@@ -1,5 +1,6 @@
-# Mesh-Talk
 [deepwiki](https://deepwiki.com/Kingson4Wu/mesh-talk)
+
+# Mesh-Talk
 A peer-to-peer mesh network chat application written in Rust that allows users to communicate in a decentralized manner.
 
 ## Features
