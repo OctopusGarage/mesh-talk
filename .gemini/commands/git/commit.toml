@@ -1,0 +1,52 @@
+# Conventional Commits Template
+
+## Format
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+## Types
+- feat: New feature
+- fix: Bug fix
+- bug: Bug fix (synonymous with `fix`)
+- docs: Documentation update
+- style: Code formatting adjustment
+- refactor: Code refactoring
+- perf: Performance optimization
+- test: Test-related
+- build: Build system or external dependency changes
+- ci: CI configuration files and script changes
+- chore: Other changes that don't modify src or test files
+- revert: Rollback previous commit
+
+## Scope
+Scope should identify the component or module affected by the commit:
+- network
+- crypto
+- ui
+- db
+- core
+- cli
+- tests
+- config
+
+## Examples
+```
+feat(network): implement libp2p peer discovery
+
+- Add Kademlia DHT for peer discovery
+- Implement mDNS for local network discovery
+- Add peer address book for storing discovered peers
+```
+
+```
+fix(crypto): resolve session establishment failure
+
+- Fix race condition in double ratchet initialization
+- Add proper error handling for key exchange failures
+- Update unit tests to cover edge cases
+```

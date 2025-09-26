@@ -1,0 +1,18 @@
+#!/bin/bash
+
+REMOTE=$1
+REMOTE_REF=$2
+LOCAL_REF=$3
+
+COMMITS=$(git rev-list $REMOTE_REF..$LOCAL_REF)
+
+for c in $COMMITS; do
+  if ! git cat-file commit $c | grep -q "gpgsig"; then
+    echo "ERROR: Commit $c is not GPG signed. Push aborted."
+    echo "Sign commits with: git commit -S -m 'message'"
+    exit 1
+  fi
+done
+
+exit 0
+

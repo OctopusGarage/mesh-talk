@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/capabilities/v1",
+  "identifier": "default",
+  "description": "Default capability for the Mesh-Talk main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default"
+  ]
+}

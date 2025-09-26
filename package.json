@@ -1,0 +1,11 @@
+{
+  "name": "mesh-talk",
+  "version": "0.1.0",
+  "description": "Mesh-Talk local network chat application",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

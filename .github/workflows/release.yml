@@ -1,74 +1,116 @@
-name: Release
+name: Tauri Release
 
 on:
   push:
     tags:
-      - "v*"
+      - "v*"  # Triggered when pushing tags
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Release - ${{ matrix.platform.os }}
-    runs-on: ${{ matrix.platform.os }}
+  build-release:
     strategy:
       matrix:
-        platform:
-          - os: macos-latest
-            os-name: macos
+        include:
+          - os: macos
+            runner: macos-latest
             target: x86_64-apple-darwin
-            binary-name: mesh-talk
-          - os: macos-latest
-            os-name: macos-aarch64
+          - os: macos
+            runner: macos-latest
             target: aarch64-apple-darwin
-            binary-name: mesh-talk
-          - os: windows-latest
-            os-name: windows
+          - os: windows
+            runner: windows-latest
             target: x86_64-pc-windows-msvc
-            binary-name: mesh-talk.exe
+    runs-on: ${{ matrix.runner }}
 
     steps:
-      - uses: actions/checkout@v3
+      # 1️⃣ Checkout
+      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+      # 2️⃣ Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          toolchain: stable
-          target: ${{ matrix.platform.target }}
-          override: true
+          node-version: 20
 
-      - name: Build binary
-        uses: actions-rs/cargo@v1
+      # 3️⃣ Install Rust
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          command: build
-          args: --release --target ${{ matrix.platform.target }}
+          targets: ${{ matrix.target }}
 
-      - name: Prepare assets
+      # 3.5️⃣ Install Tauri CLI
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli
+
+      # 3.6️⃣ Install protoc
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc
+
+      # 4️⃣ Cache Cargo
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 5️⃣ Install frontend dependencies
+      - name: Install frontend deps
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      # 6️⃣ Build Tauri app
+      - name: Build Tauri app
+        run: |
+          cd src-tauri
+          cargo tauri build --target ${{ matrix.target }}
+
+      - name: Collect build artifacts
         shell: bash
         run: |
           mkdir -p release
-          if [ "${{ matrix.platform.os }}" = "windows-latest" ]; then
-            cp target/${{ matrix.platform.target }}/release/${{ matrix.platform.binary-name }} release/
-            cd release
-            7z a ../mesh-talk-${{ matrix.platform.os-name }}.zip ${{ matrix.platform.binary-name }}
-          else
-            cp target/${{ matrix.platform.target }}/release/${{ matrix.platform.binary-name }} release/
-            cd release
-            tar -czf ../mesh-talk-${{ matrix.platform.os-name }}.tar.gz ${{ matrix.platform.binary-name }}
-          fi
+          TAG=${GITHUB_REF#refs/tags/}
 
-      - name: Get version from tag
-        id: get_version
-        shell: bash
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          for pattern in \
+            target/*/release/bundle/nsis/*.exe \
+            target/*/release/bundle/msi/*.msi \
+            target/*/release/bundle/dmg/*.dmg \
+            target/*/release/bundle/macos/*.app \
+            target/*/release/bundle/appimage/*.AppImage \
+            target/*/release/bundle/deb/*.deb \
+            target/*/release/bundle/rpm/*.rpm
+          do
+            for file in $pattern; do
+              [ -e "$file" ] || continue
+              BASENAME=$(basename "$file")
+              DIRNAME=$(dirname "$file")
+              NEWNAME=$(echo "$BASENAME" | sed -E "s/_[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?/_${TAG}/")
+              if [[ "$file" == *.app ]]; then
+                cp -R "$file" "release/$NEWNAME"
+              else
+                cp "$file" "release/$NEWNAME"
+              fi
+            done
+          done
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+          ls -lh release || true
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ steps.get_version.outputs.version }}
-          files: |
-            mesh-talk-${{ matrix.platform.os-name }}.zip
-            mesh-talk-${{ matrix.platform.os-name }}.tar.gz
+          tag_name: ${{ github.ref_name }}
+          files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

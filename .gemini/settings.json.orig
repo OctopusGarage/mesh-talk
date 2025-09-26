@@ -1,0 +1,31 @@
+{
+  "contextFileName": "PROJECT.md",
+  "gemini": {
+    "context": {
+      "project": "mesh-talk",
+      "version": "1.0.0",
+      "description": "A peer-to-peer mesh network chat application written in Rust"
+    },
+    "commands": {
+      "git": {
+        "commit": {
+          "template": "conventional",
+          "types": [
+            "feat",
+            "fix",
+            "bug",
+            "docs",
+            "style",
+            "refactor",
+            "perf",
+            "test",
+            "build",
+            "ci",
+            "chore",
+            "revert"
+          ]
+        }
+      }
+    }
+  }
+}

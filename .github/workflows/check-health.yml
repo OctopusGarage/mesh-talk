@@ -1,0 +1,92 @@
+name: Code Quality and Health Check
+
+on:
+  pull_request:
+    branches:
+      - '**'
+  push:
+    branches:
+      - '**'
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: '18'
+
+jobs:
+  check:
+    name: Code Quality and Health Check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      # 1️⃣ Checkout code
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2️⃣ Install Rust toolchain
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          components: clippy, rustfmt
+
+      # 3️⃣ Install system dependencies (macOS)
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install protobuf
+
+      # 4️⃣ Install system dependencies (Windows)
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install protoc
+
+      # 5️⃣ Cache Rust dependencies
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 6️⃣ Install Node.js
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # 7️⃣ Cache Node.js dependencies
+      - name: Cache Node.js dependencies
+        uses: actions/cache@v3
+        with:
+          path: frontend/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
+
+      # 9️⃣ Build frontend to generate `dist` folder
+      - name: Build frontend
+        run: |
+          make frontend-install
+          cd frontend
+          npm run build
+
+      # 8️⃣ Install project dependencies
+      - name: Install project dependencies
+        run: |
+          make install-deps
+
+      # 🔟 Run unified health check
+      - name: Run unified health check
+        run: |
+          chmod +x scripts/check-health.sh
+          ./scripts/check-health.sh

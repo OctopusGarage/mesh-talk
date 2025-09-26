@@ -1,0 +1,12 @@
+#!/bin/bash
+
+GPG_SIGN=$(git config commit.gpgsign)
+
+if [ "$GPG_SIGN" != "true" ]; then
+  echo "ERROR: Commit is not signed with GPG."
+  echo "Please configure GPG and use: git commit -S -m 'your message'"
+  exit 1
+fi
+
+exit 0
+

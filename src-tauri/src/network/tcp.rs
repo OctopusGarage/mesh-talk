@@ -1,0 +1,538 @@
+use crate::domain::node_registry::NodeRegistry;
+use crate::error::{MeshTalkError, MeshTalkResult, NetworkErrorKind};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
+
+/// Connection pool for managing TCP connections
+pub struct ConnectionPool {
+    connections: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+}
+
+impl Default for ConnectionPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConnectionPool {
+    /// Create a new connection pool
+    pub fn new() -> Self {
+        Self {
+            connections: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Get the connections map
+    pub fn get_connections(&self) -> Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>> {
+        Arc::clone(&self.connections)
+    }
+
+    /// Check if a connection exists for the given address
+    pub fn has_connection(&self, addr: &SocketAddr) -> bool {
+        let connections = self.connections.lock().unwrap();
+        connections.contains_key(addr)
+    }
+
+    /// Remove a connection for the given address
+    pub fn remove_connection(&self, addr: &SocketAddr) {
+        let mut connections = self.connections.lock().unwrap();
+        connections.remove(addr);
+    }
+}
+
+/// Enhanced TCP connection with keep-alive and timeout features
+pub struct EnhancedTcpConnection {
+    addr: SocketAddr,
+    sender: mpsc::Sender<String>,
+    last_activity: std::time::Instant,
+}
+
+impl EnhancedTcpConnection {
+    /// Create a new enhanced TCP connection
+    pub fn new(addr: SocketAddr, sender: mpsc::Sender<String>) -> Self {
+        Self {
+            addr,
+            sender,
+            last_activity: std::time::Instant::now(),
+        }
+    }
+
+    /// Get the connection address
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Get the sender for sending messages
+    pub fn sender(&self) -> &mpsc::Sender<String> {
+        &self.sender
+    }
+
+    /// Update the last activity timestamp
+    pub fn update_activity(&mut self) {
+        self.last_activity = std::time::Instant::now();
+    }
+
+    /// Check if the connection has timed out (30 seconds of inactivity)
+    pub fn is_timed_out(&self) -> bool {
+        self.last_activity.elapsed() > Duration::from_secs(30)
+    }
+}
+
+/// Connect to a peer with enhanced features
+pub async fn connect_to_peer<F>(
+    addr: SocketAddr,
+    peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+    message_handler: F,
+    peer_name: &str,
+) -> MeshTalkResult<()>
+where
+    F: Fn(String) + Send + 'static,
+{
+    // Check if already connected
+    if peers.lock().unwrap().contains_key(&addr) {
+        // println!("Already connected to node {}", addr);
+        return Ok(());
+    }
+
+    // Attempt to connect with a timeout
+    let stream = timeout(Duration::from_secs(10), TcpStream::connect(addr))
+        .await
+        .map_err(|_| {
+            MeshTalkError::network(
+                NetworkErrorKind::ConnectionTimeout,
+                format!("Connection timeout to {}", addr),
+            )
+        })?
+        .map_err(|e| {
+            eprintln!("Failed to connect to {}: {}", addr, e);
+            MeshTalkError::network_with_source(
+                NetworkErrorKind::ConnectionFailed,
+                format!("Failed to connect to {}", addr),
+                Box::new(e),
+            )
+        })?;
+
+    // Set TCP keep-alive options
+    if let Err(e) = stream.set_nodelay(true) {
+        eprintln!("Failed to set TCP_NODELAY: {}", e);
+    }
+
+    let (reader, writer) = stream.into_split();
+
+    let (tx, mut rx) = mpsc::channel(32);
+    peers.lock().unwrap().insert(addr, tx.clone());
+    println!("Connected to node '{}' at {}", peer_name, addr);
+
+    // Spawn task for sending messages
+    let mut writer = BufWriter::new(writer);
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            // println!("Sending message: {}", msg.trim());
+
+            // Add timeout for write operations
+            match timeout(Duration::from_secs(5), writer.write_all(msg.as_bytes())).await {
+                Ok(Ok(())) => match timeout(Duration::from_secs(5), writer.flush()).await {
+                    Ok(Ok(())) => {
+                        // println!("Message sent successfully");
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("Failed to flush buffer: {}", e);
+                        break;
+                    }
+                    Err(_) => {
+                        eprintln!("Write flush timeout");
+                        break;
+                    }
+                },
+                Ok(Err(e)) => {
+                    eprintln!("Failed to send message: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    eprintln!("Write timeout");
+                    break;
+                }
+            }
+        }
+        // println!("Message sending task ended: {}", addr);
+    });
+
+    // Spawn task for receiving messages
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+
+            // Add timeout for read operations
+            match timeout(Duration::from_secs(60), reader.read_line(&mut line)).await {
+                Ok(Ok(0)) => {
+                    // println!("Connection closed: {}", addr);
+                    break;
+                }
+                Ok(Ok(_)) => {
+                    // #[cfg(debug_assertions)] println!("Received raw message: {}", line);
+                    message_handler(line.trim().to_string());
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to read message: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    // println!("Read timeout for connection: {}", addr);
+                    // Send a keep-alive message or close connection
+                    break;
+                }
+            }
+        }
+
+        // println!("Connection disconnected: {}", addr);
+        peers.lock().unwrap().remove(&addr);
+    });
+
+    Ok(())
+}
+
+/// Handle incoming connections with enhanced features
+pub async fn handle_incoming_connection<F>(
+    stream: TcpStream,
+    addr: SocketAddr,
+    peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+    message_handler: F,
+) -> std::io::Result<()>
+where
+    F: Fn(String) + Send + 'static,
+{
+    // Set TCP keep-alive options
+    if let Err(e) = stream.set_nodelay(true) {
+        eprintln!("Failed to set TCP_NODELAY: {}", e);
+    }
+
+    let (reader, writer) = stream.into_split();
+    let (tx, mut rx) = mpsc::channel(32);
+
+    peers.lock().unwrap().insert(addr, tx.clone());
+    println!("Accepting new connection from: {}", addr);
+
+    // Spawn task for sending messages
+    let mut writer = BufWriter::new(writer);
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            // println!("Sending message: {}", msg.trim());
+
+            // Add timeout for write operations
+            match timeout(Duration::from_secs(5), writer.write_all(msg.as_bytes())).await {
+                Ok(Ok(())) => match timeout(Duration::from_secs(5), writer.flush()).await {
+                    Ok(Ok(())) => {
+                        // println!("Message sent successfully");
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("Failed to flush buffer: {}", e);
+                        break;
+                    }
+                    Err(_) => {
+                        eprintln!("Write flush timeout");
+                        break;
+                    }
+                },
+                Ok(Err(e)) => {
+                    eprintln!("Failed to send message: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    eprintln!("Write timeout");
+                    break;
+                }
+            }
+        }
+        // println!("Message sending task ended: {}", addr);
+    });
+
+    // Spawn task for receiving messages
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+
+            // Add timeout for read operations
+            match timeout(Duration::from_secs(60), reader.read_line(&mut line)).await {
+                Ok(Ok(0)) => {
+                    // println!("Connection closed: {}", addr);
+                    break;
+                }
+                Ok(Ok(_)) => {
+                    // #[cfg(debug_assertions)] println!("Received raw message: {}", line);
+                    message_handler(line.trim().to_string());
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to read message: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    // println!("Read timeout for connection: {}", addr);
+                    // Send a keep-alive message or close connection
+                    break;
+                }
+            }
+        }
+
+        // println!("Connection disconnected: {}", addr);
+        peers.lock().unwrap().remove(&addr);
+    });
+
+    Ok(())
+}
+
+/// Send a message to a peer with retry logic
+pub async fn send_message_with_retry(
+    addr: SocketAddr,
+    message: String,
+    peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+    max_retries: usize,
+) -> MeshTalkResult<()> {
+    let mut retries = 0;
+
+    loop {
+        // Get the sender for this peer
+        let sender = {
+            let peers_guard = peers.lock().unwrap();
+            peers_guard.get(&addr).cloned()
+        };
+
+        match sender {
+            Some(sender) => {
+                // Try to send the message
+                match sender.send(message.clone()).await {
+                    Ok(()) => {
+                        // println!("Message sent successfully to {}", addr);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to send message to {}: {}", addr, e);
+                        // Remove the broken connection
+                        peers.lock().unwrap().remove(&addr);
+                    }
+                }
+            }
+            None => {
+                eprintln!("No connection found for peer: {}", addr);
+            }
+        }
+
+        retries += 1;
+        if retries >= max_retries {
+            return Err(MeshTalkError::network(
+                NetworkErrorKind::SendFailed,
+                format!(
+                    "Failed to send message to {} after {} retries",
+                    addr, max_retries
+                ),
+            ));
+        }
+
+        // Wait before retrying with exponential backoff, capped at 5 seconds
+        let backoff_ms = (100 * (2_u64.pow(retries as u32))).min(5000);
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+    }
+}
+
+/// Enhanced connection manager with retry logic and exponential backoff
+pub struct ConnectionManager {
+    peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+    node_registry: Arc<Mutex<NodeRegistry>>,
+}
+
+impl ConnectionManager {
+    /// Create a new connection manager
+    pub fn new(
+        peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+        node_registry: Arc<Mutex<NodeRegistry>>,
+    ) -> Self {
+        Self {
+            peers,
+            node_registry,
+        }
+    }
+
+    /// Connect to a peer with retry logic and exponential backoff
+    pub async fn connect_with_retry<F>(
+        &self,
+        addr: SocketAddr,
+        message_handler: F,
+        peer_name: String,
+    ) -> std::io::Result<()>
+    where
+        F: Fn(String) + Send + 'static + Clone,
+    {
+        // Check if already connected
+        if self.peers.lock().unwrap().contains_key(&addr) {
+            // println!("Already connected to node {}", addr);
+            return Ok(());
+        }
+
+        // Update node registry status
+        {
+            let mut registry = self.node_registry.lock().unwrap();
+            if let Some(node) = registry.get_node_mut(addr) {
+                node.mark_connecting();
+            }
+        }
+
+        // Attempt to connect with exponential backoff
+        let mut retries = 0;
+        let max_retries = 5;
+
+        loop {
+            match connect_to_peer(
+                addr,
+                Arc::clone(&self.peers),
+                message_handler.clone(),
+                &peer_name,
+            )
+            .await
+            {
+                Ok(_) => {
+                    // Update node registry status
+                    {
+                        let mut registry = self.node_registry.lock().unwrap();
+                        if let Some(node) = registry.get_node_mut(addr) {
+                            node.mark_connected();
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to {}: {}", addr, e);
+
+                    // Update node registry status
+                    {
+                        let mut registry = self.node_registry.lock().unwrap();
+                        if let Some(node) = registry.get_node_mut(addr) {
+                            node.mark_connection_failed();
+                        }
+                    }
+
+                    retries += 1;
+                    if retries >= max_retries {
+                        return Err(std::io::Error::other(format!(
+                            "Failed to send message to {} after {} retries",
+                            addr, max_retries
+                        )));
+                    }
+
+                    // Exponential backoff: wait 2^retries seconds before retrying
+                    let backoff_time = Duration::from_secs(2u64.pow(retries as u32));
+                    // println!("Retrying connection to {} in {:?}...", addr, backoff_time);
+                    tokio::time::sleep(backoff_time).await;
+                }
+            }
+        }
+    }
+
+    /// Disconnect from a peer
+    pub fn disconnect(&self, addr: &SocketAddr) {
+        let mut peers = self.peers.lock().unwrap();
+        peers.remove(addr);
+
+        // Update node registry status
+        let mut registry = self.node_registry.lock().unwrap();
+        if let Some(node) = registry.get_node_mut(*addr) {
+            node.status = crate::domain::node_registry::NodeStatus::Offline;
+        }
+    }
+
+    /// Get connection status for a peer
+    pub fn is_connected(&self, addr: &SocketAddr) -> bool {
+        let peers = self.peers.lock().unwrap();
+        peers.contains_key(addr)
+    }
+
+    /// Check if a peer is disconnected
+    pub fn is_disconnected(&self, addr: &SocketAddr) -> bool {
+        let peers = self.peers.lock().unwrap();
+        !peers.contains_key(addr)
+    }
+
+    /// Detect disconnected nodes and update their status in the registry
+    pub fn detect_disconnected_nodes(&self) {
+        let peers = self.peers.lock().unwrap();
+        let mut registry = self.node_registry.lock().unwrap();
+
+        // Get all node addresses from the registry
+        let node_addresses: Vec<SocketAddr> = registry
+            .get_all_nodes()
+            .iter()
+            .map(|node| node.addr)
+            .collect();
+
+        // Check each node in the registry
+        for addr in node_addresses {
+            // If the node is in the registry but not in the peers map, it's disconnected
+            if !peers.contains_key(&addr) {
+                if let Some(node) = registry.get_node_mut(addr) {
+                    // Only update status if it's not already marked as disconnected
+                    if node.status != crate::domain::node_registry::NodeStatus::Offline
+                        && node.status != crate::domain::node_registry::NodeStatus::ConnectionFailed
+                    {
+                        node.status = crate::domain::node_registry::NodeStatus::Offline;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get the node registry
+    pub fn get_node_registry(&self) -> Arc<Mutex<NodeRegistry>> {
+        Arc::clone(&self.node_registry)
+    }
+
+    /// Get the peers map
+    pub fn get_peers(&self) -> Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>> {
+        Arc::clone(&self.peers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_connection_pool() {
+        let pool = ConnectionPool::new();
+        let connections = pool.get_connections();
+
+        assert!(connections.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_enhanced_tcp_connection() {
+        let (tx, _rx) = mpsc::channel(32);
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let mut connection = EnhancedTcpConnection::new(addr, tx);
+
+        assert_eq!(connection.addr(), addr);
+        assert!(!connection.is_timed_out());
+
+        // Update activity
+        connection.update_activity();
+        assert!(!connection.is_timed_out());
+    }
+
+    #[tokio::test]
+    async fn test_send_message_with_retry() {
+        let peers = Arc::new(Mutex::new(HashMap::new()));
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let result = send_message_with_retry(addr, "test".to_string(), peers, 1).await;
+
+        // Should fail because there's no connection
+        assert!(result.is_err());
+    }
+}

@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+# pre-commit hook: Run code quality checks
+
+# Run unified health check script
+chmod +x scripts/check-health.sh
+./scripts/check-health.sh
+
+echo "All pre-commit checks passed!"
+

@@ -1,15 +1,37 @@
 [deepwiki](https://deepwiki.com/Kingson4Wu/mesh-talk)
 
 # Mesh-Talk
-A peer-to-peer mesh network chat application written in Rust that allows users to communicate in a decentralized manner.
+A local network chat tool written in Rust that enables users to communicate directly with others on the same network using UDP broadcast and TCP connections.
 
 ## Features
 
-- Peer-to-peer communication without a central server
+- Local network communication without a central server
 - Automatic peer discovery using UDP broadcast
-- Real-time messaging between connected peers
+- Real-time messaging between connected peers via TCP
 - Command-line interface
 - Built with async Rust using Tokio
+- Modular architecture following professional Rust project structure
+
+## Project Structure
+
+```
+mesh-talk/
+├── src-tauri/              # Rust backend (Tauri + business logic)
+│   ├── src/
+│   │   ├── main.rs         # Tauri main entry
+│   │   ├── lib.rs          # Main library module
+│   │   ├── api.rs          # Command-line argument parsing
+│   │   ├── domain/         # Domain models
+│   │   ├── services/       # Business logic services
+│   │   ├── network/        # Network layer
+│   │   └── utils.rs        # Utility functions
+│   ├── Cargo.toml
+│   └── tauri.conf.json
+├── frontend/               # Vue frontend
+├── specifications/         # Project documentation
+├── Makefile               # Build and development commands
+└── Cargo.toml             # Workspace configuration
+```
 
 ## Prerequisites
 
@@ -53,6 +75,7 @@ cargo run -- --name YourName --port 8000
 - TCP for reliable peer-to-peer communication
 - JSON serialization for message encoding
 - Thread-safe peer management using Arc and Mutex
+- Modular design with clear separation of concerns
 
 ## Dependencies
 
@@ -60,6 +83,22 @@ cargo run -- --name YourName --port 8000
 - serde: Serialization framework
 - serde_json: JSON serialization
 - clap: Command line argument parsing
+
+## Development
+
+This project follows a professional Rust project structure with:
+- Domain models in `src-tauri/src/domain/`
+- Business logic in `src-tauri/src/services/`
+- Network handling in `src-tauri/src/network/`
+- Command-line interface in `src-tauri/src/api.rs`
+- Utility functions in `src-tauri/src/utils.rs`
+
+Use the provided Makefile for common development tasks:
+```bash
+make dev        # Run in development mode
+make build      # Build for release
+make test       # Run tests
+```
 
 ## License
 
