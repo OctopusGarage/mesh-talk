@@ -11,11 +11,11 @@ export function splitAddress(address) {
   if (!address) {
     return [address, undefined];
   }
-  
-  const parts = String(address).split(':');
+
+  const parts = String(address).split(":");
   if (parts.length >= 2) {
     const port = Number(parts.pop());
-    return [parts.join(':'), Number.isNaN(port) ? undefined : port];
+    return [parts.join(":"), Number.isNaN(port) ? undefined : port];
   }
   return [address, undefined];
 }
@@ -27,10 +27,10 @@ export function splitAddress(address) {
  */
 export function extractAddressIP(address) {
   if (!address) return address;
-  
+
   try {
     // If it's in the format ip:port, just show the IP part
-    const parts = address.split(':');
+    const parts = address.split(":");
     if (parts.length >= 2) {
       return parts[0];
     }
@@ -46,7 +46,8 @@ export function extractAddressIP(address) {
  * @returns {string} Formatted display label in format "name • username • ip:port"
  */
 export function buildNodeDisplayLabel(overrides = {}) {
-  const nodeName = (overrides.name ?? "mesh-node").toString().trim() || "mesh-node";
+  const nodeName =
+    (overrides.name ?? "mesh-node").toString().trim() || "mesh-node";
   const accountName = overrides.username ?? "Guest";
   const ipAddress = overrides.ip ?? "127.0.0.1";
   const portValue = overrides.port ?? 0;
@@ -68,7 +69,7 @@ export function getMessageConversationKey(message, userAddress = null) {
   if (message.from_address === userAddress && message.to_address) {
     return message.to_address;
   }
-  
+
   // If this message is from someone else, return the sender address
   if (message.from_address && message.from_address !== userAddress) {
     return message.from_address;
@@ -82,8 +83,6 @@ export function getMessageConversationKey(message, userAddress = null) {
   return null;
 }
 
-
-
 /**
  * Normalize a list of contacts
  * @param {Array} list - Array of contact objects
@@ -92,8 +91,10 @@ export function getMessageConversationKey(message, userAddress = null) {
  */
 export function normalizeContactList(list = [], currentUser = null) {
   return [...list]
-    .map(contact => normalizeContact(contact, currentUser))
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    .map((contact) => normalizeContact(contact, currentUser))
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+    );
 }
 
 /**

@@ -51,7 +51,7 @@ impl ContactRequestService {
             .send_contact_request(username, password, target_public_key, alias)
             .await
     }
-    
+
     /// Send a contact request to another user with user ID
     pub async fn send_contact_request_with_user_id(
         &self,
@@ -62,7 +62,13 @@ impl ContactRequestService {
         user_id: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.inner
-            .send_contact_request_with_user_id(username, password, target_public_key, alias, user_id)
+            .send_contact_request_with_user_id(
+                username,
+                password,
+                target_public_key,
+                alias,
+                user_id,
+            )
             .await
     }
 

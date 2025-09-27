@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::info;
 
 /// Service for handling contact requests
 pub struct ContactRequestService {
@@ -34,7 +35,8 @@ impl ContactRequestService {
         alias: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Default to a placeholder user ID if not provided
-        self.send_contact_request_with_user_id(username, _password, target_public_key, alias, 0).await
+        self.send_contact_request_with_user_id(username, _password, target_public_key, alias, 0)
+            .await
     }
 
     /// Send a contact request to another user with user ID
@@ -50,7 +52,10 @@ impl ContactRequestService {
         // without needing to re-authenticate. For now, we'll work with what's available.
         // The proper solution would be to store the signing key in the session after login.
 
-        println!("Sending contact request for user: {} with user ID: {}", username, user_id);
+        info!(
+            "Sending contact request for user: {} with user ID: {}",
+            username, user_id
+        );
 
         // In a real implementation, we would get the user's signing key from their session context
         // For now, let's simulate a basic implementation that generates a contact request
@@ -91,7 +96,7 @@ impl ContactRequestService {
             signature: vec![], // This would be a real signature in a working implementation
         };
 
-        println!(
+        info!(
             "Contact request created for target: {} using node alias: {} (address: {})",
             target_public_key, alias_value, requester_address
         );
@@ -112,7 +117,7 @@ impl ContactRequestService {
         // Serialize the message
         let message_json = serde_json::to_string(&message)?;
 
-        println!(
+        info!(
             "Serialized contact request message: {}",
             &message_json[..std::cmp::min(1000, message_json.len())]
         );
@@ -121,7 +126,7 @@ impl ContactRequestService {
             .parse()
             .map_err(|e| format!("Invalid target address '{target_public_key}': {e}"))?;
 
-        println!(
+        info!(
             "Attempting to deliver contact request to peer at {}",
             target_addr
         );
@@ -134,7 +139,10 @@ impl ContactRequestService {
                 .map_err(|e| format!("Failed to deliver contact request to {target_addr}: {e}"))?;
         }
 
-        println!("Contact request sent successfully to: {} with user ID: {}", target_addr, user_id);
+        info!(
+            "Contact request sent successfully to: {} with user ID: {}",
+            target_addr, user_id
+        );
         Ok(())
     }
 
@@ -176,7 +184,7 @@ impl ContactRequestService {
 
         // Verify the signature when present; otherwise skip (placeholder implementation)
         if request.signature.is_empty() {
-            println!(
+            info!(
                 "Received unsigned contact request from {}; skipping signature verification",
                 request.requester_public_key
             );
@@ -195,7 +203,7 @@ impl ContactRequestService {
         //     return Ok(());
         // }
 
-        println!(
+        info!(
             "Received contact request from user: {}",
             request.requester_alias
         );
@@ -206,12 +214,12 @@ impl ContactRequestService {
             &request.requester_public_key,
             Some(&request.requester_alias),
         ) {
-            println!(
+            info!(
                 "Warning: failed to add contact '{}' for user '{}': {:?}",
                 request.requester_public_key, username, err
             );
         } else {
-            println!(
+            info!(
                 "Added contact '{}' ({}) for user '{}'",
                 request.requester_alias, request.requester_public_key, username
             );
@@ -271,7 +279,7 @@ impl ContactRequestService {
             responder_alias: contact_response.responder_alias.clone(),
             timestamp: contact_response.timestamp,
             signature: contact_response.signature.clone(),
-            user_id: None,  // Add user_id field
+            user_id: None, // Add user_id field
         };
 
         // Serialize the message
@@ -281,7 +289,7 @@ impl ContactRequestService {
             .parse()
             .map_err(|e| format!("Invalid target address '{target_public_key}': {e}"))?;
 
-        println!(
+        info!(
             "Attempting to deliver contact response to peer at {} (approved: {})",
             target_addr, approved
         );
@@ -295,9 +303,9 @@ impl ContactRequestService {
         }
 
         if approved {
-            println!("Sent contact approval to {}", target_addr);
+            info!("Sent contact approval to {}", target_addr);
         } else {
-            println!("Sent contact denial to {}", target_addr);
+            info!("Sent contact denial to {}", target_addr);
         }
 
         Ok(())
@@ -314,7 +322,7 @@ impl ContactRequestService {
         let response = ContactResponse::from_json(response_json)?;
 
         if response.signature.is_empty() {
-            println!(
+            info!(
                 "Received unsigned contact response from {}; skipping signature verification",
                 response.responder_public_key
             );
@@ -329,17 +337,17 @@ impl ContactRequestService {
                 &response.responder_public_key,
                 Some(&response.responder_alias),
             ) {
-                Ok(_) => println!(
+                Ok(_) => info!(
                     "Contact request approved by user: {} ({})",
                     response.responder_alias, response.responder_public_key
                 ),
-                Err(err) => println!(
+                Err(err) => info!(
                     "Warning: failed to persist approved contact '{}' for '{}': {:?}",
                     response.responder_public_key, username, err
                 ),
             }
         } else {
-            println!(
+            info!(
                 "Contact request denied by user: {}",
                 response.responder_alias
             );

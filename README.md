@@ -93,12 +93,36 @@ This project follows a professional Rust project structure with:
 - Command-line interface in `src-tauri/src/api.rs`
 - Utility functions in `src-tauri/src/utils.rs`
 
+## Automation and Code Quality
+
+The project includes several automation tools to maintain code quality and consistency:
+
+### Code Formatting and Linting
+- Automatic code formatting with `cargo fmt` and `prettier`
+- Linting with `clippy` for Rust code
+- Pre-commit hooks to enforce code quality
+
+### Development Automation
 Use the provided Makefile for common development tasks:
 ```bash
 make dev        # Run in development mode
 make build      # Build for release
 make test       # Run tests
+make lint       # Run linting tools
+make fix        # Automatically fix code issues
+make format     # Format code
 ```
+
+### Automated Maintenance
+The project includes scripts for automated maintenance:
+- `scripts/check-health.sh` - Run all quality checks
+- `scripts/auto-maintain.sh` - Run regular maintenance tasks
+- Pre-commit hooks that automatically format and fix code before committing
+
+### CI/CD Integration
+- GitHub Actions workflow that runs all quality checks
+- Automatic security scanning for dependencies
+- Build verification on multiple platforms
 
 ## License
 

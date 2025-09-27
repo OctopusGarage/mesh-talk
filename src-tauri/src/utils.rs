@@ -11,14 +11,15 @@ pub fn is_valid_name(name: &str) -> bool {
         return false;
     }
 
-    name.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '-' || c == '_')
+    name.chars()
+        .all(|c| c.is_alphanumeric() || c == ' ' || c == '-' || c == '_')
 }
 
 /// Validates that a port number is within the valid range.
 ///
 /// Valid ports are between 1024 and 65535 inclusive.
 pub fn is_valid_port(port: u16) -> bool {
-    port >= 1024 && port <= 65535
+    port >= 1024
 }
 
 /// Generates a random string of the specified length using alphanumeric characters.

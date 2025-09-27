@@ -1,5 +1,4 @@
 use clap::Parser;
-use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::Path};
 
@@ -17,10 +16,7 @@ pub struct AppConfig {
 
 impl Args {
     pub fn into_config(self) -> AppConfig {
-        AppConfig {
-            name: default_node_name(),
-            port: 7000,
-        }
+        AppConfig::default()
     }
 }
 
@@ -77,7 +73,7 @@ impl AppConfig {
 pub fn default_node_name() -> String {
     // Get the hostname/machine name
     let hostname = get_hostname().unwrap_or_else(|| "unknown".to_string());
-    format!("{}", hostname)
+    hostname.to_string()
 }
 
 fn get_hostname() -> Option<String> {

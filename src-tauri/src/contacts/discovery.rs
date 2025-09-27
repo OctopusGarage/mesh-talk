@@ -1,7 +1,9 @@
 use crate::contacts::contact::Contact;
 use crate::contacts::errors::ContactError;
 use crate::contacts::manager::ContactManager;
+
 use std::sync::Arc;
+use tracing::{debug, error, info};
 
 /// Contact discovery service
 pub struct ContactDiscovery {
@@ -22,7 +24,7 @@ impl ContactDiscovery {
         event: &str, // Simplified event handling
     ) -> Result<(), ContactError> {
         // For now, we'll just log the event
-        println!("Received network event: {}", event);
+        debug!("Received network event: {}", event);
         Ok(())
     }
 
@@ -58,12 +60,8 @@ impl ContactDiscovery {
             alias.as_deref(),
         )?;
 
-        println!("Discovered and added new contact: {}", peer_id);
-
-        // Log the addresses for debugging
-        for address in addresses {
-            println!("  Address: {}", address);
-        }
+        info!("Discovered and added new contact: {}", peer_id);
+        debug!("  Addresses: {:?}", addresses);
 
         Ok(())
     }
@@ -78,7 +76,7 @@ impl ContactDiscovery {
     ) -> Result<(), ContactError> {
         // In the future, we might want to mark contacts as offline or remove them
         // For now, we'll just log the event
-        println!("Peer expired: {}", _peer_id);
+        debug!("Peer expired: {}", _peer_id);
         Ok(())
     }
 
@@ -107,7 +105,7 @@ impl ContactDiscovery {
         self.contact_manager
             .add_contact(username, password, peer_id, alias)?;
 
-        println!("Manually added contact: {}", peer_id);
+        info!("Manually added contact: {}", peer_id);
         Ok(())
     }
 
@@ -143,11 +141,11 @@ impl ContactDiscovery {
                 alias.as_deref(),
             ) {
                 Ok(()) => {
-                    println!("Discovered and added new contact: {}", peer_id);
+                    info!("Discovered and added new contact: {}", peer_id);
                     discovered_contacts.push(peer_id.clone());
                 }
                 Err(e) => {
-                    eprintln!("Failed to add discovered contact {}: {:?}", peer_id, e);
+                    error!("Failed to add discovered contact {}: {:?}", peer_id, e);
                 }
             }
         }

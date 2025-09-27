@@ -9,7 +9,7 @@ impl KeyManager {
     pub fn generate_keypair() -> Result<(VerifyingKey, SigningKey), Box<dyn std::error::Error>> {
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        let verifying_key = signing_key.verifying_key().clone();
+        let verifying_key = signing_key.verifying_key();
         Ok((verifying_key, signing_key))
     }
 

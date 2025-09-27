@@ -6,8 +6,10 @@ pub mod domain;
 pub mod error;
 pub mod events;
 pub mod identity;
+pub mod logger;
 pub mod network;
 pub mod notifications;
+pub mod perf;
 pub mod platform;
 pub mod services;
 pub mod state;
@@ -36,7 +38,6 @@ use crate::network::udp::start_udp_broadcast;
 use crate::services::node_service::NodeService;
 use crate::state::AppState;
 use std::env;
-use std::io::Write;
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::net::TcpListener;
@@ -51,10 +52,12 @@ pub struct NetworkStartup {
 
 // Tauri application entry point
 pub fn run_tauri() {
+    let _timer = perf_monitor!("application_startup");
     let base_config = AppConfig::from_env();
-    eprintln!(
+    log::info!(
         "Starting Mesh-Talk desktop runtime with node '{}' (requested TCP port: {})",
-        base_config.name, base_config.port
+        base_config.name,
+        base_config.port
     );
     let node_service = Arc::new(Mutex::new(NodeService::new(
         base_config.name.clone(),
@@ -65,22 +68,22 @@ pub fn run_tauri() {
     // Initialize file manager
     lazy_static::lazy_static! {
         static ref FILE_MANAGER: Arc<crate::storage::file_manager::FileManager> = {
-            eprintln!("Initializing file manager...");
+            log::info!("Initializing file manager...");
             // Use ~/.mesh-talk as the base data directory
             let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             let data_path = std::path::PathBuf::from(home_dir).join(".mesh-talk");
             let data_path_str = data_path.to_str().unwrap_or(".mesh-talk");
-            eprintln!("Data path: {}", data_path_str);
-            let file_manager = crate::storage::file_manager::FileManager::new(data_path.into());
-            eprintln!("File manager initialized successfully");
+            log::info!("Data path: {}", data_path_str);
+            let file_manager = crate::storage::file_manager::FileManager::new(data_path);
+            log::info!("File manager initialized successfully");
             Arc::new(file_manager)
         };
     }
 
     // Force initialization of the file manager
-    eprintln!("Accessing file manager to force initialization...");
+    log::info!("Accessing file manager to force initialization...");
     let _file_manager = FILE_MANAGER.clone();
-    eprintln!("File manager accessed");
+    log::info!("File manager accessed");
 
     // Get data path string for message service
     let data_path_str = {
@@ -97,8 +100,8 @@ pub fn run_tauri() {
         FILE_MANAGER.as_ref().clone(),
         Arc::clone(&node_service),
     ) {
-        eprintln!(
-            "Warning: Failed to initialize contact request service: {}",
+        log::warn!(
+            "Failed to initialize contact request service: {}",
             e
         );
     }
@@ -118,17 +121,22 @@ pub fn run_tauri() {
         Arc::clone(&app_config),
     );
 
-    println!("Network services are idle until a user signs in; no sockets are bound yet.");
+    log::info!("Network services are idle until a user signs in; no sockets are bound yet.");
 
     // Start Tauri app
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
+            // Initialize logging system
+            if let Err(e) = crate::logger::init_logging(&app.handle()) {
+                log::error!("Failed to initialize logging: {}", e);
+            }
+            
             // Get the node service from the app state
             let node_service = app.state::<Arc<Mutex<NodeService>>>().inner().clone();
 
             // Set up event listeners for the NodeService
-            println!("Setting up NodeService event listeners...");
+            log::info!("Setting up NodeService event listeners...");
             let event_service = Arc::clone(&node_service);
             let app_handle = app.handle().clone();
             crate::tray::create_system_tray(&app_handle)?;
@@ -169,7 +177,7 @@ pub fn run_tauri() {
             commands::handle_contact_request
         ])
         .run(tauri::generate_context!())
-        .map_err(|e| eprintln!("Error while running tauri application: {}", e))
+        .map_err(|e| log::error!("Error while running tauri application: {}", e))
         .unwrap_or(());
 }
 
@@ -200,15 +208,14 @@ pub async fn launch_network_with_broadcast(
         loop {
             match TcpListener::bind(("0.0.0.0", port)).await {
                 Ok(listener) => {
-                    println!("TCP service active on port {}", port);
+                    log::info!("TCP service active on port {}", port);
                     break listener;
                 }
                 Err(_) => {
                     port += 1;
                     // Safety check to avoid infinite loop
                     if port > 10000 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        return Err(std::io::Error::other(
                             "Unable to find an available port between 7000 and 10000",
                         ));
                     }
@@ -232,21 +239,21 @@ pub async fn launch_network_with_broadcast(
             tokio::spawn(async move {
                 let service = service.lock().await;
                 if let Err(e) = service.handle_incoming_connection(stream, addr).await {
-                    eprintln!("Failed to handle connection: {}", e);
+                    log::error!("Failed to handle connection: {}", e);
                 }
             });
         }
     });
 
     // Set up UDP discovery
-    println!("Setting up UDP discovery...");
+    log::info!("Setting up UDP discovery...");
     let discovery_service = Arc::clone(&node_service);
     let udp_discovery_handle: JoinHandle<()> = tokio::spawn(async move {
         if let Err(e) = crate::network::udp::start_udp_discovery(
             move |peer_addr, peer_name, peer_username, peer_port| {
                 let service_clone = discovery_service.clone();
                 tokio::spawn(async move {
-                    // println!("[UDP Discovery Callback] Received peer_addr: {}", peer_addr);
+                    // log::info!("[UDP Discovery Callback] Received peer_addr: {}", peer_addr);
                     let service_port = {
                         let service = service_clone.lock().await;
                         service.get_port()
@@ -286,20 +293,20 @@ pub async fn launch_network_with_broadcast(
                             );
                         }
                     } else {
-                        // println!("[UDP Discovery Callback] Ignoring self-discovery: {}", peer_addr);
+                        // log::info!("[UDP Discovery Callback] Ignoring self-discovery: {}", peer_addr);
                     }
                 });
             },
         )
         .await
         {
-            eprintln!("UDP discovery service failed: {}", e);
+            log::error!("UDP discovery service failed: {}", e);
         }
     });
 
     // Start UDP broadcast only if requested
     let udp_broadcast_handle = if start_broadcast {
-        println!("Starting UDP broadcast...");
+        log::info!("Starting UDP broadcast...");
         let broadcast_name = {
             let service = node_service.lock().await;
             service.get_name()
@@ -309,17 +316,19 @@ pub async fn launch_network_with_broadcast(
             (broadcast_username.clone(), Some(service.get_user_id()))
         };
         Some(tokio::spawn(async move {
-            if let Err(e) = start_udp_broadcast(broadcast_name, username_clone, actual_port, user_id).await {
-                eprintln!("UDP broadcast failed: {}", e);
+            if let Err(e) =
+                start_udp_broadcast(broadcast_name, username_clone, actual_port, user_id).await
+            {
+                log::error!("UDP broadcast failed: {}", e);
             }
         }))
     } else {
-        println!("Skipping UDP broadcast as requested.");
+        log::info!("Skipping UDP broadcast as requested.");
         None
     };
 
     // Start the reconnection manager
-    println!("Starting reconnection manager...");
+    log::info!("Starting reconnection manager...");
     let reconnection_service = Arc::clone(&node_service);
     let reconnection_handle: JoinHandle<()> = tokio::spawn(async move {
         let (reconnection_manager, node_name, message_handlers) = {
@@ -344,7 +353,7 @@ pub async fn launch_network_with_broadcast(
                         )
                         .await
                     {
-                        eprintln!("Failed to process message: {}", e);
+                        log::error!("Failed to process message: {}", e);
                     }
                 });
             })
@@ -370,9 +379,10 @@ pub async fn run_cli(node_service: Arc<Mutex<NodeService>>) -> std::io::Result<(
         let service = node_service.lock().await;
         (service.get_name(), service.get_port())
     };
-    println!(
+    log::info!(
         "Starting node service for '{}' (requested TCP port: {})",
-        node_name, requested_port
+        node_name,
+        requested_port
     );
 
     // For CLI, we always start the broadcast since there's no login concept
@@ -380,11 +390,8 @@ pub async fn run_cli(node_service: Arc<Mutex<NodeService>>) -> std::io::Result<(
         match launch_network_with_broadcast(Arc::clone(&node_service), true, None).await {
             Ok(startup) => startup,
             Err(e) => {
-                eprintln!("{}", crate::user_friendly_errors::format_any_error(&e));
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Failed to launch network",
-                ));
+                log::error!("{}", crate::user_friendly_errors::format_any_error(&e));
+                return Err(std::io::Error::other("Failed to launch network"));
             }
         };
     let actual_port = network_startup.port;
@@ -394,17 +401,9 @@ pub async fn run_cli(node_service: Arc<Mutex<NodeService>>) -> std::io::Result<(
         let service = node_service.lock().await;
         service.get_name()
     };
-    println!("Local node: {} (TCP port: {})", node_name, actual_port);
+    log::info!("Local node: {} (TCP port: {})", node_name, actual_port);
 
-    println!(
-        "
-Start chatting (type 'quit' to exit):"
-    );
-    print!("> ");
-    std::io::stdout()
-        .flush()
-        .map_err(|e| eprintln!("Failed to flush stdout: {}", e))
-        .unwrap_or(());
+    log::info!("Start chatting (type 'quit' to exit):");
 
     // Handle user input
     let mut input = String::new();
@@ -422,15 +421,9 @@ Start chatting (type 'quit' to exit):"
         tokio::spawn(async move {
             let service = service.lock().await;
             if let Err(e) = service.broadcast_message(message).await {
-                eprintln!("{}", crate::user_friendly_errors::format_any_error(&e));
+                log::error!("{}", crate::user_friendly_errors::format_any_error(&e));
             }
         });
-
-        print!("> ");
-        std::io::stdout()
-            .flush()
-            .map_err(|e| eprintln!("Failed to flush stdout: {}", e))
-            .unwrap_or(());
     }
 
     Ok(())

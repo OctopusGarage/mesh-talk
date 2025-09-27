@@ -6,5 +6,8 @@ set -e
 chmod +x scripts/check-health.sh
 ./scripts/check-health.sh
 
+# Ensure all changes are staged after auto-fixes
+git add -A
+
 echo "All pre-commit checks passed!"
 

@@ -1,5 +1,7 @@
 {
-  "contextFileName": "PROJECT.md",
+  "context": {
+    "fileName": "PROJECT.md"
+  },
   "gemini": {
     "context": {
       "project": "mesh-talk",

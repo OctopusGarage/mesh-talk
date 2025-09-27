@@ -1,5 +1,6 @@
 use crate::commands::ChatMessageInfo;
 use crate::domain::node_registry::NodeStatus;
+use crate::perf_monitor;
 use crate::services::node_service::{MessageEvent, NodeService};
 use crate::state::AppState;
 use std::collections::{HashMap, HashSet};
@@ -9,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, Runtime};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
+use tracing::{error, info};
 
 #[derive(Clone, Debug)]
 struct ContactStatusChange {
@@ -132,7 +134,7 @@ async fn emit_message_received<R: Runtime>(app_handle: tauri::AppHandle<R>, even
     let payload = build_message_event_payload(&app_handle, &event);
 
     if let Err(e) = app_handle.emit(EVENT_MESSAGE_RECEIVED, payload) {
-        eprintln!("Failed to emit message received event: {}", e);
+        error!("Failed to emit message received event: {}", e);
     }
 }
 
@@ -186,7 +188,7 @@ fn emit_contact_status_changed<R: Runtime>(
     };
 
     if let Err(e) = app_handle.emit(EVENT_CONTACT_STATUS_CHANGED, event) {
-        eprintln!("Failed to emit contact status changed event: {}", e);
+        error!("Failed to emit contact status changed event: {}", e);
     }
 }
 
@@ -199,14 +201,14 @@ pub fn emit_network_status_changed<R: Runtime>(
     let event = NetworkStatusChangedEvent { status, peer_count };
 
     if let Err(e) = app_handle.emit(EVENT_NETWORK_STATUS_CHANGED, event) {
-        eprintln!("Failed to emit network status changed event: {}", e);
+        error!("Failed to emit network status changed event: {}", e);
     }
 }
 
 pub fn emit_node_port_changed<R: Runtime>(app_handle: &tauri::AppHandle<R>, port: u16, ip: String) {
     let event = NodePortChangedEvent { port, ip };
     if let Err(e) = app_handle.emit(EVENT_NODE_PORT_CHANGED, event) {
-        eprintln!("Failed to emit node port changed event: {}", e);
+        error!("Failed to emit node port changed event: {}", e);
     }
 }
 
@@ -216,7 +218,7 @@ pub fn emit_nodes_discovered<R: Runtime>(
 ) {
     let event = NodesDiscoveredEvent { nodes };
     if let Err(e) = app_handle.emit(EVENT_NODES_DISCOVERED, event) {
-        eprintln!("Failed to emit nodes discovered event: {}", e);
+        error!("Failed to emit nodes discovered event: {}", e);
     }
 }
 
@@ -239,7 +241,7 @@ pub fn emit_contact_request_received<R: Runtime>(
     };
 
     if let Err(e) = app_handle.emit(EVENT_CONTACT_REQUEST_RECEIVED, event) {
-        eprintln!("Failed to emit contact request received event: {}", e);
+        error!("Failed to emit contact request received event: {}", e);
     }
 }
 
@@ -258,7 +260,7 @@ pub fn emit_contact_response_received<R: Runtime>(
     };
 
     if let Err(e) = app_handle.emit(EVENT_CONTACT_RESPONSE_RECEIVED, event) {
-        eprintln!("Failed to emit contact response received event: {}", e);
+        error!("Failed to emit contact response received event: {}", e);
     }
 }
 
@@ -275,7 +277,7 @@ pub fn emit_contact_added<R: Runtime>(
     };
 
     if let Err(e) = app_handle.emit(EVENT_CONTACT_ADDED, event) {
-        eprintln!("Failed to emit contact added event: {}", e);
+        error!("Failed to emit contact added event: {}", e);
     }
 }
 
@@ -284,6 +286,7 @@ pub async fn setup_node_service_events(
     node_service: Arc<Mutex<NodeService>>,
     app_handle: tauri::AppHandle,
 ) {
+    let _timer = perf_monitor!("setup_node_service_events");
     set_node_event_app_handle(&app_handle);
 
     // Clone the app handle for use in the async block
@@ -420,9 +423,9 @@ pub async fn setup_node_service_events(
                     let service = node_for_ip_monitor.lock().await;
                     let port = service.get_port();
                     drop(service); // Release the lock before emitting the event
-                    
+
                     emit_node_port_changed(&ip_monitor_handle, port, current_ip.clone());
-                    println!("IP address changed from {} to {}", prev_ip, current_ip);
+                    info!("IP address changed from {} to {}", prev_ip, current_ip);
                 }
             }
 
@@ -495,18 +498,18 @@ fn build_message_event_payload_with_state(
             event.content.clone(),
         )
         .map_err(|err| {
-            eprintln!("Failed to persist incoming message: {:?}", err);
+            error!("Failed to persist incoming message: {:?}", err);
         })
         .ok()
         .and_then(|message| {
             if let Err(err) = message_service.mark_delivered(message.id) {
-                eprintln!("Failed to mark incoming message as delivered: {:?}", err);
+                error!("Failed to mark incoming message as delivered: {:?}", err);
             }
 
             message_service
                 .get_message(message.id)
                 .map_err(|err| {
-                    eprintln!("Failed to reload persisted message: {:?}", err);
+                    error!("Failed to reload persisted message: {:?}", err);
                 })
                 .ok()
                 .or(Some(message))

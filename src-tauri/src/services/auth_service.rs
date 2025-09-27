@@ -1,7 +1,7 @@
 use crate::domain::models::{EntityId, User};
 use crate::identity::manager::IdentityManager;
-use crate::storage::file_manager::FileManager;
 use crate::services::common::{Service, ServiceDependencies, ServiceHealth};
+use crate::storage::file_manager::FileManager;
 
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use std::collections::HashMap;
@@ -108,33 +108,34 @@ static INSTANCE: std::sync::OnceLock<AuthService> = std::sync::OnceLock::new();
 impl Service for AuthService {
     type Error = AuthError;
     type Result<T> = AuthResult<T>;
-    
+
     fn init(dependencies: ServiceDependencies) -> Self {
         // Extract file manager from dependencies
-        let file_manager = dependencies.file_manager
+        let file_manager = dependencies
+            .file_manager
             .and_then(|fm| fm.downcast_ref::<FileManager>().cloned())
             .expect("File manager is required for AuthService");
-            
+
         let identity_manager = Arc::new(IdentityManager::new(file_manager));
         Self::new(identity_manager)
     }
-    
+
     fn service_name(&self) -> &'static str {
         "AuthService"
     }
-    
+
     fn health_check(&self) -> ServiceHealth {
         ServiceHealth::Healthy
     }
-    
+
     fn shutdown(&self) -> Self::Result<()> {
         // Clear sessions on shutdown
         let mut sessions = self.sessions.lock().unwrap();
         sessions.clear();
-        
+
         let mut current_user = self.current_user.lock().unwrap();
         *current_user = None;
-        
+
         Ok(())
     }
 }
@@ -205,7 +206,7 @@ impl AuthService {
         let id = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
-            
+
             let mut hasher = DefaultHasher::new();
             identity_user.user_id.hash(&mut hasher);
             hasher.finish() as EntityId
@@ -251,7 +252,7 @@ impl AuthService {
         let id = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
-            
+
             let mut hasher = DefaultHasher::new();
             identity_user.user_id.hash(&mut hasher);
             hasher.finish() as EntityId
@@ -346,7 +347,7 @@ impl AuthService {
             id: session.user_id,
             name: "Unknown".to_string(), // We don't have the username in the session
             address: "Unknown".to_string(), // We don't have the address in the session
-            identity_id: String::new(), // No identity_id available in session
+            identity_id: String::new(),  // No identity_id available in session
             created_at: session.created_at,
             last_seen: SystemTime::now()
                 .duration_since(UNIX_EPOCH)

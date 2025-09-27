@@ -1,6 +1,6 @@
 use crate::domain::models::{ChatMessage, EntityId, MessageStatus};
-use crate::storage::file_manager::FileManager;
 use crate::services::common::{Service, ServiceDependencies, ServiceHealth};
+use crate::storage::file_manager::FileManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -97,24 +97,25 @@ static INSTANCE: OnceLock<MessageService> = OnceLock::new();
 impl Service for MessageService {
     type Error = MessageError;
     type Result<T> = MessageResult<T>;
-    
+
     fn init(dependencies: ServiceDependencies) -> Self {
         // Extract file manager from dependencies
-        let file_manager = dependencies.file_manager
+        let file_manager = dependencies
+            .file_manager
             .and_then(|fm| fm.downcast_ref::<FileManager>().cloned())
             .expect("File manager is required for MessageService");
-            
+
         Self::new(Arc::new(file_manager))
     }
-    
+
     fn service_name(&self) -> &'static str {
         "MessageService"
     }
-    
+
     fn health_check(&self) -> ServiceHealth {
         ServiceHealth::Healthy
     }
-    
+
     fn shutdown(&self) -> Self::Result<()> {
         // Clear cache on shutdown
         let mut cache = self.cache.lock().unwrap();

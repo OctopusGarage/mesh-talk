@@ -12,19 +12,19 @@ use std::sync::{Arc, OnceLock};
 pub trait Service: Clone + Send + Sync {
     /// Service-specific error type
     type Error;
-    
+
     /// Service-specific result type
     type Result<T>;
-    
+
     /// Initializes the service with required dependencies
     fn init(dependencies: ServiceDependencies) -> Self;
-    
+
     /// Gets the name of the service for logging and debugging purposes
     fn service_name(&self) -> &'static str;
-    
+
     /// Performs health check on the service
     fn health_check(&self) -> ServiceHealth;
-    
+
     /// Shuts down the service gracefully
     fn shutdown(&self) -> Self::Result<()>;
 }
@@ -69,7 +69,7 @@ impl<T> ServiceManager<T> {
             instance: OnceLock::new(),
         }
     }
-    
+
     /// Gets or initializes the service instance
     pub fn get_or_init<F>(&self, initializer: F) -> &T
     where
@@ -77,12 +77,12 @@ impl<T> ServiceManager<T> {
     {
         self.instance.get_or_init(initializer)
     }
-    
+
     /// Sets the service instance if not already set
     pub fn set(&self, value: T) -> Result<(), T> {
         self.instance.set(value)
     }
-    
+
     /// Gets a reference to the service instance if it exists
     pub fn get(&self) -> Option<&T> {
         self.instance.get()
@@ -99,7 +99,7 @@ impl<T> Default for ServiceManager<T> {
 pub trait ServiceResultExt<T, E> {
     /// Maps the result to include service context information
     fn with_service_context(self, service_name: &str, operation: &str) -> Result<T, E>;
-    
+
     /// Converts to a standardized service result format
     fn to_service_result<F>(self, converter: F) -> ServiceResult<T>
     where
@@ -146,7 +146,7 @@ impl<T, E> ServiceResultExt<T, E> for Result<T, E> {
         // need to be implemented specifically for each error type
         self
     }
-    
+
     fn to_service_result<F>(self, converter: F) -> ServiceResult<T>
     where
         F: FnOnce(E) -> ServiceError,
@@ -158,8 +158,7 @@ impl<T, E> ServiceResultExt<T, E> for Result<T, E> {
 /// Common service initialization utilities
 pub mod init {
     use super::*;
-    
-    
+
     /// Initializes a global service instance
     ///
     /// This provides a standardized way to initialize global service instances
@@ -174,17 +173,20 @@ pub mod init {
     {
         match initializer() {
             Ok(service) => {
-                service_manager.set(service).map_err(|_| {
-                    // This is a bit tricky since we've consumed the error,
-                    // but we can reconstruct a meaningful error
-                    panic!("Failed to set service instance - this should not happen")
-                }).unwrap_or(());
+                service_manager
+                    .set(service)
+                    .map_err(|_| {
+                        // This is a bit tricky since we've consumed the error,
+                        // but we can reconstruct a meaningful error
+                        panic!("Failed to set service instance - this should not happen")
+                    })
+                    .unwrap_or(());
                 Ok(())
             }
             Err(e) => Err(e),
         }
     }
-    
+
     /// Gets a global service instance, panicking if not initialized
     ///
     /// This provides a standardized way to access global service instances
@@ -205,72 +207,71 @@ pub mod init {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    
+
     // Mock service for testing
     #[derive(Clone)]
     struct MockService {
         name: String,
     }
-    
+
     impl Service for MockService {
         type Error = String;
         type Result<T> = Result<T, String>;
-        
+
         fn init(_deps: ServiceDependencies) -> Self {
             Self {
                 name: "mock".to_string(),
             }
         }
-        
+
         fn service_name(&self) -> &'static str {
             "MockService"
         }
-        
+
         fn health_check(&self) -> ServiceHealth {
             ServiceHealth::Healthy
         }
-        
+
         fn shutdown(&self) -> Self::Result<()> {
             Ok(())
         }
     }
-    
+
     #[test]
     fn test_service_manager() {
         let manager: ServiceManager<MockService> = ServiceManager::new();
-        
+
         // Should be able to set once
         let service = MockService {
             name: "test".to_string(),
         };
         assert!(manager.set(service).is_ok());
-        
+
         // Should be able to get
         let retrieved = manager.get();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "test");
     }
-    
+
     #[test]
     fn test_service_manager_get_or_init() {
         let manager: ServiceManager<String> = ServiceManager::new();
-        
+
         // Should initialize and return the value
         let value = manager.get_or_init(|| "initialized".to_string());
         assert_eq!(value, "initialized");
-        
+
         // Should return the same value on subsequent calls
         let value2 = manager.get_or_init(|| "different".to_string());
         assert_eq!(value2, "initialized");
     }
-    
+
     #[test]
     fn test_service_health_enum() {
         let healthy = ServiceHealth::Healthy;
         let degraded = ServiceHealth::Degraded("Slow response times".to_string());
         let unhealthy = ServiceHealth::Unhealthy("Database connection failed".to_string());
-        
+
         assert_eq!(healthy, ServiceHealth::Healthy);
         assert_ne!(degraded, healthy);
         assert_ne!(unhealthy, healthy);

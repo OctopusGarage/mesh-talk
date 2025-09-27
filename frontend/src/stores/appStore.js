@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { API } from "../services/api";
 import { useFeedbackStore } from "./feedbackStore";
+import Logger from "../utils/logger";
 import {
   normalizeMessage,
   normalizeMessageList,
@@ -15,7 +16,7 @@ import {
 export const useAppStore = defineStore("app", () => {
   // Dependencies
   const feedback = useFeedbackStore();
-  
+
   // State
   const user = ref(null);
   const nodeInfo = ref(null);
@@ -33,11 +34,11 @@ export const useAppStore = defineStore("app", () => {
 
   // Computed properties
   const isAuthenticated = computed(() => Boolean(user.value));
-  
+
   const sortedContacts = computed(() =>
     [...contacts.value].sort((a, b) => a.name.localeCompare(b.name)),
   );
-  
+
   const filteredMessages = computed(() => {
     if (!activeConversation.value) {
       return messages.value;
@@ -47,8 +48,6 @@ export const useAppStore = defineStore("app", () => {
       (message) => messageConversationKey(message) === activeConversation.value,
     );
   });
-
-  
 
   // Contact normalization functions
   function normalizeContact(contact) {
@@ -97,7 +96,6 @@ export const useAppStore = defineStore("app", () => {
   }
 
   // Message normalization functions
-  
 
   function upsertMessage(message) {
     if (!message) {
@@ -105,19 +103,22 @@ export const useAppStore = defineStore("app", () => {
     }
 
     const normalized = normalizeMessage(message);
-    
+
     // Prevent duplicates based on ID or content/sender/timestamp combination
     const current = Array.isArray(messages.value) ? [...messages.value] : [];
-    
+
     // First, try to find by ID
-    let index = current.findIndex((entry) => entry.id === normalized.id && normalized.id !== 0);
-    
+    let index = current.findIndex(
+      (entry) => entry.id === normalized.id && normalized.id !== 0,
+    );
+
     if (index === -1) {
       // If no ID match (or ID is 0), try to find potential duplicate by content, sender, and time
-      index = current.findIndex((entry) => 
-        entry.content === normalized.content &&
-        entry.from_address === normalized.from_address &&
-        Math.abs((entry.sent_at || 0) - (normalized.sent_at || 0)) < 2 // Within 2 seconds
+      index = current.findIndex(
+        (entry) =>
+          entry.content === normalized.content &&
+          entry.from_address === normalized.from_address &&
+          Math.abs((entry.sent_at || 0) - (normalized.sent_at || 0)) < 2, // Within 2 seconds
       );
     }
 
@@ -132,7 +133,6 @@ export const useAppStore = defineStore("app", () => {
   }
 
   // Message conversation key function
-  
 
   // Message conversation key function
   function messageConversationKey(message) {
@@ -146,7 +146,7 @@ export const useAppStore = defineStore("app", () => {
     if (message.from_address === selfAddress && message.to_address) {
       return message.to_address;
     }
-    
+
     // If this message is from someone else, return the sender address
     if (message.from_address && message.from_address !== selfAddress) {
       return message.from_address;
@@ -174,7 +174,7 @@ export const useAppStore = defineStore("app", () => {
       return;
     }
 
-    console.error(err);
+    Logger.error(err);
     const message =
       options.message ||
       (typeof err === "string" ? err : (err?.message ?? "Unknown error"));
@@ -288,6 +288,7 @@ export const useAppStore = defineStore("app", () => {
     ensureEventListeners();
   }
 
+  // Refresh node information from the backend
   async function refreshNodeInfo() {
     try {
       const info = await API.node.getNodeInfo();
@@ -306,11 +307,25 @@ export const useAppStore = defineStore("app", () => {
         networkRunning.value = true;
         networkStatus.value = "connected";
       }
+      
+      // Log successful refresh
+      await Logger.network("node-info-refresh", {
+        nodeName: info.name,
+        nodePort: info.port,
+        nodeStatus: info.status,
+        networkStatus: networkStatus.value
+      });
     } catch (err) {
       setError(err, {
         message: "Failed to load node information",
         source: "store.refreshNodeInfo",
         toast: false,
+      });
+      
+      // Log error
+      await Logger.error("Failed to refresh node info", {
+        error: err.message,
+        source: "store.refreshNodeInfo"
       });
     }
   }
@@ -321,11 +336,17 @@ export const useAppStore = defineStore("app", () => {
     return Promise.resolve();
   }
 
+    // Refresh contacts from the backend
   async function refreshContacts() {
     try {
       const result = await API.contacts.getContacts();
       if (result.success) {
         applyContacts(result.contacts ?? []);
+        
+        // Log successful refresh
+        await Logger.contact("contacts-refresh", {
+          contactCount: (result.contacts ?? []).length
+        });
       }
     } catch (err) {
       setError(err, {
@@ -333,66 +354,110 @@ export const useAppStore = defineStore("app", () => {
         source: "store.refreshContacts",
         toast: false,
       });
+      
+      // Log error
+      await Logger.error("Failed to refresh contacts", {
+        error: err.message,
+        source: "store.refreshContacts"
+      });
     }
   }
 
+  // Refresh messages from the backend
   async function refreshMessages() {
     try {
       const result = await API.messages.getMessages();
       const normalized = normalizeMessageList(Array.isArray(result) ? result : []);
       messages.value = normalized;
       recomputeUnread();
+      
+      // Log successful refresh
+      await Logger.chat("messages-refresh", {
+        messageCount: normalized.length,
+        unreadCount: unreadCount.value
+      });
     } catch (err) {
       setError(err, {
         message: "Failed to refresh messages",
         source: "store.refreshMessages",
         toast: false,
       });
+      
+      // Log error
+      await Logger.error("Failed to refresh messages", {
+        error: err.message,
+        source: "store.refreshMessages"
+      });
     }
   }
 
-  // Message actions
+  // Send a message to connected peers
   async function sendMessage(content) {
-    if (activeConversation.value) {
-      await ensureNodeConnection(activeConversation.value);
+    const trimmed = content.trim();
+    if (trimmed.length === 0) {
+      const error = new Error("Message content cannot be empty");
+      setError(error, {
+        message: "Message content cannot be empty",
+        source: "messages.send",
+        toast: true,
+      });
+      
+      // Log validation error
+      await Logger.error("Empty message content", {
+        error: "Message content cannot be empty",
+        source: "messages.send"
+      });
+      
+      return { success: false, error: "Message content cannot be empty" };
     }
-    setLoading(true);
-    setError(null, { clearLastError: true });
+
     try {
-      // Prepare the message object to be stored locally before sending
-      const localMessage = {
-        id: Date.now(), // Temporary ID until backend assigns real ID
-        from_user_id: user.value?.id,
-        from_address: user.value?.address,
-        to_address: activeConversation.value,
-        content: content,
-        sent_at: Math.floor(Date.now() / 1000),
-        status: 0, // Sent (not yet delivered)
-      };
-      
-      // Add the local message immediately to show in UI
-      const addedMessage = upsertMessage(localMessage);
-      
-      // Now send to backend
-      const result = await API.messages.sendMessage(content);
-      
-      // Merge the backend result with the local one (in case backend returns additional fields)
-      let processedResult = { ...localMessage, ...result };
-      
-      const normalized = upsertMessage(processedResult) ?? normalizeMessage(processedResult);
-      const key = messageConversationKey(normalized);
-      if (!activeConversation.value && key) {
-        activeConversation.value = key;
+      const result = await API.messages.sendMessage(trimmed);
+      if (result?.success) {
+        const message = upsertMessage(result.message);
+        if (activeConversation.value && messageConversationKey(message) !== activeConversation.value) {
+          activeConversation.value = messageConversationKey(message);
+        }
+        
+        // Log successful send
+        await Logger.chat("message-sent", {
+          messageId: message.id,
+          contentLength: trimmed.length,
+          recipient: activeConversation.value
+        });
+        
+        return { success: true, message };
+      } else {
+        const error = new Error(result?.message ?? "Failed to send message");
+        setError(error, {
+          message: result?.message ?? "Failed to send message",
+          source: "messages.send",
+          toast: true,
+        });
+        
+        // Log send failure
+        await Logger.error("Failed to send message", {
+          error: result?.message ?? "Failed to send message",
+          source: "messages.send"
+        });
+        
+        return { success: false, error: result?.message ?? "Failed to send message" };
       }
-      return { success: true, message: normalized };
     } catch (err) {
       setError(err, {
         message: "Failed to send message",
         source: "messages.send",
+        toast: true,
       });
-      return { success: false, error: error.value };
-    } finally {
-      setLoading(false);
+      
+      // Log exception
+      await Logger.error("Exception while sending message", {
+        error: err.message,
+        source: "messages.send",
+        stack: err.stack
+      });
+      
+      return { success: false, error: err.message };
     }
   }
 
@@ -435,19 +500,21 @@ export const useAppStore = defineStore("app", () => {
   async function updateContact(contactId, data) {
     try {
       const result = await API.contacts.updateContact(contactId, data);
-      
+
       // Update the contact in the local store if successful
       if (result.success && result.contact) {
-        const contactIndex = contacts.value.findIndex(contact => contact.id === contactId);
+        const contactIndex = contacts.value.findIndex(
+          (contact) => contact.id === contactId,
+        );
         if (contactIndex !== -1) {
           // Preserve the original name if it was explicitly provided in the update
           const updatedContact = {
             ...contacts.value[contactIndex],
-            ...result.contact
+            ...result.contact,
           };
-          
+
           contacts.value[contactIndex] = normalizeContact(updatedContact);
-          
+
           // If name was explicitly provided in the update, override the normalized name field
           if (data.name !== undefined) {
             contacts.value[contactIndex].name = data.name;
@@ -462,7 +529,7 @@ export const useAppStore = defineStore("app", () => {
           contacts.value.push(newContact);
         }
       }
-      
+
       return result;
     } catch (err) {
       setError(err, {
@@ -507,7 +574,8 @@ export const useAppStore = defineStore("app", () => {
         const incomingMessage = payload.message;
 
         if (incomingMessage) {
-          const normalized = upsertMessage(incomingMessage) ?? normalizeMessage(incomingMessage);
+          const normalized =
+            upsertMessage(incomingMessage) ?? normalizeMessage(incomingMessage);
 
           if (payload.sender_address) {
             upsertContactFromEvent({
@@ -570,8 +638,7 @@ export const useAppStore = defineStore("app", () => {
         const updatedPort = payload.port ?? current.port ?? 0;
         const updatedIp = payload.ip ?? current.ip ?? "127.0.0.1";
         const updatedName = current.name ?? "mesh-node";
-        const updatedUsername =
-          current.username ?? user.value?.name ?? "Guest";
+        const updatedUsername = current.username ?? user.value?.name ?? "Guest";
 
         nodeInfo.value = {
           ...current,
@@ -616,7 +683,7 @@ export const useAppStore = defineStore("app", () => {
               }),
           }));
         }
-      })
+      }),
     );
   }
 
@@ -664,9 +731,9 @@ export const useAppStore = defineStore("app", () => {
       // But we still need to handle status updates for contacts that might exist but weren't explicitly identified
       // Check if this address exists in the contacts list by comparing address
       const contactIndexByAddress = contacts.value.findIndex(
-        contact => contact.address === payload.address
+        (contact) => contact.address === payload.address,
       );
-      
+
       if (contactIndexByAddress !== -1) {
         // Update the contact status even if we don't have the contact_id
         const existingContact = contacts.value[contactIndexByAddress];
@@ -754,7 +821,8 @@ export const useAppStore = defineStore("app", () => {
       return;
     }
 
-    const label = node.display_label ??
+    const label =
+      node.display_label ??
       buildNodeDisplayLabel({
         name: node.name ?? node.node_name,
         username: node.username,
@@ -763,7 +831,7 @@ export const useAppStore = defineStore("app", () => {
       });
 
     const existingIndex = discoveredNodes.value.findIndex(
-      (n) => n.address === node.address
+      (n) => n.address === node.address,
     );
 
     if (existingIndex !== -1) {
@@ -782,7 +850,7 @@ export const useAppStore = defineStore("app", () => {
 
   function removeDiscoveredNode(address) {
     discoveredNodes.value = discoveredNodes.value.filter(
-      (node) => node.address !== address
+      (node) => node.address !== address,
     );
   }
 
@@ -799,19 +867,19 @@ export const useAppStore = defineStore("app", () => {
 
     // Create a map of discovered addresses that are "connected" (online)
     const discoveredOnlineAddresses = new Set();
-    discoveredNodes.value.forEach(node => {
+    discoveredNodes.value.forEach((node) => {
       if (node.is_connected) {
         discoveredOnlineAddresses.add(node.address);
       }
     });
 
     // Update contact status based on discovery list
-    contacts.value = contacts.value.map(contact => {
+    contacts.value = contacts.value.map((contact) => {
       const isOnline = discoveredOnlineAddresses.has(contact.address);
       return {
         ...contact,
         status: isOnline ? "online" : "offline",
-        is_online: isOnline
+        is_online: isOnline,
       };
     });
   }

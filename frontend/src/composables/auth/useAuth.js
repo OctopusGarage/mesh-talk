@@ -13,7 +13,7 @@ export function useAuth() {
   // Authentication methods
   const login = async (username, password) => store.login(username, password);
   const logout = async () => store.logout();
-  const register = async (username, password) => 
+  const register = async (username, password) =>
     store.register(username, password);
 
   return {

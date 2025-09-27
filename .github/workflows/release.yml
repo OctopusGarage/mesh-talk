@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"  # Triggered when pushing tags
 
+permissions:
+  contents: write  
+  id-token: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -48,7 +52,6 @@ jobs:
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
-
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
         run: choco install protoc
@@ -62,6 +65,10 @@ jobs:
             ~/.cargo/git
             src-tauri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Install zip on Windows
+        if: runner.os == 'Windows'
+        run: choco install zip -y
 
       # 5️⃣ Install frontend dependencies
       - name: Install frontend deps
@@ -76,6 +83,7 @@ jobs:
           cd src-tauri
           cargo tauri build --target ${{ matrix.target }}
 
+      # 7️⃣ Collect artifacts
       - name: Collect build artifacts
         shell: bash
         run: |
@@ -94,7 +102,6 @@ jobs:
             for file in $pattern; do
               [ -e "$file" ] || continue
               BASENAME=$(basename "$file")
-              DIRNAME=$(dirname "$file")
               NEWNAME=$(echo "$BASENAME" | sed -E "s/_[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?/_${TAG}/")
               if [[ "$file" == *.app ]]; then
                 cp -R "$file" "release/$NEWNAME"
@@ -106,11 +113,92 @@ jobs:
 
           ls -lh release || true
 
-      - name: Upload to GitHub Release
+      # 8️⃣ Generate SHA256 checksums
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          cd release
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -Command "
+              Get-ChildItem -File | Where-Object { \$_.Name -ne 'SHA256SUMS' } |
+              ForEach-Object { \$h = Get-FileHash -Algorithm SHA256 \$_.FullName; \"\$($h.Hash)  \$($_.Name)\" } |
+              Out-File -Encoding ASCII SHA256SUMS
+            "
+          else
+            if command -v sha256sum >/dev/null 2>&1; then
+              find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec sha256sum {} \; > SHA256SUMS
+            else
+              find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec shasum -a 256 {} \; > SHA256SUMS
+            fi
+          fi
+
+          echo "SHA256SUMS created:"
+          cat SHA256SUMS
+
+      # 9️⃣ Install cosign
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.6.0
+
+      # 🔟 Package and sign artifacts
+      - name: Package and sign artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF#refs/tags/}
+          mkdir -p release_zips
+
+          OS_NAME=""
+          ARCH=""
+
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin)
+              OS_NAME="macos"
+              ARCH="x86_64"
+              ;;
+            aarch64-apple-darwin)
+              OS_NAME="macos"
+              ARCH="arm64"
+              ;;
+            x86_64-pc-windows-msvc)
+              OS_NAME="windows"
+              ARCH="x86_64"
+              ;;
+            *-linux-gnu | *-linux-musl)
+              OS_NAME="linux"
+              ARCH="$(echo ${{ matrix.target }} | cut -d- -f1)"
+              ;;
+            *)
+              echo "Unsupported target: ${{ matrix.target }}"
+              exit 1
+              ;;
+          esac
+
+          ZIP_NAME="release_zips/mesh-talk_${TAG}_${OS_NAME}_${ARCH}.zip"
+
+          case "$OS_NAME" in
+            macos)
+              zip -r "$ZIP_NAME" release/*.app release/*.dmg release/SHA256SUMS -x "*.DS_Store"
+              ;;
+            windows)
+              zip -r "$ZIP_NAME" release/*.exe release/*.msi release/SHA256SUMS
+              ;;
+            linux)
+              zip -r "$ZIP_NAME" release/*.AppImage release/*.deb release/*.rpm release/SHA256SUMS
+              ;;
+          esac
+
+          BUNDLE_FILE="${ZIP_NAME}.bundle"
+          cosign sign-blob --yes --bundle "$BUNDLE_FILE" "$ZIP_NAME"
+
+          echo "✅ Bundle signature generated: $BUNDLE_FILE"
+          ls -lh release_zips
+
+      # 1️⃣1️⃣ Upload zipped artifacts + bundle to GitHub Release
+      - name: Upload zipped artifacts and signature bundle to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: release/*
+          files: release_zips/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

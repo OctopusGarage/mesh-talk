@@ -5,6 +5,12 @@ use super::{NotificationProvider, PlatformResult, SecureStorage};
 /// macOS secure storage implementation using Keychain Services
 pub struct MacOSSecureStorage;
 
+impl Default for MacOSSecureStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MacOSSecureStorage {
     pub fn new() -> Self {
         Self
@@ -97,6 +103,12 @@ impl SecureStorage for MacOSSecureStorage {
 
 /// macOS notification provider implementation
 pub struct MacOSNotificationProvider;
+
+impl Default for MacOSNotificationProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MacOSNotificationProvider {
     pub fn new() -> Self {

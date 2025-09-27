@@ -1053,7 +1053,7 @@ async fn send_contact_request_impl(
             &session.user.name, // Using username as password placeholder - the service should handle this differently
             &target_public_key,
             alias.as_deref(),
-            session.user.id,  // Pass the user ID from the session
+            session.user.id, // Pass the user ID from the session
         )
         .await
     {

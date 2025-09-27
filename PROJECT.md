@@ -4,56 +4,48 @@ This document serves as the main project specification and context file for AI t
 
 ## Project Overview
 
-Mesh-Talk is a local network chat tool written in Rust that enables users to communicate directly with others on the same network using UDP broadcast and TCP connections.
+Mesh-Talk is a secure, decentralized desktop chat application built with Rust and Tauri that enables users to communicate directly with others on the same network using peer-to-peer connections.
 
 ### Current Implementation
 
 #### Technology Stack
 
 - **Language**: Rust 2021
+- **Frontend Framework**: Vue.js 3 with Composition API
+- **Desktop Framework**: Tauri 2.x
 - **Async Runtime**: Tokio
 - **Serialization**: serde, serde_json
+- **UI State Management**: Pinia
+- **Encryption**: Signal Protocol via libsignal-rust
 - **Command-line Parsing**: clap
 
 #### Core Features
 
-1. Local network communication without a central server
+1. Decentralized peer-to-peer communication without a central server
 2. Automatic peer discovery using UDP broadcast
-3. Real-time messaging between connected peers via TCP
-4. Command-line interface
+3. Secure end-to-end encrypted messaging using Signal Protocol
+4. Real-time messaging between connected peers via TCP connections
+5. Contact management with discovery and request/accept workflows
+6. Cross-platform desktop application (Windows, macOS, Linux)
+7. System tray integration and desktop notifications
+8. Encrypted local data storage
 
 #### Network Implementation
 
-- UDP broadcast (port 8888) for local network peer discovery
+- UDP broadcast discovery for local network peer detection
 - TCP connections for reliable peer-to-peer communication
-- JSON encoding for messages
+- JSON encoding for message exchange
+- Heartbeat mechanism for connection health monitoring
+- Automatic reconnection for dropped connections
 - Thread-safe peer management using Arc and Mutex
 
-#### Message Types
+#### Security Features
 
-```rust
-#[derive(Debug, Serialize, Deserialize)]
-enum Message {
-    Discovery {
-        name: String,
-        port: u16,
-    },
-    Chat {
-        from: String,
-        content: String,
-    },
-}
-```
-
-#### Main Components
-
-- `Node`: Core node structure managing node name, port, and connected peers
-- `start_udp_broadcast`: Starts UDP broadcast, periodically broadcasting node information
-- `start_udp_discovery`: Listens for UDP broadcasts to discover new nodes
-- `connect_to_peer`: Connects to newly discovered nodes
-- `handle_incoming_connection`: Handles incoming TCP connections
-- `broadcast_message`: Broadcasts messages to all connected nodes
-- `handle_message`: Processes received messages
+- End-to-end encryption using Signal Protocol
+- Digital signatures for contact requests using Ed25519
+- Encrypted local storage with AES-GCM
+- Secure key management with platform-specific keychains
+- Password hashing with Argon2
 
 ## AI Tool Compatibility
 
@@ -110,16 +102,18 @@ src-tauri/
 │   │   └── node_registry.rs    # Node registry for discovered nodes
 │   ├── services/               # Business logic services
 │   │   ├── auth_service.rs     # Authentication service
-│   │   ├── contact_service.rs  # Contact management service
+│   │   ├── contact_service.rs   # Contact management service
 │   │   ├── message_service.rs  # Message handling service
 │   │   ├── node_service.rs     # Core network node service
 │   │   ├── notification_service.rs # Notification service
-│   │   └── contact_request_service.rs # Contact request handling
+│   │   ├── contact_request_service.rs # Contact request handling
+│   │   └── common.rs           # Common service utilities
 │   ├── network/                # Network communication layer
 │   │   ├── tcp.rs              # TCP connection management
 │   │   ├── udp.rs              # UDP broadcast and discovery
-│   │   ├── reconnection.rs     # Connection reconnection logic
-│   │   └── runtime.rs          # Network runtime management
+│   │   ├── reconnection.rs      # Connection reconnection logic
+│   │   ├── runtime.rs          # Network runtime management
+│   │   └── utils.rs            # Network utilities (retry logic, timeouts)
 │   ├── identity/               # User authentication and identity
 │   │   ├── auth.rs             # Authentication logic
 │   │   ├── keys.rs             # Key pair generation and management
@@ -132,7 +126,7 @@ src-tauri/
 │   │   ├── service.rs          # Contact service
 │   │   ├── request.rs          # Contact request handling
 │   │   ├── discovery.rs        # Contact discovery service
-│   │   └── integration.rs      # Contact discovery integration
+│   │   └── integration.rs       # Contact discovery integration
 │   ├── crypto/                 # Cryptography and encryption
 │   │   ├── keys.rs             # Key management
 │   │   ├── session.rs          # Session management
@@ -141,10 +135,10 @@ src-tauri/
 │   ├── storage/                # Data persistence
 │   │   ├── file_manager.rs     # File system operations
 │   │   ├── encryption.rs       # Data encryption
-│   │   ├── serialization.rs    # Data serialization
-│   │   └── errors.rs           # Storage-related errors
+│   │   ├── serialization.rs   # Data serialization
+│   │   └── errors.rs          # Storage-related errors
 │   ├── notifications/          # Notification system
-│   │   ├── desktop.rs          # Desktop notification manager
+│   │   ├── desktop.rs         # Desktop notification manager
 │   │   ├── settings.rs         # Notification settings
 │   │   └── tray.rs             # System tray integration
 │   ├── platform/               # Platform-specific implementations
@@ -155,13 +149,13 @@ src-tauri/
 │   ├── events.rs               # Event emission and handling
 │   ├── tray.rs                 # System tray menu and interactions
 │   ├── error.rs                # Custom error types
-│   ├── user_friendly_errors.rs # User-friendly error messages
-│   └── utils.rs                # Utility functions
+│   ├── user_friendly_errors.rs  # User-friendly error messages
+│   ├── utils/                  # Utility functions
+│   │   └── error_handling.rs   # Error handling utilities
+│   └── lib.rs                  # Library exports and main application logic
 ├── Cargo.toml                  # Rust dependencies and build configuration
-├── tauri.conf.json             # Tauri configuration
-├── build.rs                    # Build script
-└── capabilities/               # Tauri capabilities and permissions
-    └── default.json
+└── tauri.conf.json             # Tauri configuration
+
 ```
 
 ### Architecture Layers
@@ -190,6 +184,7 @@ The application implements a custom protocol with the following features:
 - UDP broadcast for node discovery
 - TCP for reliable message delivery
 - Heartbeat mechanism for connection health
+- JSON message encoding with automatic retry and timeout logic
 
 ## Frontend Architecture
 
@@ -279,23 +274,23 @@ For task completion criteria, see [@specifications/task_completion_criteria.md](
 
 ### Technology Selection and Initialization
 
-1. Integrate Tauri + Vue.js GUI framework
-2. Integrate Signal Protocol encryption library
-3. Integrate SQLite database
+1. Continue enhancing Tauri + Vue.js GUI framework
+2. Further integrate Signal Protocol encryption library
+3. Enhance SQLite database integration for data persistence
 
 ## Development Recommendations
 
 Based on the detailed analysis in TODO.md, it is recommended to proceed with development in a modular way:
 
-1. `feature/port-handling`: Handle UDP/TCP port conflicts and dynamic allocation
-2. `feature/cli-enhancements`: Improve CLI functionality and user experience
-3. `feature/ui`: Add GUI interface using Tauri/Vue.js
-4. `feature/net`: Enhance network capabilities
-5. `feature/notifications`: Add system notifications
+1. `feature/net`: Continue enhancing network capabilities with improved reliability
+2. `feature/notifications`: Continue improving system notifications and user feedback
+3. `feature/ui`: Continue enhancing GUI interface for better user experience
+4. `feature/cli-enhancements`: Improve CLI functionality and user experience
+5. `feature/port-handling`: Handle UDP/TCP port conflicts and dynamic allocation
 
 ## Important Considerations
 
-1. Signal Implementation and Compatibility: Initially implement as "signal-compatible bidirectional ratchet implementation"
+1. Signal Implementation and Compatibility: Continue implementing as "signal-compatible bidirectional ratchet implementation"
 2. NAT Traversal Uncertainty: Must support relays, and user experience should be clear when direct connection is not possible
 3. Key Backup: Need to provide secure backup (encrypted export) mechanism
 4. Offline Messages: P2P + no central storage means offline messages depend on relays or the recipient coming online to resend/poll

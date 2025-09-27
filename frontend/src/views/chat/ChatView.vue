@@ -36,10 +36,13 @@
             >
               <div class="contact-info">
                 <div class="contact-details">
-                  <span class="contact-name">{{ contact.username}}</span>
-                  <span class="contact-meta">{{ contact.ip}}</span>
+                  <span class="contact-name">{{ contact.username }}</span>
+                  <span class="contact-meta">{{ contact.ip }}</span>
                 </div>
-                <span class="contact-status-icon" :class="contact.status || 'offline'"></span>
+                <span
+                  class="contact-status-icon"
+                  :class="contact.status || 'offline'"
+                ></span>
               </div>
             </li>
           </ul>
@@ -88,8 +91,12 @@
               >
                 <p class="overlay-title">Details</p>
                 <ul>
-                  <li v-if="node.name"><span>{{ node.name }}</span></li>
-                  <li v-if="node.address"><span>{{ node.address }}</span></li>
+                  <li v-if="node.name">
+                    <span>{{ node.name }}</span>
+                  </li>
+                  <li v-if="node.address">
+                    <span>{{ node.address }}</span>
+                  </li>
                 </ul>
               </div>
             </li>
@@ -111,8 +118,12 @@
             {{ nodePanelInfo.label }}
           </p>
           <ul class="node-stats">
-            <li>Peers: <span>{{ peerCount }}</span></li>
-            <li>Unread: <span>{{ unreadCount }}</span></li>
+            <li>
+              Peers: <span>{{ peerCount }}</span>
+            </li>
+            <li>
+              Unread: <span>{{ unreadCount }}</span>
+            </li>
           </ul>
           <div class="node-meta-footer">
             <button class="logout-button" @click="logout">Logout</button>
@@ -120,23 +131,32 @@
           <div v-if="nodeOverlayVisible" class="node-info-overlay">
             <p class="overlay-title">Details</p>
             <ul>
-              <li v-if="nodePanelInfo.nodeName"><span>{{ nodePanelInfo.nodeName }}</span></li>
-              <li v-if="nodePanelInfo.address"><span>{{ nodePanelInfo.address }}</span></li>
+              <li v-if="nodePanelInfo.nodeName">
+                <span>{{ nodePanelInfo.nodeName }}</span>
+              </li>
+              <li v-if="nodePanelInfo.address">
+                <span>{{ nodePanelInfo.address }}</span>
+              </li>
             </ul>
           </div>
         </div>
       </section>
     </aside>
   </main>
-  
+
   <!-- Contact Request Popup -->
   <div v-if="showContactRequestPopup" class="contact-request-popup">
     <div class="popup-content">
       <h3>Contact Request</h3>
-      <p>{{ pendingContactRequest?.requester_alias || 'Unknown' }} wants to connect with you.</p>
+      <p>
+        {{ pendingContactRequest?.requester_alias || "Unknown" }} wants to
+        connect with you.
+      </p>
       <div class="popup-actions">
         <button @click="acceptContactRequest" class="accept-btn">Accept</button>
-        <button @click="declineContactRequest" class="decline-btn">Decline</button>
+        <button @click="declineContactRequest" class="decline-btn">
+          Decline
+        </button>
       </div>
     </div>
   </div>
@@ -155,6 +175,7 @@ import { useFeedbackStore } from "../../stores/feedbackStore";
 import { API } from "../../services/api";
 import { listen } from "@tauri-apps/api/event";
 import { splitAddress, buildDiscoveredLabel } from "../../utils/addressUtils";
+import Logger from "../../utils/logger";
 
 // Router and store initialization
 const router = useRouter();
@@ -173,7 +194,7 @@ const {
   activeConversation,
   nodeInfo,
   loading,
-  discoveredNodes, 
+  discoveredNodes,
 } = storeToRefs(store);
 
 // Event listener references
@@ -189,11 +210,13 @@ const networkStatusLabel = computed(() => {
 
 const activeContact = computed(() => {
   if (!activeConversation.value) return null;
-  
+
   // Find the contact that matches the active conversation address
-  return sortedContacts.value.find(contact => 
-    contact.address === activeConversation.value
-  ) || null;
+  return (
+    sortedContacts.value.find(
+      (contact) => contact.address === activeConversation.value,
+    ) || null
+  );
 });
 
 const nodePanelInfo = computed(() => {
@@ -212,7 +235,8 @@ const nodePanelInfo = computed(() => {
   const ip = info.ip ?? null;
   const port = info.port ?? null;
   const directAddress = typeof info.address === "string" ? info.address : null;
-  const address = directAddress ?? (ip ? `${ip}${port ? `:${port}` : ""}` : null);
+  const address =
+    directAddress ?? (ip ? `${ip}${port ? `:${port}` : ""}` : null);
   const label = username ?? nodeName ?? address ?? "Current Node";
 
   return { label, nodeName, address };
@@ -222,10 +246,14 @@ const nodePanelInfo = computed(() => {
 const nodeOverlayActive = ref(false);
 const nodeOverlayAvailable = computed(() => {
   const details = nodePanelInfo.value;
-  return Boolean(details.nodeName || details.address || networkStatusLabel.value);
+  return Boolean(
+    details.nodeName || details.address || networkStatusLabel.value,
+  );
 });
 
-const nodeOverlayVisible = computed(() => nodeOverlayActive.value && nodeOverlayAvailable.value);
+const nodeOverlayVisible = computed(
+  () => nodeOverlayActive.value && nodeOverlayAvailable.value,
+);
 
 // Discovery properties
 const hoveredDiscovery = ref(null);
@@ -262,10 +290,10 @@ const discoveredNodeList = computed(() => {
     .map((node) => {
       const displayLabel = node.display_label ?? buildDiscoveredLabel(node);
       const uniqueKey = (() => {
-        const parts = String(node.address).split(':');
+        const parts = String(node.address).split(":");
         if (parts.length >= 2) {
           const port = parts.pop();
-          return `${parts.join(':')}:${port}`;
+          return `${parts.join(":")}:${port}`;
         }
         return node.address;
       })();
@@ -277,10 +305,6 @@ const discoveredNodeList = computed(() => {
       };
     });
 });
-
-
-
-
 
 // Contact request handling
 // State for contact request popup
@@ -306,14 +330,14 @@ const resolvePendingRequestJson = () => {
     // Attempt to normalise enum-style payloads to the bare ContactRequest struct
     try {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
+      if (parsed && typeof parsed === "object") {
         if (parsed.requester_public_key && parsed.signature) {
           return JSON.stringify(parsed);
         }
 
         const variant =
           parsed.ContactRequest || parsed.contact_request || parsed.request;
-        if (variant && typeof variant === 'object') {
+        if (variant && typeof variant === "object") {
           return JSON.stringify(variant);
         }
       }
@@ -324,11 +348,11 @@ const resolvePendingRequestJson = () => {
     return raw;
   };
 
-  if (typeof payload === 'string') {
+  if (typeof payload === "string") {
     return normalize(payload);
   }
 
-  if (typeof payload === 'object' && payload !== null) {
+  if (typeof payload === "object" && payload !== null) {
     const direct =
       payload.request_json ||
       payload.requestJson ||
@@ -347,7 +371,7 @@ const resolvePendingRequestJson = () => {
       try {
         return normalize(atob(base64));
       } catch (err) {
-        console.error('Failed to decode base64 contact request:', err);
+        Logger.error("Failed to decode base64 contact request:", { error: err });
       }
     }
   }
@@ -356,12 +380,19 @@ const resolvePendingRequestJson = () => {
 };
 
 // Message handling functions
-const handleSend = async (content) => {
-  const result = await store.sendMessage(content);
-  if (!result.success && store.error) {
-    console.error(store.error);
-  }
-};
+  // Send a message to connected peers
+  const handleSend = async (content) => {
+    const result = await store.sendMessage(content);
+    if (!result.success && store.error) {
+      Logger.error(store.error);
+      await Logger.error("Failed to send message", {
+        contentLength: content.length,
+        error: store.error
+      });
+    } else {
+      await Logger.chat("sent", result.message);
+    }
+  };
 
 const handleMarkRead = async (messageId) => {
   await store.markMessageRead(messageId);
@@ -388,97 +419,128 @@ const handleDiscoveryConnect = async (node) => {
 
 // Discovery invite functions
 const handleDiscoveryInvite = async (node) => {
-  console.log('Handling discovery invite for node:', node);
-  if (!node || !node.address) {
-    console.error('Invalid node for invitation');
-    return;
-  }
+  Logger.info("Handling discovery invite for node:", { node });
+    Logger.error("Invalid node for invitation");
 
   // Extract the public key from the node's address or other properties
   // In a real implementation, we would have the public key available in the node object
   const targetPublicKey = node.public_key || node.address; // Fallback to address if no public key
-  
-  console.log('Sending contact request to public key:', targetPublicKey);
-  
+
+  Logger.info("Sending contact request to public key:", { targetPublicKey });
+
   try {
-    const result = await API.contacts.sendContactRequest(targetPublicKey, node.display_label || node.name);
-    
-    console.log('Contact request result:', result);
-    
+    const result = await API.contacts.sendContactRequest(
+      targetPublicKey,
+      node.display_label || node.name,
+    );
+
+    Logger.info("Contact request result:", { result });
+
     if (result.success) {
-      feedback.showSuccess(`Invitation sent to ${node.display_label || node.name}`);
+      feedback.showSuccess(
+        `Invitation sent to ${node.display_label || node.name}`,
+      );
     } else {
-      feedback.showError(`Failed to send invitation: ${result.message || 'Unknown error'}`);
+      feedback.showError(
+        `Failed to send invitation: ${result.message || "Unknown error"}`,
+      );
     }
   } catch (error) {
-    console.error('Error sending contact request:', error);
+    Logger.error("Error sending contact request:", { error });
     feedback.showError(`Error sending invitation: ${error.message}`);
   }
 };
 
 // Contact request popup functions
-// Handle incoming contact request
-const handleContactRequest = async (event) => {
-  console.log('Received contact request:', event.payload);
-  pendingContactRequest.value = event.payload;
-  showContactRequestPopup.value = true;
-};
-
-// Accept contact request
-const acceptContactRequest = async () => {
-  const requestJson = resolvePendingRequestJson();
-  if (!requestJson) {
-    feedback.showError('Unable to parse contact request payload.');
-    showContactRequestPopup.value = false;
-    pendingContactRequest.value = null;
-    return;
-  }
-
-  try {
-    const result = await API.contacts.handleContactRequest(requestJson, true);
+  // Handle incoming contact requests
+  const handleContactRequest = async (event) => {
+    Logger.info('Received contact request:', { payload: event.payload });
+    await Logger.contact("request-received", event.payload);
     
-    if (result.success) {
-      feedback.showSuccess(`Contact request from ${pendingContactRequest.value.requester_alias} accepted`);
-      // Refresh contacts to show the new contact
-      await store.refreshContacts();
-    } else {
-      feedback.showError(`Failed to accept contact request: ${result.message || 'Unknown error'}`);
-    }
-  } catch (error) {
-    console.error('Error accepting contact request:', error);
-    feedback.showError(`Error accepting contact request: ${error.message}`);
-  } finally {
-    showContactRequestPopup.value = false;
-    pendingContactRequest.value = null;
-  }
-};
+    pendingContactRequest.value = event.payload;
+    showContactRequestPopup.value = true;
+  };
 
-// Decline contact request
-const declineContactRequest = async () => {
-  const requestJson = resolvePendingRequestJson();
-  if (!requestJson) {
-    feedback.showError('Unable to parse contact request payload.');
-    showContactRequestPopup.value = false;
-    pendingContactRequest.value = null;
-    return;
-  }
-
-  try {
-    const result = await API.contacts.handleContactRequest(requestJson, false);
-    
-    if (result.success) {
-      feedback.showInfo(`Contact request from ${pendingContactRequest.value.requester_alias} declined`);
-    } else {
-      feedback.showError(`Failed to decline contact request: ${result.message || 'Unknown error'}`);
+  // Accept a contact request
+  const acceptContactRequest = async () => {
+    const requestJson = resolvePendingRequestJson();
+    if (!requestJson) {
+      feedback.showError('Unable to parse contact request payload.');
+      await Logger.error("Failed to parse contact request payload");
+      showContactRequestPopup.value = false;
+      pendingContactRequest.value = null;
+      return;
     }
-  } catch (error) {
-    console.error('Error declining contact request:', error);
-    feedback.showError(`Error declining contact request: ${error.message}`);
-  } finally {
-    showContactRequestPopup.value = false;
-    pendingContactRequest.value = null;
-  }
-};
+
+    try {
+      const result = await API.contacts.handleContactRequest(requestJson, true);
+      
+      if (result.success) {
+        feedback.showSuccess(`Contact request from ${pendingContactRequest.value.requester_alias} accepted`);
+        await Logger.contact("accepted", {
+          requesterAlias: pendingContactRequest.value.requester_alias,
+          requesterPublicKey: pendingContactRequest.value.requester_public_key
+        });
+        
+        // Refresh contacts to show the new contact
+        await store.refreshContacts();
+      } else {
+        feedback.showError(`Failed to accept contact request: ${result.message || 'Unknown error'}`);
+        await Logger.error("Failed to accept contact request", {
+          error: result.message || 'Unknown error'
+        });
+      }
+    } catch (error) {
+      Logger.error('Error accepting contact request:', { error });
+      feedback.showError(`Error accepting contact request: ${error.message}`);
+      await Logger.error("Exception while accepting contact request", {
+        error: error.message,
+        stack: error.stack
+      });
+    } finally {
+      showContactRequestPopup.value = false;
+      pendingContactRequest.value = null;
+    }
+  };
+
+  // Decline a contact request
+  const declineContactRequest = async () => {
+    const requestJson = resolvePendingRequestJson();
+    if (!requestJson) {
+      feedback.showError('Unable to parse contact request payload.');
+      await Logger.error("Failed to parse contact request payload for decline");
+      showContactRequestPopup.value = false;
+      pendingContactRequest.value = null;
+      return;
+    }
+
+    try {
+      const result = await API.contacts.handleContactRequest(requestJson, false);
+      
+      if (result.success) {
+        feedback.showInfo(`Contact request from ${pendingContactRequest.value.requester_alias} declined`);
+        await Logger.contact("declined", {
+          requesterAlias: pendingContactRequest.value.requester_alias,
+          requesterPublicKey: pendingContactRequest.value.requester_public_key
+        });
+      } else {
+        feedback.showError(`Failed to decline contact request: ${result.message || 'Unknown error'}`);
+        await Logger.error("Failed to decline contact request", {
+          error: result.message || 'Unknown error'
+        });
+      }
+    } catch (error) {
+      Logger.error('Error declining contact request:', { error });
+      feedback.showError(`Error declining contact request: ${error.message}`);
+      await Logger.error("Exception while declining contact request", {
+        error: error.message,
+        stack: error.stack
+      });
+    } finally {
+      showContactRequestPopup.value = false;
+      pendingContactRequest.value = null;
+    }
+  };
 
 // Other functions
 const logout = async () => {
@@ -487,30 +549,41 @@ const logout = async () => {
 };
 
 // Lifecycle hooks
-onMounted(async () => {
-  if (!store.isAuthenticated) {
-    router.replace({ name: "login" });
-    return;
-  }
-  await startMessageListener();
-  
-  // Initial data loading
-  await Promise.all([
-    store.refreshContacts(),
-    store.refreshMessages(),
-    store.refreshNodeInfo(),
-  ]);
-  
-  // Listen for contact request events
-  contactRequestUnlisten.value = await listen('contact-request-received', handleContactRequest);
-  contactAddedUnlisten.value = await listen('contact-added', async () => {
-    await store.refreshContacts();
+  // Initialize component
+  onMounted(async () => {
+    if (!store.isAuthenticated) {
+      router.replace({ name: "login" });
+      return;
+    }
+    await startMessageListener();
+    
+    // Log component initialization
+    await Logger.info("ChatView component mounted", {
+      userId: store.user?.id,
+      userName: store.user?.name,
+      userAddress: store.user?.address
+    });
+    
+    // Initial data loading
+    await Promise.all([
+      store.refreshContacts(),
+      store.refreshMessages(),
+      store.refreshNodeInfo(),
+    ]);
+    
+    // Listen for contact request events
+    contactRequestUnlisten.value = await listen('contact-request-received', handleContactRequest);
+    contactAddedUnlisten.value = await listen('contact-added', async () => {
+      await store.refreshContacts();
+    });
+    
+    // Log successful initialization
+    await Logger.info("ChatView component initialized successfully");
   });
-});
 
 onBeforeUnmount(() => {
   void stopMessageListener();
-  
+
   // Clean up contact request event listener
   if (contactRequestUnlisten.value) {
     contactRequestUnlisten.value();
@@ -530,8 +603,17 @@ onBeforeUnmount(() => {
   gap: 1.5rem;
   padding: 1.5rem;
   align-items: stretch;
-  background: radial-gradient(circle at top left, rgba(30, 64, 175, 0.25), transparent 55%),
-    radial-gradient(circle at bottom right, rgba(14, 116, 144, 0.2), transparent 50%);
+  background:
+    radial-gradient(
+      circle at top left,
+      rgba(30, 64, 175, 0.25),
+      transparent 55%
+    ),
+    radial-gradient(
+      circle at bottom right,
+      rgba(14, 116, 144, 0.2),
+      transparent 50%
+    );
   width: 100%;
   max-width: 100vw;
   height: 100vh;
@@ -658,7 +740,9 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   background: rgba(15, 23, 42, 0.55);
   border: 1px solid rgba(148, 163, 184, 0.1);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    transform 0.2s ease;
   position: relative;
 }
 
@@ -712,7 +796,9 @@ onBeforeUnmount(() => {
   color: #bbf7d0;
   padding: 0.35rem 0.75rem;
   font-size: 0.75rem;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease;
 }
 
 .discovery-actions .invite-btn:hover {
@@ -814,7 +900,9 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(8px);
   opacity: 0;
   transform: translateY(-6px);
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
   pointer-events: none;
   min-width: 0;
   overflow: hidden;
@@ -858,7 +946,9 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(8px);
   opacity: 0;
   transform: translateY(-6px);
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
   pointer-events: none;
   min-width: 0;
   overflow: hidden;
@@ -1050,7 +1140,9 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   background: rgba(15, 23, 42, 0.55);
   border: 1px solid rgba(148, 163, 184, 0.1);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    transform 0.2s ease;
   position: relative;
   z-index: 1;
   cursor: pointer;

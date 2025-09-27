@@ -27,7 +27,7 @@ pub enum Message {
         #[serde(default)]
         username: Option<String>,
         #[serde(default)]
-        user_id: Option<u64>,  // Add user ID field
+        user_id: Option<u64>, // Add user ID field
     },
     Chat {
         from: String,
@@ -39,7 +39,7 @@ pub enum Message {
         #[serde(default)]
         username: Option<String>,
         #[serde(default)]
-        user_id: Option<u64>,  // Add user ID field
+        user_id: Option<u64>, // Add user ID field
     },
     ContactRequest {
         requester_public_key: String,
@@ -51,7 +51,7 @@ pub enum Message {
         #[serde(default)]
         username: Option<String>,
         #[serde(default)]
-        user_id: Option<u64>,  // Add user ID field
+        user_id: Option<u64>, // Add user ID field
         #[serde(default)]
         ip: Option<String>,
         #[serde(default)]
@@ -64,6 +64,6 @@ pub enum Message {
         timestamp: u64,
         signature: Vec<u8>,
         #[serde(default)]
-        user_id: Option<u64>,  // Add user ID field
+        user_id: Option<u64>, // Add user ID field
     },
 }

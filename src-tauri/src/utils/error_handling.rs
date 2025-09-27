@@ -3,8 +3,8 @@
 //! This module provides shared utilities for consistent error handling
 //! and conversion patterns across the application.
 
-use crate::error::MeshTalkError;
 use crate::commands::CommandError;
+use crate::error::MeshTalkError;
 
 /// Converts a MeshTalkError to a CommandError with appropriate categorization
 pub fn map_mesh_talk_error_to_command_error(error: MeshTalkError) -> CommandError {
@@ -82,12 +82,12 @@ where
 pub trait ResultExt<T, E> {
     /// Maps errors using a provided closure
     fn map_err_to_command(self, mapper: impl FnOnce(E) -> CommandError) -> Result<T, CommandError>;
-    
+
     /// Maps IO errors to command errors
     fn map_io_err(self) -> Result<T, CommandError>
     where
         E: Into<std::io::Error>;
-        
+
     /// Maps MeshTalk errors to command errors
     fn map_mesh_err(self) -> Result<T, CommandError>
     where
@@ -98,14 +98,14 @@ impl<T, E> ResultExt<T, E> for Result<T, E> {
     fn map_err_to_command(self, mapper: impl FnOnce(E) -> CommandError) -> Result<T, CommandError> {
         self.map_err(mapper)
     }
-    
+
     fn map_io_err(self) -> Result<T, CommandError>
     where
         E: Into<std::io::Error>,
     {
         self.map_err(|e| map_io_error_to_command_error(e.into()))
     }
-    
+
     fn map_mesh_err(self) -> Result<T, CommandError>
     where
         E: Into<MeshTalkError>,
@@ -121,11 +121,9 @@ mod tests {
 
     #[test]
     fn test_map_mesh_talk_network_error() {
-        let error = MeshTalkError::network(
-            NetworkErrorKind::ConnectionFailed,
-            "Connection refused",
-        );
-        
+        let error =
+            MeshTalkError::network(NetworkErrorKind::ConnectionFailed, "Connection refused");
+
         let command_error = map_mesh_talk_error_to_command_error(error);
         let error_string = format!("{:?}", command_error);
         assert!(error_string.contains("Network error"));
@@ -145,16 +143,16 @@ mod tests {
     fn test_standard_error_creators() {
         let validation = validation_error("Invalid input");
         assert!(matches!(validation, CommandError::Validation(_)));
-        
+
         let auth = authentication_error("Not logged in");
         assert!(matches!(auth, CommandError::Authentication(_)));
-        
+
         let service = service_error("Service unavailable");
         assert!(matches!(service, CommandError::Service(_)));
-        
+
         let network = network_error("Connection failed");
         assert!(matches!(network, CommandError::Network(_)));
-        
+
         let authz = authorization_error("Insufficient permissions");
         assert!(matches!(authz, CommandError::Authorization(_)));
     }

@@ -105,7 +105,7 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                toggle_window_visibility(&tray.app_handle());
+                toggle_window_visibility(tray.app_handle());
             }
         });
 

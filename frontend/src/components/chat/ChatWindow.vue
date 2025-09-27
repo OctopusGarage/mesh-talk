@@ -28,7 +28,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed } from "vue";
 
 // Props and emits
 const props = defineProps({
@@ -50,30 +50,37 @@ const props = defineProps({
   },
 });
 
-defineEmits(['markRead', 'markAllRead']);
+defineEmits(["markRead", "markAllRead"]);
 
 // Computed properties
 const title = computed(() => {
   if (props.activeContact) {
-    return props.activeContact.username || props.activeContact.name || props.activeConversation || 'All Messages';
+    return (
+      props.activeContact.username ||
+      props.activeContact.name ||
+      props.activeConversation ||
+      "All Messages"
+    );
   }
-  return props.activeConversation ?? 'All Messages';
+  return props.activeConversation ?? "All Messages";
 });
 
 const subtitle = computed(() =>
-  props.activeConversation ? 'Direct conversation' : 'All activity',
+  props.activeConversation ? "Direct conversation" : "All activity",
 );
 
 // Utility functions
 const formatTimestamp = (timestamp) => {
-  if (!timestamp) return '';
+  if (!timestamp) return "";
   const date = new Date(timestamp * 1000);
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 };
 
 const messageDirection = (message) => {
-  if (!props.currentUser) return 'incoming';
-  return message.from_user_id === props.currentUser.id ? 'outgoing' : 'incoming';
+  if (!props.currentUser) return "incoming";
+  return message.from_user_id === props.currentUser.id
+    ? "outgoing"
+    : "incoming";
 };
 </script>
 

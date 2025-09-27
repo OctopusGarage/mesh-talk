@@ -244,7 +244,7 @@ impl NodeRegistry {
     /// Remove timed out nodes from the registry and return their addresses.
     pub fn remove_timed_out_nodes(&mut self) -> Vec<SocketAddr> {
         let mut to_remove = Vec::new();
-        
+
         // Collect addresses of timed out nodes
         for (addr, node) in &self.nodes {
             if node.is_timed_out() {

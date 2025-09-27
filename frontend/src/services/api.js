@@ -16,9 +16,10 @@ const nodeAPI = {
 // Contact API functions
 const contactsAPI = {
   getContacts: () => invoke("get_contacts"),
-  updateContact: (contactId, data) => invoke("update_contact", { id: contactId, ...data }),
+  updateContact: (contactId, data) =>
+    invoke("update_contact", { id: contactId, ...data }),
   deleteContact: (contactId) => invoke("delete_contact", { contactId }),
-  sendContactRequest: (targetPublicKey, alias) => 
+  sendContactRequest: (targetPublicKey, alias) =>
     invoke("send_contact_request", { targetPublicKey, alias }),
   handleContactRequest: (requestJson, approve) =>
     invoke("handle_contact_request", { requestJson, approve }),

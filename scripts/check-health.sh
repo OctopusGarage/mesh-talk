@@ -69,6 +69,13 @@ if ! cd src-tauri && cargo fmt -- --check; then
 fi
 cd ..
 
+# Apply automatic code formatting fixes (Rust)
+print_status "success" "Applying automatic Rust code formatting fixes..."
+if ! cd src-tauri && cargo fmt; then
+    print_status "warning" "Failed to apply some Rust code formatting fixes automatically."
+fi
+cd ..
+
 # Check code formatting (Frontend)
 print_status "success" "Checking frontend code formatting..."
 if ! cd frontend && npx prettier --check src/; then
@@ -77,11 +84,25 @@ if ! cd frontend && npx prettier --check src/; then
 fi
 cd ..
 
+# Apply automatic code formatting fixes (Frontend)
+print_status "success" "Applying automatic frontend code formatting fixes..."
+if ! cd frontend && npx prettier --write src/; then
+    print_status "warning" "Failed to apply some frontend code formatting fixes automatically."
+fi
+cd ..
+
 # Run Clippy (Rust linter)
 print_status "success" "Running Rust linter (Clippy)..."
 if ! cd src-tauri && cargo clippy -- -D warnings; then
     print_status "error" "Rust linting issues found. Please fix Clippy warnings."
     exit 1
+fi
+cd ..
+
+# Apply automatic Clippy fixes
+print_status "success" "Applying automatic Clippy fixes..."
+if ! cd src-tauri && cargo clippy --fix --allow-dirty --allow-staged; then
+    print_status "warning" "Failed to apply some Clippy fixes automatically."
 fi
 cd ..
 

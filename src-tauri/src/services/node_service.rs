@@ -33,7 +33,7 @@ pub trait MessageEventListener: Send + Sync {
     fn on_message_received(&self, event: MessageEvent);
 }
 
-/// Static notification service instance
+// Static notification service instance
 lazy_static::lazy_static! {
     pub static ref NOTIFICATION_SERVICE: crate::services::notification_service::NotificationService = crate::services::notification_service::NotificationService::new();
 }
@@ -73,7 +73,7 @@ impl NodeService {
         ));
         let message_handlers = Arc::new(RwLock::new(Vec::<MessageEventHandler>::new()));
 
-        let service = Self {
+        Self {
             node: Node {
                 name: name.clone(),
                 port,
@@ -85,21 +85,19 @@ impl NodeService {
             reconnection_manager,
             message_handlers,
             user_id: Arc::new(AtomicU64::new(0)), // Initialize with 0 (not authenticated)
-        };
-
-        service
+        }
     }
 
     /// Sets the authenticated user ID for this node service
     pub fn set_user_id(&self, user_id: u64) {
         self.user_id.store(user_id, Ordering::SeqCst);
     }
-    
+
     /// Gets the authenticated user ID for this node service
     pub fn get_user_id(&self) -> u64 {
         self.user_id.load(Ordering::SeqCst)
     }
-    
+
     /// Connects to a peer at the specified socket address
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> std::io::Result<()> {
         let peer_info = Arc::clone(&self.node.peer_info);
@@ -325,7 +323,7 @@ Received message from {}: {}
                 signature,
                 node_name,
                 username,
-                user_id: _,  // Extract user_id but don't use it currently
+                user_id: _, // Extract user_id but don't use it currently
                 ip,
                 port,
             }) => {
@@ -358,7 +356,7 @@ Received message from {}: {}
                     signature: signature.clone(),
                     node_name,
                     username,
-                    user_id: None,  // Add user_id as None for now since it's from an external request
+                    user_id: None, // Add user_id as None for now since it's from an external request
                     ip: Some(peer_ip.clone()),
                     port: Some(peer_port),
                 }) {
@@ -404,7 +402,7 @@ Received message from {}: {}
                     responder_alias: responder_alias.clone(),
                     timestamp,
                     signature: signature.clone(),
-                    user_id: None,  // Add user_id as None for now since it's from an external response
+                    user_id: None, // Add user_id as None for now since it's from an external response
                 }) {
                     Ok(json) => json,
                     Err(err) => {
@@ -427,8 +425,7 @@ Received message from {}: {}
                         if let Some(session) = app_state.session().get() {
                             let service = app_state.contact_request_service();
                             let contact_service = app_state.contact_service();
-                            if let Err(err) =
-                                service
+                            if let Err(err) = service
                                 .handle_contact_response(&session.user.name, "", &response_json)
                                 .await
                             {
@@ -474,8 +471,11 @@ Received message from {}: {}
                 Ok(())
             }
             Err(e) => {
-                eprintln!("Failed to parse message: {} (raw message: {})
-", e, line);
+                eprintln!(
+                    "Failed to parse message: {} (raw message: {})
+",
+                    e, line
+                );
                 Err(e)
             }
         }

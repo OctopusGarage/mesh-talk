@@ -186,6 +186,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { useAuth } from "../../composables/auth/useAuth";
+import Logger from "../../utils/logger";
 
 // Router and authentication
 const router = useRouter();
@@ -290,13 +291,25 @@ async function handleLogin() {
     return;
   }
 
+  // Log login attempt
+  await Logger.auth("login-attempt", {
+    username: loginForm.username.trim()
+  });
+
   const result = await login(loginForm.username.trim(), loginForm.password);
   if (result?.success) {
     await router.push(prepareRedirect());
+    await Logger.auth("login-success", {
+      username: loginForm.username.trim()
+    });
     return;
   }
 
   formError.value = error.value ?? "Unable to login";
+  await Logger.auth("login-failure", {
+    username: loginForm.username.trim(),
+    error: error.value ?? "Unable to login"
+  });
 }
 
 async function handleRegister() {
@@ -331,6 +344,11 @@ async function handleRegister() {
     return;
   }
 
+  // Log registration attempt
+  await Logger.auth("register-attempt", {
+    username: registerForm.username.trim()
+  });
+
   const result = await register(
     registerForm.username.trim(),
     registerForm.password,
@@ -342,10 +360,18 @@ async function handleRegister() {
     loginForm.password = registerForm.password;
     registerForm.password = "";
     registerForm.confirm = "";
+    
+    await Logger.auth("register-success", {
+      username: registerForm.username.trim()
+    });
     return;
   }
 
   formError.value = error.value ?? "Registration failed";
+  await Logger.auth("register-failure", {
+    username: registerForm.username.trim(),
+    error: error.value ?? "Registration failed"
+  });
 }
 
 // Mode switching functions

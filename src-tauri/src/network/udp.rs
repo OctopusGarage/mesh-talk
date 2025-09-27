@@ -121,7 +121,7 @@ pub async fn start_udp_broadcast(
     name: String,
     username: Option<String>,
     port: u16,
-    user_id: Option<u64>,  // Add user ID parameter
+    user_id: Option<u64>, // Add user ID parameter
 ) -> MeshTalkResult<()> {
     let broadcast_port = discovery_port();
     let socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0)))?;
@@ -325,7 +325,7 @@ where
                                     name,
                                     port,
                                     username,
-                                    user_id: _,  // Extract user_id but don't use it in registry for now
+                                    user_id: _, // Extract user_id but don't use it in registry for now
                                 }) = serde_json::from_str(json_data)
                                 {
                                     // println!("[UDP Discovery] Received discovery message from {}:{}\", name, port);
@@ -351,7 +351,7 @@ where
                                     name,
                                     port,
                                     username,
-                                    user_id: _,  // Extract user_id but don't use it in registry for now
+                                    user_id: _, // Extract user_id but don't use it in registry for now
                                 }) = serde_json::from_str(json_data)
                                 {
                                     let peer_addr = SocketAddr::new(addr.ip(), port);

@@ -12,6 +12,12 @@ pub struct ContactList {
     pub alias_index: HashMap<String, HashSet<String>>, // lowercase_alias -> public_keys
 }
 
+impl Default for ContactList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContactList {
     pub fn new() -> Self {
         ContactList {
@@ -24,10 +30,7 @@ impl ContactList {
     pub fn update_alias_index(&mut self, contact: &Contact) {
         if let Some(alias) = &contact.alias {
             let lowercase_alias = alias.to_lowercase();
-            let public_keys = self
-                .alias_index
-                .entry(lowercase_alias)
-                .or_insert_with(HashSet::new);
+            let public_keys = self.alias_index.entry(lowercase_alias).or_default();
             public_keys.insert(contact.public_key.clone());
         }
     }
@@ -520,8 +523,10 @@ impl ContactManager {
 
         // Add each contact, avoiding duplicates
         for (public_key, contact) in contacts {
-            if !contact_list.contacts.contains_key(&public_key) {
-                contact_list.contacts.insert(public_key, contact.clone());
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                contact_list.contacts.entry(public_key)
+            {
+                e.insert(contact.clone());
                 contact_list.update_alias_index(&contact);
                 imported_count += 1;
             }

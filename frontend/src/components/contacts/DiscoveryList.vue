@@ -8,16 +8,20 @@
         @click="$emit('connect', node)"
         :class="{ active: node.address === activeAddress }"
       >
-        <span class="avatar">{{ (node.name || node.address).charAt(0).toUpperCase() }}</span>
+        <span class="avatar">{{
+          (node.name || node.address).charAt(0).toUpperCase()
+        }}</span>
         <div class="details">
           <span class="name">{{ node.name }}</span>
           <span class="address">{{ node.username }}</span>
           <span class="address">{{ node.address }}</span>
         </div>
         <div class="node-actions">
-          <span class="status" :class="node.status">{{ (node.status || 'offline').toUpperCase() }}</span>
-          <button 
-            class="invite-btn" 
+          <span class="status" :class="node.status">{{
+            (node.status || "offline").toUpperCase()
+          }}</span>
+          <button
+            class="invite-btn"
             @click.stop="$emit('invite', node)"
             title="Invite to connect"
           >
@@ -42,7 +46,7 @@ const props = defineProps({
   },
 });
 
-defineEmits(['connect', 'invite']);
+defineEmits(["connect", "invite"]);
 </script>
 
 <style scoped>
@@ -108,7 +112,9 @@ li {
   background: rgba(15, 23, 42, 0.6);
   border-radius: 12px;
   border: 1px solid transparent;
-  transition: border-color 0.2s, transform 0.2s;
+  transition:
+    border-color 0.2s,
+    transform 0.2s;
   cursor: pointer;
 }
 

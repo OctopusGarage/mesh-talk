@@ -1,6 +1,6 @@
-import { computed } from 'vue';
-import { storeToRefs } from 'pinia';
-import { useAppStore } from '../../stores/appStore';
+import { computed } from "vue";
+import { storeToRefs } from "pinia";
+import { useAppStore } from "../../stores/appStore";
 
 /**
  * Real-time messaging composable for handling message events
@@ -12,7 +12,7 @@ export function useRealTimeMessages() {
   const { messages, networkStatus } = storeToRefs(store);
 
   // Computed properties
-  const isConnected = computed(() => networkStatus.value === 'connected');
+  const isConnected = computed(() => networkStatus.value === "connected");
 
   // Message listener methods
   const startMessageListener = async () => {

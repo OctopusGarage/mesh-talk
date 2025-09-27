@@ -5,6 +5,7 @@ import router from "./router";
 import "./styles/global.css";
 import { useAppStore } from "./stores/appStore";
 import { useFeedbackStore } from "./stores/feedbackStore";
+import Logger from "./utils/logger";
 
 // Initialize application
 const app = createApp(App);
@@ -34,19 +35,19 @@ window.addEventListener("unhandledrejection", (event) => {
 // Add global keyboard shortcuts
 window.addEventListener("keydown", (event) => {
   // Cmd+Shift+A to open contact manager (macOS-style shortcut)
-  if (event.metaKey && event.shiftKey && event.key === 'A') {
+  if (event.metaKey && event.shiftKey && event.key === "A") {
     event.preventDefault();
     // We would need to communicate with the backend to open the contact manager
     // This is just a placeholder for now
-    console.log("Cmd+Shift+A pressed - would open contact manager");
+    Logger.info("Cmd+Shift+A pressed - would open contact manager");
   }
-  
+
   // Cmd+W to close window (macOS-style shortcut)
-  if (event.metaKey && event.key === 'w') {
+  if (event.metaKey && event.key === "w") {
     event.preventDefault();
     // We would need to communicate with Tauri to close the window
     // This is just a placeholder for now
-    console.log("Cmd+W pressed - would close window");
+    Logger.info("Cmd+W pressed - would close window");
   }
 });
 

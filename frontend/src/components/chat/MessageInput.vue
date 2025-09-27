@@ -12,7 +12,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
+import { ref, watch } from "vue";
 
 const props = defineProps({
   disabled: {
@@ -21,20 +21,20 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['send']);
+const emit = defineEmits(["send"]);
 
-const draft = ref('');
+const draft = ref("");
 
 const emitMessage = () => {
   const content = draft.value.trim();
   if (!content) return;
-  emit('send', content);
-  draft.value = '';
+  emit("send", content);
+  draft.value = "";
 };
 
 const handleKeyDown = (event) => {
   // Cmd+Enter or Ctrl+Enter to send message
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
     emitMessage();
   }
@@ -44,7 +44,7 @@ watch(
   () => props.disabled,
   (disabled) => {
     if (disabled) {
-      draft.value = '';
+      draft.value = "";
     }
   },
 );
@@ -68,7 +68,11 @@ input {
 }
 
 button {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.9), rgba(14, 165, 233, 0.9));
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.9),
+    rgba(14, 165, 233, 0.9)
+  );
   border: none;
   color: white;
   padding: 0.85rem 1.4rem;

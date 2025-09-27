@@ -1,11 +1,7 @@
 <template>
   <aside class="contact-list">
     <header>
-      <p
-        v-if="showNetworkBadge"
-        class="network"
-        :class="networkStatus"
-      >
+      <p v-if="showNetworkBadge" class="network" :class="networkStatus">
         {{ networkLabel }}
       </p>
     </header>
@@ -23,7 +19,7 @@
           <span class="address">{{ extractAddressIP(contact.address) }}</span>
         </div>
         <span class="status" :class="contact.status || 'offline'">
-          {{ (contact.status || 'offline').toUpperCase() }}
+          {{ (contact.status || "offline").toUpperCase() }}
         </span>
       </li>
     </ul>
@@ -32,8 +28,8 @@
 
 <script setup>
 // Props and emits
-import { computed } from 'vue';
-import { extractAddressIP } from '../../utils/addressUtils';
+import { computed } from "vue";
+import { extractAddressIP } from "../../utils/addressUtils";
 const props = defineProps({
   contacts: {
     type: Array,
@@ -41,7 +37,7 @@ const props = defineProps({
   },
   networkStatus: {
     type: String,
-    default: 'disconnected',
+    default: "disconnected",
   },
   activeConversation: {
     type: String,
@@ -49,11 +45,11 @@ const props = defineProps({
   },
   title: {
     type: String,
-    default: 'Contacts',
+    default: "Contacts",
   },
   emptyMessage: {
     type: String,
-    default: 'No contacts yet',
+    default: "No contacts yet",
   },
   showNetworkBadge: {
     type: Boolean,
@@ -61,16 +57,14 @@ const props = defineProps({
   },
 });
 
-defineEmits(['select']);
+defineEmits(["select"]);
 
 // Computed properties
 const networkLabel = computed(() => {
-  if (props.networkStatus === 'connected') return 'Online';
-  if (props.networkStatus === 'connecting') return 'Connecting';
-  return 'Offline';
+  if (props.networkStatus === "connected") return "Online";
+  if (props.networkStatus === "connecting") return "Connecting";
+  return "Offline";
 });
-
-
 </script>
 
 <style scoped>
@@ -148,7 +142,9 @@ li {
   background: rgba(15, 23, 42, 0.6);
   border-radius: 12px;
   border: 1px solid transparent;
-  transition: border-color 0.2s, transform 0.2s;
+  transition:
+    border-color 0.2s,
+    transform 0.2s;
 }
 
 li:hover {

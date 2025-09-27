@@ -59,7 +59,7 @@ where
     EF: Fn(&E) -> bool,
 {
     let mut retries = 0;
-    
+
     loop {
         match operation().await {
             Ok(result) => return Ok(result),
@@ -68,14 +68,15 @@ where
                 if !error_filter(&e) || retries >= retry_config.max_retries {
                     return Err(e);
                 }
-                
+
                 retries += 1;
-                
+
                 // Calculate exponential backoff delay
-                let delay_ms = (retry_config.base_delay_ms as f64 
-                    * retry_config.backoff_factor.powi(retries as i32)) as u64;
+                let delay_ms = (retry_config.base_delay_ms as f64
+                    * retry_config.backoff_factor.powi(retries as i32))
+                    as u64;
                 let capped_delay_ms = delay_ms.min(retry_config.max_delay_ms);
-                
+
                 tokio::time::sleep(Duration::from_millis(capped_delay_ms)).await;
             }
         }
@@ -93,10 +94,7 @@ where
     tokio_timeout(timeout_config.timeout_duration, operation)
         .await
         .map_err(|_| {
-            MeshTalkError::network(
-                NetworkErrorKind::ConnectionTimeout,
-                "Operation timed out",
-            )
+            MeshTalkError::network(NetworkErrorKind::ConnectionTimeout, "Operation timed out")
         })?
         .map_err(|e| {
             MeshTalkError::network_with_source(
@@ -154,20 +152,24 @@ mod tests {
     async fn test_retry_with_backoff_success() {
         let attempt_counter = Arc::new(AtomicU32::new(0));
         let counter = attempt_counter.clone();
-        
+
         let result = retry_with_backoff(
             || async {
                 let current_attempt = counter.fetch_add(1, Ordering::SeqCst);
                 if current_attempt < 2 {
-                    Err(std::io::Error::new(std::io::ErrorKind::Other, "Temporary error"))
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Temporary error",
+                    ))
                 } else {
                     Ok("Success")
                 }
             },
             &standard_network_retry_config(),
             |e: &std::io::Error| e.kind() == std::io::ErrorKind::Other,
-        ).await;
-        
+        )
+        .await;
+
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Success");
         assert_eq!(attempt_counter.load(Ordering::SeqCst), 3);
@@ -177,19 +179,23 @@ mod tests {
     async fn test_retry_with_backoff_max_retries() {
         let attempt_counter = Arc::new(AtomicU32::new(0));
         let counter = attempt_counter.clone();
-        
+
         let result: Result<String, std::io::Error> = retry_with_backoff(
             || async {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "Persistent error"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Persistent error",
+                ))
             },
             &RetryConfig {
                 max_retries: 2,
                 ..Default::default()
             },
             |_| true,
-        ).await;
-        
+        )
+        .await;
+
         assert!(result.is_err());
         // Should have tried 3 times (initial + 2 retries)
         assert_eq!(attempt_counter.load(Ordering::SeqCst), 3);
