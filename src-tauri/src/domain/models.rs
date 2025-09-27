@@ -26,6 +26,7 @@ pub struct User {
 }
 
 impl User {
+    /// Creates a new User instance with the provided id, name, and address
     pub fn new(id: EntityId, name: String, address: String) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -43,6 +44,7 @@ impl User {
         }
     }
 
+    /// Updates the last seen timestamp to the current time and marks user as online
     pub fn update_last_seen(&mut self) {
         self.last_seen = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -72,6 +74,7 @@ pub struct Contact {
 }
 
 impl Contact {
+    /// Creates a new Contact instance with the provided parameters
     pub fn new(id: EntityId, user_id: EntityId, name: String, address: String) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -81,6 +84,7 @@ impl Contact {
         Self::from_storage(id, user_id, name, address, false, now, None)
     }
 
+    /// Creates a Contact instance from stored data
     pub fn from_storage(
         id: EntityId,
         user_id: EntityId,
@@ -164,6 +168,7 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    /// Creates a new ChatMessage instance with the provided parameters
     pub fn new(
         id: EntityId,
         from_user_id: EntityId,
@@ -191,6 +196,7 @@ impl ChatMessage {
         }
     }
 
+    /// Marks the message as delivered and updates the delivery timestamp
     pub fn mark_delivered(&mut self) {
         self.delivered_at = Some(
             SystemTime::now()
@@ -201,6 +207,7 @@ impl ChatMessage {
         self.status = MessageStatus::Delivered;
     }
 
+    /// Marks the message as read and updates the read timestamp
     pub fn mark_read(&mut self) {
         self.read_at = Some(
             SystemTime::now()
@@ -211,6 +218,7 @@ impl ChatMessage {
         self.status = MessageStatus::Read;
     }
 
+    /// Marks the message as failed
     pub fn mark_failed(&mut self) {
         self.status = MessageStatus::Failed;
     }
@@ -236,6 +244,7 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
+    /// Creates a new PeerInfo instance with the provided parameters
     pub fn new(
         addr: SocketAddr,
         node_name: String,
@@ -253,6 +262,7 @@ impl PeerInfo {
         }
     }
 
+    /// Marks the peer as connected and updates the connection timestamp
     pub fn mark_connected(&mut self) {
         self.is_connected = true;
         self.last_connected = Some(
@@ -263,10 +273,12 @@ impl PeerInfo {
         );
     }
 
+    /// Marks the peer as disconnected
     pub fn mark_disconnected(&mut self) {
         self.is_connected = false;
     }
 
+    /// Updates the heartbeat timestamp to the current time
     pub fn update_heartbeat(&mut self) {
         self.last_heartbeat = Some(
             SystemTime::now()
@@ -276,6 +288,7 @@ impl PeerInfo {
         );
     }
 
+    /// Updates the peer's metadata (name, username, listen port)
     pub fn update_metadata(
         &mut self,
         node_name: String,
@@ -287,6 +300,7 @@ impl PeerInfo {
         self.listen_port = listen_port;
     }
 
+    /// Returns a formatted display label for the peer
     pub fn display_label(&self) -> String {
         let username = self
             .username

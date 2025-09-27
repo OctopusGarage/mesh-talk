@@ -3,9 +3,20 @@ import { computed, reactive, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { API } from "../services/api";
 import { useFeedbackStore } from "./feedbackStore";
+import {
+  normalizeMessage,
+  normalizeMessageList,
+  buildNodeDisplayLabel,
+  splitAddress,
+  getMessageConversationKey,
+  buildDiscoveredLabel
+} from "../utils/addressUtils";
 
 export const useAppStore = defineStore("app", () => {
+  // Dependencies
   const feedback = useFeedbackStore();
+  
+  // State
   const user = ref(null);
   const nodeInfo = ref(null);
   const contacts = ref([]);
@@ -20,10 +31,13 @@ export const useAppStore = defineStore("app", () => {
   const activeConversation = ref(null);
   const discoveredNodes = ref([]); // Added: List of discovered network nodes
 
+  // Computed properties
   const isAuthenticated = computed(() => Boolean(user.value));
+  
   const sortedContacts = computed(() =>
     [...contacts.value].sort((a, b) => a.name.localeCompare(b.name)),
   );
+  
   const filteredMessages = computed(() => {
     if (!activeConversation.value) {
       return messages.value;
@@ -34,22 +48,18 @@ export const useAppStore = defineStore("app", () => {
     );
   });
 
+  
+
+  // Contact normalization functions
   function normalizeContact(contact) {
     if (!contact) {
       return contact;
     }
 
     const status = contact.status ?? (contact.is_online ? "online" : "offline");
-    const address = contact.address ?? "";
-    const [addressIp, addressPort] = (() => {
-      const parts = address.split(":");
-      if (parts.length >= 2) {
-        const portValue = Number(parts[parts.length - 1]);
-        return [parts.slice(0, -1).join(":"), Number.isNaN(portValue) ? undefined : portValue];
-      }
-      return [address, undefined];
-    })();
+    const [addressIp, addressPort] = splitAddress(contact.address ?? "");
 
+    const accountName = user.value?.name ?? "Guest";
     const nodeName = contact.node_name ?? contact.name ?? "Unknown";
     const username = contact.username ?? "Unknown";
     const listenPort = contact.listen_port ?? addressPort ?? 0;
@@ -57,7 +67,7 @@ export const useAppStore = defineStore("app", () => {
       contact.display_label ??
       buildNodeDisplayLabel({
         name: nodeName,
-        username,
+        username: accountName,
         ip: contact.ip ?? addressIp ?? "127.0.0.1",
         port: listenPort,
       });
@@ -76,39 +86,18 @@ export const useAppStore = defineStore("app", () => {
     };
   }
 
-  function normalizeContactList(list = []) {
-    return [...list]
+  function applyContacts(list = []) {
+    const normalized = [...list]
       .map(normalizeContact)
       .sort((a, b) =>
         a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
       );
-  }
-
-  function applyContacts(list = []) {
-    const normalized = normalizeContactList(list);
     contacts.value = normalized;
     return normalized;
   }
 
-  function normalizeMessage(message) {
-    if (!message) {
-      return message;
-    }
-
-    return {
-      ...message,
-      sent_at: message.sent_at ?? Date.now(),
-      delivered_at: message.delivered_at ?? null,
-      read_at: message.read_at ?? null,
-      status: message.status ?? 0,
-    };
-  }
-
-  function normalizeMessageList(list = []) {
-    return [...list]
-      .map(normalizeMessage)
-      .sort((a, b) => (a.sent_at ?? 0) - (b.sent_at ?? 0));
-  }
+  // Message normalization functions
+  
 
   function upsertMessage(message) {
     if (!message) {
@@ -142,14 +131,36 @@ export const useAppStore = defineStore("app", () => {
     return normalized;
   }
 
-  function buildNodeDisplayLabel(overrides = {}) {
-    const nodeName = (overrides.name ?? "mesh-node").toString().trim() || "mesh-node";
-    const accountName = overrides.username ?? user.value?.name ?? "Guest";
-    const ipAddress = overrides.ip ?? "127.0.0.1";
-    const portValue = overrides.port ?? 0;
-    return `${nodeName} • ${accountName} • ${ipAddress}:${portValue}`;
+  // Message conversation key function
+  
+
+  // Message conversation key function
+  function messageConversationKey(message) {
+    if (!message) {
+      return null;
+    }
+
+    const selfAddress = user.value?.address;
+
+    // If this message is from the current user, return the recipient address
+    if (message.from_address === selfAddress && message.to_address) {
+      return message.to_address;
+    }
+    
+    // If this message is from someone else, return the sender address
+    if (message.from_address && message.from_address !== selfAddress) {
+      return message.from_address;
+    }
+
+    // Fallback to to_address if from_address doesn't match self
+    if (message.to_address && message.to_address !== selfAddress) {
+      return message.to_address;
+    }
+
+    return null;
   }
 
+  // State management utility functions
   function setLoading(state) {
     loading.value = state;
   }
@@ -178,12 +189,13 @@ export const useAppStore = defineStore("app", () => {
     });
   }
 
+  // Authentication actions
   async function login(username, password) {
     setLoading(true);
     setError(null, { clearLastError: true });
     const taskKey = feedback.beginTask("auth:login", "Signing in…");
     try {
-      const result = await API.login(username, password);
+      const result = await API.auth.login(username, password);
       if (!result.success) {
         throw new Error(result.error ?? "Unable to login");
       }
@@ -211,7 +223,7 @@ export const useAppStore = defineStore("app", () => {
     setError(null, { clearLastError: true });
     const taskKey = feedback.beginTask("auth:register", "Creating account…");
     try {
-      const result = await API.register(username, password);
+      const result = await API.auth.register(username, password);
       if (!result.success) {
         throw new Error(result.error ?? "Registration failed");
       }
@@ -238,7 +250,7 @@ export const useAppStore = defineStore("app", () => {
     setError(null, { clearLastError: true });
     const taskKey = feedback.beginTask("auth:logout", "Signing out…");
     try {
-      const result = await API.logout();
+      const result = await API.auth.logout();
       if (!result.success) {
         throw new Error(result.error ?? "Logout failed");
       }
@@ -265,6 +277,7 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  // Data refresh actions
   async function bootstrapAfterAuth() {
     await Promise.all([
       refreshContacts(),
@@ -277,7 +290,7 @@ export const useAppStore = defineStore("app", () => {
 
   async function refreshNodeInfo() {
     try {
-      const info = await API.getNodeInfo();
+      const info = await API.node.getNodeInfo();
       nodeInfo.value = {
         ...info,
         display_label:
@@ -310,7 +323,7 @@ export const useAppStore = defineStore("app", () => {
 
   async function refreshContacts() {
     try {
-      const result = await API.getContacts();
+      const result = await API.contacts.getContacts();
       if (result.success) {
         applyContacts(result.contacts ?? []);
       }
@@ -325,7 +338,7 @@ export const useAppStore = defineStore("app", () => {
 
   async function refreshMessages() {
     try {
-      const result = await API.getMessages();
+      const result = await API.messages.getMessages();
       const normalized = normalizeMessageList(Array.isArray(result) ? result : []);
       messages.value = normalized;
       recomputeUnread();
@@ -338,6 +351,7 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  // Message actions
   async function sendMessage(content) {
     if (activeConversation.value) {
       await ensureNodeConnection(activeConversation.value);
@@ -360,7 +374,7 @@ export const useAppStore = defineStore("app", () => {
       const addedMessage = upsertMessage(localMessage);
       
       // Now send to backend
-      const result = await API.sendMessage(content);
+      const result = await API.messages.sendMessage(content);
       
       // Merge the backend result with the local one (in case backend returns additional fields)
       let processedResult = { ...localMessage, ...result };
@@ -384,7 +398,7 @@ export const useAppStore = defineStore("app", () => {
 
   async function markMessageRead(messageId) {
     try {
-      const result = await API.markMessageRead(messageId);
+      const result = await API.messages.markMessageRead(messageId);
       const index = messages.value.findIndex((msg) => msg.id === result.id);
       if (index !== -1) {
         messages.value[index] = result;
@@ -401,7 +415,7 @@ export const useAppStore = defineStore("app", () => {
 
   async function markAllMessagesRead() {
     try {
-      await API.markAllMessagesRead();
+      await API.messages.markAllMessagesRead();
       messages.value = messages.value.map((msg) => ({
         ...msg,
         status: 2,
@@ -417,6 +431,50 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  // Contact management actions
+  async function updateContact(contactId, data) {
+    try {
+      const result = await API.contacts.updateContact(contactId, data);
+      
+      // Update the contact in the local store if successful
+      if (result.success && result.contact) {
+        const contactIndex = contacts.value.findIndex(contact => contact.id === contactId);
+        if (contactIndex !== -1) {
+          // Preserve the original name if it was explicitly provided in the update
+          const updatedContact = {
+            ...contacts.value[contactIndex],
+            ...result.contact
+          };
+          
+          contacts.value[contactIndex] = normalizeContact(updatedContact);
+          
+          // If name was explicitly provided in the update, override the normalized name field
+          if (data.name !== undefined) {
+            contacts.value[contactIndex].name = data.name;
+          }
+        } else {
+          // If contact doesn't exist locally, add it
+          const newContact = normalizeContact(result.contact);
+          // If name was explicitly provided, override the normalized name field
+          if (data.name !== undefined) {
+            newContact.name = data.name;
+          }
+          contacts.value.push(newContact);
+        }
+      }
+      
+      return result;
+    } catch (err) {
+      setError(err, {
+        message: "Failed to update contact",
+        source: "contacts.update",
+        toast: true,
+      });
+      return { success: false, error: err.message };
+    }
+  }
+
+  // Conversation and connection actions
   function selectConversation(address) {
     activeConversation.value = address;
   }
@@ -427,7 +485,7 @@ export const useAppStore = defineStore("app", () => {
       return;
     }
     try {
-      await API.connectToNode(target);
+      await API.node.connectToNode(target);
     } catch (err) {
       setError(err, {
         message: "Failed to connect to node",
@@ -437,6 +495,7 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  // Event listener management
   function ensureEventListeners() {
     if (listeners.length > 0) {
       return;
@@ -552,7 +611,7 @@ export const useAppStore = defineStore("app", () => {
               buildNodeDisplayLabel({
                 name: node.name,
                 username: node.username ?? "Unknown",
-                ip: node.ip ?? node.address.split(":")[0],
+                ip: node.ip ?? splitAddress(node.address)[0],
                 port: node.listen_port ?? node.port ?? undefined,
               }),
           }));
@@ -571,21 +630,16 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  // Contact management
   function upsertContactFromEvent(payload) {
     if (!payload.address) {
       return;
     }
 
     const status = payload.status ?? "offline";
-    const [addressIp, addressPort] = (() => {
-      const parts = payload.address.split(":");
-      if (parts.length >= 2) {
-        const portValue = Number(parts[parts.length - 1]);
-        return [parts.slice(0, -1).join(":"), Number.isNaN(portValue) ? undefined : portValue];
-      }
-      return [payload.address, undefined];
-    })();
+    const [addressIp, addressPort] = splitAddress(payload.address ?? "");
 
+    const accountName = user.value?.name ?? "Guest";
     const nodeName = payload.node_name ?? payload.name ?? "Unknown";
     const username = payload.username ?? "Unknown";
     const listenPort = payload.listen_port ?? addressPort ?? 0;
@@ -593,7 +647,7 @@ export const useAppStore = defineStore("app", () => {
       payload.display_label ??
       buildNodeDisplayLabel({
         name: nodeName,
-        username,
+        username: accountName,
         ip: payload.ip ?? addressIp ?? "127.0.0.1",
         port: listenPort,
       });
@@ -649,9 +703,14 @@ export const useAppStore = defineStore("app", () => {
       contacts.value.push(normalized);
     }
 
-    contacts.value = normalizeContactList(contacts.value);
+    contacts.value = [...contacts.value]
+      .map(normalizeContact)
+      .sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+      );
   }
 
+  // Unread message tracking
   function recomputeUnread() {
     unreadCount.value = messages.value.filter(
       (message) => message.id && message.status !== 2,
@@ -689,6 +748,7 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  // Node discovery management
   function addDiscoveredNode(node) {
     if (!node.address) {
       return;
@@ -730,31 +790,7 @@ export const useAppStore = defineStore("app", () => {
     discoveredNodes.value = [];
   }
 
-  function messageConversationKey(message) {
-    if (!message) {
-      return null;
-    }
-
-    const selfAddress = user.value?.address;
-
-    // If this message is from the current user, return the recipient address
-    if (message.from_address === selfAddress && message.to_address) {
-      return message.to_address;
-    }
-    
-    // If this message is from someone else, return the sender address
-    if (message.from_address && message.from_address !== selfAddress) {
-      return message.from_address;
-    }
-
-    // Fallback to to_address if from_address doesn't match self
-    if (message.to_address && message.to_address !== selfAddress) {
-      return message.to_address;
-    }
-
-    return null;
-  }
-
+  // Contact synchronization
   // Function to synchronize contact status with discovered nodes
   function syncContactStatusWithDiscovery() {
     if (!discoveredNodes.value || !contacts.value) {
@@ -825,15 +861,12 @@ export const useAppStore = defineStore("app", () => {
     sendMessage,
     markMessageRead,
     markAllMessagesRead,
+    updateContact,
     selectConversation,
     ensureNodeConnection,
     ensureEventListeners,
     teardownEventListeners,
     setError,
     setLoading,
-    
-    // internal functions
-    syncContactStatusWithDiscovery,
-    cleanup,
   };
 });

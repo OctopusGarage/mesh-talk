@@ -45,10 +45,6 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = "3.8"
 futures = "0.3"
 
-[[bench]]
-name = "message_passing_benchmark"
-harness = false
-
 [lib]
 name = "mesh_talk"
 path = "src/lib.rs"
@@ -60,7 +56,3 @@ path = "src/main.rs"
 [[bin]]
 name = "mesh-talk-cli"
 path = "src/bin/mesh-talk-cli.rs"
-
-[[example]]
-name = "test_user_friendly_errors"
-path = "examples/test_user_friendly_errors.rs"

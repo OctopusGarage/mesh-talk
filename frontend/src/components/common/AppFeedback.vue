@@ -43,11 +43,13 @@
 import { computed } from "vue";
 import { useFeedbackStore } from "../../stores/feedbackStore";
 
+// Store and computed properties
 const feedback = useFeedbackStore();
 const toasts = computed(() => feedback.toasts);
 const isBusy = computed(() => feedback.isBusy);
 const tasks = computed(() => feedback.tasks);
 
+// Methods
 const dismiss = (id) => feedback.dismissToast(id);
 </script>
 

@@ -1,6 +1,7 @@
 use crate::domain::models::{EntityId, User};
 use crate::identity::manager::IdentityManager;
 use crate::storage::file_manager::FileManager;
+use crate::services::common::{Service, ServiceDependencies, ServiceHealth};
 
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use std::collections::HashMap;
@@ -31,6 +32,17 @@ pub enum AuthError {
     StorageError(String),
     /// Internal error
     InternalError(String),
+}
+
+impl From<AuthError> for crate::services::common::ServiceError {
+    fn from(error: AuthError) -> Self {
+        crate::services::common::ServiceError {
+            service: "AuthService".to_string(),
+            operation: "unknown".to_string(),
+            message: format!("{:?}", error),
+            source: None,
+        }
+    }
 }
 
 /// Authentication result type
@@ -93,6 +105,40 @@ pub struct AuthService {
 
 static INSTANCE: std::sync::OnceLock<AuthService> = std::sync::OnceLock::new();
 
+impl Service for AuthService {
+    type Error = AuthError;
+    type Result<T> = AuthResult<T>;
+    
+    fn init(dependencies: ServiceDependencies) -> Self {
+        // Extract file manager from dependencies
+        let file_manager = dependencies.file_manager
+            .and_then(|fm| fm.downcast_ref::<FileManager>().cloned())
+            .expect("File manager is required for AuthService");
+            
+        let identity_manager = Arc::new(IdentityManager::new(file_manager));
+        Self::new(identity_manager)
+    }
+    
+    fn service_name(&self) -> &'static str {
+        "AuthService"
+    }
+    
+    fn health_check(&self) -> ServiceHealth {
+        ServiceHealth::Healthy
+    }
+    
+    fn shutdown(&self) -> Self::Result<()> {
+        // Clear sessions on shutdown
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.clear();
+        
+        let mut current_user = self.current_user.lock().unwrap();
+        *current_user = None;
+        
+        Ok(())
+    }
+}
+
 impl AuthService {
     /// Create a new authentication service
     pub fn new(identity_manager: Arc<IdentityManager>) -> Self {
@@ -103,12 +149,12 @@ impl AuthService {
         }
     }
 
-    /// Get the global auth service instance
+    /// Get the global authentication service instance
     pub fn global() -> &'static AuthService {
         INSTANCE.get().expect("AuthService not initialized")
     }
 
-    /// Initialize the global auth service instance
+    /// Initialize the global authentication service instance
     pub fn init_global(file_manager: FileManager) {
         let identity_manager = Arc::new(IdentityManager::new(file_manager));
         INSTANCE.set(AuthService::new(identity_manager)).ok();

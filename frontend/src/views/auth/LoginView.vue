@@ -187,11 +187,13 @@ import { computed, reactive, ref, watch } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { useAuth } from "../../composables/auth/useAuth";
 
+// Router and authentication
 const router = useRouter();
 const route = useRoute();
 const { login, register, isAuthenticated, loading, error, setError } =
   useAuth();
 
+// Form state
 const mode = ref(route.query.mode === "register" ? "register" : "login");
 const loginForm = reactive({ username: "", password: "" });
 const registerForm = reactive({
@@ -207,7 +209,9 @@ const registerErrors = reactive({
 });
 const formError = ref("");
 
+// Computed properties
 const isLoginMode = computed(() => mode.value === "login");
+
 const submitLabel = computed(() => {
   if (loading.value) {
     return isLoginMode.value ? "Signing in…" : "Creating account…";
@@ -243,6 +247,7 @@ const isSubmitDisabled = computed(() => {
   );
 });
 
+// Utility functions
 function resetLoginErrors() {
   loginErrors.username = "";
   loginErrors.password = "";
@@ -267,6 +272,7 @@ function prepareRedirect() {
   return { name: "chat" };
 }
 
+// Form handling functions
 async function handleLogin() {
   resetLoginErrors();
   formError.value = "";
@@ -342,6 +348,7 @@ async function handleRegister() {
   formError.value = error.value ?? "Registration failed";
 }
 
+// Mode switching functions
 function switchMode(nextMode) {
   if (mode.value === nextMode) {
     return;
@@ -353,6 +360,7 @@ function switchMode(nextMode) {
   resetRegisterErrors();
 }
 
+// Watchers
 watch(
   () => route.query.mode,
   (value) => {

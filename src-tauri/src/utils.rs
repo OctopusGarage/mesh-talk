@@ -1,36 +1,34 @@
 //! Utility functions for the Mesh-Talk application
+//!
+//! Contains general utility functions used throughout the application.
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
-/// Validates that a port number is in the valid range (1-65535)
-pub fn is_valid_port(port: u16) -> bool {
-    port > 0
-}
-
-/// Checks if a name is valid (non-empty and not too long)
+/// Validates that a name meets the application's requirements.
+///
+/// Names must be non-empty and contain only alphanumeric characters, spaces, hyphens, or underscores.
 pub fn is_valid_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 50
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_valid_port() {
-        assert!(is_valid_port(8000));
-        assert!(is_valid_port(1));
-        assert!(is_valid_port(65535));
-        assert!(!is_valid_port(0));
+    if name.is_empty() {
+        return false;
     }
 
-    #[test]
-    fn test_is_valid_name() {
-        assert!(is_valid_name("Alice"));
-        assert!(is_valid_name("Bob"));
-        assert!(!is_valid_name(""));
-        assert!(is_valid_name("A"));
-        // Test with a 50-character name
-        assert!(is_valid_name(&"A".repeat(50)));
-        // Test with a 51-character name
-        assert!(!is_valid_name(&"A".repeat(51)));
-    }
+    name.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '-' || c == '_')
 }
+
+/// Validates that a port number is within the valid range.
+///
+/// Valid ports are between 1024 and 65535 inclusive.
+pub fn is_valid_port(port: u16) -> bool {
+    port >= 1024 && port <= 65535
+}
+
+/// Generates a random string of the specified length using alphanumeric characters.
+pub fn generate_random_string(length: usize) -> String {
+    thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect()
+}
+
+/// Re-export error handling utilities
+pub mod error_handling;

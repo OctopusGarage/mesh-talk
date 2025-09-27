@@ -1,9 +1,9 @@
 use crate::domain::models::{ChatMessage, EntityId, MessageStatus};
 use crate::storage::file_manager::FileManager;
+use crate::services::common::{Service, ServiceDependencies, ServiceHealth};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Message error types
 #[derive(Debug, Clone, PartialEq)]
@@ -16,6 +16,17 @@ pub enum MessageError {
     StorageError(String),
     /// Internal error
     InternalError(String),
+}
+
+impl From<MessageError> for crate::services::common::ServiceError {
+    fn from(error: MessageError) -> Self {
+        crate::services::common::ServiceError {
+            service: "MessageService".to_string(),
+            operation: "unknown".to_string(),
+            message: format!("{:?}", error),
+            source: None,
+        }
+    }
 }
 
 /// Message result type
@@ -82,6 +93,35 @@ pub struct MessageService {
 }
 
 static INSTANCE: OnceLock<MessageService> = OnceLock::new();
+
+impl Service for MessageService {
+    type Error = MessageError;
+    type Result<T> = MessageResult<T>;
+    
+    fn init(dependencies: ServiceDependencies) -> Self {
+        // Extract file manager from dependencies
+        let file_manager = dependencies.file_manager
+            .and_then(|fm| fm.downcast_ref::<FileManager>().cloned())
+            .expect("File manager is required for MessageService");
+            
+        Self::new(Arc::new(file_manager))
+    }
+    
+    fn service_name(&self) -> &'static str {
+        "MessageService"
+    }
+    
+    fn health_check(&self) -> ServiceHealth {
+        ServiceHealth::Healthy
+    }
+    
+    fn shutdown(&self) -> Self::Result<()> {
+        // Clear cache on shutdown
+        let mut cache = self.cache.lock().unwrap();
+        cache.clear();
+        Ok(())
+    }
+}
 
 impl MessageService {
     /// Create a new message service

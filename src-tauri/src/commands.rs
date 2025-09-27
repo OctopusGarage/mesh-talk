@@ -4,17 +4,25 @@ use crate::events::{emit_contact_added, emit_network_status_changed, emit_node_p
 use crate::services::auth_service::AuthError;
 use crate::services::node_service::{NodeService, NOTIFICATION_SERVICE};
 use crate::state::{AppState, SessionInfo};
+// use crate::utils::error_handling::{map_mesh_talk_error_to_command_error, validation_error, authentication_error, service_error, network_error, ResultExt};
+
 use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Represents possible errors that can occur in command execution
 #[derive(Debug)]
 pub enum CommandError {
+    /// Input validation errors
     Validation(String),
+    /// Authentication-related errors
     Authentication(String),
+    /// Authorization-related errors
     Authorization(String),
+    /// Service-level errors
     Service(String),
+    /// Network-related errors
     Network(String),
 }
 
@@ -32,8 +40,10 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
+/// Type alias for command results
 type CommandResult<T> = Result<T, CommandError>;
 
+/// Requires an active user session, returning an error if none exists
 fn require_session(state: &AppState) -> CommandResult<SessionInfo> {
     state
         .session()
@@ -41,6 +51,7 @@ fn require_session(state: &AppState) -> CommandResult<SessionInfo> {
         .ok_or_else(|| CommandError::Authentication("User session not found. Please login.".into()))
 }
 
+/// Sends a message to connected peers
 #[tauri::command]
 pub async fn send_message(
     content: String,
@@ -53,6 +64,7 @@ pub async fn send_message(
         .map_err(|e| e.to_string())
 }
 
+/// Internal implementation for sending a message with proper error handling
 async fn send_message_impl(
     content: String,
     node_service: &Arc<Mutex<NodeService>>,
@@ -104,6 +116,7 @@ async fn send_message_impl(
     }
 }
 
+/// Gets information about the current node
 #[tauri::command]
 pub async fn get_node_info(
     node_service: tauri::State<'_, Arc<Mutex<NodeService>>>,
@@ -148,7 +161,7 @@ pub async fn get_node_info(
     })
 }
 
-/// Get the local IP address of the machine
+/// Gets the local IP address of the machine
 fn get_local_ip() -> Option<String> {
     // Try to infer the outward-facing interface without performing a full TCP handshake.
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
@@ -166,6 +179,7 @@ fn get_local_ip() -> Option<String> {
     Some("127.0.0.1".to_string())
 }
 
+/// Logs in a user with the provided credentials
 #[tauri::command]
 pub async fn login(
     app_handle: tauri::AppHandle,
@@ -201,6 +215,7 @@ pub async fn login(
     Ok(result)
 }
 
+/// Starts the network runtime
 #[tauri::command]
 pub async fn start_network(
     app_handle: tauri::AppHandle,
@@ -216,6 +231,7 @@ pub async fn start_network(
     .map_err(|e| e.to_string())
 }
 
+/// Internal implementation for starting the network runtime
 async fn start_network_impl(
     app_handle: tauri::AppHandle,
     node_service: Arc<Mutex<NodeService>>,
@@ -294,11 +310,13 @@ async fn start_network_impl(
     }
 }
 
+/// Stops the network runtime
 #[tauri::command]
 pub async fn stop_network(app_state: tauri::State<'_, AppState>) -> Result<(), String> {
     stop_network_impl(app_state.inner()).map_err(|e| e.to_string())
 }
 
+/// Internal implementation for stopping the network runtime
 fn stop_network_impl(app_state: &AppState) -> CommandResult<()> {
     if let Some(runtime) = app_state.take_network_runtime() {
         println!("Stopping network runtime");

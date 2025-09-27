@@ -6,14 +6,16 @@ import "./styles/global.css";
 import { useAppStore } from "./stores/appStore";
 import { useFeedbackStore } from "./stores/feedbackStore";
 
+// Initialize application
 const app = createApp(App);
 const pinia = createPinia();
 app.use(pinia);
 
+// Initialize stores
 const feedback = useFeedbackStore();
-const store = useAppStore();
-const { isAuthenticated } = storeToRefs(store);
+const { isAuthenticated } = storeToRefs(useAppStore());
 
+// Global error handling
 window.addEventListener("error", (event) => {
   const payload = event?.error ?? event?.message;
   feedback.showError(payload, {
@@ -48,6 +50,7 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
+// Authentication guard
 router.beforeEach((to, from, next) => {
   if (to.meta.requiresAuth && !isAuthenticated.value) {
     next({ name: "login", query: { redirect: to.fullPath } });

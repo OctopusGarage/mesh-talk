@@ -143,18 +143,20 @@
 </template>
 
 <script setup>
+// Props and emits
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import ContactList from "../../components/contacts/ContactList.vue";
 import ChatWindow from "../../components/chat/ChatWindow.vue";
 import MessageInput from "../../components/chat/MessageInput.vue";
 import { useAppStore } from "../../stores/appStore";
 import { storeToRefs } from "pinia";
 import { useRealTimeMessages } from "../../composables/chat/useRealTimeMessages";
 import { useFeedbackStore } from "../../stores/feedbackStore";
-import { invoke } from "@tauri-apps/api/core";
+import { API } from "../../services/api";
 import { listen } from "@tauri-apps/api/event";
+import { splitAddress, buildDiscoveredLabel } from "../../utils/addressUtils";
 
+// Router and store initialization
 const router = useRouter();
 const store = useAppStore();
 const feedback = useFeedbackStore();
@@ -174,9 +176,11 @@ const {
   discoveredNodes, 
 } = storeToRefs(store);
 
+// Event listener references
 const contactRequestUnlisten = ref(null);
 const contactAddedUnlisten = ref(null);
 
+// Computed properties
 const networkStatusLabel = computed(() => {
   if (networkStatus.value === "connected") return "Online";
   if (networkStatus.value === "connecting") return "Connecting";
@@ -214,6 +218,7 @@ const nodePanelInfo = computed(() => {
   return { label, nodeName, address };
 });
 
+// Node overlay properties
 const nodeOverlayActive = ref(false);
 const nodeOverlayAvailable = computed(() => {
   const details = nodePanelInfo.value;
@@ -222,28 +227,8 @@ const nodeOverlayAvailable = computed(() => {
 
 const nodeOverlayVisible = computed(() => nodeOverlayActive.value && nodeOverlayAvailable.value);
 
+// Discovery properties
 const hoveredDiscovery = ref(null);
-
-function buildDiscoveredLabel(node) {
-  const nodeName = node.name ?? node.node_name ?? "Unknown";
-  const username = node.username ?? "Unknown";
-  const [ipPart, portPart] = (() => {
-    if (node.ip) {
-      return [node.ip, node.listen_port ?? node.port ?? undefined];
-    }
-    if (node.address) {
-      const parts = String(node.address).split(":");
-      if (parts.length >= 2) {
-        const port = Number(parts.pop());
-        return [parts.join(":"), Number.isNaN(port) ? undefined : port];
-      }
-      return [node.address, undefined];
-    }
-    return ["127.0.0.1", undefined];
-  })();
-  const port = node.listen_port ?? node.port ?? portPart ?? 0;
-  return `${nodeName} • ${username} • ${ipPart}:${port}`;
-}
 
 const discoveredNodeList = computed(() => {
   const uniqueAddresses = new Set();
@@ -257,15 +242,7 @@ const discoveredNodeList = computed(() => {
         return false;
       }
 
-      const [ipPart, portPart] = (() => {
-        const parts = normalizedAddress.split(':');
-        if (parts.length < 2) {
-          return [normalizedAddress, undefined];
-        }
-        const portString = parts.pop() ?? '';
-        const port = Number.parseInt(portString, 10);
-        return [parts.join(':'), Number.isNaN(port) ? undefined : port];
-      })();
+      const [ipPart, portPart] = splitAddress(normalizedAddress);
 
       const ip = node.ip ?? ipPart;
       const port = node.listen_port ?? node.port ?? portPart;
@@ -301,60 +278,14 @@ const discoveredNodeList = computed(() => {
     });
 });
 
-const handleDiscoveryConnect = async (node) => {
-  if (!node || node.isSelf || !node.address) {
-    return;
-  }
 
-  await store.ensureNodeConnection(node.address);
-  store.selectConversation(node.address);
-};
-const handleSend = async (content) => {
-  const result = await store.sendMessage(content);
-  if (!result.success && store.error) {
-    console.error(store.error);
-  }
-};
 
-const handleMarkRead = async (messageId) => {
-  await store.markMessageRead(messageId);
-};
 
-const handleMarkAllRead = async () => {
-  await store.markAllMessagesRead();
-};
 
+// Contact request handling
 // State for contact request popup
 const showContactRequestPopup = ref(false);
 const pendingContactRequest = ref(null);
-
-const handleSelectContact = async (address) => {
-  await store.ensureNodeConnection(address);
-  store.selectConversation(address);
-};
-
-const formatNodeAddress = (address) => {
-  if (!address) return '';
-  
-  // Extract just the IP part or hostname part for display
-  try {
-    // If it's in the format ip:port, just show the IP part
-    const parts = address.split(':');
-    if (parts.length >= 2) {
-      return parts[0];
-    }
-    return address;
-  } catch (e) {
-    return address;
-  }
-};
-
-// Handle incoming contact request
-const handleContactRequest = async (event) => {
-  console.log('Received contact request:', event.payload);
-  pendingContactRequest.value = event.payload;
-  showContactRequestPopup.value = true;
-};
 
 const resolvePendingRequestJson = () => {
   const payload = pendingContactRequest.value;
@@ -424,7 +355,38 @@ const resolvePendingRequestJson = () => {
   return null;
 };
 
-  // Handle discovery invite
+// Message handling functions
+const handleSend = async (content) => {
+  const result = await store.sendMessage(content);
+  if (!result.success && store.error) {
+    console.error(store.error);
+  }
+};
+
+const handleMarkRead = async (messageId) => {
+  await store.markMessageRead(messageId);
+};
+
+const handleMarkAllRead = async () => {
+  await store.markAllMessagesRead();
+};
+
+// Contact handling functions
+const handleSelectContact = async (address) => {
+  await store.ensureNodeConnection(address);
+  store.selectConversation(address);
+};
+
+const handleDiscoveryConnect = async (node) => {
+  if (!node || node.isSelf || !node.address) {
+    return;
+  }
+
+  await store.ensureNodeConnection(node.address);
+  store.selectConversation(node.address);
+};
+
+// Discovery invite functions
 const handleDiscoveryInvite = async (node) => {
   console.log('Handling discovery invite for node:', node);
   if (!node || !node.address) {
@@ -439,10 +401,7 @@ const handleDiscoveryInvite = async (node) => {
   console.log('Sending contact request to public key:', targetPublicKey);
   
   try {
-    const result = await invoke('send_contact_request', {
-      targetPublicKey: targetPublicKey,
-      alias: node.display_label || node.name
-    });
+    const result = await API.contacts.sendContactRequest(targetPublicKey, node.display_label || node.name);
     
     console.log('Contact request result:', result);
     
@@ -457,6 +416,14 @@ const handleDiscoveryInvite = async (node) => {
   }
 };
 
+// Contact request popup functions
+// Handle incoming contact request
+const handleContactRequest = async (event) => {
+  console.log('Received contact request:', event.payload);
+  pendingContactRequest.value = event.payload;
+  showContactRequestPopup.value = true;
+};
+
 // Accept contact request
 const acceptContactRequest = async () => {
   const requestJson = resolvePendingRequestJson();
@@ -468,10 +435,7 @@ const acceptContactRequest = async () => {
   }
 
   try {
-    const result = await invoke('handle_contact_request', {
-      requestJson,
-      approve: true
-    });
+    const result = await API.contacts.handleContactRequest(requestJson, true);
     
     if (result.success) {
       feedback.showSuccess(`Contact request from ${pendingContactRequest.value.requester_alias} accepted`);
@@ -500,10 +464,7 @@ const declineContactRequest = async () => {
   }
 
   try {
-    const result = await invoke('handle_contact_request', {
-      requestJson,
-      approve: false
-    });
+    const result = await API.contacts.handleContactRequest(requestJson, false);
     
     if (result.success) {
       feedback.showInfo(`Contact request from ${pendingContactRequest.value.requester_alias} declined`);
@@ -519,11 +480,13 @@ const declineContactRequest = async () => {
   }
 };
 
+// Other functions
 const logout = async () => {
   await store.logout();
   router.push({ name: "login" });
 };
 
+// Lifecycle hooks
 onMounted(async () => {
   if (!store.isAuthenticated) {
     router.replace({ name: "login" });

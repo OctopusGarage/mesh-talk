@@ -1,22 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 
 // Authentication API functions
-export const authAPI = {
+const authAPI = {
   login: (username, password) => invoke("login", { username, password }),
   register: (username, password) => invoke("register", { username, password }),
   logout: () => invoke("logout"),
 };
 
 // Node API functions
-export const nodeAPI = {
+const nodeAPI = {
   getNodeInfo: () => invoke("get_node_info"),
   connectToNode: (address) => invoke("connect_to_node", { address }),
 };
 
 // Contact API functions
-export const contactsAPI = {
+const contactsAPI = {
   getContacts: () => invoke("get_contacts"),
-  updateContact: (contactId, data) => invoke("update_contact", { contactId, ...data }),
+  updateContact: (contactId, data) => invoke("update_contact", { id: contactId, ...data }),
   deleteContact: (contactId) => invoke("delete_contact", { contactId }),
   sendContactRequest: (targetPublicKey, alias) => 
     invoke("send_contact_request", { targetPublicKey, alias }),
@@ -25,7 +25,7 @@ export const contactsAPI = {
 };
 
 // Message API functions
-export const messagesAPI = {
+const messagesAPI = {
   getMessages: () => invoke("get_messages"),
   sendMessage: (content) => invoke("send_message", { content }),
   markMessageRead: (messageId) => invoke("mark_message_read", { messageId }),
@@ -33,7 +33,7 @@ export const messagesAPI = {
 };
 
 // Network API functions
-export const networkAPI = {
+const networkAPI = {
   getDiscoveredNodes: () => invoke("get_discovered_nodes"),
   startNodeDiscovery: () => invoke("start_node_discovery"),
   stopNodeDiscovery: () => invoke("stop_node_discovery"),
@@ -41,9 +41,9 @@ export const networkAPI = {
 
 // Combined API service
 export const API = {
-  ...authAPI,
-  ...nodeAPI,
-  ...contactsAPI,
-  ...messagesAPI,
-  ...networkAPI,
+  auth: authAPI,
+  node: nodeAPI,
+  contacts: contactsAPI,
+  messages: messagesAPI,
+  network: networkAPI,
 };

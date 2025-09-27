@@ -18,14 +18,14 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tokio::sync::{mpsc, RwLock};
 
-// Message event type for notifying about received messages
+/// Message event type for notifying about received messages
 #[derive(Debug, Clone)]
 pub struct MessageEvent {
     pub from: String,
     pub content: String,
 }
 
-// Type alias for message event handlers
+/// Type alias for message event handlers
 pub type MessageEventHandler = Arc<dyn Fn(MessageEvent) + Send + Sync>;
 
 /// Trait for handling message events
@@ -33,26 +33,32 @@ pub trait MessageEventListener: Send + Sync {
     fn on_message_received(&self, event: MessageEvent);
 }
 
-// Static notification service instance
+/// Static notification service instance
 lazy_static::lazy_static! {
     pub static ref NOTIFICATION_SERVICE: crate::services::notification_service::NotificationService = crate::services::notification_service::NotificationService::new();
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// NodeService manages the network node and peer connections
 #[derive(Clone)]
 pub struct NodeService {
+    /// The core node information and peer connections
     pub node: Node,
+    /// Registry of discovered nodes
     pub node_registry: Arc<Mutex<NodeRegistry>>,
+    /// Connection manager for handling TCP connections
     pub connection_manager: Arc<ConnectionManager>,
+    /// Reconnection manager for handling connection retries
     pub reconnection_manager: Arc<ReconnectionManager>,
-    // Message event handlers for notifying about received messages
+    /// Message event handlers for notifying about received messages
     pub message_handlers: Arc<RwLock<Vec<MessageEventHandler>>>,
-    // User ID for the authenticated user (0 if not authenticated)
+    /// User ID for the authenticated user (0 if not authenticated)
     pub user_id: Arc<AtomicU64>,
 }
 
 impl NodeService {
+    /// Creates a new NodeService instance with the provided name and port
     pub fn new(name: String, port: u16) -> Self {
         let peers = Arc::new(Mutex::new(HashMap::new()));
         let peer_info_map = Arc::new(Mutex::new(HashMap::new()));
@@ -84,14 +90,17 @@ impl NodeService {
         service
     }
 
+    /// Sets the authenticated user ID for this node service
     pub fn set_user_id(&self, user_id: u64) {
         self.user_id.store(user_id, Ordering::SeqCst);
     }
     
+    /// Gets the authenticated user ID for this node service
     pub fn get_user_id(&self) -> u64 {
         self.user_id.load(Ordering::SeqCst)
     }
     
+    /// Connects to a peer at the specified socket address
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> std::io::Result<()> {
         let peer_info = Arc::clone(&self.node.peer_info);
         let name = self.node.name.clone();
@@ -134,6 +143,7 @@ impl NodeService {
             .await
     }
 
+    /// Handles an incoming TCP connection from a peer
     pub async fn handle_incoming_connection(
         &self,
         stream: tokio::net::TcpStream,
@@ -172,6 +182,7 @@ impl NodeService {
         .await
     }
 
+    /// Broadcasts a message to all connected peers
     pub async fn broadcast_message(&self, content: String) -> std::io::Result<()> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
@@ -244,6 +255,7 @@ impl NodeService {
         send_message_with_retry(addr, json_line, Arc::clone(&self.node.peers), 3).await
     }
 
+    /// Handles a received message by parsing it and performing appropriate actions based on message type
     pub async fn handle_message_static(
         line: String,
         _node_name: String,
@@ -252,7 +264,12 @@ impl NodeService {
         // println!("Trying to parse message: {}", line);
         match serde_json::from_str(&line) {
             Ok(Message::Chat { from, content }) => {
-                println!("\nReceived message from {}: {}\n", from, content);
+                println!(
+                    "
+Received message from {}: {}
+",
+                    from, content
+                );
 
                 // Notify message handlers
                 let handlers = message_handlers.read().await;
@@ -278,7 +295,8 @@ impl NodeService {
                 ..
             }) => {
                 println!(
-                    "Received Discovery message from {} (user: {:?}), port: {}\n",
+                    "Received Discovery message from {} (user: {:?}), port: {}
+",
                     name, username, port
                 );
                 Ok(())
@@ -290,7 +308,8 @@ impl NodeService {
                 ..
             }) => {
                 println!(
-                    "Received Heartbeat message from {} (user: {:?}), port: {}\n",
+                    "Received Heartbeat message from {} (user: {:?}), port: {}
+",
                     name, username, port
                 );
 
@@ -408,7 +427,8 @@ impl NodeService {
                         if let Some(session) = app_state.session().get() {
                             let service = app_state.contact_request_service();
                             let contact_service = app_state.contact_service();
-                            if let Err(err) = service
+                            if let Err(err) =
+                                service
                                 .handle_contact_response(&session.user.name, "", &response_json)
                                 .await
                             {
@@ -454,40 +474,49 @@ impl NodeService {
                 Ok(())
             }
             Err(e) => {
-                eprintln!("Failed to parse message: {} (raw message: {})\n", e, line);
+                eprintln!("Failed to parse message: {} (raw message: {})
+", e, line);
                 Err(e)
             }
         }
     }
 
+    /// Returns a clone of the peers HashMap wrapped in Arc<Mutex<...>>
     pub fn get_peers(&self) -> Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>> {
         Arc::clone(&self.node.peers)
     }
 
+    /// Returns the name of this node
     pub fn get_name(&self) -> String {
         self.node.name.clone()
     }
 
+    /// Returns the port this node is listening on
     pub fn get_port(&self) -> u16 {
         self.node.port
     }
 
+    /// Updates the port this node is listening on
     pub fn update_port(&mut self, new_port: u16) {
         self.node.port = new_port;
     }
 
+    /// Updates the name of this node
     pub fn update_name(&mut self, new_name: String) {
         self.node.name = new_name;
     }
 
+    /// Returns a clone of the node registry wrapped in Arc<Mutex<...>>
     pub fn get_node_registry(&self) -> Arc<Mutex<NodeRegistry>> {
         Arc::clone(&self.node_registry)
     }
 
+    /// Returns a clone of the connection manager
     pub fn get_connection_manager(&self) -> Arc<ConnectionManager> {
         Arc::clone(&self.connection_manager)
     }
 
+    /// Returns a clone of the reconnection manager
     pub fn get_reconnection_manager(&self) -> Arc<ReconnectionManager> {
         Arc::clone(&self.reconnection_manager)
     }

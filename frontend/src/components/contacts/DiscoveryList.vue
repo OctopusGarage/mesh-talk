@@ -30,6 +30,7 @@
 </template>
 
 <script setup>
+// Props and emits
 const props = defineProps({
   nodes: {
     type: Array,

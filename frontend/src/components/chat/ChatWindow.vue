@@ -30,6 +30,7 @@
 <script setup>
 import { computed } from 'vue';
 
+// Props and emits
 const props = defineProps({
   messages: {
     type: Array,
@@ -51,6 +52,7 @@ const props = defineProps({
 
 defineEmits(['markRead', 'markAllRead']);
 
+// Computed properties
 const title = computed(() => {
   if (props.activeContact) {
     return props.activeContact.username || props.activeContact.name || props.activeConversation || 'All Messages';
@@ -62,6 +64,7 @@ const subtitle = computed(() =>
   props.activeConversation ? 'Direct conversation' : 'All activity',
 );
 
+// Utility functions
 const formatTimestamp = (timestamp) => {
   if (!timestamp) return '';
   const date = new Date(timestamp * 1000);

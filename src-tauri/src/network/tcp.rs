@@ -20,25 +20,25 @@ impl Default for ConnectionPool {
 }
 
 impl ConnectionPool {
-    /// Create a new connection pool
+    /// Creates a new connection pool
     pub fn new() -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Get the connections map
+    /// Gets the connections map wrapped in Arc<Mutex<...>>
     pub fn get_connections(&self) -> Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>> {
         Arc::clone(&self.connections)
     }
 
-    /// Check if a connection exists for the given address
+    /// Checks if a connection exists for the given address
     pub fn has_connection(&self, addr: &SocketAddr) -> bool {
         let connections = self.connections.lock().unwrap();
         connections.contains_key(addr)
     }
 
-    /// Remove a connection for the given address
+    /// Removes a connection for the given address
     pub fn remove_connection(&self, addr: &SocketAddr) {
         let mut connections = self.connections.lock().unwrap();
         connections.remove(addr);
@@ -53,7 +53,7 @@ pub struct EnhancedTcpConnection {
 }
 
 impl EnhancedTcpConnection {
-    /// Create a new enhanced TCP connection
+    /// Creates a new enhanced TCP connection
     pub fn new(addr: SocketAddr, sender: mpsc::Sender<String>) -> Self {
         Self {
             addr,
@@ -62,28 +62,28 @@ impl EnhancedTcpConnection {
         }
     }
 
-    /// Get the connection address
+    /// Gets the connection address
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
-    /// Get the sender for sending messages
+    /// Gets the sender for sending messages
     pub fn sender(&self) -> &mpsc::Sender<String> {
         &self.sender
     }
 
-    /// Update the last activity timestamp
+    /// Updates the last activity timestamp
     pub fn update_activity(&mut self) {
         self.last_activity = std::time::Instant::now();
     }
 
-    /// Check if the connection has timed out (30 seconds of inactivity)
+    /// Checks if the connection has timed out (30 seconds of inactivity)
     pub fn is_timed_out(&self) -> bool {
         self.last_activity.elapsed() > Duration::from_secs(30)
     }
 }
 
-/// Connect to a peer with enhanced features
+/// Connects to a peer with enhanced features including timeout and retry logic
 pub async fn connect_to_peer<F>(
     addr: SocketAddr,
     peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
@@ -199,7 +199,7 @@ where
     Ok(())
 }
 
-/// Handle incoming connections with enhanced features
+/// Handles incoming connections with enhanced features including timeout and retry logic
 pub async fn handle_incoming_connection<F>(
     stream: TcpStream,
     addr: SocketAddr,
@@ -291,7 +291,7 @@ where
     Ok(())
 }
 
-/// Send a message to a peer with retry logic
+/// Sends a message to a peer with retry logic and exponential backoff
 pub async fn send_message_with_retry(
     addr: SocketAddr,
     message: String,
@@ -351,7 +351,7 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    /// Create a new connection manager
+    /// Creates a new connection manager with the provided peers and node registry
     pub fn new(
         peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
         node_registry: Arc<Mutex<NodeRegistry>>,
@@ -362,7 +362,7 @@ impl ConnectionManager {
         }
     }
 
-    /// Connect to a peer with retry logic and exponential backoff
+    /// Connects to a peer with retry logic and exponential backoff
     pub async fn connect_with_retry<F>(
         &self,
         addr: SocketAddr,
@@ -437,7 +437,7 @@ impl ConnectionManager {
         }
     }
 
-    /// Disconnect from a peer
+    /// Disconnects from a peer and updates the node registry
     pub fn disconnect(&self, addr: &SocketAddr) {
         let mut peers = self.peers.lock().unwrap();
         peers.remove(addr);
@@ -449,19 +449,19 @@ impl ConnectionManager {
         }
     }
 
-    /// Get connection status for a peer
+    /// Gets connection status for a peer
     pub fn is_connected(&self, addr: &SocketAddr) -> bool {
         let peers = self.peers.lock().unwrap();
         peers.contains_key(addr)
     }
 
-    /// Check if a peer is disconnected
+    /// Checks if a peer is disconnected
     pub fn is_disconnected(&self, addr: &SocketAddr) -> bool {
         let peers = self.peers.lock().unwrap();
         !peers.contains_key(addr)
     }
 
-    /// Detect disconnected nodes and update their status in the registry
+    /// Detects disconnected nodes and updates their status in the registry
     pub fn detect_disconnected_nodes(&self) {
         let peers = self.peers.lock().unwrap();
         let mut registry = self.node_registry.lock().unwrap();
@@ -489,12 +489,12 @@ impl ConnectionManager {
         }
     }
 
-    /// Get the node registry
+    /// Gets a clone of the node registry wrapped in Arc<Mutex<...>>
     pub fn get_node_registry(&self) -> Arc<Mutex<NodeRegistry>> {
         Arc::clone(&self.node_registry)
     }
 
-    /// Get the peers map
+    /// Gets a clone of the peers map wrapped in Arc<Mutex<...>>
     pub fn get_peers(&self) -> Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>> {
         Arc::clone(&self.peers)
     }

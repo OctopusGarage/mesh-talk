@@ -20,7 +20,7 @@
         <span class="avatar">{{ contact.name.charAt(0).toUpperCase() }}</span>
         <div class="details">
           <span class="name">{{ contact.name }}</span>
-          <span class="address">{{ formatNodeAddress(contact.address) }}</span>
+          <span class="address">{{ extractAddressIP(contact.address) }}</span>
         </div>
         <span class="status" :class="contact.status || 'offline'">
           {{ (contact.status || 'offline').toUpperCase() }}
@@ -31,8 +31,9 @@
 </template>
 
 <script setup>
+// Props and emits
 import { computed } from 'vue';
-
+import { extractAddressIP } from '../../utils/addressUtils';
 const props = defineProps({
   contacts: {
     type: Array,
@@ -62,27 +63,14 @@ const props = defineProps({
 
 defineEmits(['select']);
 
-const formatNodeAddress = (address) => {
-  if (!address) return '';
-  
-  // Extract just the IP part or hostname part for display
-  try {
-    // If it's in the format ip:port, just show the IP part
-    const parts = address.split(':');
-    if (parts.length >= 2) {
-      return parts[0];
-    }
-    return address;
-  } catch (e) {
-    return address;
-  }
-};
-
+// Computed properties
 const networkLabel = computed(() => {
   if (props.networkStatus === 'connected') return 'Online';
   if (props.networkStatus === 'connecting') return 'Connecting';
   return 'Offline';
 });
+
+
 </script>
 
 <style scoped>
