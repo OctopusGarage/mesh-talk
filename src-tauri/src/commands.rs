@@ -1,13 +1,18 @@
 use crate::api::AppConfig;
+use crate::domain::message::Message;
 use crate::domain::models::{ChatMessage, Contact, MessageStatus, User};
 use crate::events::{emit_contact_added, emit_network_status_changed, emit_node_port_changed};
 use crate::services::auth_service::AuthError;
+use crate::services::file_transfer::{FileTransferHandle, FileTransferManager, TransferManifest};
 use crate::services::node_service::{NodeService, NOTIFICATION_SERVICE};
 use crate::state::{AppState, SessionInfo};
 // use crate::utils::error_handling::{map_mesh_talk_error_to_command_error, validation_error, authentication_error, service_error, network_error, ResultExt};
 
+use log::info;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -55,18 +60,28 @@ fn require_session(state: &AppState) -> CommandResult<SessionInfo> {
 #[tauri::command]
 pub async fn send_message(
     content: String,
+    target_user_id: Option<String>,
+    target_address: Option<String>,
     node_service: tauri::State<'_, Arc<Mutex<NodeService>>>,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<ChatMessageInfo, String> {
-    send_message_impl(content, node_service.inner(), app_state.inner())
-        .await
-        .map(ChatMessageInfo::from)
-        .map_err(|e| e.to_string())
+    send_message_impl(
+        content,
+        target_user_id,
+        target_address,
+        node_service.inner(),
+        app_state.inner(),
+    )
+    .await
+    .map(ChatMessageInfo::from)
+    .map_err(|e| e.to_string())
 }
 
 /// Internal implementation for sending a message with proper error handling
 async fn send_message_impl(
     content: String,
+    target_user_id: Option<String>,
+    target_address: Option<String>,
     node_service: &Arc<Mutex<NodeService>>,
     app_state: &AppState,
 ) -> CommandResult<ChatMessage> {
@@ -80,40 +95,94 @@ async fn send_message_impl(
 
     let session = require_session(app_state)?;
 
+    let normalized_target_user_id = target_user_id.and_then(|id| {
+        let trimmed = id.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let normalized_target_address = target_address.and_then(|addr| {
+        let trimmed = addr.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    if normalized_target_user_id.is_none() && normalized_target_address.is_none() {
+        return Err(CommandError::Validation(
+            "Target user_id or address is required".into(),
+        ));
+    }
+
     let message = app_state
         .message_service()
         .create_message(
-            session.user.id,
+            session.user.name.clone(),
+            session.user.user_id.clone(),
             session.user.address.clone(),
-            None,
-            None,
+            normalized_target_user_id.clone(),
+            normalized_target_address.clone(),
             trimmed.to_string(),
         )
         .map_err(|e| CommandError::Service(format!("Failed to create message: {e:?}")))?;
 
-    let service = node_service.lock().await;
-    let broadcast_result = service.broadcast_message(trimmed.to_string()).await;
-    drop(service);
+    let chat_payload = Message::Chat {
+        from: session.user.name.clone(),
+        content: trimmed.to_string(),
+        from_user_id: Some(session.user.user_id.clone()),
+        from_address: Some(session.user.address.clone()),
+        to_user_id: normalized_target_user_id.clone(),
+        to_address: normalized_target_address.clone(),
+    };
 
-    match broadcast_result {
-        Ok(_) => {
-            app_state
-                .message_service()
-                .mark_delivered(message.id)
-                .map_err(|e| CommandError::Service(format!("Failed to record delivery: {e:?}")))?;
-            let updated = app_state
-                .message_service()
-                .get_message(message.id)
-                .map_err(|e| CommandError::Service(format!("Failed to reload message: {e:?}")))?;
-            Ok(updated)
+    let serialized = serde_json::to_string(&chat_payload)
+        .map_err(|e| CommandError::Service(format!("Failed to serialize message: {e}")))?;
+
+    let send_result = {
+        let service = node_service.lock().await;
+        if let Some(ref user_id) = normalized_target_user_id {
+            service
+                .send_json_message_to_user(user_id, serialized.clone())
+                .await
+                .map_err(|e| {
+                    CommandError::Network(format!("Failed to send message to user {user_id}: {e}"))
+                })
+        } else if let Some(ref addr_str) = normalized_target_address {
+            let socket_addr: SocketAddr = addr_str.parse().map_err(|e| {
+                CommandError::Validation(format!("Invalid target address '{addr_str}': {e}"))
+            })?;
+            service
+                .send_json_message_to_peer(socket_addr, serialized.clone())
+                .await
+                .map_err(|e| {
+                    CommandError::Network(format!("Failed to send message to {addr_str}: {e}"))
+                })
+        } else {
+            service
+                .broadcast_message(trimmed.to_string())
+                .await
+                .map_err(|e| CommandError::Network(format!("Failed to broadcast message: {e}")))
         }
-        Err(err) => {
-            let _ = app_state.message_service().mark_failed(message.id);
-            Err(CommandError::Network(format!(
-                "Failed to broadcast message: {err}"
-            )))
-        }
+    };
+
+    if let Err(err) = send_result {
+        let _ = app_state.message_service().mark_failed(message.id.clone());
+        return Err(err);
     }
+
+    app_state
+        .message_service()
+        .mark_delivered(message.id.clone())
+        .map_err(|e| CommandError::Service(format!("Failed to record delivery: {e:?}")))?;
+    let updated = app_state
+        .message_service()
+        .get_message(message.id.clone())
+        .map_err(|e| CommandError::Service(format!("Failed to reload message: {e:?}")))?;
+    Ok(updated)
 }
 
 /// Gets information about the current node
@@ -149,9 +218,11 @@ pub async fn get_node_info(
     let node_name = service.get_name();
     let username_display = username.clone().unwrap_or_else(|| "Guest".to_string());
     let display_label = format!("{} • {} • {}:{}", node_name, username_display, ip, port);
+    let user_id = service.get_user_id();
 
     Ok(NodeInfo {
         name: node_name,
+        user_id: user_id,
         port,
         username,
         status,
@@ -264,7 +335,7 @@ async fn start_network_impl(
 
     // Set the user ID on the node service
     if let Some(session) = app_state.session().get() {
-        let user_id = session.user.id;
+        let user_id = session.user.user_id.clone();
         {
             let service = node_service.lock().await;
             service.set_user_id(user_id);
@@ -355,6 +426,52 @@ async fn connect_to_node_impl(
         .map_err(|e| CommandError::Network(format!("Failed to connect to {socket_addr}: {e}")))
 }
 
+#[tauri::command]
+pub async fn connect_to_user(
+    user_id: String,
+    node_service: tauri::State<'_, Arc<Mutex<NodeService>>>,
+    app_state: tauri::State<'_, AppState>,
+) -> Result<ConnectUserResult, String> {
+    connect_to_user_impl(user_id, node_service.inner(), app_state.inner())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn connect_to_user_impl(
+    user_id: String,
+    node_service: &Arc<Mutex<NodeService>>,
+    app_state: &AppState,
+) -> CommandResult<ConnectUserResult> {
+    require_session(app_state)?;
+
+    let trimmed = user_id.trim();
+    if trimmed.is_empty() {
+        return Err(CommandError::Validation("user_id is required".into()));
+    }
+
+    let service = node_service.lock().await;
+    let status = service
+        .ensure_connection_for_user(trimmed)
+        .await
+        .map_err(|e| {
+            CommandError::Network(format!(
+                "Failed to establish connection for user_id {}: {}",
+                trimmed, e
+            ))
+        })?;
+
+    info!(
+        "[COMMANDS] TCP connection ready for user_id {} at {} (reused={})",
+        trimmed, status.addr, status.reused
+    );
+
+    Ok(ConnectUserResult {
+        success: true,
+        address: Some(status.addr.to_string()),
+        reused: status.reused,
+    })
+}
+
 fn login_impl(
     username: String,
     password: String,
@@ -375,7 +492,7 @@ fn login_impl(
     {
         Ok((user, token)) => {
             app_state.session().set(token.clone(), user.clone());
-            refresh_unread_count(app_state, user.id)?;
+            refresh_unread_count(app_state, user.user_id.clone())?;
             Ok(LoginResult {
                 success: true,
                 token: Some(token),
@@ -484,8 +601,45 @@ pub async fn get_contacts(app_state: tauri::State<'_, AppState>) -> Result<Conta
 
 fn get_contacts_impl(app_state: &AppState) -> CommandResult<ContactResult> {
     let session = require_session(app_state)?;
-    let mut contacts = app_state.contact_service().get_contacts(session.user.id);
+    let mut contacts = app_state.contact_service().get_contacts(
+        session.user.name.clone(),    // Pass the actual username
+        session.user.user_id.clone(), // Pass the user_id as well
+    );
     contacts.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    // Log the retrieved contacts as JSON
+    println!(
+        "Retrieved {} contacts for user '{}' (user_id: {}):",
+        contacts.len(),
+        session.user.name,
+        session.user.user_id
+    );
+    if !contacts.is_empty() {
+        // Print the full contact data as JSON
+        let json_contacts: Vec<serde_json::Value> = contacts
+            .iter()
+            .map(|contact| {
+                serde_json::json!({
+                    "id": contact.id,
+                    "user_id": contact.user_id,
+                    "name": contact.name,
+                    "username": contact.username,
+                    "address": contact.address,
+                    "is_online": contact.is_online,
+                    "added_at": contact.added_at,
+                    "notes": contact.notes
+                })
+            })
+            .collect();
+
+        println!(
+            "Contact data as JSON: {}",
+            serde_json::to_string_pretty(&json_contacts)
+                .unwrap_or_else(|_| "Failed to serialize".to_string())
+        );
+    } else {
+        println!("No contacts found in storage.");
+    }
 
     Ok(ContactResult {
         success: true,
@@ -510,10 +664,11 @@ fn get_messages_impl(app_state: &AppState) -> CommandResult<Vec<ChatMessage>> {
     let filtered = messages
         .into_iter()
         .filter(|message| {
-            message.from_user_id == session.user.id
+            message.from_user_id == session.user.user_id
                 || message
                     .to_user_id
-                    .map(|id| id == session.user.id)
+                    .as_ref()
+                    .map(|id| id == &session.user.user_id)
                     .unwrap_or(true)
         })
         .collect();
@@ -522,7 +677,7 @@ fn get_messages_impl(app_state: &AppState) -> CommandResult<Vec<ChatMessage>> {
 
 #[tauri::command]
 pub async fn mark_message_read(
-    message_id: u64,
+    message_id: String,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<ChatMessageInfo, String> {
     mark_message_read_impl(message_id, app_state.inner())
@@ -530,19 +685,19 @@ pub async fn mark_message_read(
         .map_err(|e| e.to_string())
 }
 
-fn mark_message_read_impl(message_id: u64, app_state: &AppState) -> CommandResult<ChatMessage> {
+fn mark_message_read_impl(message_id: String, app_state: &AppState) -> CommandResult<ChatMessage> {
     let session = require_session(app_state)?;
 
     let message = app_state
         .message_service()
-        .get_message(message_id)
+        .get_message(message_id.clone())
         .map_err(|e| CommandError::Service(format!("Failed to load message: {e:?}")))?;
 
     ensure_message_access(&message, &session)?;
 
     app_state
         .message_service()
-        .mark_read(message_id)
+        .mark_read(message_id.clone())
         .map_err(|e| CommandError::Service(format!("Failed to mark message read: {e:?}")))?;
 
     let updated = app_state
@@ -550,14 +705,14 @@ fn mark_message_read_impl(message_id: u64, app_state: &AppState) -> CommandResul
         .get_message(message_id)
         .map_err(|e| CommandError::Service(format!("Failed to reload message: {e:?}")))?;
 
-    refresh_unread_count(app_state, session.user.id)?;
+    refresh_unread_count(app_state, session.user.user_id.clone())?;
 
     Ok(updated)
 }
 
 #[tauri::command]
 pub async fn mark_message_delivered(
-    message_id: u64,
+    message_id: String,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<ChatMessageInfo, String> {
     mark_message_delivered_impl(message_id, app_state.inner())
@@ -566,21 +721,21 @@ pub async fn mark_message_delivered(
 }
 
 fn mark_message_delivered_impl(
-    message_id: u64,
+    message_id: String,
     app_state: &AppState,
 ) -> CommandResult<ChatMessage> {
     let session = require_session(app_state)?;
 
     let message = app_state
         .message_service()
-        .get_message(message_id)
+        .get_message(message_id.clone())
         .map_err(|e| CommandError::Service(format!("Failed to load message: {e:?}")))?;
 
     ensure_message_access(&message, &session)?;
 
     app_state
         .message_service()
-        .mark_delivered(message_id)
+        .mark_delivered(message_id.clone())
         .map_err(|e| CommandError::Service(format!("Failed to mark message delivered: {e:?}")))?;
 
     app_state
@@ -599,17 +754,18 @@ fn mark_all_messages_read_impl(app_state: &AppState) -> CommandResult<()> {
 
     app_state
         .message_service()
-        .mark_all_read_for_user(session.user.id)
+        .mark_all_read_for_user(session.user.user_id.clone())
         .map_err(|e| CommandError::Service(format!("Failed to mark messages read: {e:?}")))?;
 
-    refresh_unread_count(app_state, session.user.id)
+    refresh_unread_count(app_state, session.user.user_id.clone())
 }
 
 fn ensure_message_access(message: &ChatMessage, session: &SessionInfo) -> CommandResult<()> {
-    let is_sender = message.from_user_id == session.user.id;
+    let is_sender = message.from_user_id == session.user.user_id;
     let is_recipient = message
         .to_user_id
-        .map(|id| id == session.user.id)
+        .as_ref()
+        .map(|id| id == &session.user.user_id)
         .unwrap_or(true);
 
     if is_sender || is_recipient {
@@ -621,7 +777,7 @@ fn ensure_message_access(message: &ChatMessage, session: &SessionInfo) -> Comman
     }
 }
 
-fn refresh_unread_count(app_state: &AppState, user_id: u64) -> CommandResult<()> {
+fn refresh_unread_count(app_state: &AppState, user_id: String) -> CommandResult<()> {
     let unread = app_state
         .message_service()
         .count_unread_for_user(user_id)
@@ -631,9 +787,66 @@ fn refresh_unread_count(app_state: &AppState, user_id: u64) -> CommandResult<()>
     Ok(())
 }
 
+#[tauri::command]
+pub async fn send_file(
+    path: String,
+    target_user_id: Option<String>,
+    target_address: Option<String>,
+) -> Result<FileTransferHandle, String> {
+    FileTransferManager::global()
+        .start_outgoing(PathBuf::from(path), target_user_id, target_address)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn resume_file_transfer(transfer_id: String) -> Result<(), String> {
+    FileTransferManager::global()
+        .resume_transfer(&transfer_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cancel_file_transfer(transfer_id: String) -> Result<(), String> {
+    FileTransferManager::global()
+        .cancel_transfer(&transfer_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_file_transfers() -> Result<FileTransferList, String> {
+    FileTransferManager::global()
+        .list_transfers()
+        .await
+        .map(|transfers| FileTransferList { transfers })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn accept_incoming_file_transfer(
+    transfer_id: String,
+    save_path: Option<String>,
+) -> Result<(), String> {
+    FileTransferManager::global()
+        .accept_incoming_transfer(&transfer_id, save_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reject_incoming_file_transfer(transfer_id: String) -> Result<(), String> {
+    FileTransferManager::global()
+        .reject_incoming_transfer(&transfer_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 pub struct NodeInfo {
     pub name: String,
+    pub user_id: String,
     pub port: u16,
     pub username: Option<String>, // Logged-in username if available
     pub status: String,           // "Online" or "Offline"
@@ -644,14 +857,14 @@ pub struct NodeInfo {
 
 #[derive(serde::Serialize, Clone)]
 pub struct UserInfo {
-    pub id: u32,
+    pub id: String,
     pub username: String,
 }
 
 impl From<User> for UserInfo {
     fn from(user: User) -> Self {
         Self {
-            id: user.id as u32,
+            id: user.user_id,
             username: user.name.clone(),
         }
     }
@@ -660,7 +873,7 @@ impl From<User> for UserInfo {
 impl UserInfo {
     fn new(user: User) -> Self {
         Self {
-            id: user.id as u32,
+            id: user.user_id,
             username: user.name,
         }
     }
@@ -695,9 +908,19 @@ pub struct NetworkStartResult {
 }
 
 #[derive(serde::Serialize)]
+pub struct ConnectUserResult {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    pub reused: bool,
+}
+
+#[derive(serde::Serialize)]
 pub struct ContactInfo {
-    pub id: u32,
+    pub id: String,
+    pub user_id: String,
     pub name: String,
+    pub username: String,
     pub address: String,
     pub status: String,
     pub is_online: bool,
@@ -709,8 +932,10 @@ pub struct ContactInfo {
 impl From<Contact> for ContactInfo {
     fn from(contact: Contact) -> Self {
         Self {
-            id: contact.id as u32,
+            id: contact.id,
+            user_id: contact.user_id,
             name: contact.name,
+            username: contact.username,
             address: contact.address,
             status: if contact.is_online {
                 "online".into()
@@ -733,12 +958,12 @@ pub struct ContactResult {
     pub contacts: Vec<ContactInfo>,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ChatMessageInfo {
-    pub id: u64,
-    pub from_user_id: u64,
+    pub id: String,
+    pub from_user_id: String,
     pub from_address: String,
-    pub to_user_id: Option<u64>,
+    pub to_user_id: Option<String>,
     pub to_address: Option<String>,
     pub content: String,
     pub sent_at: u64,
@@ -769,11 +994,20 @@ impl From<ChatMessage> for ChatMessageInfo {
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTransferList {
+    pub transfers: Vec<TransferManifest>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::auth_service::AuthService;
     use crate::services::contact_service::ContactService;
+    use crate::services::file_transfer::{
+        FileTransferHandle, FileTransferManager, TransferManifest,
+    };
     use crate::services::message_service::MessageService;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -808,8 +1042,11 @@ mod tests {
             let auth_service = AuthService::new(Arc::new(
                 crate::identity::manager::IdentityManager::new(file_manager.clone()),
             ));
+            let identity_manager =
+                crate::identity::manager::IdentityManager::new(file_manager.clone());
             let contact_manager = Arc::new(crate::contacts::manager::ContactManager::new(
                 file_manager.clone(),
+                identity_manager,
             ));
             let contact_service = ContactService::new(contact_manager);
             let message_service = MessageService::new(Arc::new(file_manager));
@@ -870,7 +1107,8 @@ mod tests {
         let message = app_state
             .message_service()
             .create_message(
-                session.user.id,
+                session.user.name.clone(),
+                session.user.user_id.clone(),
                 session.user.address.clone(),
                 None,
                 None,
@@ -879,7 +1117,8 @@ mod tests {
             .expect("create message");
         assert_eq!(message.status, MessageStatus::Sent);
 
-        let updated = mark_message_delivered_impl(message.id, app_state).expect("mark delivered");
+        let updated =
+            mark_message_delivered_impl(message.id.clone(), app_state).expect("mark delivered");
         assert_eq!(updated.status, MessageStatus::Delivered);
         assert!(updated.delivered_at.is_some());
     }
@@ -896,19 +1135,21 @@ mod tests {
         let message = app_state
             .message_service()
             .create_message(
-                42,
+                session.user.name.clone(),
+                "42".to_string(), // Use string ID for other user
                 "peer:7000".into(),
-                Some(session.user.id),
+                Some(session.user.user_id.clone()),
                 Some(session.user.address.clone()),
                 "incoming".into(),
             )
             .expect("create message");
+        let message_id = message.id.clone();
         app_state
             .message_service()
-            .mark_delivered(message.id)
+            .mark_delivered(message_id.clone())
             .expect("mark delivered");
 
-        let updated = mark_message_read_impl(message.id, app_state).expect("mark read");
+        let updated = mark_message_read_impl(message_id, app_state).expect("mark read");
         assert_eq!(updated.status, MessageStatus::Read);
         assert!(updated.read_at.is_some());
     }
@@ -927,16 +1168,18 @@ mod tests {
             let msg = app_state
                 .message_service()
                 .create_message(
-                    777,
+                    session.user.name.clone(),
+                    "777".to_string(), // Use string ID for other user
                     "peer:7000".into(),
-                    Some(session.user.id),
+                    Some(session.user.user_id.clone()),
                     Some(session.user.address.clone()),
                     content.into(),
                 )
                 .expect("create inbound");
+            let msg_id = msg.id.clone(); // Clone the ID before using it
             app_state
                 .message_service()
-                .mark_delivered(msg.id)
+                .mark_delivered(msg_id)
                 .expect("deliver inbound");
             msg.id
         };
@@ -997,8 +1240,14 @@ mod tests {
     async fn send_message_requires_auth() {
         let harness = TestHarness::new();
 
-        let result =
-            send_message_impl("hello".into(), &harness.node_service, &harness.app_state).await;
+        let result = send_message_impl(
+            "hello".into(),
+            None,
+            None,
+            &harness.node_service,
+            &harness.app_state,
+        )
+        .await;
         assert!(matches!(result, Err(CommandError::Authentication(_))));
     }
 
@@ -1010,9 +1259,15 @@ mod tests {
         register_impl("bob".into(), "secret123".into(), app_state).expect("register");
         login_impl("bob".into(), "secret123".into(), app_state).expect("login");
 
-        let message = send_message_impl("hi there".into(), &harness.node_service, app_state)
-            .await
-            .expect("send message");
+        let message = send_message_impl(
+            "hi there".into(),
+            None,
+            Some("127.0.0.1:7000".into()),
+            &harness.node_service,
+            app_state,
+        )
+        .await
+        .expect("send message");
 
         assert_eq!(message.content, "hi there");
         assert_eq!(message.status, MessageStatus::Delivered);
@@ -1024,16 +1279,32 @@ mod tests {
 pub async fn send_contact_request(
     target_public_key: String,
     alias: Option<String>,
+    username: Option<String>,
+    remote_ip: Option<String>,
+    port: Option<u16>,
+    user_id: Option<String>,
     app_state: tauri::State<'_, AppState>,
 ) -> Result<ContactRequestResult, String> {
-    send_contact_request_impl(target_public_key, alias, app_state.inner())
-        .await
-        .map_err(|e| e.to_string())
+    send_contact_request_impl(
+        target_public_key,
+        alias,
+        username,
+        remote_ip,
+        port,
+        user_id,
+        app_state.inner(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 async fn send_contact_request_impl(
     target_public_key: String,
     alias: Option<String>,
+    username: Option<String>,
+    remote_ip: Option<String>,
+    port: Option<u16>,
+    user_id: Option<String>,
     app_state: &AppState,
 ) -> CommandResult<ContactRequestResult> {
     let session = require_session(app_state)?;
@@ -1046,14 +1317,17 @@ async fn send_contact_request_impl(
     // Get the contact request service from app state
     let contact_request_service = app_state.contact_request_service();
 
-    // Send the contact request with user ID
+    // Send the contact request with user ID and additional fields
     match contact_request_service
         .send_contact_request_with_user_id(
             &session.user.name,
             &session.user.name, // Using username as password placeholder - the service should handle this differently
             &target_public_key,
             alias.as_deref(),
-            session.user.id, // Pass the user ID from the session
+            session.user.user_id.clone(), // Use provided user_id or fallback to session user_id
+            username,                     // Pass the username from the frontend
+            remote_ip,                    // Pass the remote IP from the frontend
+            port,                         // Pass the port from the frontend
         )
         .await
     {
@@ -1108,14 +1382,29 @@ async fn handle_contact_request_impl(
         let (req_pub_key, req_alias) = extract_request_metadata(&request_json)
             .ok_or_else(|| CommandError::Validation("Invalid contact request format".into()))?;
 
+        log::info!("=== START CONTACT REQUEST HANDLING ===");
+        log::info!(
+            "User: {}, Request JSON: {}",
+            session.user.name,
+            request_json
+        );
+
         // Handle the contact request (this will also send auto-approval response)
-        contact_request_service
+        log::info!("Calling contact_request_service.handle_contact_request...");
+        let handle_result = contact_request_service
             .handle_contact_request(
                 &session.user.name,
                 "", // Empty password placeholder - the service should get credentials differently
                 &request_json,
             )
-            .await
+            .await;
+
+        match &handle_result {
+            Ok(_) => log::info!("Successfully handled contact request"),
+            Err(e) => log::error!("Failed to handle contact request: {}", e),
+        }
+
+        handle_result
             .map_err(|e| CommandError::Service(format!("Failed to handle contact request: {e}")))?;
 
         let contact_address = req_pub_key.clone();
@@ -1126,15 +1415,25 @@ async fn handle_contact_request_impl(
             address: Some(contact_address.clone()),
         });
 
+        log::info!("Calling contact_service.add_contact...");
         if let Err(err) = contact_service.add_contact(
-            session.user.id,
+            session.user.name.clone(),    // Pass the username first
+            session.user.user_id.clone(), // Then pass the user_id
             req_alias.clone(),
             contact_address.clone(),
             None,
         ) {
-            eprintln!(
+            log::warn!(
                 "Warning: failed to record contact '{}' for user '{}': {:?}",
-                contact_address, session.user.name, err
+                contact_address,
+                session.user.name,
+                err
+            );
+        } else {
+            log::info!(
+                "Successfully recorded contact '{}' for user '{}'",
+                contact_address,
+                session.user.name
             );
         }
     } else {
@@ -1149,6 +1448,7 @@ async fn handle_contact_request_impl(
                     "", // Empty password placeholder - the service should get credentials differently
                     &contact_request.requester_public_key,
                     false, // not approved
+                    None,
                 )
                 .await
                 .map_err(|e| {
@@ -1162,6 +1462,12 @@ async fn handle_contact_request_impl(
     }
 
     if let Some(ref contact) = created_contact {
+        log::info!(
+            "Emitting contact added event for contact: public_key={}, alias={:?}, address={:?}",
+            contact.public_key,
+            contact.alias,
+            contact.address
+        );
         emit_contact_added(
             app_handle,
             contact.public_key.clone(),
@@ -1169,6 +1475,8 @@ async fn handle_contact_request_impl(
             contact.address.clone(),
         );
     }
+
+    log::info!("=== END CONTACT REQUEST HANDLING ===");
 
     Ok(ContactRequestResult {
         success: true,
@@ -1249,11 +1557,13 @@ pub struct ContactRequestResult {
     pub contact: Option<ContactSummary>,
 }
 
-#[derive(Clone, serde::Serialize)]
+/// Summary information about a contact
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContactSummary {
+    /// Contact's public key
     pub public_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Contact's alias/name
     pub alias: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Contact's network address
     pub address: Option<String>,
 }

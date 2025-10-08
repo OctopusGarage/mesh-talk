@@ -121,7 +121,7 @@ pub async fn start_udp_broadcast(
     name: String,
     username: Option<String>,
     port: u16,
-    user_id: Option<u64>, // Add user ID parameter
+    user_id: Option<String>, // Add user ID parameter
 ) -> MeshTalkResult<()> {
     let broadcast_port = discovery_port();
     let socket = bind_udp_socket(SocketAddr::from(([0, 0, 0, 0], 0)))?;
@@ -142,14 +142,14 @@ pub async fn start_udp_broadcast(
         name: name.clone(),
         port,
         username: username.clone(),
-        user_id,
+        user_id: user_id.clone(),
     };
 
     let heartbeat_message = Message::Heartbeat {
         name,
         port,
         username,
-        user_id,
+        user_id: user_id.clone(),
     };
 
     println!("Starting UDP broadcast on port {}...", broadcast_port);
@@ -227,7 +227,7 @@ async fn send_message(
 
 pub async fn start_udp_discovery<F>(connect_callback: F) -> MeshTalkResult<()>
 where
-    F: Fn(SocketAddr, String, Option<String>, u16) + Send + 'static + Clone,
+    F: Fn(SocketAddr, String, Option<String>, u16, Option<String>) + Send + 'static + Clone,
 {
     // Try to bind to the standard broadcast port, but handle conflicts gracefully
     let broadcast_port = discovery_port();
@@ -303,6 +303,7 @@ where
                     node.name.clone(),
                     node.username.clone(),
                     node.listen_port.unwrap_or(node.addr.port()),
+                    node.user_id.clone(), // Include user_id in the reconnect callback
                 );
             }
         }
@@ -325,7 +326,7 @@ where
                                     name,
                                     port,
                                     username,
-                                    user_id: _, // Extract user_id but don't use it in registry for now
+                                    user_id, // Capture the user_id instead of discarding it
                                 }) = serde_json::from_str(json_data)
                                 {
                                     // println!("[UDP Discovery] Received discovery message from {}:{}\", name, port);
@@ -339,10 +340,17 @@ where
                                             name.clone(),
                                             username.clone(),
                                             Some(port),
+                                            user_id.clone(), // Pass the user_id to the registry
                                         );
                                     }
 
-                                    connect_callback(peer_addr, name, username.clone(), port);
+                                    connect_callback(
+                                        peer_addr,
+                                        name,
+                                        username.clone(),
+                                        port,
+                                        user_id.clone(),
+                                    );
                                 }
                             }
                             MESSAGE_TYPE_HEARTBEAT => {
@@ -351,7 +359,7 @@ where
                                     name,
                                     port,
                                     username,
-                                    user_id: _, // Extract user_id but don't use it in registry for now
+                                    user_id, // Capture the user_id instead of discarding it
                                 }) = serde_json::from_str(json_data)
                                 {
                                     let peer_addr = SocketAddr::new(addr.ip(), port);
@@ -364,10 +372,17 @@ where
                                             name.clone(),
                                             username.clone(),
                                             Some(port),
+                                            user_id.clone(), // Pass the user_id to the registry
                                         );
                                     }
 
-                                    connect_callback(peer_addr, name, username.clone(), port);
+                                    connect_callback(
+                                        peer_addr,
+                                        name,
+                                        username.clone(),
+                                        port,
+                                        user_id.clone(),
+                                    );
                                 }
                             }
                             _ => {

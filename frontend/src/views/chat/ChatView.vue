@@ -8,10 +8,16 @@
           :active-conversation="activeConversation"
           :active-contact="activeContact"
           @mark-read="handleMarkRead"
-          @mark-all-read="handleMarkAllRead"
+          @resume-transfer="handleResumeTransfer"
+          @cancel-transfer="handleCancelTransfer"
+          @open-transfer="handleOpenTransfer"
         >
           <template #input>
-            <MessageInput :disabled="loading" @send="handleSend" />
+            <MessageInput
+              :disabled="loading"
+              @send="handleSend"
+              @attach="handleAttach"
+            />
           </template>
         </ChatWindow>
       </div>
@@ -31,12 +37,14 @@
             <li
               v-for="contact in sortedContacts"
               :key="contact.id ?? contact.address"
-              :class="{ active: contact.address === activeConversation }"
-              @click="handleSelectContact(contact.address)"
+              :class="{ active: isContactActive(contact) }"
+              @click="handleSelectContact(contact)"
             >
               <div class="contact-info">
                 <div class="contact-details">
-                  <span class="contact-name">{{ contact.username }}</span>
+                  <span class="contact-name">
+                    {{ displayNameForContact(contact) }}
+                  </span>
                   <span class="contact-meta">{{ contact.ip }}</span>
                 </div>
                 <span
@@ -137,6 +145,9 @@
               <li v-if="nodePanelInfo.address">
                 <span>{{ nodePanelInfo.address }}</span>
               </li>
+              <li v-if="nodePanelInfo.user_id">
+                <span>{{ nodePanelInfo.user_id }}</span>
+              </li>
             </ul>
           </div>
         </div>
@@ -164,7 +175,7 @@
 
 <script setup>
 // Props and emits
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import ChatWindow from "../../components/chat/ChatWindow.vue";
 import MessageInput from "../../components/chat/MessageInput.vue";
@@ -174,6 +185,8 @@ import { useRealTimeMessages } from "../../composables/chat/useRealTimeMessages"
 import { useFeedbackStore } from "../../stores/feedbackStore";
 import { API } from "../../services/api";
 import { listen } from "@tauri-apps/api/event";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openShell } from "@tauri-apps/plugin-shell";
 import { splitAddress, buildDiscoveredLabel } from "../../utils/addressUtils";
 import Logger from "../../utils/logger";
 
@@ -195,7 +208,11 @@ const {
   nodeInfo,
   loading,
   discoveredNodes,
+  fileTransfers,
+  pendingIncomingTransfers,
 } = storeToRefs(store);
+
+const processingIncomingTransfer = ref(false);
 
 // Event listener references
 const contactRequestUnlisten = ref(null);
@@ -208,16 +225,60 @@ const networkStatusLabel = computed(() => {
   return "Offline";
 });
 
-const activeContact = computed(() => {
-  if (!activeConversation.value) return null;
+const normalizeConversationKey = (key) => {
+  if (typeof key !== "string") {
+    return null;
+  }
+  const trimmed = key.trim();
+  return trimmed.length ? trimmed : null;
+};
 
-  // Find the contact that matches the active conversation address
+const contactConversationKey = (contact) => {
+  if (!contact) {
+    return null;
+  }
+
+  if (typeof contact === "string") {
+    return normalizeConversationKey(contact);
+  }
+
+  const keyFromStore = store.conversationKeyForContact(contact);
+  if (keyFromStore) {
+    return keyFromStore;
+  }
+
+  const fallback =
+    contact.address ??
+    contact.public_key ??
+    contact.user_id ??
+    contact.userId ??
+    null;
+
+  return normalizeConversationKey(fallback);
+};
+
+const isContactActive = (contact) => {
+  const contactKey = contactConversationKey(contact);
+  const activeKey = normalizeConversationKey(activeConversation.value);
+  return Boolean(contactKey && activeKey && contactKey === activeKey);
+};
+
+const activeContact = computed(() => {
+  if (!activeConversation.value) {
+    return null;
+  }
+
   return (
-    sortedContacts.value.find(
-      (contact) => contact.address === activeConversation.value,
-    ) || null
+    sortedContacts.value.find((contact) => isContactActive(contact)) ?? null
   );
 });
+
+const displayNameForContact = (contact) =>
+  contact?.username ||
+  contact?.name ||
+  contact?.display_label ||
+  contactConversationKey(contact) ||
+  "Unknown";
 
 const nodePanelInfo = computed(() => {
   const info = nodeInfo.value;
@@ -227,6 +288,7 @@ const nodePanelInfo = computed(() => {
       label: user.value?.name ?? "Current Node",
       nodeName: null,
       address: null,
+      user_id: null,
     };
   }
 
@@ -234,12 +296,13 @@ const nodePanelInfo = computed(() => {
   const username = info.username ?? user.value?.name ?? null;
   const ip = info.ip ?? null;
   const port = info.port ?? null;
+  const user_id = info.user_id ?? null; // Add user_id from node info
   const directAddress = typeof info.address === "string" ? info.address : null;
   const address =
     directAddress ?? (ip ? `${ip}${port ? `:${port}` : ""}` : null);
   const label = username ?? nodeName ?? address ?? "Current Node";
 
-  return { label, nodeName, address };
+  return { label, nodeName, address, user_id };
 });
 
 // Node overlay properties
@@ -382,7 +445,7 @@ const resolvePendingRequestJson = () => {
 // Message handling functions
   // Send a message to connected peers
   const handleSend = async (content) => {
-    const result = await store.sendMessage(content);
+    const result = await store.sendMessage(content, activeContact.value);
     if (!result.success && store.error) {
       Logger.error(store.error);
       await Logger.error("Failed to send message", {
@@ -394,18 +457,121 @@ const resolvePendingRequestJson = () => {
     }
   };
 
+const handleAttach = async () => {
+  try {
+    const selection = await openDialog({ multiple: false });
+    const filePath = normalizeSelectionPath(selection);
+    if (!filePath) {
+      return;
+    }
+
+    const result = await store.sendFile(filePath, activeContact.value);
+    if (!result.success) {
+      feedback.showError(result.error ?? "发送文件失败");
+    } else {
+      feedback.showInfo("文件传输已开始", { autoDismiss: 2000 });
+    }
+  } catch (error) {
+    feedback.showError(error.message ?? "发送文件失败");
+    await Logger.error("send-file-failed", {
+      error: error.message,
+    });
+  }
+};
+
+const handleResumeTransfer = async (transferId) => {
+  if (!transferId) {
+    return;
+  }
+  await store.resumeFileTransfer(transferId);
+};
+
+const handleCancelTransfer = async (transferId) => {
+  if (!transferId) {
+    return;
+  }
+  await store.cancelFileTransfer(transferId);
+};
+
+const handleOpenTransfer = async (fileMeta) => {
+  const targetPath =
+    fileMeta?.localPath ?? fileMeta?.path ?? fileTransfers.value?.[fileMeta?.transferId]?.localPath;
+  if (!targetPath) {
+    feedback.showError("文件尚未可用");
+    return;
+  }
+  try {
+    await openShell(targetPath);
+  } catch (error) {
+    feedback.showError(error.message ?? "无法打开文件");
+    await Logger.error("open-file-failed", {
+      error: error.message,
+      path: targetPath,
+    });
+  }
+};
+
+const normalizeSelectionPath = (selection) => {
+  if (!selection) {
+    return null;
+  }
+  if (Array.isArray(selection)) {
+    return selection[0] ?? null;
+  }
+  if (typeof selection === "object") {
+    return selection.path ?? null;
+  }
+  if (typeof selection === "string") {
+    return selection;
+  }
+  return null;
+};
+
+const processNextIncomingTransfer = async () => {
+  if (processingIncomingTransfer.value) {
+    return;
+  }
+  const next = pendingIncomingTransfers.value[0];
+  if (!next) {
+    return;
+  }
+  processingIncomingTransfer.value = true;
+  try {
+    const selection = await saveDialog({ defaultPath: next.fileName });
+    const savePath = normalizeSelectionPath(selection);
+    if (!savePath) {
+      await store.rejectIncomingFileTransfer(next.transferId);
+      feedback.showInfo("已取消接收", { autoDismiss: 2000 });
+    } else {
+      await store.acceptIncomingFileTransfer(next.transferId, savePath);
+      feedback.showInfo("开始接收文件", { autoDismiss: 2000 });
+    }
+  } catch (error) {
+    feedback.showError(error.message ?? "无法接收文件");
+    await Logger.error("accept-file-failed", {
+      transferId: next.transferId,
+      error: error.message,
+    });
+    await store.rejectIncomingFileTransfer(next.transferId);
+  } finally {
+    processingIncomingTransfer.value = false;
+    if (pendingIncomingTransfers.value.length > 0) {
+      void processNextIncomingTransfer();
+    }
+  }
+};
+
 const handleMarkRead = async (messageId) => {
   await store.markMessageRead(messageId);
 };
 
-const handleMarkAllRead = async () => {
-  await store.markAllMessagesRead();
-};
-
 // Contact handling functions
-const handleSelectContact = async (address) => {
-  await store.ensureNodeConnection(address);
-  store.selectConversation(address);
+const handleSelectContact = async (contact) => {
+  if (!contact) {
+    return;
+  }
+  await store.ensureNodeConnection(contact);
+  store.selectConversation(contact);
 };
 
 const handleDiscoveryConnect = async (node) => {
@@ -413,43 +579,64 @@ const handleDiscoveryConnect = async (node) => {
     return;
   }
 
-  await store.ensureNodeConnection(node.address);
-  store.selectConversation(node.address);
+  await store.ensureNodeConnection(node);
+  store.selectConversation(node);
 };
 
-// Discovery invite functions
-const handleDiscoveryInvite = async (node) => {
-  Logger.info("Handling discovery invite for node:", { node });
-    Logger.error("Invalid node for invitation");
-
-  // Extract the public key from the node's address or other properties
-  // In a real implementation, we would have the public key available in the node object
-  const targetPublicKey = node.public_key || node.address; // Fallback to address if no public key
-
-  Logger.info("Sending contact request to public key:", { targetPublicKey });
-
-  try {
-    const result = await API.contacts.sendContactRequest(
-      targetPublicKey,
-      node.display_label || node.name,
-    );
-
-    Logger.info("Contact request result:", { result });
-
-    if (result.success) {
-      feedback.showSuccess(
-        `Invitation sent to ${node.display_label || node.name}`,
-      );
-    } else {
-      feedback.showError(
-        `Failed to send invitation: ${result.message || "Unknown error"}`,
-      );
+  const handleDiscoveryInvite = async (node) => {
+    Logger.info("Handling discovery invite for node:", { node });
+    if (!node || !node.address) {
+      Logger.error("Invalid node for invitation");
+      return;
     }
-  } catch (error) {
-    Logger.error("Error sending contact request:", { error });
-    feedback.showError(`Error sending invitation: ${error.message}`);
-  }
-};
+
+    // Extract the public key from the node's address or other properties
+    // In a real implementation, we would have the public key available in the node object
+    const targetPublicKey = node.public_key || node.address; // Fallback to address if no public key
+
+    Logger.info("Sending contact request to public key:", { targetPublicKey });
+
+    try {
+      // Extract additional fields for the contact request
+      const username = node.username || null;
+      const remoteIp = node.ip || null;
+      const port = node.listen_port || node.port || null;
+      const userId = node.user_id || null;
+      
+      Logger.info("Contact request parameters:", {
+        targetPublicKey,
+        alias: node.display_label || node.name,
+        username,
+        remoteIp,
+        port,
+        userId
+      });
+
+      const result = await API.contacts.sendContactRequest(
+        targetPublicKey,
+        node.display_label || node.name,
+        username,
+        remoteIp,
+        port,
+        userId,
+      );
+
+      Logger.info("Contact request result:", { result });
+
+      if (result.success) {
+        feedback.showSuccess(
+          `Invitation sent to ${node.display_label || node.name}`,
+        );
+      } else {
+        feedback.showError(
+          `Failed to send invitation: ${result.message || "Unknown error"}`,
+        );
+      }
+    } catch (error) {
+      Logger.error("Error sending contact request:", { error });
+      feedback.showError(`Error sending invitation: ${error.message}`);
+    }
+  };
 
 // Contact request popup functions
   // Handle incoming contact requests
@@ -548,6 +735,15 @@ const logout = async () => {
   router.push({ name: "login" });
 };
 
+watch(
+  () => pendingIncomingTransfers.value.length,
+  (length) => {
+    if (length > 0) {
+      void processNextIncomingTransfer();
+    }
+  },
+);
+
 // Lifecycle hooks
   // Initialize component
   onMounted(async () => {
@@ -579,6 +775,10 @@ const logout = async () => {
     
     // Log successful initialization
     await Logger.info("ChatView component initialized successfully");
+
+    if (pendingIncomingTransfers.value.length > 0) {
+      void processNextIncomingTransfer();
+    }
   });
 
 onBeforeUnmount(() => {

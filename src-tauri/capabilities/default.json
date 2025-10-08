@@ -6,6 +6,10 @@
   "permissions": [
     "core:default",
     "notification:default",
-    "log:default"
+    "log:default",
+    "dialog:default",
+    "shell:default",
+    "fs:allow-home-read-recursive",
+    "fs:allow-home-write-recursive"
   ]
 }

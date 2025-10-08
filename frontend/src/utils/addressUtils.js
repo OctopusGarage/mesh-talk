@@ -106,13 +106,59 @@ export function normalizeMessage(message) {
   if (!message) {
     return message;
   }
-
-  return {
+  const base = {
     ...message,
     sent_at: message.sent_at ?? Date.now(),
     delivered_at: message.delivered_at ?? null,
     read_at: message.read_at ?? null,
     status: message.status ?? 0,
+  };
+
+  let kind = "text";
+  let file = null;
+
+  const rawContent = base.content;
+  if (typeof rawContent === "string") {
+    try {
+      const parsed = JSON.parse(rawContent);
+      if (parsed && typeof parsed === "object" && parsed.type === "file") {
+        kind = "file";
+        file = {
+          transferId: parsed.transferId,
+          fileName: parsed.fileName,
+          fileSize: parsed.fileSize ?? 0,
+          checksum: parsed.checksum ?? null,
+          status: parsed.status ?? "pending",
+          direction: parsed.direction ?? "outgoing",
+          bytesTransferred: parsed.bytesTransferred ?? parsed.resumeOffset ?? 0,
+          resumeOffset: parsed.resumeOffset ?? 0,
+          targetUserId: parsed.targetUserId ?? null,
+          targetAddress: parsed.targetAddress ?? null,
+        };
+      }
+    } catch (err) {
+      // not json, keep as text
+    }
+  } else if (rawContent && typeof rawContent === "object" && rawContent.type === "file") {
+    kind = "file";
+    file = {
+      transferId: rawContent.transferId,
+      fileName: rawContent.fileName,
+      fileSize: rawContent.fileSize ?? 0,
+      checksum: rawContent.checksum ?? null,
+      status: rawContent.status ?? "pending",
+      direction: rawContent.direction ?? "outgoing",
+      bytesTransferred: rawContent.bytesTransferred ?? rawContent.resumeOffset ?? 0,
+      resumeOffset: rawContent.resumeOffset ?? 0,
+      targetUserId: rawContent.targetUserId ?? null,
+      targetAddress: rawContent.targetAddress ?? null,
+    };
+  }
+
+  return {
+    ...base,
+    kind,
+    file,
   };
 }
 

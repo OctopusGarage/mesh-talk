@@ -209,11 +209,11 @@ fn mark_all_messages_read_from_tray(app: &AppHandle) {
 
     let message_service = app_state.message_service().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(e) = message_service.mark_all_read_for_user(session.user.id) {
+        if let Err(e) = message_service.mark_all_read_for_user(session.user.user_id.clone()) {
             eprintln!("Failed to mark messages as read from tray: {:?}", e);
         }
 
-        match message_service.count_unread_for_user(session.user.id) {
+        match message_service.count_unread_for_user(session.user.user_id.clone()) {
             Ok(count) => NOTIFICATION_SERVICE.set_unread_count(count),
             Err(e) => eprintln!("Failed to count unread messages: {:?}", e),
         }

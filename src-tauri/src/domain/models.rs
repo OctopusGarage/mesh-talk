@@ -2,21 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Unique identifier for entities
-pub type EntityId = u64;
-
 /// User entity representing a Mesh-Talk user
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// Unique identifier for the user
-    pub id: EntityId,
+    pub user_id: String,
     /// User's display name
     pub name: String,
     /// User's unique identifier/address
     pub address: String,
-    /// Persistent identity UUID (string form)
-    #[serde(default)]
-    pub identity_id: String,
     /// Timestamp when the user was created
     pub created_at: u64,
     /// Timestamp when the user was last seen online
@@ -27,17 +21,16 @@ pub struct User {
 
 impl User {
     /// Creates a new User instance with the provided id, name, and address
-    pub fn new(id: EntityId, name: String, address: String) -> Self {
+    pub fn new(user_id: String, name: String, address: String) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
         Self {
-            id,
+            user_id,
             name,
             address,
-            identity_id: String::new(),
             created_at: now,
             last_seen: now,
             is_online: false,
@@ -54,15 +47,18 @@ impl User {
     }
 }
 
+use uuid::Uuid;
 /// Contact entity representing a user's contact
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contact {
     /// Unique identifier for the contact
-    pub id: EntityId,
+    pub id: String,
     /// ID of the user who owns this contact
-    pub user_id: EntityId,
+    pub user_id: String,
     /// Contact's name (may be different from their display name)
     pub name: String,
+    /// Contact's username (as reported by the remote peer or backend)
+    pub username: String,
     /// Contact's address
     pub address: String,
     /// Whether this contact is currently online
@@ -75,20 +71,21 @@ pub struct Contact {
 
 impl Contact {
     /// Creates a new Contact instance with the provided parameters
-    pub fn new(id: EntityId, user_id: EntityId, name: String, address: String) -> Self {
+    pub fn new(user_id: String, name: String, username: String, address: String) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-
-        Self::from_storage(id, user_id, name, address, false, now, None)
+        let id = Uuid::new_v4().to_string();
+        Self::from_storage(id, user_id, name, username, address, false, now, None)
     }
 
     /// Creates a Contact instance from stored data
     pub fn from_storage(
-        id: EntityId,
-        user_id: EntityId,
+        id: String,
+        user_id: String,
         name: String,
+        username: String,
         address: String,
         is_online: bool,
         added_at: u64,
@@ -98,6 +95,7 @@ impl Contact {
             id,
             user_id,
             name,
+            username,
             address,
             is_online,
             added_at,
@@ -146,13 +144,13 @@ impl MessageStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Unique identifier for the message
-    pub id: EntityId,
+    pub id: String,
     /// ID of the user who sent the message
-    pub from_user_id: EntityId,
+    pub from_user_id: String,
     /// Address of the user who sent the message
     pub from_address: String,
     /// ID of the user who received the message (for direct messages)
-    pub to_user_id: Option<EntityId>,
+    pub to_user_id: Option<String>,
     /// Address of the user who received the message (for direct messages)
     pub to_address: Option<String>,
     /// Content of the message
@@ -165,15 +163,17 @@ pub struct ChatMessage {
     pub read_at: Option<u64>,
     /// Status of the message
     pub status: MessageStatus,
+    /// Username of the account that owns/persisted this message on disk
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_username: Option<String>,
 }
 
 impl ChatMessage {
     /// Creates a new ChatMessage instance with the provided parameters
     pub fn new(
-        id: EntityId,
-        from_user_id: EntityId,
+        from_user_id: String,
         from_address: String,
-        to_user_id: Option<EntityId>,
+        to_user_id: Option<String>,
         to_address: Option<String>,
         content: String,
     ) -> Self {
@@ -181,7 +181,7 @@ impl ChatMessage {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-
+        let id = Uuid::new_v4().to_string();
         Self {
             id,
             from_user_id,
@@ -193,6 +193,7 @@ impl ChatMessage {
             delivered_at: None,
             read_at: None,
             status: MessageStatus::Sent,
+            owner_username: None,
         }
     }
 
@@ -241,6 +242,10 @@ pub struct PeerInfo {
     pub last_connected: Option<u64>,
     /// Timestamp of last heartbeat received
     pub last_heartbeat: Option<u64>,
+    /// User ID of the peer (if provided in discovery)
+    pub user_id: Option<String>,
+    /// IP address of the peer (provided in discovery/heartbeat messages)
+    pub ip: Option<String>,
 }
 
 impl PeerInfo {
@@ -259,6 +264,8 @@ impl PeerInfo {
             is_connected: false,
             last_connected: None,
             last_heartbeat: None,
+            user_id: None,
+            ip: None,
         }
     }
 
@@ -294,10 +301,14 @@ impl PeerInfo {
         node_name: String,
         username: Option<String>,
         listen_port: Option<u16>,
+        user_id: Option<String>,
     ) {
         self.node_name = node_name;
         self.username = username;
         self.listen_port = listen_port;
+        if user_id.is_some() {
+            self.user_id = user_id;
+        }
     }
 
     /// Returns a formatted display label for the peer

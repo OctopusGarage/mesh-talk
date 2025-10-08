@@ -1,6 +1,6 @@
 use crate::domain::node_registry::NodeRegistry;
 use crate::error::{MeshTalkError, MeshTalkResult, NetworkErrorKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -204,6 +204,7 @@ pub async fn handle_incoming_connection<F>(
     stream: TcpStream,
     addr: SocketAddr,
     peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+    connection_manager: Option<Arc<ConnectionManager>>,
     message_handler: F,
 ) -> std::io::Result<()>
 where
@@ -218,6 +219,9 @@ where
     let (tx, mut rx) = mpsc::channel(32);
 
     peers.lock().unwrap().insert(addr, tx.clone());
+    if let Some(manager) = &connection_manager {
+        manager.register_connection_for_addr(addr);
+    }
     println!("Accepting new connection from: {}", addr);
 
     // Spawn task for sending messages
@@ -286,6 +290,9 @@ where
 
         // println!("Connection disconnected: {}", addr);
         peers.lock().unwrap().remove(&addr);
+        if let Some(manager) = &connection_manager {
+            manager.unregister_addr(&addr);
+        }
     });
 
     Ok(())
@@ -348,6 +355,8 @@ pub async fn send_message_with_retry(
 pub struct ConnectionManager {
     peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
     node_registry: Arc<Mutex<NodeRegistry>>,
+    user_connections: Arc<Mutex<HashMap<String, SocketAddr>>>,
+    addr_users: Arc<Mutex<HashMap<SocketAddr, HashSet<String>>>>,
 }
 
 impl ConnectionManager {
@@ -359,7 +368,92 @@ impl ConnectionManager {
         Self {
             peers,
             node_registry,
+            user_connections: Arc::new(Mutex::new(HashMap::new())),
+            addr_users: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Register a mapping from user_id to an active socket address
+    pub fn register_user_connection(&self, user_id: impl Into<String>, addr: SocketAddr) {
+        let user_id = user_id.into();
+
+        let previous_addr = {
+            let mut user_map = self.user_connections.lock().unwrap();
+            user_map.insert(user_id.clone(), addr)
+        };
+
+        if let Some(existing_addr) = previous_addr {
+            if existing_addr != addr {
+                let mut addr_map = self.addr_users.lock().unwrap();
+                if let Some(users) = addr_map.get_mut(&existing_addr) {
+                    users.remove(&user_id);
+                    if users.is_empty() {
+                        addr_map.remove(&existing_addr);
+                    }
+                }
+            }
+        }
+
+        let mut addr_map = self.addr_users.lock().unwrap();
+        addr_map
+            .entry(addr)
+            .or_insert_with(HashSet::new)
+            .insert(user_id);
+    }
+
+    /// Register connection by inspecting the node registry for the address
+    pub fn register_connection_for_addr(&self, addr: SocketAddr) {
+        let user_id = {
+            let registry = self.node_registry.lock().unwrap();
+            registry
+                .get_node(addr)
+                .and_then(|node| node.user_id.clone())
+        };
+
+        if let Some(user_id) = user_id {
+            self.register_user_connection(user_id, addr);
+        }
+    }
+
+    /// Remove all user mappings associated with an address
+    pub fn unregister_addr(&self, addr: &SocketAddr) {
+        let users = {
+            let mut addr_map = self.addr_users.lock().unwrap();
+            addr_map.remove(addr)
+        };
+
+        if let Some(users) = users {
+            let mut user_map = self.user_connections.lock().unwrap();
+            for user in users {
+                if let Some(mapped_addr) = user_map.get(&user) {
+                    if mapped_addr == addr {
+                        user_map.remove(&user);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove mapping for a specific user_id
+    pub fn unregister_user(&self, user_id: &str) {
+        if let Some(addr) = {
+            let mut user_map = self.user_connections.lock().unwrap();
+            user_map.remove(user_id)
+        } {
+            let mut addr_map = self.addr_users.lock().unwrap();
+            if let Some(users) = addr_map.get_mut(&addr) {
+                users.remove(user_id);
+                if users.is_empty() {
+                    addr_map.remove(&addr);
+                }
+            }
+        }
+    }
+
+    /// Resolve a connected socket address for the provided user_id
+    pub fn address_for_user(&self, user_id: &str) -> Option<SocketAddr> {
+        let user_map = self.user_connections.lock().unwrap();
+        user_map.get(user_id).copied()
     }
 
     /// Connects to a peer with retry logic and exponential backoff
@@ -401,11 +495,20 @@ impl ConnectionManager {
             {
                 Ok(_) => {
                     // Update node registry status
-                    {
+                    let user_id = {
                         let mut registry = self.node_registry.lock().unwrap();
                         if let Some(node) = registry.get_node_mut(addr) {
                             node.mark_connected();
+                            node.user_id.clone()
+                        } else {
+                            None
                         }
+                    };
+
+                    if let Some(uid) = user_id {
+                        self.register_user_connection(uid, addr);
+                    } else {
+                        self.register_connection_for_addr(addr);
                     }
                     return Ok(());
                 }
@@ -441,6 +544,7 @@ impl ConnectionManager {
     pub fn disconnect(&self, addr: &SocketAddr) {
         let mut peers = self.peers.lock().unwrap();
         peers.remove(addr);
+        self.unregister_addr(addr);
 
         // Update node registry status
         let mut registry = self.node_registry.lock().unwrap();
@@ -534,5 +638,20 @@ mod tests {
 
         // Should fail because there's no connection
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_connection_manager_user_mapping() {
+        let peers = Arc::new(Mutex::new(HashMap::new()));
+        let registry = Arc::new(Mutex::new(NodeRegistry::new()));
+        let manager = ConnectionManager::new(Arc::clone(&peers), Arc::clone(&registry));
+
+        let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        manager.register_user_connection("user123", addr);
+
+        assert_eq!(manager.address_for_user("user123"), Some(addr));
+
+        manager.unregister_addr(&addr);
+        assert!(manager.address_for_user("user123").is_none());
     }
 }

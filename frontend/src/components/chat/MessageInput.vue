@@ -7,7 +7,22 @@
       :disabled="disabled"
       @keydown="handleKeyDown"
     />
-    <button type="submit" :disabled="disabled || !draft.trim()">Send</button>
+    <button
+      type="button"
+      class="attach"
+      :disabled="disabled"
+      @click="emitAttach"
+      title="附加文件"
+    >
+      📎
+    </button>
+    <button
+      type="submit"
+      class="send"
+      :disabled="disabled || !draft.trim()"
+    >
+      Send
+    </button>
   </form>
 </template>
 
@@ -21,7 +36,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["send"]);
+const emit = defineEmits(["send", "attach"]);
 
 const draft = ref("");
 
@@ -30,6 +45,10 @@ const emitMessage = () => {
   if (!content) return;
   emit("send", content);
   draft.value = "";
+};
+
+const emitAttach = () => {
+  emit("attach");
 };
 
 const handleKeyDown = (event) => {
@@ -53,7 +72,7 @@ watch(
 <style scoped>
 .message-input {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 1rem;
   align-items: center;
 }
@@ -67,7 +86,16 @@ input {
   padding: 0.85rem 1.25rem;
 }
 
-button {
+button.attach {
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 999px;
+  color: #93c5fd;
+  font-size: 1.1rem;
+  padding: 0.6rem 0.9rem;
+}
+
+.message-input .send {
   background: linear-gradient(
     135deg,
     rgba(59, 130, 246, 0.9),
@@ -81,7 +109,7 @@ button {
   letter-spacing: 0.04em;
 }
 
-button:disabled {
+.message-input button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

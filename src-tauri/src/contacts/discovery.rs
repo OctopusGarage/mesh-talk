@@ -38,7 +38,7 @@ impl ContactDiscovery {
         addresses: Vec<String>, // Use String instead of libp2p::Multiaddr
     ) -> Result<(), ContactError> {
         // Validate the peer ID
-        if !Contact::validate_public_key(peer_id) {
+        if !Contact::validate_ip(peer_id) {
             return Err(ContactError::InvalidPublicKey);
         }
 
@@ -89,7 +89,7 @@ impl ContactDiscovery {
         alias: Option<&str>,
     ) -> Result<(), ContactError> {
         // Validate the peer ID
-        if !Contact::validate_public_key(peer_id) {
+        if !Contact::validate_ip(peer_id) {
             return Err(ContactError::InvalidPublicKey);
         }
 
@@ -101,9 +101,27 @@ impl ContactDiscovery {
             return Err(ContactError::ContactAlreadyExists(peer_id.to_string()));
         }
 
+        // Parse the IP and port from the peer ID
+        let parts: Vec<&str> = peer_id.split(':').collect();
+        if parts.len() != 2 {
+            return Err(ContactError::InvalidPublicKey);
+        }
+
+        let ip = parts[0];
+        let port_str = parts[1];
+        let port = port_str
+            .parse::<u16>()
+            .map_err(|_| ContactError::InvalidPublicKey)?;
+
         // Add the contact
-        self.contact_manager
-            .add_contact(username, password, peer_id, alias)?;
+        self.contact_manager.add_contact(
+            username,
+            password,
+            ip,
+            port,
+            alias.unwrap_or(ip),
+            None,
+        )?;
 
         info!("Manually added contact: {}", peer_id);
         Ok(())
@@ -120,7 +138,7 @@ impl ContactDiscovery {
 
         for peer_id in peer_ids {
             // Validate the peer ID
-            if !Contact::validate_public_key(peer_id) {
+            if !Contact::validate_ip(peer_id) {
                 continue;
             }
 

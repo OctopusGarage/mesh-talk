@@ -45,7 +45,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let _identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let identity_manager = crate::identity::manager::IdentityManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager);
         let contact_discovery = Arc::new(ContactDiscovery::new(Arc::new(contact_manager)));
 
         let _integration = super::NetworkContactDiscovery::new(contact_discovery);

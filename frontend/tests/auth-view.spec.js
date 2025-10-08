@@ -1,14 +1,32 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createTestingPinia } from "@pinia/testing";
 import { nextTick } from "vue";
 import { useAppStore } from "../src/stores/appStore";
-import LoginView from "../src/views/LoginView.vue";
+import LoginView from "../src/views/auth/LoginView.vue";
+
+const routeMock = { query: {} };
+const routerMock = {
+  replace: vi.fn(() => Promise.resolve()),
+  push: vi.fn(() => Promise.resolve()),
+};
+
+vi.mock("vue-router", () => ({
+  useRoute: () => routeMock,
+  useRouter: () => routerMock,
+}));
 
 describe("LoginView.vue", () => {
   let wrapper;
   let store;
 
   beforeEach(() => {
+    routeMock.query = {};
+    routerMock.replace.mockReset();
+    routerMock.replace.mockImplementation(() => Promise.resolve());
+    routerMock.push.mockReset();
+    routerMock.push.mockImplementation(() => Promise.resolve());
+
     wrapper = mount(LoginView, {
       global: {
         plugins: [
@@ -33,7 +51,10 @@ describe("LoginView.vue", () => {
   });
 
   afterEach(() => {
-    wrapper.unmount();
+    if (wrapper) {
+      wrapper.unmount();
+      wrapper = null;
+    }
     vi.clearAllMocks();
   });
 

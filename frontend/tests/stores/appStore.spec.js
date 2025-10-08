@@ -16,6 +16,14 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: mockListen,
 }));
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-shell", () => ({
+  open: vi.fn(),
+}));
+
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("appStore real-time messaging integration", () => {
@@ -32,13 +40,13 @@ describe("appStore real-time messaging integration", () => {
 
   it("refreshes store state when a message event arrives", async () => {
     const store = useAppStore();
-    store.user = { id: 1, address: "self.node" };
+    store.user = { user_id: "test-user-uuid-1", address: "self.node" };
 
     const inboundMessage = {
-      id: 42,
+      id: "test-message-uuid-42", // Use UUID string instead of number
       from_address: "peer.node",
       to_address: "self.node",
-      to_user_id: 1,
+      to_user_id: "test-user-uuid-1", // Match the user's user_id
       status: 0,
       content: "hello there",
     };
@@ -72,12 +80,13 @@ describe("appStore real-time messaging integration", () => {
         message: inboundMessage,
         sender_address: "peer.node",
         sender_name: "Peer Node",
+        contact_id: "test-contact-uuid",
       },
     });
     await flushPromises();
 
     expect(mockInvoke).toHaveBeenCalledWith("mark_message_read", {
-      messageId: 42,
+      messageId: "test-message-uuid-42",
     });
     expect(store.messages).toHaveLength(1);
     expect(store.messages[0].status).toBe(2);
@@ -109,7 +118,7 @@ describe("appStore real-time messaging integration", () => {
     expect(store.peerCount).toBe(2);
 
     await store.teardownEventListeners();
-    expect(unlistenSpy).toHaveBeenCalledTimes(4);
+    expect(unlistenSpy).toHaveBeenCalledTimes(11);
   });
 
   it("updates node info when the port changes", async () => {
@@ -136,7 +145,7 @@ describe("appStore real-time messaging integration", () => {
 
   it("updates contact details via updateContact", async () => {
     const store = useAppStore();
-    store.user = { id: 1, address: "self.node" };
+    store.user = { user_id: "test-user-uuid-1", address: "self.node" };
 
     const updatedContact = {
       id: 1,

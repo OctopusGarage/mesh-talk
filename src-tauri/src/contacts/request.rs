@@ -89,6 +89,9 @@ pub struct ContactResponse {
     pub timestamp: u64,
     /// Signature to verify authenticity
     pub signature: Vec<u8>,
+    /// Optional user identifier for the responder
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 impl ContactResponse {
@@ -109,6 +112,7 @@ impl ContactResponse {
             responder_alias,
             timestamp,
             signature: Vec::new(), // Will be filled in after signing
+            user_id: None,
         };
 
         // Sign the response
@@ -121,6 +125,7 @@ impl ContactResponse {
             responder_alias: response.responder_alias,
             timestamp: response.timestamp,
             signature,
+            user_id: None,
         })
     }
 
@@ -136,6 +141,7 @@ impl ContactResponse {
             responder_alias: self.responder_alias.clone(),
             timestamp: self.timestamp,
             signature: Vec::new(),
+            user_id: self.user_id.clone(),
         };
 
         // Serialize for verification

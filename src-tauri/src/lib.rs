@@ -92,22 +92,27 @@ pub fn run_tauri() {
         data_path.to_str().unwrap_or(".mesh-talk").to_string()
     };
 
+    // Initialize identity manager first
+    let identity_manager = Arc::new(crate::identity::manager::IdentityManager::new(
+        FILE_MANAGER.as_ref().clone(),
+    ));
+
     // Initialize contact service
-    crate::services::contact_service::ContactService::init_global(FILE_MANAGER.as_ref().clone());
+    crate::services::contact_service::ContactService::init_global(
+        FILE_MANAGER.as_ref().clone(),
+        identity_manager,
+    );
 
     // Initialize contact request service
     if let Err(e) = crate::services::contact_request_service::ContactRequestService::init_global(
         FILE_MANAGER.as_ref().clone(),
         Arc::clone(&node_service),
     ) {
-        log::warn!(
-            "Failed to initialize contact request service: {}",
-            e
-        );
+        log::warn!("Failed to initialize contact request service: {}", e);
     }
 
     // Initialize message service
-    crate::services::message_service::MessageService::init_global(data_path_str);
+    crate::services::message_service::MessageService::init_global(data_path_str.clone());
 
     // Initialize auth service
     crate::services::auth_service::AuthService::init_global(FILE_MANAGER.as_ref().clone());
@@ -121,17 +126,30 @@ pub fn run_tauri() {
         Arc::clone(&app_config),
     );
 
+    let file_transfer_manager = crate::services::file_transfer::FileTransferManager::init_global(
+        data_path_str.clone(),
+        app_state.clone(),
+    );
+    tauri::async_runtime::block_on(async {
+        file_transfer_manager
+            .set_node_service(Arc::clone(&node_service))
+            .await;
+    });
+
     log::info!("Network services are idle until a user signs in; no sockets are bound yet.");
 
     // Start Tauri app
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             // Initialize logging system
             if let Err(e) = crate::logger::init_logging(&app.handle()) {
                 log::error!("Failed to initialize logging: {}", e);
             }
-            
+
             // Get the node service from the app state
             let node_service = app.state::<Arc<Mutex<NodeService>>>().inner().clone();
 
@@ -165,6 +183,7 @@ pub fn run_tauri() {
             commands::start_network,
             commands::stop_network,
             commands::connect_to_node,
+            commands::connect_to_user,
             commands::logout,
             commands::register,
             commands::get_contacts,
@@ -174,7 +193,13 @@ pub fn run_tauri() {
             commands::mark_all_messages_read,
             commands::get_discovered_nodes,
             commands::send_contact_request,
-            commands::handle_contact_request
+            commands::handle_contact_request,
+            commands::send_file,
+            commands::resume_file_transfer,
+            commands::cancel_file_transfer,
+            commands::list_file_transfers,
+            commands::accept_incoming_file_transfer,
+            commands::reject_incoming_file_transfer
         ])
         .run(tauri::generate_context!())
         .map_err(|e| log::error!("Error while running tauri application: {}", e))
@@ -249,8 +274,8 @@ pub async fn launch_network_with_broadcast(
     log::info!("Setting up UDP discovery...");
     let discovery_service = Arc::clone(&node_service);
     let udp_discovery_handle: JoinHandle<()> = tokio::spawn(async move {
-        if let Err(e) = crate::network::udp::start_udp_discovery(
-            move |peer_addr, peer_name, peer_username, peer_port| {
+        tokio::spawn(crate::network::udp::start_udp_discovery(
+            move |peer_addr, peer_name, peer_username, peer_port, peer_user_id| {
                 let service_clone = discovery_service.clone();
                 tokio::spawn(async move {
                     // log::info!("[UDP Discovery Callback] Received peer_addr: {}", peer_addr);
@@ -269,39 +294,36 @@ pub async fn launch_network_with_broadcast(
                                     peer_name.clone(),
                                     peer_username.clone(),
                                     Some(peer_port),
+                                    peer_user_id.clone(),
                                 );
                                 existing.update_heartbeat();
                             } else {
-                                let peer_info = PeerInfo::new(
+                                let mut peer_info = PeerInfo::new(
                                     peer_addr,
                                     peer_name.clone(),
                                     peer_username.clone(),
                                     Some(peer_port),
                                 );
+                                peer_info.user_id = peer_user_id.clone();
+                                peer_info.mark_connected();
+                                let _label = peer_info.display_label();
                                 peer_info_map.insert(peer_addr, peer_info);
                             }
                         }
 
-                        {
-                            let service_guard = service_clone.lock().await;
-                            let mut registry = service_guard.node_registry.lock().unwrap();
-                            registry.add_or_update_node(
-                                peer_addr,
-                                peer_name.clone(),
-                                peer_username.clone(),
-                                Some(peer_port),
-                            );
-                        }
-                    } else {
-                        // log::info!("[UDP Discovery Callback] Ignoring self-discovery: {}", peer_addr);
+                        let service = service_for_peer.lock().await;
+                        let mut registry = service.node_registry.lock().unwrap();
+                        registry.add_or_update_node(
+                            peer_addr,
+                            peer_name.clone(),
+                            peer_username.clone(),
+                            Some(peer_port),
+                            peer_user_id.clone(), // Pass the user_id to the registry
+                        );
                     }
                 });
             },
-        )
-        .await
-        {
-            log::error!("UDP discovery service failed: {}", e);
-        }
+        ));
     });
 
     // Start UDP broadcast only if requested
@@ -313,7 +335,12 @@ pub async fn launch_network_with_broadcast(
         };
         let (username_clone, user_id) = {
             let service = node_service.lock().await;
-            (broadcast_username.clone(), Some(service.get_user_id()))
+            let user_id_str = service.get_user_id();
+            if user_id_str.is_empty() {
+                (broadcast_username.clone(), None)
+            } else {
+                (broadcast_username.clone(), Some(user_id_str))
+            }
         };
         Some(tokio::spawn(async move {
             if let Err(e) =

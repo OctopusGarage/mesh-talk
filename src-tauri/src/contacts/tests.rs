@@ -12,7 +12,7 @@ mod tests {
     fn test_contact_creation() {
         let public_key = "test_public_key".to_string();
         let alias = Some("Test User".to_string());
-        let contact = Contact::new(public_key.clone(), alias.clone());
+        let contact = Contact::new(public_key.clone(), alias.clone(), None);
 
         assert_eq!(contact.public_key, public_key);
         assert_eq!(contact.alias, alias);
@@ -33,7 +33,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -45,11 +45,11 @@ mod tests {
         let alias = Some("Test Contact");
 
         // Add a contact
-        let result = contact_manager.add_contact(username, password, public_key, alias);
+        let result = contact_manager.add_contact(username, password, public_key, alias, None);
         assert!(result.is_ok());
 
         // Try to add the same contact again (should fail)
-        let result = contact_manager.add_contact(username, password, public_key, alias);
+        let result = contact_manager.add_contact(username, password, public_key, alias, None);
         assert!(result.is_err());
 
         // Get the contact and verify it exists
@@ -65,7 +65,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -80,10 +80,10 @@ mod tests {
 
         // Add contacts
         contact_manager
-            .add_contact(username, password, public_key1, alias1)
+            .add_contact(username, password, public_key1, alias1, None)
             .unwrap();
         contact_manager
-            .add_contact(username, password, public_key2, alias2)
+            .add_contact(username, password, public_key2, alias2, None)
             .unwrap();
 
         // Get a specific contact
@@ -105,7 +105,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -131,11 +131,11 @@ mod tests {
     }
 
     #[test]
-    fn test_contact_manager_update_contact_alias() {
+    fn test_contact_manager_update_alias() {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -143,25 +143,23 @@ mod tests {
         // Register a user first
         let _user = identity_manager.register_user(username, password).unwrap();
 
+        // Add a contact
         let public_key = "contact_public_key";
         let alias = Some("Test Contact");
-
-        // Add a contact
         contact_manager
             .add_contact(username, password, public_key, alias)
             .unwrap();
 
-        // Update the contact alias
-        let new_alias = Some("Updated Contact");
-        let result =
-            contact_manager.update_contact_alias(username, password, public_key, new_alias);
-        assert!(result.is_ok());
+        // Update the alias
+        contact_manager
+            .update_contact_alias(username, password, public_key, Some("Updated Contact"))
+            .unwrap();
 
         // Get the contact and verify the alias was updated
         let contact = contact_manager
             .get_contact(username, password, public_key)
             .unwrap();
-        assert_eq!(contact.alias, new_alias.map(|s| s.to_string()));
+        assert_eq!(contact.alias, Some("Updated Contact".to_string()));
     }
 
     #[test]
@@ -169,7 +167,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -201,7 +199,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -211,13 +209,13 @@ mod tests {
 
         // Add some contacts
         contact_manager
-            .add_contact(username, password, "public_key_1", Some("Alice"))
+            .add_contact(username, password, "public_key_1", Some("Alice"), None)
             .unwrap();
         contact_manager
-            .add_contact(username, password, "public_key_2", Some("Bob Smith"))
+            .add_contact(username, password, "public_key_2", Some("Bob Smith"), None)
             .unwrap();
         contact_manager
-            .add_contact(username, password, "public_key_3", Some("Charlie"))
+            .add_contact(username, password, "public_key_3", Some("Charlie"), None)
             .unwrap();
 
         // Search for contacts by alias
@@ -266,7 +264,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -276,13 +274,13 @@ mod tests {
 
         // Add contacts with aliases
         contact_manager
-            .add_contact(username, password, "public_key_1", Some("Alice"))
+            .add_contact(username, password, "public_key_1", Some("Alice"), None)
             .unwrap();
         contact_manager
-            .add_contact(username, password, "public_key_2", Some("Alice"))
+            .add_contact(username, password, "public_key_2", Some("Alice"), None)
             .unwrap(); // Same alias
         contact_manager
-            .add_contact(username, password, "public_key_3", Some("Bob"))
+            .add_contact(username, password, "public_key_3", Some("Bob"), None)
             .unwrap();
 
         // Check that we can list all contacts
@@ -315,7 +313,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -376,7 +374,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
 
         let username = "testuser";
         let password = "testpassword";
@@ -472,7 +470,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_manager = FileManager::new(temp_dir.path().to_path_buf());
         let identity_manager = IdentityManager::new(file_manager.clone());
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
         let contact_discovery = ContactDiscovery::new(Arc::new(contact_manager));
 
         let username = "testuser";
@@ -487,7 +485,7 @@ mod tests {
             .unwrap();
 
         // Check that the contact was added
-        let contact_manager = ContactManager::new(file_manager.clone());
+        let contact_manager = ContactManager::new(file_manager.clone(), identity_manager.clone());
         let contact = contact_manager
             .get_contact(username, password, "peer_id_1")
             .unwrap();

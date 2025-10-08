@@ -34,6 +34,8 @@ pub struct DiscoveredNode {
     pub name: String,
     /// Advertised username
     pub username: Option<String>,
+    /// Advertised TCP listening IP
+    pub remote_ip: Option<String>,
     /// Advertised TCP listening port
     pub listen_port: Option<u16>,
     /// Last time we received a heartbeat from this node
@@ -44,6 +46,8 @@ pub struct DiscoveredNode {
     pub status: NodeStatus,
     /// Number of consecutive connection failures
     pub failure_count: u32,
+    /// User ID of the node (if provided in discovery)
+    pub user_id: Option<String>,
 }
 
 impl DiscoveredNode {
@@ -58,11 +62,13 @@ impl DiscoveredNode {
             addr,
             name,
             username,
+            remote_ip: None,
             listen_port,
             last_heartbeat: SystemTime::now(),
             last_connected: None,
             status: NodeStatus::Offline,
             failure_count: 0,
+            user_id: None,
         }
     }
 
@@ -125,6 +131,8 @@ impl DiscoveredNode {
 pub struct NodeRegistry {
     /// Map of discovered nodes (key: node address, value: DiscoveredNode)
     nodes: HashMap<SocketAddr, DiscoveredNode>,
+    /// Index mapping user_id to node address for fast lookup (key: user_id, value: node address)
+    user_id_index: HashMap<String, SocketAddr>,
 }
 
 impl NodeRegistry {
@@ -132,6 +140,7 @@ impl NodeRegistry {
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
+            user_id_index: HashMap::new(),
         }
     }
 
@@ -142,6 +151,7 @@ impl NodeRegistry {
         name: String,
         username: Option<String>,
         listen_port: Option<u16>,
+        user_id: Option<String>,
     ) {
         let ip = addr.ip();
         let resolved_port = listen_port.unwrap_or_else(|| addr.port());
@@ -159,17 +169,57 @@ impl NodeRegistry {
         if let Some(key) = existing_key {
             if key == normalized_addr {
                 if let Some(node) = self.nodes.get_mut(&key) {
+                    // Remove old user_id from index if it exists and differs from new one
+                    if let Some(old_user_id) = &node.user_id {
+                        if user_id.as_ref() != Some(old_user_id) {
+                            self.user_id_index.remove(old_user_id);
+                        }
+                    }
+
                     node.addr = normalized_addr;
                     node.name = name;
                     node.username = username;
                     node.listen_port = Some(resolved_port);
+                    if let Some(id) = user_id {
+                        println!(
+                            "[NODE REGISTRY] Updating node {} with user_id: {}",
+                            normalized_addr, id
+                        );
+                        node.user_id = Some(id.clone());
+                        // Add to user_id_index
+                        self.user_id_index.insert(id, normalized_addr);
+                    } else {
+                        println!(
+                            "[NODE REGISTRY] Node {} has no user_id to update",
+                            normalized_addr
+                        );
+                    }
                     node.update_heartbeat();
                 }
             } else if let Some(mut node) = self.nodes.remove(&key) {
+                // Remove old entry from user_id_index if node had a user_id
+                if let Some(old_user_id) = &node.user_id {
+                    self.user_id_index.remove(old_user_id);
+                }
+
                 node.addr = normalized_addr;
                 node.name = name;
                 node.username = username;
                 node.listen_port = Some(resolved_port);
+                if let Some(id) = user_id {
+                    println!(
+                        "[NODE REGISTRY] Normalizing node to {} with user_id: {}",
+                        normalized_addr, id
+                    );
+                    node.user_id = Some(id.clone());
+                    // Add new entry to user_id_index
+                    self.user_id_index.insert(id, normalized_addr);
+                } else {
+                    println!(
+                        "[NODE REGISTRY] Normalized node {} has no user_id to update",
+                        normalized_addr
+                    );
+                }
                 node.update_heartbeat();
                 println!("Discovered node normalized to {}", normalized_addr);
                 self.nodes.insert(normalized_addr, node);
@@ -181,13 +231,24 @@ impl NodeRegistry {
                 username.clone(),
                 Some(resolved_port),
             );
+            if let Some(id) = user_id {
+                println!(
+                    "[NODE REGISTRY] Creating new node {} with user_id: {}",
+                    normalized_addr, id
+                );
+                node.user_id = Some(id.clone());
+                // Add to user_id_index
+                self.user_id_index.insert(id, normalized_addr);
+            } else {
+                println!(
+                    "[NODE REGISTRY] Creating new node {} without user_id",
+                    normalized_addr
+                );
+            }
             node.update_heartbeat();
             println!(
                 "Discovered new node: addr={} name='{}' username='{:#?}' port={}",
-                normalized_addr,
-                name,
-                username.as_deref().unwrap_or("Unknown"),
-                resolved_port
+                normalized_addr, name, username, resolved_port
             );
             self.nodes.insert(normalized_addr, node);
         }
@@ -263,6 +324,35 @@ impl NodeRegistry {
         removed_addrs
     }
 
+    /// Get a node by user_id
+    pub fn get_node_by_user_id(&self, user_id: &str) -> Option<&DiscoveredNode> {
+        if let Some(addr) = self.user_id_index.get(user_id) {
+            self.nodes.get(addr)
+        } else {
+            None
+        }
+    }
+
+    /// Get a mutable reference to a node by user_id
+    pub fn get_node_by_user_id_mut(&mut self, user_id: &str) -> Option<&mut DiscoveredNode> {
+        if let Some(addr) = self.user_id_index.get(user_id) {
+            self.nodes.get_mut(addr)
+        } else {
+            None
+        }
+    }
+
+    /// Remove a node by user_id
+    pub fn remove_node_by_user_id(&mut self, user_id: &str) -> Option<DiscoveredNode> {
+        if let Some(addr) = self.user_id_index.get(user_id) {
+            let addr = *addr;
+            self.user_id_index.remove(user_id);
+            self.nodes.remove(&addr)
+        } else {
+            None
+        }
+    }
+
     /// Get the number of nodes
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -297,7 +387,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
 
-        registry.add_or_update_node(addr, "test-node".to_string(), None, Some(addr.port()));
+        registry.add_or_update_node(addr, "test-node".to_string(), None, Some(addr.port()), None);
         assert_eq!(registry.len(), 1);
 
         let node = registry.get_node(addr).unwrap();
@@ -306,11 +396,99 @@ mod tests {
     }
 
     #[test]
+    fn test_add_or_update_node_with_user_id() {
+        let mut registry = NodeRegistry::new();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
+        let user_id = "user123".to_string();
+
+        registry.add_or_update_node(
+            addr,
+            "test-node".to_string(),
+            Some("username".to_string()),
+            Some(addr.port()),
+            Some(user_id.clone()),
+        );
+        assert_eq!(registry.len(), 1);
+
+        // Test that we can get the node by user_id
+        let node = registry.get_node_by_user_id(&user_id).unwrap();
+        assert_eq!(node.name, "test-node");
+        assert_eq!(node.user_id.as_ref(), Some(&user_id));
+        assert_eq!(node.username.as_ref(), Some(&"username".to_string()));
+    }
+
+    #[test]
+    fn test_get_node_by_user_id_not_found() {
+        let registry = NodeRegistry::new();
+        assert!(registry.get_node_by_user_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_remove_node_by_user_id() {
+        let mut registry = NodeRegistry::new();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
+        let user_id = "user456".to_string();
+
+        registry.add_or_update_node(
+            addr,
+            "test-node".to_string(),
+            Some("username".to_string()),
+            Some(addr.port()),
+            Some(user_id.clone()),
+        );
+
+        // Verify node exists
+        assert!(registry.get_node_by_user_id(&user_id).is_some());
+
+        // Remove node by user_id
+        let removed_node = registry.remove_node_by_user_id(&user_id);
+        assert!(removed_node.is_some());
+        assert_eq!(removed_node.unwrap().name, "test-node");
+
+        // Verify node no longer exists
+        assert!(registry.get_node_by_user_id(&user_id).is_none());
+    }
+
+    #[test]
+    fn test_update_node_with_new_user_id() {
+        let mut registry = NodeRegistry::new();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
+        let old_user_id = "old_user".to_string();
+        let new_user_id = "new_user".to_string();
+
+        // Add node with old user_id
+        registry.add_or_update_node(
+            addr,
+            "test-node".to_string(),
+            Some("username".to_string()),
+            Some(addr.port()),
+            Some(old_user_id.clone()),
+        );
+
+        // Verify old user_id works
+        assert!(registry.get_node_by_user_id(&old_user_id).is_some());
+        assert!(registry.get_node_by_user_id(&new_user_id).is_none());
+
+        // Update node with new user_id
+        registry.add_or_update_node(
+            addr,
+            "test-node".to_string(),
+            Some("username".to_string()),
+            Some(addr.port()),
+            Some(new_user_id.clone()),
+        );
+
+        // Verify old user_id no longer works, but new one does
+        assert!(registry.get_node_by_user_id(&old_user_id).is_none());
+        assert!(registry.get_node_by_user_id(&new_user_id).is_some());
+    }
+
+    #[test]
     fn test_update_node_status() {
         let mut registry = NodeRegistry::new();
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
 
-        registry.add_or_update_node(addr, "test-node".to_string(), None, Some(addr.port()));
+        registry.add_or_update_node(addr, "test-node".to_string(), None, Some(addr.port()), None);
         registry.update_node_status(addr, NodeStatus::ConnectionFailed);
 
         let node = registry.get_node(addr).unwrap();
@@ -323,7 +501,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
 
-        registry.add_or_update_node(addr, "test-node".to_string(), None, Some(addr.port()));
+        registry.add_or_update_node(addr, "test-node".to_string(), None, Some(addr.port()), None);
         registry.update_node_status(addr, NodeStatus::ConnectionFailed);
 
         let node = registry.get_node(addr).unwrap();
@@ -336,8 +514,20 @@ mod tests {
         let addr1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7000);
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7001);
 
-        registry.add_or_update_node(addr1, "test-node-1".to_string(), None, Some(addr1.port()));
-        registry.add_or_update_node(addr2, "test-node-2".to_string(), None, Some(addr2.port()));
+        registry.add_or_update_node(
+            addr1,
+            "test-node-1".to_string(),
+            None,
+            Some(addr1.port()),
+            None,
+        );
+        registry.add_or_update_node(
+            addr2,
+            "test-node-2".to_string(),
+            None,
+            Some(addr2.port()),
+            None,
+        );
 
         // Manually set one node to timeout
         if let Some(node) = registry.get_node_mut(addr1) {

@@ -1,6 +1,7 @@
 use crate::commands::ChatMessageInfo;
 use crate::domain::node_registry::NodeStatus;
 use crate::perf_monitor;
+use crate::services::file_transfer::{TransferDirection, TransferStatus};
 use crate::services::node_service::{MessageEvent, NodeService};
 use crate::state::AppState;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +31,10 @@ pub const EVENT_CONTACT_ADDED: &str = "contact-added";
 pub const EVENT_NETWORK_STATUS_CHANGED: &str = "network-status-changed";
 pub const EVENT_NODE_PORT_CHANGED: &str = "node-port-changed";
 pub const EVENT_NODES_DISCOVERED: &str = "nodes-discovered";
+pub const EVENT_FILE_TRANSFER_STATUS: &str = "file-transfer-status";
+pub const EVENT_FILE_TRANSFER_PROGRESS: &str = "file-transfer-progress";
+pub const EVENT_FILE_TRANSFER_COMPLETE: &str = "file-transfer-complete";
+pub const EVENT_FILE_TRANSFER_OFFER: &str = "file-transfer-offer";
 
 static NODE_EVENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
@@ -53,13 +58,31 @@ pub struct MessageReceivedEvent {
     pub sender_name: String,
     pub sender_address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contact_id: Option<u64>,
+    pub contact_id: Option<String>,
+    pub is_unread: bool,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct FileTransferOfferEvent {
+    pub transfer_id: String,
+    pub file_name: String,
+    pub file_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_save_path: Option<bool>,
 }
 
 #[derive(serde::Serialize, Clone)]
 pub struct ContactStatusChangedEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contact_id: Option<u64>,
+    pub contact_id: Option<String>,
     pub address: String,
     pub ip: String,
     pub status: String, // online, offline, away, etc.
@@ -127,6 +150,12 @@ pub struct DiscoveredNodeInfo {
     pub port: u16,
     pub display_label: String,
     pub is_connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<String>,
 }
 
 // Function to emit a message received event
@@ -155,7 +184,11 @@ fn emit_contact_status_changed<R: Runtime>(
         if let Some(session) = app_state.session().get() {
             app_state
                 .contact_service()
-                .find_contact_by_address(session.user.id, &address)
+                .find_contact_by_address(
+                    session.user.name.clone(),
+                    session.user.user_id.clone(),
+                    &address,
+                )
                 .map(|contact| (Some(contact.id), Some(contact.name)))
                 .unwrap_or((None, None))
         } else {
@@ -216,6 +249,18 @@ pub fn emit_nodes_discovered<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     nodes: Vec<DiscoveredNodeInfo>,
 ) {
+    // Debug logging: Print the complete data packet being sent
+    println!(
+        "[EVENTS DEBUG] Emitting nodes-discovered event with {} nodes",
+        nodes.len()
+    );
+    for (i, node) in nodes.iter().enumerate() {
+        println!(
+            "  [Node {}] Name: {}, Username: {:?}, Address: {}, IP: {}, Port: {}, User ID: {:?}, Source IP: {:?}",
+            i, node.name, node.username, node.address, node.ip, node.port, node.user_id, node.source_ip
+        );
+    }
+
     let event = NodesDiscoveredEvent { nodes };
     if let Err(e) = app_handle.emit(EVENT_NODES_DISCOVERED, event) {
         error!("Failed to emit nodes discovered event: {}", e);
@@ -367,6 +412,7 @@ pub async fn setup_node_service_events(
             let nodes = {
                 let service = node_for_discovery.lock().await;
                 let registry = service.node_registry.lock().unwrap();
+                let peer_info_map = service.node.peer_info.lock().unwrap();
 
                 registry
                     .snapshot()
@@ -385,6 +431,11 @@ pub async fn setup_node_service_events(
                             port
                         );
 
+                        // Try to get the source IP from peer_info if available
+                        let source_ip = peer_info_map
+                            .get(&entry.addr)
+                            .and_then(|peer_info| peer_info.ip.clone());
+
                         DiscoveredNodeInfo {
                             name: entry.name,
                             username: username_clone,
@@ -394,6 +445,9 @@ pub async fn setup_node_service_events(
                             port,
                             display_label,
                             is_connected: entry.status == NodeStatus::Online,
+                            last_seen: None, // In a full implementation, we would track this
+                            user_id: entry.user_id.clone(),
+                            source_ip,
                         }
                     })
                     .collect::<Vec<DiscoveredNodeInfo>>()
@@ -481,19 +535,28 @@ fn build_message_event_payload_with_state(
         return fallback();
     };
 
-    let sender_address = if event.from.trim().is_empty() {
+    let sender_address = if event.from_address.trim().is_empty() {
         "unknown".to_owned()
     } else {
-        event.from.clone()
+        event.from_address.clone()
     };
+    let sender_name = event
+        .sender_name
+        .clone()
+        .unwrap_or_else(|| sender_address.clone());
+    let from_user_id = event
+        .from_user_id
+        .clone()
+        .unwrap_or_else(|| "unknown_sender".to_string());
 
     let message_service = app_state.message_service();
 
     let persisted_message = message_service
         .create_message(
-            0,
+            session.user.name.clone(),
+            from_user_id,
             sender_address.clone(),
-            Some(session.user.id),
+            Some(session.user.user_id.clone()),
             Some(session.user.address.clone()),
             event.content.clone(),
         )
@@ -502,12 +565,13 @@ fn build_message_event_payload_with_state(
         })
         .ok()
         .and_then(|message| {
-            if let Err(err) = message_service.mark_delivered(message.id) {
+            let message_id = message.id.clone(); // Store the ID before move
+            if let Err(err) = message_service.mark_delivered(message_id.clone()) {
                 error!("Failed to mark incoming message as delivered: {:?}", err);
             }
 
             message_service
-                .get_message(message.id)
+                .get_message(message_id)
                 .map_err(|err| {
                     error!("Failed to reload persisted message: {:?}", err);
                 })
@@ -516,12 +580,16 @@ fn build_message_event_payload_with_state(
         });
 
     let contact_service = app_state.contact_service();
-    let contact = contact_service.find_contact_by_address(session.user.id, &sender_address);
+    let contact = contact_service.find_contact_by_address(
+        session.user.name.clone(),
+        session.user.user_id.clone(),
+        &sender_address,
+    );
     let sender_name = contact
         .as_ref()
         .map(|contact| contact.name.clone())
-        .unwrap_or_else(|| event.from.clone());
-    let contact_id = contact.as_ref().map(|contact| contact.id);
+        .unwrap_or(sender_name);
+    let contact_id = contact.as_ref().map(|contact| contact.id.clone());
 
     if let Some(message) = persisted_message {
         return MessageReceivedEvent {
@@ -529,6 +597,7 @@ fn build_message_event_payload_with_state(
             sender_name,
             sender_address,
             contact_id,
+            is_unread: false, // Since this message was persisted, it might not be unread
         };
     }
 
@@ -541,22 +610,34 @@ fn fallback_message_event(event: &MessageEvent) -> MessageReceivedEvent {
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
 
+    let sender_address = if event.from_address.trim().is_empty() {
+        "unknown".to_string()
+    } else {
+        event.from_address.clone()
+    };
+    let sender_name = event
+        .sender_name
+        .clone()
+        .unwrap_or_else(|| sender_address.clone());
+    let from_user_id = event.from_user_id.clone().unwrap_or_default();
+
     MessageReceivedEvent {
         message: ChatMessageInfo {
-            id: 0,
-            from_user_id: 0,
-            from_address: event.from.clone(),
-            to_user_id: None,
-            to_address: None,
+            id: String::new(),
+            from_user_id,
+            from_address: sender_address.clone(),
+            to_user_id: event.to_user_id.clone(),
+            to_address: event.to_address.clone(),
             content: event.content.clone(),
             sent_at: timestamp,
             delivered_at: None,
             read_at: None,
             status: 0,
         },
-        sender_name: event.from.clone(),
-        sender_address: event.from.clone(),
+        sender_name,
+        sender_address,
         contact_id: None,
+        is_unread: true, // Default to true for fallback messages (incoming messages)
     }
 }
 
@@ -672,8 +753,10 @@ mod tests {
         let auth_service = AuthService::new(Arc::new(
             crate::identity::manager::IdentityManager::new(file_manager.clone()),
         ));
+        let identity_manager = crate::identity::manager::IdentityManager::new(file_manager.clone());
         let contact_manager = Arc::new(crate::contacts::manager::ContactManager::new(
             file_manager.clone(),
+            identity_manager,
         ));
         let contact_service = ContactService::new(contact_manager);
         let message_service = MessageService::new(Arc::new(file_manager));
@@ -685,21 +768,29 @@ mod tests {
             Arc::new(crate::api::AppConfig::default()),
         );
 
-        let local_user = User::new(1, "local-user".into(), "127.0.0.1:7000".into());
+        let local_user = User::new(
+            "test-user-uuid".to_string(),
+            "local-user".into(),
+            "127.0.0.1:7000".into(),
+        );
         app_state.session().set("token".into(), local_user.clone());
 
         let event = MessageEvent {
-            from: "peer-one".into(),
+            from_address: "192.168.0.2:9000".into(),
+            sender_name: Some("peer-one".into()),
+            from_user_id: Some("peer-user".into()),
+            to_user_id: Some(local_user.user_id.clone()),
+            to_address: Some(local_user.address.clone()),
             content: "Hello from the network".into(),
         };
 
         let payload = build_message_event_payload_with_state(&event, Some(&app_state));
 
-        assert!(payload.message.id > 0);
+        assert!(!payload.message.id.is_empty()); // Check that the message id is not empty instead of > 0
         assert_eq!(payload.message.content, "Hello from the network");
-        assert_eq!(payload.message.to_user_id, Some(local_user.id));
+        assert_eq!(payload.message.to_user_id, Some(local_user.user_id));
         assert_eq!(payload.sender_name, "peer-one");
-        assert_eq!(payload.sender_address, "peer-one");
+        assert_eq!(payload.sender_address, "192.168.0.2:9000");
         assert!(payload.contact_id.is_none());
         assert_eq!(payload.message.status, 1); // Delivered
 
@@ -709,4 +800,76 @@ mod tests {
             .expect("message persisted");
         assert_eq!(persisted.content, "Hello from the network");
     }
+}
+
+pub fn emit_file_transfer_status(
+    transfer_id: &str,
+    status: TransferStatus,
+    error: Option<String>,
+    direction: TransferDirection,
+) {
+    with_node_event_app_handle(|handle| {
+        let _ = handle.emit(
+            EVENT_FILE_TRANSFER_STATUS,
+            serde_json::json!({
+                "transferId": transfer_id,
+                "status": format!("{status:?}").to_lowercase(),
+                "direction": match direction {
+                    TransferDirection::Incoming => "incoming",
+                    TransferDirection::Outgoing => "outgoing",
+                },
+                "error": error,
+            }),
+        );
+    });
+}
+
+pub fn emit_file_transfer_progress(
+    transfer_id: &str,
+    bytes: u64,
+    total: u64,
+    direction: TransferDirection,
+) {
+    with_node_event_app_handle(|handle| {
+        let _ = handle.emit(
+            EVENT_FILE_TRANSFER_PROGRESS,
+            serde_json::json!({
+                "transferId": transfer_id,
+                "bytes": bytes,
+                "total": total,
+                "direction": match direction {
+                    TransferDirection::Incoming => "incoming",
+                    TransferDirection::Outgoing => "outgoing",
+                }
+            }),
+        );
+    });
+}
+
+pub fn emit_file_transfer_complete(
+    transfer_id: &str,
+    path: String,
+    direction: TransferDirection,
+    checksum_valid: bool,
+) {
+    with_node_event_app_handle(|handle| {
+        let _ = handle.emit(
+            EVENT_FILE_TRANSFER_COMPLETE,
+            serde_json::json!({
+                "transferId": transfer_id,
+                "path": path,
+                "direction": match direction {
+                    TransferDirection::Incoming => "incoming",
+                    TransferDirection::Outgoing => "outgoing",
+                },
+                "checksumValid": checksum_valid,
+            }),
+        );
+    });
+}
+
+pub fn emit_file_transfer_offer(event: FileTransferOfferEvent) {
+    with_node_event_app_handle(|handle| {
+        let _ = handle.emit(EVENT_FILE_TRANSFER_OFFER, event);
+    });
 }

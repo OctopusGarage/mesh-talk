@@ -1,12 +1,12 @@
 use crate::contacts::manager::ContactManager;
 use crate::contacts::request::{ContactRequest, ContactResponse};
-
+use crate::events::{emit_contact_added, with_node_event_app_handle};
 use crate::services::node_service::NodeService;
 use serde_json::Value;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Service for handling contact requests
 pub struct ContactRequestService {
@@ -35,8 +35,17 @@ impl ContactRequestService {
         alias: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Default to a placeholder user ID if not provided
-        self.send_contact_request_with_user_id(username, _password, target_public_key, alias, 0)
-            .await
+        self.send_contact_request_with_user_id(
+            username,
+            _password,
+            target_public_key,
+            alias,
+            String::from("0"),
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Send a contact request to another user with user ID
@@ -46,7 +55,10 @@ impl ContactRequestService {
         _password: &str, // Password parameter kept for compatibility, but not used
         target_public_key: &str,
         alias: Option<&str>,
-        user_id: u64,
+        user_id: String,
+        remote_username: Option<String>, // Add username parameter
+        remote_ip: Option<String>,       // Add IP parameter
+        remote_port: Option<u16>,        // Add port parameter
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Note: In a real implementation, this would be called from a context that has access to the user's keys
         // without needing to re-authenticate. For now, we'll work with what's available.
@@ -109,9 +121,9 @@ impl ContactRequestService {
             signature: contact_request.signature,
             node_name: Some(node_name.clone()),
             username: Some(username.to_string()),
-            user_id: Some(user_id),
-            ip: Some(local_ip.clone()),
-            port: Some(port),
+            user_id: Some(user_id.clone()),
+            ip: remote_ip.clone(), // Add the remote IP to the message
+            port: remote_port,     // Add the remote port to the message
         };
 
         // Serialize the message
@@ -133,10 +145,33 @@ impl ContactRequestService {
 
         {
             let node_service = self.node_service.lock().await;
-            node_service
-                .send_json_message_to_peer(target_addr, message_json.clone())
-                .await
-                .map_err(|e| format!("Failed to deliver contact request to {target_addr}: {e}"))?;
+
+            let mut delivered = false;
+            if !user_id.trim().is_empty() && user_id != "0" {
+                match node_service
+                    .send_json_message_to_user(&user_id, message_json.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        delivered = true;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to deliver contact request via user_id {}: {}. Falling back to address {}",
+                            user_id, err, target_addr
+                        );
+                    }
+                }
+            }
+
+            if !delivered {
+                node_service
+                    .send_json_message_to_peer(target_addr, message_json.clone())
+                    .await
+                    .map_err(|e| {
+                        format!("Failed to deliver contact request to {target_addr}: {e}")
+                    })?;
+            }
         }
 
         info!(
@@ -153,10 +188,40 @@ impl ContactRequestService {
         _password: &str, // Password parameter kept for compatibility, but not used
         request_json: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        log::info!("=== START HANDLE_CONTACT_REQUEST IN SERVICE ===");
+        log::info!("Username: {}, Request JSON: {}", username, request_json);
+
+        // Extract user_id from the request JSON if available
+        let mut contact_user_id = None;
+        if let Ok(value) = serde_json::from_str::<Value>(request_json) {
+            if let Some(user_id_value) = value.get("user_id") {
+                if let Some(user_id_str) = user_id_value.as_str() {
+                    contact_user_id = Some(user_id_str.to_string());
+                    log::info!("Extracted user_id from request: {:?}", user_id_str);
+                }
+            }
+        }
+
+        log::info!("Contact user_id: {:?}", contact_user_id);
+
+        // Normalize user_id (trim whitespace, drop empty values)
+        contact_user_id = contact_user_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty());
+
         // Deserialize the contact request
+        log::info!("Deserializing contact request...");
         let request = match ContactRequest::from_json(request_json) {
-            Ok(req) => req,
-            Err(_) => {
+            Ok(req) => {
+                log::info!(
+                    "Successfully deserialized contact request: requester={}, alias={}",
+                    req.requester_public_key,
+                    req.requester_alias
+                );
+                req
+            }
+            Err(e) => {
+                log::warn!("Failed to deserialize with ContactRequest::from_json: {}. Trying fallback parsing...", e);
                 let value: Value = serde_json::from_str(request_json)?;
                 let requester_public_key = value
                     .get("requester_public_key")
@@ -173,6 +238,12 @@ impl ContactRequestService {
                     .and_then(|v| v.as_u64())
                     .ok_or("Missing timestamp")?;
 
+                log::info!(
+                    "Fallback parsing successful: requester={}, alias={}",
+                    requester_public_key,
+                    requester_alias
+                );
+
                 ContactRequest {
                     requester_public_key,
                     requester_alias,
@@ -184,51 +255,110 @@ impl ContactRequestService {
 
         // Verify the signature when present; otherwise skip (placeholder implementation)
         if request.signature.is_empty() {
-            info!(
+            log::info!(
                 "Received unsigned contact request from {}; skipping signature verification",
                 request.requester_public_key
             );
         } else if !request.verify_signature().unwrap_or(false) {
+            log::error!("Invalid signature in contact request");
             return Err("Invalid signature in contact request".into());
         }
 
-        // Check if the contact already exists
-        // Note: This check may not work properly without proper password
-        // In a real implementation, contact existence checks would work differently
-        // if self
-        //     .contact_manager
-        //     .contact_exists(username, _password, &request.requester_public_key)?
-        // {
-        //     // Contact already exists, nothing to do
-        //     return Ok(());
-        // }
-
-        info!(
+        log::info!(
             "Received contact request from user: {}",
             request.requester_alias
         );
 
+        // Ensure TCP connectivity to requester if user_id is known so response can reuse channel
+        if let Some(uid) = contact_user_id.as_ref() {
+            let node_service_clone = {
+                let service = self.node_service.lock().await;
+                service.clone()
+            };
+
+            match node_service_clone.ensure_connection_for_user(uid).await {
+                Ok(status) => {
+                    info!(
+                        "Ensured TCP channel to requester user_id {} at {} (reused={})",
+                        uid, status.addr, status.reused
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to prepare TCP channel for requester user_id {}: {}",
+                        uid, err
+                    );
+                }
+            }
+        }
+
+        // Parse the IP and port from the public key
+        let parts: Vec<&str> = request.requester_public_key.split(':').collect();
+        if parts.len() != 2 {
+            log::error!(
+                "Invalid requester public key format: {}",
+                request.requester_public_key
+            );
+            return Err("Invalid requester public key format".into());
+        }
+
+        let ip = parts[0];
+        let port = parts[1].parse::<u16>().map_err(|_| {
+            log::error!(
+                "Invalid port in requester public key: {}",
+                request.requester_public_key
+            );
+            "Invalid port in requester public key"
+        })?;
+
+        log::info!(
+            "Calling contact_manager.add_contact with IP: {}, Port: {}",
+            ip,
+            port
+        );
         if let Err(err) = self.contact_manager.add_contact(
             username,
             _password,
-            &request.requester_public_key,
-            Some(&request.requester_alias),
+            ip,
+            port,
+            &request.requester_alias,
+            contact_user_id.clone(), // Use the extracted user_id
         ) {
-            info!(
+            log::warn!(
                 "Warning: failed to add contact '{}' for user '{}': {:?}",
-                request.requester_public_key, username, err
+                request.requester_public_key,
+                username,
+                err
             );
         } else {
-            info!(
+            log::info!(
                 "Added contact '{}' ({}) for user '{}'",
-                request.requester_alias, request.requester_public_key, username
+                request.requester_alias,
+                request.requester_public_key,
+                username
             );
         }
 
         // Send an approval response
-        self.send_contact_response(username, _password, &request.requester_public_key, true)
-            .await?;
+        log::info!("Sending contact approval response...");
+        let response_result = self
+            .send_contact_response(
+                username,
+                _password,
+                &request.requester_public_key,
+                true,
+                contact_user_id.clone(),
+            )
+            .await;
 
+        match &response_result {
+            Ok(_) => log::info!("Successfully sent contact approval response"),
+            Err(e) => log::error!("Failed to send contact approval response: {}", e),
+        }
+
+        response_result?;
+
+        log::info!("=== END HANDLE_CONTACT_REQUEST IN SERVICE ===");
         Ok(())
     }
 
@@ -239,13 +369,19 @@ impl ContactRequestService {
         _password: &str, // Password parameter kept for compatibility, but not used
         target_public_key: &str,
         approved: bool,
+        target_user_id: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // In a real implementation, this would get user information from session context
         // rather than re-authenticating with username/password
 
-        let (node_name, port) = {
+        let (node_name, port, local_user_id, node_service_clone) = {
             let service = self.node_service.lock().await;
-            (service.get_name(), service.get_port())
+            (
+                service.get_name(),
+                service.get_port(),
+                service.get_user_id(),
+                service.clone(),
+            )
         };
 
         let responder_alias = if node_name.trim().is_empty() {
@@ -270,6 +406,11 @@ impl ContactRequestService {
                 .unwrap()
                 .as_secs(),
             signature: vec![], // This would be a real signature in a working implementation
+            user_id: if local_user_id.trim().is_empty() {
+                None
+            } else {
+                Some(local_user_id.clone())
+            },
         };
 
         // Create a message for the contact response
@@ -279,7 +420,11 @@ impl ContactRequestService {
             responder_alias: contact_response.responder_alias.clone(),
             timestamp: contact_response.timestamp,
             signature: contact_response.signature.clone(),
-            user_id: None, // Add user_id field
+            user_id: if local_user_id.trim().is_empty() {
+                None
+            } else {
+                Some(local_user_id.clone())
+            },
         };
 
         // Serialize the message
@@ -294,12 +439,44 @@ impl ContactRequestService {
             target_addr, approved
         );
 
-        {
-            let node_service = self.node_service.lock().await;
-            node_service
+        let normalized_user_id = target_user_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let mut delivered = false;
+        if let Some(ref uid) = normalized_user_id {
+            match node_service_clone
+                .send_json_message_to_user(uid, message_json.clone())
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        "Delivered contact response via user_id {} (approved={})",
+                        uid, approved
+                    );
+                    delivered = true;
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to deliver contact response via user_id {}: {}. Falling back to address {}",
+                        uid,
+                        err,
+                        target_addr
+                    );
+                }
+            }
+        }
+
+        if !delivered {
+            node_service_clone
                 .send_json_message_to_peer(target_addr, message_json.clone())
                 .await
                 .map_err(|e| format!("Failed to deliver contact response to {target_addr}: {e}"))?;
+            info!(
+                "Delivered contact response via address {} (approved={})",
+                target_addr, approved
+            );
         }
 
         if approved {
@@ -330,17 +507,78 @@ impl ContactRequestService {
             return Err("Invalid signature in contact response".into());
         }
 
+        // Parse the IP and port from the public key
+        let parts: Vec<&str> = response.responder_public_key.split(':').collect();
+        if parts.len() != 2 {
+            log::error!(
+                "Invalid responder public key format: {}",
+                response.responder_public_key
+            );
+            return Err("Invalid responder public key format".into());
+        }
+
+        let ip = parts[0];
+        let port = parts[1].parse::<u16>().map_err(|_| {
+            log::error!(
+                "Invalid port in responder public key: {}",
+                response.responder_public_key
+            );
+            "Invalid port in responder public key"
+        })?;
+
         if response.approved {
+            if let Some(ref uid) = response.user_id {
+                let trimmed_uid = uid.trim();
+                if !trimmed_uid.is_empty() {
+                    let node_service_clone = {
+                        let service = self.node_service.lock().await;
+                        service.clone()
+                    };
+
+                    match node_service_clone
+                        .ensure_connection_for_user(trimmed_uid)
+                        .await
+                    {
+                        Ok(status) => {
+                            info!(
+                                "Ensured TCP channel to responder user_id {} at {} (reused={})",
+                                trimmed_uid, status.addr, status.reused
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to prepare TCP channel for responder user_id {}: {}",
+                                trimmed_uid, err
+                            );
+                        }
+                    }
+                }
+            }
+
             match self.contact_manager.add_contact(
                 username,
                 password,
-                &response.responder_public_key,
-                Some(&response.responder_alias),
+                ip,
+                port,
+                &response.responder_alias,
+                response.user_id.clone(),
             ) {
-                Ok(_) => info!(
-                    "Contact request approved by user: {} ({})",
-                    response.responder_alias, response.responder_public_key
-                ),
+                Ok(_) => {
+                    info!(
+                        "Contact request approved by user: {} ({})",
+                        response.responder_alias, response.responder_public_key
+                    );
+
+                    let address_string = format!("{}:{}", ip, port);
+                    with_node_event_app_handle(|app_handle| {
+                        emit_contact_added(
+                            app_handle,
+                            response.responder_public_key.clone(),
+                            Some(response.responder_alias.clone()),
+                            Some(address_string.clone()),
+                        );
+                    });
+                }
                 Err(err) => info!(
                     "Warning: failed to persist approved contact '{}' for '{}': {:?}",
                     response.responder_public_key, username, err
@@ -373,7 +611,11 @@ impl ContactRequestService {
                 requester_alias,
                 timestamp,
                 signature,
-                ..
+                node_name,
+                username: message_username,
+                user_id: message_user_id,
+                ip: message_ip,
+                port: message_port,
             } => {
                 // Create a contact request from the message data
                 let request = ContactRequest {
@@ -383,12 +625,50 @@ impl ContactRequestService {
                     signature,
                 };
 
-                // Serialize the request for the handler
-                let request_json = request.to_json()?;
+                // Serialize the request for the handler, including additional fields
+                let mut request_json = request.to_json()?;
+
+                // Add the additional fields to the JSON if they exist
+                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&request_json) {
+                    if let Some(obj) = value.as_object_mut() {
+                        if let Some(node_name) = node_name {
+                            obj.insert(
+                                "node_name".to_string(),
+                                serde_json::Value::String(node_name),
+                            );
+                        }
+                        if let Some(ref message_username) = message_username {
+                            obj.insert(
+                                "username".to_string(),
+                                serde_json::Value::String(message_username.clone()),
+                            );
+                        }
+                        if let Some(message_user_id) = message_user_id {
+                            obj.insert(
+                                "user_id".to_string(),
+                                serde_json::Value::String(message_user_id),
+                            );
+                        }
+                        if let Some(message_ip) = message_ip {
+                            obj.insert("ip".to_string(), serde_json::Value::String(message_ip));
+                        }
+                        if let Some(message_port) = message_port {
+                            obj.insert(
+                                "port".to_string(),
+                                serde_json::Value::Number(message_port.into()),
+                            );
+                        }
+                        request_json = serde_json::to_string(&value)?;
+                    }
+                }
 
                 // Handle the contact request
-                self.handle_contact_request(username, password, &request_json)
-                    .await?;
+                self.handle_contact_request(
+                    message_username.as_deref().unwrap_or(""),
+                    password,
+                    &request_json,
+                )
+                .await?;
             }
             crate::domain::message::Message::ContactResponse {
                 responder_public_key,
@@ -405,6 +685,7 @@ impl ContactRequestService {
                     responder_alias,
                     timestamp,
                     signature,
+                    user_id: None,
                 };
 
                 // Serialize the response for the handler
@@ -453,7 +734,8 @@ mod tests {
             "test-node".to_string(),
             0,
         )));
-        let contact_manager = Arc::new(ContactManager::new(file_manager.clone()));
+        let identity_manager = crate::identity::manager::IdentityManager::new(file_manager.clone());
+        let contact_manager = Arc::new(ContactManager::new(file_manager.clone(), identity_manager));
         let _service = ContactRequestService::new(contact_manager, node_service);
 
         // Just test that the service can be created
@@ -471,7 +753,8 @@ mod tests {
             "test-node".to_string(),
             0,
         )));
-        let contact_manager = Arc::new(ContactManager::new(file_manager.clone()));
+        let identity_manager = crate::identity::manager::IdentityManager::new(file_manager.clone());
+        let contact_manager = Arc::new(ContactManager::new(file_manager.clone(), identity_manager));
         let service = ContactRequestService::new(contact_manager, node_service);
 
         // Test processing a contact request message
@@ -482,7 +765,7 @@ mod tests {
             signature: vec![1, 2, 3, 4],
             node_name: Some("test-node".to_string()),
             username: Some("tester".to_string()),
-            user_id: Some(1),
+            user_id: Some("test-user-1".to_string()),
             ip: Some("127.0.0.1".to_string()),
             port: Some(7000),
         };
@@ -506,7 +789,7 @@ mod tests {
             responder_alias: "Test User".to_string(),
             timestamp: 1234567890,
             signature: vec![1, 2, 3, 4],
-            user_id: Some(1),
+            user_id: Some("test-user-1".to_string()),
         };
 
         let message_json = serde_json::to_string(&contact_response_message).unwrap();

@@ -1,15 +1,16 @@
 use crate::contacts::contact::Contact;
 use crate::contacts::errors::ContactError;
 
+use crate::contacts::public_key_encryption::PublicKeyFileManager;
+use crate::identity::manager::IdentityManager;
 use crate::storage::file_manager::FileManager;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContactList {
-    pub contacts: HashMap<String, Contact>, // public_key -> Contact
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
-    pub alias_index: HashMap<String, HashSet<String>>, // lowercase_alias -> public_keys
+    pub contacts: HashMap<String, Contact>, // ip:port -> Contact
+                                            // Removed alias_index since we're not using aliases anymore
 }
 
 impl Default for ContactList {
@@ -22,142 +23,175 @@ impl ContactList {
     pub fn new() -> Self {
         ContactList {
             contacts: HashMap::new(),
-            alias_index: HashMap::new(),
+            // Removed alias_index since we're not using aliases anymore
         }
     }
 
-    /// Update the alias index when a contact is added or modified
-    pub fn update_alias_index(&mut self, contact: &Contact) {
-        if let Some(alias) = &contact.alias {
-            let lowercase_alias = alias.to_lowercase();
-            let public_keys = self.alias_index.entry(lowercase_alias).or_default();
-            public_keys.insert(contact.public_key.clone());
-        }
-    }
-
-    /// Remove a contact from the alias index
-    pub fn remove_from_alias_index(&mut self, contact: &Contact) {
-        if let Some(alias) = &contact.alias {
-            let lowercase_alias = alias.to_lowercase();
-            if let Some(public_keys) = self.alias_index.get_mut(&lowercase_alias) {
-                public_keys.remove(&contact.public_key);
-                // Clean up empty entries
-                if public_keys.is_empty() {
-                    self.alias_index.remove(&lowercase_alias);
-                }
-            }
-        }
-    }
-
-    /// Find contacts by alias using the index
-    pub fn find_by_alias(&self, alias: &str) -> Vec<&Contact> {
-        let lowercase_alias = alias.to_lowercase();
-        if let Some(public_keys) = self.alias_index.get(&lowercase_alias) {
-            public_keys
-                .iter()
-                .filter_map(|public_key| self.contacts.get(public_key))
-                .collect()
-        } else {
-            vec![]
-        }
-    }
-
-    /// Rebuild the alias index from the contacts
-    pub fn rebuild_alias_index(&mut self) {
-        // Clear the existing index
-        self.alias_index.clear();
-
-        // Create a vector of contacts to avoid borrowing issues
-        let contacts: Vec<Contact> = self.contacts.values().cloned().collect();
-
-        // Rebuild from contacts
-        for contact in contacts {
-            self.update_alias_index(&contact);
-        }
-    }
+    // Removed alias_index related methods since we're not using aliases anymore
 }
 
 #[derive(Clone)]
 pub struct ContactManager {
+    // Keep the original file manager for other operations
     file_manager: FileManager,
+    // Add the public key encryption file manager for contacts
+    public_key_file_manager: PublicKeyFileManager,
 }
 
 impl ContactManager {
-    pub fn new(file_manager: FileManager) -> Self {
-        ContactManager { file_manager }
+    pub fn new(file_manager: FileManager, identity_manager: IdentityManager) -> Self {
+        let public_key_file_manager = PublicKeyFileManager::new(
+            file_manager.base_path().to_path_buf(), // Get the base path from the file manager
+            identity_manager,
+        );
+        ContactManager {
+            file_manager,
+            public_key_file_manager,
+        }
     }
 
     pub fn add_contact(
         &self,
         username: &str,
         password: &str,
-        contact_public_key: &str,
-        alias: Option<&str>,
+        contact_ip: &str,
+        contact_port: u16,
+        contact_username: &str,
+        contact_user_id: Option<String>,
     ) -> Result<(), ContactError> {
-        // Validate the public key
-        if !Contact::validate_public_key(contact_public_key) {
+        log::info!("=== START ADD_CONTACT IN MANAGER ===");
+        log::info!("Username: {}, Contact IP: {}, Contact Port: {}, Contact username: {}, Contact user ID: {:?}", 
+                  username, contact_ip, contact_port, contact_username, contact_user_id);
+
+        // Validate the contact IP
+        if !Contact::validate_ip(contact_ip) {
+            log::warn!("Invalid contact IP: {}", contact_ip);
             return Err(ContactError::InvalidPublicKey);
         }
 
-        // Validate the alias
-        let alias_string = alias.map(|s| s.to_string());
-        if !Contact::validate_alias(&alias_string) {
-            return Err(ContactError::InvalidAlias);
+        // Validate the contact port
+        if !Contact::validate_port(contact_port) {
+            log::warn!("Invalid contact port: {}", contact_port);
+            return Err(ContactError::InvalidPublicKey);
         }
 
-        // Check if the contact already exists
-        if self.contact_exists(username, password, contact_public_key)? {
-            return Err(ContactError::ContactAlreadyExists(
-                contact_public_key.to_string(),
-            ));
+        log::info!(
+            "Validated contact data - IP: {}, Port: {}, Username: {}",
+            contact_ip,
+            contact_port,
+            contact_username
+        );
+
+        // Load existing contacts for deduplication
+        log::info!("Loading existing contacts...");
+        let mut contact_list = self.load_contacts(username, password)?;
+        log::info!("Loaded {} existing contacts", contact_list.contacts.len());
+
+        // Deduplicate by user_id when provided
+        if let Some(ref user_id) = contact_user_id {
+            if let Some((existing_key, mut existing_contact)) = contact_list
+                .contacts
+                .iter()
+                .find(|(_, contact)| {
+                    contact
+                        .user_id
+                        .as_ref()
+                        .map(|id| id == user_id)
+                        .unwrap_or(false)
+                })
+                .map(|(key, contact)| (key.clone(), contact.clone()))
+            {
+                log::info!(
+                    "Contact with user_id {} already exists (key: {}). Updating entry.",
+                    user_id,
+                    existing_key
+                );
+
+                existing_contact.ip = contact_ip.to_string();
+                existing_contact.port = contact_port;
+                existing_contact.username = contact_username.to_string();
+                existing_contact.user_id = Some(user_id.clone());
+
+                contact_list.contacts.remove(&existing_key);
+                let contact_key = format!("{}:{}", contact_ip, contact_port);
+                contact_list
+                    .contacts
+                    .insert(contact_key, existing_contact.clone());
+
+                log::info!("Saving updated contact for existing user_id {}", user_id);
+                self.save_contacts(username, password, &contact_list)?;
+                log::info!("=== UPDATED EXISTING CONTACT BY USER_ID ===");
+                return Ok(());
+            }
+        }
+
+        let contact_address = format!("{}:{}", contact_ip, contact_port);
+        if contact_list.contacts.contains_key(&contact_address) {
+            log::warn!("Contact already exists with address: {}", contact_address);
+            return Err(ContactError::ContactAlreadyExists(contact_address));
         }
 
         // Create the contact
-        let contact = Contact::new(contact_public_key.to_string(), alias_string);
+        log::info!("Creating contact object...");
+        let contact = Contact::new(
+            contact_ip.to_string(),
+            contact_port,
+            contact_username.to_string(),
+            contact_user_id.clone(),
+        );
+        log::info!(
+            "Created contact - IP: {}, Port: {}, Username: {}, User ID: {:?}",
+            contact.ip,
+            contact.port,
+            contact.username,
+            contact.user_id
+        );
 
-        // Load existing contacts
-        let mut contact_list = self.load_contacts(username, password)?;
-
-        // Add the new contact
+        // Add the new contact using IP:Port as the key
+        log::info!(
+            "Adding new contact to contact list with key: {}...",
+            contact_address
+        );
         contact_list
             .contacts
-            .insert(contact_public_key.to_string(), contact.clone());
-
-        // Update the alias index
-        contact_list.update_alias_index(&contact);
+            .insert(contact_address, contact.clone());
+        log::info!("Added contact to contact list");
 
         // Save the updated contacts
-        self.save_contacts(username, password, &contact_list)?;
-
-        Ok(())
+        log::info!("Saving updated contacts...");
+        match self.save_contacts(username, password, &contact_list) {
+            Ok(_) => {
+                log::info!("=== SUCCESSFULLY ADDED CONTACT ===");
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to save contacts: {}", e);
+                Err(e)
+            }
+        }
     }
 
     pub fn remove_contact(
         &self,
         username: &str,
         password: &str,
-        contact_public_key: &str,
+        contact_address: &str, // IP:Port format
     ) -> Result<(), ContactError> {
         // Load existing contacts
         let mut contact_list = self.load_contacts(username, password)?;
 
         // Check if the contact exists and get its current state
-        if let Some(contact) = contact_list.contacts.get(contact_public_key) {
+        if let Some(contact) = contact_list.contacts.get(contact_address) {
             let contact_clone = contact.clone();
 
-            // Remove from alias index
-            contact_list.remove_from_alias_index(&contact_clone);
-
             // Remove the contact
-            contact_list.contacts.remove(contact_public_key);
+            contact_list.contacts.remove(contact_address);
 
             // Save the updated contacts
             self.save_contacts(username, password, &contact_list)?;
             Ok(())
         } else {
-            Err(ContactError::ContactNotFound(
-                contact_public_key.to_string(),
-            ))
+            Err(ContactError::ContactNotFound(contact_address.to_string()))
         }
     }
 
@@ -190,16 +224,17 @@ impl ContactManager {
         Ok(contact_list.contacts.values().cloned().collect())
     }
 
-    pub fn update_contact_alias(
+    pub fn update_contact_username(
         &self,
         username: &str,
         password: &str,
-        contact_public_key: &str,
-        alias: Option<&str>,
+        contact_address: &str, // IP:Port format
+        new_username: Option<&str>,
     ) -> Result<(), ContactError> {
-        // Validate the alias
-        let alias_string = alias.map(|s| s.to_string());
-        if !Contact::validate_alias(&alias_string) {
+        // Validate the new username
+        let username_string = new_username.map(|s| s.to_string());
+        if !Contact::validate_username(&username_string.clone().unwrap_or_default()) {
+            log::warn!("Invalid username: {:?}", username_string);
             return Err(ContactError::InvalidAlias);
         }
 
@@ -207,70 +242,86 @@ impl ContactManager {
         let mut contact_list = self.load_contacts(username, password)?;
 
         // Check if the contact exists and get its current state
-        if let Some(contact) = contact_list.contacts.get(contact_public_key) {
+        if let Some(contact) = contact_list.contacts.get(contact_address) {
             let mut contact_clone = contact.clone();
 
-            // Remove from old alias index
-            contact_list.remove_from_alias_index(&contact_clone);
+            // Remove the group index
+            // (Note: We're not using a group index in this implementation)
 
-            // Update the alias in the contact
-            contact_clone.alias = alias_string;
+            // Update the username in the contact
+            contact_clone.username = username_string.unwrap_or_default();
 
             // Update the contact in the list
             contact_list
                 .contacts
-                .insert(contact_public_key.to_string(), contact_clone.clone());
+                .insert(contact_address.to_string(), contact_clone.clone());
 
-            // Add to new alias index
-            contact_list.update_alias_index(&contact_clone);
+            // Add to new group index
+            // (Note: We're not using a group index in this implementation)
 
             // Save the updated contacts
             self.save_contacts(username, password, &contact_list)?;
 
             Ok(())
         } else {
-            Err(ContactError::ContactNotFound(
-                contact_public_key.to_string(),
-            ))
+            Err(ContactError::ContactNotFound(contact_address.to_string()))
         }
     }
 
-    /// Add a discovered contact with default settings
     pub fn add_discovered_contact(
         &self,
         username: &str,
         password: &str,
-        contact_public_key: &str,
+        contact_address: &str, // IP:Port format
         default_alias: Option<&str>,
     ) -> Result<(), ContactError> {
-        // Validate the public key
-        if !Contact::validate_public_key(contact_public_key) {
+        // Validate the contact address (IP:Port format)
+        let parts: Vec<&str> = contact_address.split(':').collect();
+        if parts.len() != 2 {
+            log::warn!("Invalid contact address format: {}", contact_address);
+            return Err(ContactError::InvalidPublicKey);
+        }
+
+        let ip = parts[0];
+        let port_str = parts[1];
+        let port = port_str.parse::<u16>().map_err(|_| {
+            log::warn!("Invalid port in contact address: {}", contact_address);
+            ContactError::InvalidPublicKey
+        })?;
+
+        if !Contact::validate_ip(ip) {
+            log::warn!("Invalid IP in contact address: {}", contact_address);
+            return Err(ContactError::InvalidPublicKey);
+        }
+
+        if !Contact::validate_port(port) {
+            log::warn!("Invalid port in contact address: {}", contact_address);
             return Err(ContactError::InvalidPublicKey);
         }
 
         // Check if the contact already exists
-        if self.contact_exists(username, password, contact_public_key)? {
+        if self.contact_exists(username, password, contact_address)? {
+            log::warn!("Contact already exists with address: {}", contact_address);
             return Err(ContactError::ContactAlreadyExists(
-                contact_public_key.to_string(),
+                contact_address.to_string(),
             ));
         }
 
         // Create the contact with default alias
         let contact = Contact::new(
-            contact_public_key.to_string(),
-            default_alias.map(|s| s.to_string()),
+            ip.to_string(),                          // IP address
+            port,                                    // Port number
+            default_alias.unwrap_or(ip).to_string(), // Use IP as default username if not provided
+            None,
         );
 
         // Load existing contacts
         let mut contact_list = self.load_contacts(username, password)?;
 
-        // Add the new contact
+        // Add the new contact using IP:Port as the key
         contact_list
             .contacts
-            .insert(contact_public_key.to_string(), contact.clone());
-
-        // Update the alias index
-        contact_list.update_alias_index(&contact);
+            .insert(contact_address.to_string(), contact.clone());
 
         // Save the updated contacts
         self.save_contacts(username, password, &contact_list)?;
@@ -282,13 +333,13 @@ impl ContactManager {
         &self,
         username: &str,
         password: &str,
-        contact_public_key: &str,
+        contact_address: &str, // IP:Port format
     ) -> Result<bool, ContactError> {
         // Load existing contacts
         let contact_list = self.load_contacts(username, password)?;
 
-        // Check if the contact exists
-        Ok(contact_list.contacts.contains_key(contact_public_key))
+        // Check if the contact exists by address (IP:Port)
+        Ok(contact_list.contacts.contains_key(contact_address))
     }
 
     /// Search contacts by alias or public key
@@ -312,14 +363,10 @@ impl ContactManager {
             .values()
             .filter(|contact| {
                 contact
-                    .public_key
+                    .get_address()
                     .to_lowercase()
                     .contains(&normalized_query)
-                    || contact
-                        .alias
-                        .as_ref()
-                        .map(|alias| alias.to_lowercase().contains(&normalized_query))
-                        .unwrap_or(false)
+                    || contact.username.to_lowercase().contains(&normalized_query)
             })
             .cloned()
             .collect();
@@ -328,29 +375,63 @@ impl ContactManager {
     }
 
     fn load_contacts(&self, username: &str, password: &str) -> Result<ContactList, ContactError> {
-        // Try to read the contacts file
-        let result: Result<ContactList, _> =
-            self.file_manager
-                .read_encrypted_file(username, "data/contacts.json", password);
+        log::info!(
+            "Loading contacts for user '{}' from file: users/{}/data/contacts.json",
+            username,
+            username
+        );
+
+        // Try to read the contacts file using public key encryption
+        let result: Result<ContactList, _> = self.public_key_file_manager.read_encrypted_file(
+            username,
+            password,
+            "data/contacts.json",
+        );
 
         match result {
             Ok(mut contacts) => {
-                // If the alias index is empty, rebuild it from the contacts
-                if contacts.alias_index.is_empty() && !contacts.contacts.is_empty() {
-                    contacts.rebuild_alias_index();
+                log::info!(
+                    "Successfully loaded {} contacts for user '{}'",
+                    contacts.contacts.len(),
+                    username
+                );
+
+                // Log details about each contact being loaded
+                for (public_key, contact) in &contacts.contacts {
+                    log::debug!(
+                        "Loaded contact - Public Key: {}, User ID: {:?}, Username: {}, Added: {}",
+                        public_key,
+                        contact.user_id,
+                        contact.username,
+                        contact.added_at
+                    );
                 }
+
+                // Removed alias index rebuild since we're not using aliases anymore
+
                 Ok(contacts)
             }
-            Err(crate::storage::errors::StorageError::FileNotFound(_)) => {
-                // If the file doesn't exist, return an empty contact list
+            Err(crate::storage::errors::StorageError::FileNotFound(path)) => {
+                log::info!(
+                    "Contacts file not found for user '{}', path: {} - returning empty contact list",
+                    username,
+                    path.display()
+                );
                 Ok(ContactList::new())
             }
             Err(crate::storage::errors::StorageError::Deserialization(_)) => {
+                log::warn!(
+                    "Failed to deserialize contacts file for user '{}' - returning empty contact list",
+                    username
+                );
                 // If deserialization fails, return an empty contact list
                 // This can happen if the file format has changed
                 Ok(ContactList::new())
             }
-            Err(e) => Err(ContactError::StorageError(e.to_string())),
+            Err(e) => {
+                log::error!("Failed to load contacts for user '{}': {}", username, e);
+                Err(ContactError::StorageError(e.to_string()))
+            }
         }
     }
 
@@ -378,7 +459,6 @@ impl ContactManager {
                 .insert(contact_public_key.to_string(), contact_clone.clone());
 
             // Update the alias index
-            contact_list.update_alias_index(&contact_clone);
 
             // Save the updated contacts
             self.save_contacts(username, password, &contact_list)?;
@@ -414,7 +494,6 @@ impl ContactManager {
                 .insert(contact_public_key.to_string(), contact_clone.clone());
 
             // Update the alias index
-            contact_list.update_alias_index(&contact_clone);
 
             // Save the updated contacts
             self.save_contacts(username, password, &contact_list)?;
@@ -527,7 +606,6 @@ impl ContactManager {
                 contact_list.contacts.entry(public_key)
             {
                 e.insert(contact.clone());
-                contact_list.update_alias_index(&contact);
                 imported_count += 1;
             }
         }
@@ -544,9 +622,40 @@ impl ContactManager {
         password: &str,
         contact_list: &ContactList,
     ) -> Result<(), ContactError> {
-        // Save the contacts file
-        self.file_manager
-            .write_encrypted_file(username, "data/contacts.json", contact_list, password)
-            .map_err(|e| ContactError::StorageError(e.to_string()))
+        // Log what we're saving and where
+        log::info!(
+            "Saving contacts for user '{}' to file: users/{}/data/contacts.json, contact count: {}",
+            username,
+            username,
+            contact_list.contacts.len()
+        );
+
+        // Log details about each contact being saved
+        for (public_key, contact) in &contact_list.contacts {
+            log::debug!(
+                "Saving contact - Public Key: {}, User ID: {:?}, Username: {}, Added: {}",
+                public_key,
+                contact.user_id,
+                contact.username,
+                contact.added_at
+            );
+        }
+
+        // Save the contacts file using public key encryption
+        let result = self
+            .public_key_file_manager
+            .write_encrypted_file(username, password, "data/contacts.json", contact_list)
+            .map_err(|e| ContactError::StorageError(e.to_string()));
+
+        match &result {
+            Ok(_) => log::info!(
+                "Successfully saved {} contacts for user '{}' to data/contacts.json",
+                contact_list.contacts.len(),
+                username
+            ),
+            Err(e) => log::error!("Failed to save contacts for user '{}': {}", username, e),
+        }
+
+        result
     }
 }

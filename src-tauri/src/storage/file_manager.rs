@@ -13,6 +13,12 @@ pub struct FileManager {
 }
 
 impl FileManager {
+    pub fn base_path(&self) -> &PathBuf {
+        &self.base_path
+    }
+}
+
+impl FileManager {
     pub fn new(base_path: PathBuf) -> Self {
         FileManager { base_path }
     }

@@ -1,5 +1,5 @@
 use crate::contacts::manager::ContactManager;
-use crate::domain::models::{Contact, EntityId};
+use crate::domain::models::Contact;
 use crate::identity::manager::IdentityManager;
 use crate::storage::file_manager::FileManager;
 use std::collections::HashMap;
@@ -29,19 +29,18 @@ pub type ContactResult<T> = Result<T, ContactError>;
 #[derive(Clone)]
 pub struct ContactService {
     /// Contact manager for file-based storage
-    _contact_manager: Arc<ContactManager>,
+    contact_manager: Arc<ContactManager>,
     /// In-memory cache of contacts for performance
-    cache: Arc<Mutex<HashMap<EntityId, Contact>>>,
+    cache: Arc<Mutex<HashMap<String, Contact>>>,
 }
 
 static INSTANCE: OnceLock<ContactService> = OnceLock::new();
-static CONTACT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl ContactService {
     /// Create a new contact service
     pub fn new(contact_manager: Arc<ContactManager>) -> Self {
         Self {
-            _contact_manager: contact_manager,
+            contact_manager,
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -52,9 +51,11 @@ impl ContactService {
     }
 
     /// Initialize the global contact service instance
-    pub fn init_global(file_manager: FileManager) {
-        let _identity_manager = Arc::new(IdentityManager::new(file_manager.clone()));
-        let contact_manager = Arc::new(ContactManager::new(file_manager));
+    pub fn init_global(file_manager: FileManager, identity_manager: Arc<IdentityManager>) {
+        let contact_manager = Arc::new(ContactManager::new(
+            file_manager,
+            (*identity_manager).clone(),
+        ));
         INSTANCE.set(ContactService::new(contact_manager)).ok();
     }
 
@@ -72,7 +73,8 @@ impl ContactService {
     /// Add a new contact
     pub fn add_contact(
         &self,
-        user_id: EntityId,
+        username: String,
+        user_id: String,
         name: String,
         address: String,
         notes: Option<String>,
@@ -87,73 +89,74 @@ impl ContactService {
             return Err(ContactError::InvalidContactData);
         }
 
-        {
-            let cache = self.cache.lock().unwrap();
-            if cache
-                .values()
-                .any(|contact| contact.user_id == user_id && contact.address == normalized_address)
-            {
-                return Err(ContactError::ContactAlreadyExists);
-            }
+        // Normalize the owning account username used for storage paths
+        let account_username = username.trim();
+        if account_username.is_empty() {
+            return Err(ContactError::InvalidContactData);
         }
-
-        // For file-based storage, we need to get the current user's username
-        // This is a simplification - in a real implementation, you'd want to map user_id to username
-        let _username = format!("user_{}", user_id);
 
         // For this implementation, we'll use a placeholder password
         // In a real implementation, you'd need to get the actual password from the session
-        let _password = "placeholder_password";
+        let password = "placeholder_password";
 
-        // Check if contact already exists
-        // Note: This implementation is simplified and may not work exactly like the database version
-        // In a real implementation, you'd need to properly integrate with the ContactManager
-        /*
-        let existing_contacts = self
-            .contact_manager
-            .list_contacts(&username, password)
-            .map_err(|e| {
-                ContactError::StorageError(format!("Failed to check existing contacts: {}", e))
-            })?;
+        // First, check if the contact already exists in the contact manager
+        // Extract IP and port from the address (format: "ip:port")
+        let parts: Vec<&str> = normalized_address.split(':').collect();
+        if parts.len() != 2 {
+            return Err(ContactError::InvalidContactData);
+        }
+        let ip = parts[0];
+        let port: u16 = parts[1]
+            .parse()
+            .map_err(|_| ContactError::InvalidContactData)?;
 
-        for contact in existing_contacts {
-            if contact.name.eq_ignore_ascii_case(normalized_name)
-                || contact.address.eq_ignore_ascii_case(normalized_address)
-            {
+        let address_key = format!("{}:{}", ip, port);
+
+        // For file-based storage, we'll use a placeholder password
+        // In a real implementation, you'd need to get the actual password from the session
+        let password = "placeholder_password";
+
+        // Check if contact already exists in the file-based storage
+        if let Ok(exists) =
+            self.contact_manager
+                .contact_exists(account_username, password, &address_key)
+        {
+            if exists {
                 return Err(ContactError::ContactAlreadyExists);
             }
         }
-        */
 
-        let sanitized_notes = Self::normalize_optional_field(notes);
-        let added_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // Add the contact to the contact manager
+        self.contact_manager
+            .add_contact(
+                account_username,
+                password,
+                ip,
+                port,
+                &normalized_name,
+                Some(user_id.clone()),
+            )
+            .map_err(|e| ContactError::StorageError(format!("Failed to add contact: {}", e)))?;
 
-        let contact_id = CONTACT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-        let contact = Contact::from_storage(
-            contact_id,
+        // Create the domain contact object
+        let contact = Contact::new(
             user_id,
             normalized_name.to_string(),
+            normalized_name.to_string(),
             normalized_address.to_string(),
-            false, // is_online
-            added_at,
-            sanitized_notes,
         );
 
         // Update cache
         {
             let mut cache = self.cache.lock().unwrap();
-            cache.insert(contact.id, contact.clone());
+            cache.insert(contact.id.clone(), contact.clone());
         }
 
         Ok(contact)
     }
 
     /// Remove a contact by ID
-    pub fn remove_contact(&self, id: EntityId) -> ContactResult<()> {
+    pub fn remove_contact(&self, id: String) -> ContactResult<()> {
         // For file-based storage, we need to get the current user's username
         // This is a simplification - in a real implementation, you'd want to map user_id to username
         let _username = format!("user_{}", id);
@@ -176,7 +179,7 @@ impl ContactService {
     }
 
     /// Get all contacts for a user
-    pub fn get_contacts(&self, user_id: EntityId) -> Vec<Contact> {
+    pub fn get_contacts(&self, username: String, user_id: String) -> Vec<Contact> {
         // Try to get from cache first
         {
             let cache = self.cache.lock().unwrap();
@@ -192,22 +195,78 @@ impl ContactService {
             }
         }
 
-        // For file-based storage, we need to get the current user's username
-        // This is a simplification - in a real implementation, you'd want to map user_id to username
-        let _username = format!("user_{}", user_id);
-
         // For this implementation, we'll use a placeholder password
         // In a real implementation, you'd need to get the actual password from the session
-        let _password = "placeholder_password";
+        let password = "placeholder_password";
 
-        // Otherwise, get from storage
-        // Note: This is a simplified implementation that doesn't fully integrate with ContactManager
-        // In a real implementation, you'd need to properly adapt the ContactManager to work with the domain models
-        vec![] // Return empty vector for now
+        // Get from storage via the contact manager
+        match self.contact_manager.list_contacts(&username, password) {
+            Ok(contacts) => {
+                // Convert the contact manager contacts to domain model contacts
+                let domain_contacts: Vec<Contact> = contacts
+                    .into_iter()
+                    .map(|cm_contact| {
+                        // Create domain contact from contact manager contact
+                        // Note: contact manager stores IP and port separately, we combine them for the address field
+                        let address = format!("{}:{}", cm_contact.ip, cm_contact.port);
+                        // Use the user_id from the contact manager's contact, or fallback to the passed user_id if none
+                        let contact_user_id = cm_contact.user_id.unwrap_or_else(|| user_id.clone());
+
+                        // Extract username from display label if it's in "username • other_info" format, or use as is
+                        let cleaned_username = if cm_contact.username.contains(" • ") {
+                            cm_contact
+                                .username
+                                .split(" • ")
+                                .next()
+                                .unwrap_or(&cm_contact.username)
+                                .trim()
+                                .to_string()
+                        } else {
+                            cm_contact.username.trim().to_string()
+                        };
+
+                        // Ensure the username is meaningful; use IP:Port as fallback if needed
+                        let contact_username = if cleaned_username.is_empty()
+                            || cleaned_username.eq_ignore_ascii_case("unknown")
+                        {
+                            format!("{}:{}", cm_contact.ip, cm_contact.port)
+                        } else {
+                            cleaned_username
+                        };
+
+                        let contact_name = contact_username.clone();
+                        Contact::from_storage(
+                            uuid::Uuid::new_v4().to_string(), // Generate a new UUID for the domain contact
+                            contact_user_id,
+                            contact_name, // Display name for the contact
+                            contact_username,
+                            address,              // Reconstruct the address
+                            cm_contact.is_online, // Use the online status from contact manager
+                            cm_contact.added_at,
+                            None, // Notes field not available in contact manager's contact
+                        )
+                    })
+                    .collect();
+
+                // Update cache with loaded contacts
+                {
+                    let mut cache = self.cache.lock().unwrap();
+                    for contact in &domain_contacts {
+                        cache.insert(contact.id.clone(), contact.clone());
+                    }
+                }
+
+                domain_contacts
+            }
+            Err(_) => {
+                // If loading from storage fails, return empty vector
+                vec![]
+            }
+        }
     }
 
     /// Search contacts by name or address
-    pub fn search_contacts(&self, user_id: EntityId, query: &str) -> Vec<Contact> {
+    pub fn search_contacts(&self, username: String, user_id: String, query: &str) -> Vec<Contact> {
         let normalized_query = query.trim();
         if normalized_query.is_empty() {
             return vec![];
@@ -232,36 +291,153 @@ impl ContactService {
             return cached_matches;
         }
 
-        // For file-based storage, we need to get the current user's username
-        // This is a simplification - in a real implementation, you'd want to map user_id to username
-        let _username = format!("user_{}", user_id);
-
         // For this implementation, we'll use a placeholder password
-        // In a real implementation, you'd need to get the actual password from the session
-        let _password = "placeholder_password";
+        let password = "placeholder_password";
 
-        // Note: This is a simplified implementation that doesn't fully integrate with ContactManager
-        // In a real implementation, you'd need to properly adapt the ContactManager to work with the domain models
-        vec![] // Return empty vector for now
+        // Search contacts via the contact manager
+        match self
+            .contact_manager
+            .search_contacts(&username, password, query)
+        {
+            Ok(contacts) => {
+                // Convert the contact manager contacts to domain model contacts
+                let domain_contacts: Vec<Contact> = contacts
+                    .into_iter()
+                    .map(|cm_contact| {
+                        // Create domain contact from contact manager contact
+                        let address = format!("{}:{}", cm_contact.ip, cm_contact.port);
+                        // Use the user_id from the contact manager's contact, or fallback to the passed user_id if none
+                        let contact_user_id = cm_contact.user_id.unwrap_or_else(|| user_id.clone());
+
+                        // Extract username from display label if it's in "username • other_info" format, or use as is
+                        let cleaned_username = if cm_contact.username.contains(" • ") {
+                            cm_contact
+                                .username
+                                .split(" • ")
+                                .next()
+                                .unwrap_or(&cm_contact.username)
+                                .trim()
+                                .to_string()
+                        } else {
+                            cm_contact.username.trim().to_string()
+                        };
+
+                        let contact_username = if cleaned_username.is_empty()
+                            || cleaned_username.eq_ignore_ascii_case("unknown")
+                        {
+                            format!("{}:{}", cm_contact.ip, cm_contact.port)
+                        } else {
+                            cleaned_username
+                        };
+
+                        let contact_name = contact_username.clone();
+                        Contact::from_storage(
+                            uuid::Uuid::new_v4().to_string(), // Generate a new UUID for the domain contact
+                            contact_user_id,
+                            contact_name, // Display name for the contact
+                            contact_username,
+                            address,              // Reconstruct the address
+                            cm_contact.is_online, // Use the online status from contact manager
+                            cm_contact.added_at,
+                            None, // Notes field not available in contact manager's contact
+                        )
+                    })
+                    .collect();
+
+                // Update cache with loaded contacts
+                {
+                    let mut cache = self.cache.lock().unwrap();
+                    for contact in &domain_contacts {
+                        cache.insert(contact.id.clone(), contact.clone());
+                    }
+                }
+
+                domain_contacts
+            }
+            Err(_) => {
+                // If search fails, return empty vector
+                vec![]
+            }
+        }
     }
 
     /// Find a contact by address for the provided user
-    pub fn find_contact_by_address(&self, user_id: EntityId, _address: &str) -> Option<Contact> {
-        // For file-based storage, we need to get the current user's username
-        // This is a simplification - in a real implementation, you'd want to map user_id to username
-        let _username = format!("user_{}", user_id);
+    pub fn find_contact_by_address(
+        &self,
+        username: String,
+        user_id: String,
+        address: &str,
+    ) -> Option<Contact> {
+        // Try to get from cache first
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(contact) = cache
+                .values()
+                .find(|contact| contact.user_id == user_id && contact.address == address)
+            {
+                return Some(contact.clone());
+            }
+        }
 
         // For this implementation, we'll use a placeholder password
-        // In a real implementation, you'd need to get the actual password from the session
-        let _password = "placeholder_password";
+        let password = "placeholder_password";
 
-        // Note: This is a simplified implementation that doesn't fully integrate with ContactManager
-        // In a real implementation, you'd need to properly adapt the ContactManager to work with the domain models
-        None // Return None for now
+        // Try to get from storage via the contact manager
+        match self
+            .contact_manager
+            .get_contact(&username, password, address)
+        {
+            Ok(cm_contact) => {
+                // Convert the contact manager contact to domain model contact
+                let contact_user_id = cm_contact.user_id.unwrap_or_else(|| user_id);
+
+                // Extract username from display label if it's in "username • other_info" format, or use as is
+                let cleaned_username = if cm_contact.username.contains(" • ") {
+                    cm_contact
+                        .username
+                        .split(" • ")
+                        .next()
+                        .unwrap_or(&cm_contact.username)
+                        .trim()
+                        .to_string()
+                } else {
+                    cm_contact.username.trim().to_string()
+                };
+
+                let contact_username = if cleaned_username.is_empty()
+                    || cleaned_username.eq_ignore_ascii_case("unknown")
+                {
+                    format!("{}:{}", cm_contact.ip, cm_contact.port)
+                } else {
+                    cleaned_username
+                };
+
+                let contact_name = contact_username.clone();
+                let domain_contact = Contact::from_storage(
+                    uuid::Uuid::new_v4().to_string(), // Generate a new UUID for the domain contact
+                    contact_user_id,
+                    contact_name, // Display name for the contact
+                    contact_username,
+                    address.to_string(),  // Use the address
+                    cm_contact.is_online, // Use the online status from contact manager
+                    cm_contact.added_at,
+                    None, // Notes field not available in contact manager's contact
+                );
+
+                // Update cache with loaded contact
+                {
+                    let mut cache = self.cache.lock().unwrap();
+                    cache.insert(domain_contact.id.clone(), domain_contact.clone());
+                }
+
+                Some(domain_contact)
+            }
+            Err(_) => None, // Return None if contact not found or error occurred
+        }
     }
 
     /// Get a contact by ID
-    pub fn get_contact(&self, id: EntityId) -> ContactResult<Contact> {
+    pub fn get_contact(&self, username: String, id: String) -> ContactResult<Contact> {
         // Try to get from cache first
         {
             let cache = self.cache.lock().unwrap();
@@ -270,17 +446,11 @@ impl ContactService {
             }
         }
 
-        // For file-based storage, we need to get the current user's username
-        // This is a simplification - in a real implementation, you'd want to map user_id to username
-        let _username = format!("user_{}", id);
-
-        // For this implementation, we'll use a placeholder password
-        // In a real implementation, you'd need to get the actual password from the session
-        let _password = "placeholder_password";
-
-        // Note: This is a simplified implementation that doesn't fully integrate with ContactManager
-        // In a real implementation, you'd need to properly adapt the ContactManager to work with the domain models
-
+        // This is a limitation of the current architecture: the file-based contact manager
+        // stores contacts by address (IP:Port) as the key, not by UUID. The domain contact
+        // model uses UUIDs. We'd need to load all contacts for the user and find the one
+        // with matching UUID. This is inefficient but necessary for the current architecture.
+        // For now, we'll return an error since there's no direct way to map UUID to address.
         Err(ContactError::ContactNotFound)
     }
 
@@ -297,7 +467,8 @@ impl ContactService {
 
     pub fn update_contact(
         &self,
-        id: EntityId,
+        username: String,
+        id: String,
         name: Option<String>,
         address: Option<String>,
         notes: Option<String>,
@@ -315,39 +486,37 @@ impl ContactService {
             }
         }
 
-        // For file-based storage, we need to get the current user's username
-        // This is a simplification - in a real implementation, you'd want to map user_id to username
-        let _username = format!("user_{}", id);
+        // Find the existing contact in cache to get user_id and address
+        let existing_contact = {
+            let cache = self.cache.lock().unwrap();
+            cache.get(&id).cloned()
+        };
 
-        // For this implementation, we'll use a placeholder password
-        // In a real implementation, you'd need to get the actual password from the session
-        let _password = "placeholder_password";
+        if let Some(mut contact) = existing_contact {
+            // Update the contact's fields if provided
+            if let Some(name) = name {
+                contact.name = name;
+            }
+            if let Some(address) = address {
+                contact.address = address;
+            }
+            if let Some(notes) = notes {
+                contact.notes = Some(notes);
+            }
 
-        // Note: This is a simplified implementation that doesn't fully integrate with ContactManager
-        // In a real implementation, you'd need to properly adapt the ContactManager to work with the domain models
+            // Update cache
+            {
+                let mut cache = self.cache.lock().unwrap();
+                cache.insert(contact.id.clone(), contact.clone());
+            }
 
-        // Find the existing contact in cache
-        let mut cache = self.cache.lock().unwrap();
-        let mut contact = cache
-            .get(&id)
-            .cloned()
-            .ok_or(ContactError::ContactNotFound)?;
-
-        // Update the contact's fields if provided
-        if let Some(name) = name {
-            contact.name = name;
+            Ok(contact)
+        } else {
+            // If not in cache, we have limited ability to update without knowing user_id and original address
+            // The file-based storage system is indexed by address, but the domain system uses UUIDs
+            // This is a limitation of the integration approach
+            Err(ContactError::ContactNotFound)
         }
-        if let Some(address) = address {
-            contact.address = address;
-        }
-        if let Some(notes) = notes {
-            contact.notes = Some(notes);
-        }
-
-        // Insert updated contact back into cache
-        cache.insert(contact.id, contact.clone());
-
-        Ok(contact)
     }
 }
 
@@ -371,10 +540,13 @@ mod tests {
         let data_path = temp_dir.path().to_path_buf();
 
         let file_manager = FileManager::new(data_path);
-        let _identity_manager = Arc::new(crate::identity::manager::IdentityManager::new(
+        let identity_manager = Arc::new(crate::identity::manager::IdentityManager::new(
             file_manager.clone(),
         ));
-        let contact_manager = Arc::new(crate::contacts::manager::ContactManager::new(file_manager));
+        let contact_manager = Arc::new(crate::contacts::manager::ContactManager::new(
+            file_manager,
+            (*identity_manager).clone(),
+        ));
         let contact_service = ContactService::new(contact_manager);
         contact_service
     }
@@ -383,7 +555,8 @@ mod tests {
     fn test_add_contact() {
         let contact_service = setup_test_service();
         let _result = contact_service.add_contact(
-            1,
+            "test_user".to_string(),   // username
+            "test-user-1".to_string(), // user_id
             "Alice".to_string(),
             "192.168.1.100:7000".to_string(),
             None,
@@ -401,12 +574,23 @@ mod tests {
     #[test]
     fn test_add_contact_invalid_data() {
         let contact_service = setup_test_service();
-        let result =
-            contact_service.add_contact(1, "".to_string(), "192.168.1.100:7000".to_string(), None);
+        let result = contact_service.add_contact(
+            "test_user".to_string(),
+            "test-user-1".to_string(),
+            "".to_string(),
+            "192.168.1.100:7000".to_string(),
+            None,
+        );
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ContactError::InvalidContactData);
 
-        let result = contact_service.add_contact(1, "Alice".to_string(), "".to_string(), None);
+        let result = contact_service.add_contact(
+            "test_user".to_string(),
+            "test-user-1".to_string(),
+            "Alice".to_string(),
+            "".to_string(),
+            None,
+        );
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ContactError::InvalidContactData);
     }

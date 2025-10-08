@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/capabilities/v1",
+  "identifier": "fs:allow-home",
+  "description": "Access to files under the user's home directory",
+  "permissions": [
+    "fs:allow-home-read-recursive",
+    "fs:allow-home-write-recursive"
+  ]
+}

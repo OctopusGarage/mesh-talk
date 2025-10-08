@@ -18,8 +18,11 @@ impl ContactRequestService {
         file_manager: crate::storage::file_manager::FileManager,
         node_service: Arc<Mutex<NodeService>>,
     ) -> Result<(), String> {
-        let _identity_manager = Arc::new(IdentityManager::new(file_manager.clone()));
-        let contact_manager = Arc::new(ContactManager::new(file_manager));
+        let identity_manager = Arc::new(IdentityManager::new(file_manager.clone()));
+        let contact_manager = Arc::new(ContactManager::new(
+            file_manager,
+            (*identity_manager).clone(),
+        ));
 
         // Note: The original ContactRequestService expects a Libp2pNetwork which is not available
         // For now, we'll create the service without the network and handle it differently
@@ -59,7 +62,10 @@ impl ContactRequestService {
         password: &str,
         target_public_key: &str,
         alias: Option<&str>,
-        user_id: u64,
+        user_id: String,
+        remote_username: Option<String>,
+        remote_ip: Option<String>,
+        remote_port: Option<u16>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.inner
             .send_contact_request_with_user_id(
@@ -68,6 +74,9 @@ impl ContactRequestService {
                 target_public_key,
                 alias,
                 user_id,
+                remote_username,
+                remote_ip,
+                remote_port,
             )
             .await
     }
@@ -91,9 +100,16 @@ impl ContactRequestService {
         password: &str,
         target_public_key: &str,
         approved: bool,
+        target_user_id: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.inner
-            .send_contact_response(username, password, target_public_key, approved)
+            .send_contact_response(
+                username,
+                password,
+                target_public_key,
+                approved,
+                target_user_id,
+            )
             .await
     }
 

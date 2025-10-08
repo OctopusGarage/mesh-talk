@@ -1,8 +1,9 @@
-use crate::domain::models::{ChatMessage, EntityId, MessageStatus};
+use crate::domain::models::{ChatMessage, MessageStatus};
 use crate::services::common::{Service, ServiceDependencies, ServiceHealth};
 use crate::storage::file_manager::FileManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Message error types
@@ -35,31 +36,34 @@ pub type MessageResult<T> = Result<T, MessageError>;
 /// Serializable message structure for file storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredMessage {
-    id: EntityId,
-    from_user_id: EntityId,
+    id: String,
+    from_user_id: String,
     from_address: String,
-    to_user_id: Option<EntityId>,
+    to_user_id: Option<String>,
     to_address: Option<String>,
     content: String,
     sent_at: u64,
     delivered_at: Option<u64>,
     read_at: Option<u64>,
     status: MessageStatus,
+    #[serde(default)]
+    owner_username: Option<String>,
 }
 
 impl From<&ChatMessage> for StoredMessage {
     fn from(message: &ChatMessage) -> Self {
         StoredMessage {
-            id: message.id,
-            from_user_id: message.from_user_id,
+            id: message.id.clone(),
+            from_user_id: message.from_user_id.clone(),
             from_address: message.from_address.clone(),
-            to_user_id: message.to_user_id,
+            to_user_id: message.to_user_id.clone(),
             to_address: message.to_address.clone(),
             content: message.content.clone(),
             sent_at: message.sent_at,
             delivered_at: message.delivered_at,
             read_at: message.read_at,
-            status: message.status.clone(), // Add .clone() here
+            status: message.status.clone(),
+            owner_username: message.owner_username.clone(),
         }
     }
 }
@@ -77,6 +81,7 @@ impl From<StoredMessage> for ChatMessage {
             delivered_at: stored.delivered_at,
             read_at: stored.read_at,
             status: stored.status,
+            owner_username: stored.owner_username,
         }
     }
 }
@@ -87,12 +92,40 @@ pub struct MessageService {
     /// File manager for persistent storage
     file_manager: Arc<FileManager>,
     /// In-memory cache of messages for performance
-    cache: Arc<Mutex<HashMap<EntityId, ChatMessage>>>,
-    /// Next message ID to assign
-    next_id: Arc<Mutex<EntityId>>,
+    cache: Arc<Mutex<HashMap<String, ChatMessage>>>,
 }
 
 static INSTANCE: OnceLock<MessageService> = OnceLock::new();
+
+fn sanitize_dir_component(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let sanitized: String = trimmed
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn build_storage_username(owner_username: Option<&str>, fallback_user_id: &str) -> String {
+    if let Some(owner) = owner_username.and_then(sanitize_dir_component) {
+        owner
+    } else {
+        format!("user_{}", fallback_user_id)
+    }
+}
 
 impl Service for MessageService {
     type Error = MessageError;
@@ -130,7 +163,6 @@ impl MessageService {
         Self {
             file_manager,
             cache: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(Mutex::new(1)),
         }
     }
 
@@ -148,9 +180,10 @@ impl MessageService {
     /// Create a new message
     pub fn create_message(
         &self,
-        from_user_id: EntityId,
+        owner_username: impl AsRef<str>,
+        from_user_id: String,
         from_address: String,
-        to_user_id: Option<EntityId>,
+        to_user_id: Option<String>,
         to_address: Option<String>,
         content: String,
     ) -> MessageResult<ChatMessage> {
@@ -159,38 +192,34 @@ impl MessageService {
             return Err(MessageError::InvalidMessageData);
         }
 
-        // Generate a new ID
-        let id = {
-            let mut next_id = self.next_id.lock().unwrap();
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+        let owner_username = owner_username.as_ref().trim().to_string();
 
         // Create domain message
-        let message = ChatMessage::new(
-            id,
-            from_user_id,
+        let mut message = ChatMessage::new(
+            from_user_id.clone(),
             from_address,
             to_user_id,
             to_address,
             content,
         );
+        if !owner_username.is_empty() {
+            message.owner_username = Some(owner_username.clone());
+        }
 
         // Convert to stored message
         let stored_message: StoredMessage = (&message).into();
 
         // Save to file storage
-        // For this implementation, we'll use a placeholder username and password
-        // In a real implementation, you'd get these from the session
-        let username = format!("user_{}", from_user_id);
+        // For this implementation, we'll use a placeholder password
+        // The directory is derived from the owner username if available
+        let username = build_storage_username(message.owner_username.as_deref(), &from_user_id);
         let password = "placeholder_password";
 
         // Save the message
         self.file_manager
             .write_encrypted_file(
                 &username,
-                &format!("messages/{}.json", id),
+                &format!("messages/{}.json", message.id),
                 &stored_message,
                 password,
             )
@@ -199,16 +228,16 @@ impl MessageService {
         // Update cache
         {
             let mut cache = self.cache.lock().unwrap();
-            cache.insert(message.id, message.clone());
+            cache.insert(message.id.clone(), message.clone());
         }
 
         Ok(message)
     }
 
     /// Mark a message as delivered
-    pub fn mark_delivered(&self, id: EntityId) -> MessageResult<()> {
+    pub fn mark_delivered(&self, id: String) -> MessageResult<()> {
         // Get the message from cache or storage
-        let mut message = self.get_message(id)?;
+        let mut message = self.get_message(id.clone())?;
 
         // Update the message status
         message.mark_delivered();
@@ -219,7 +248,8 @@ impl MessageService {
         // Save to file storage
         // For this implementation, we'll use a placeholder username and password
         // In a real implementation, you'd get these from the session
-        let username = format!("user_{}", message.from_user_id);
+        let username =
+            build_storage_username(message.owner_username.as_deref(), &message.from_user_id);
         let password = "placeholder_password";
 
         // Save the updated message
@@ -235,16 +265,16 @@ impl MessageService {
         // Update cache
         {
             let mut cache = self.cache.lock().unwrap();
-            cache.insert(message.id, message.clone());
+            cache.insert(message.id.clone(), message.clone());
         }
 
         Ok(())
     }
 
     /// Mark a message as read
-    pub fn mark_read(&self, id: EntityId) -> MessageResult<()> {
+    pub fn mark_read(&self, id: String) -> MessageResult<()> {
         // Get the message from cache or storage
-        let mut message = self.get_message(id)?;
+        let mut message = self.get_message(id.clone())?;
 
         // Update the message status
         message.mark_read();
@@ -255,7 +285,8 @@ impl MessageService {
         // Save to file storage
         // For this implementation, we'll use a placeholder username and password
         // In a real implementation, you'd get these from the session
-        let username = format!("user_{}", message.from_user_id);
+        let username =
+            build_storage_username(message.owner_username.as_deref(), &message.from_user_id);
         let password = "placeholder_password";
 
         // Save the updated message
@@ -271,16 +302,16 @@ impl MessageService {
         // Update cache
         {
             let mut cache = self.cache.lock().unwrap();
-            cache.insert(message.id, message.clone());
+            cache.insert(message.id.clone(), message.clone());
         }
 
         Ok(())
     }
 
     /// Mark a message as failed
-    pub fn mark_failed(&self, id: EntityId) -> MessageResult<()> {
+    pub fn mark_failed(&self, id: String) -> MessageResult<()> {
         // Get the message from cache or storage
-        let mut message = self.get_message(id)?;
+        let mut message = self.get_message(id.clone())?;
 
         // Update the message status
         message.mark_failed();
@@ -291,7 +322,8 @@ impl MessageService {
         // Save to file storage
         // For this implementation, we'll use a placeholder username and password
         // In a real implementation, you'd get these from the session
-        let username = format!("user_{}", message.from_user_id);
+        let username =
+            build_storage_username(message.owner_username.as_deref(), &message.from_user_id);
         let password = "placeholder_password";
 
         // Save the updated message
@@ -307,14 +339,14 @@ impl MessageService {
         // Update cache
         {
             let mut cache = self.cache.lock().unwrap();
-            cache.insert(message.id, message.clone());
+            cache.insert(message.id.clone(), message.clone());
         }
 
         Ok(())
     }
 
     /// Mark all messages as read for a user
-    pub fn mark_all_read_for_user(&self, user_id: EntityId) -> MessageResult<usize> {
+    pub fn mark_all_read_for_user(&self, user_id: String) -> MessageResult<usize> {
         // In a file-based system, we would need to iterate through all messages
         // This is a simplified implementation that just updates the cache
         let mut updated_count = 0;
@@ -323,7 +355,9 @@ impl MessageService {
         {
             let mut cache = self.cache.lock().unwrap();
             for message in cache.values_mut() {
-                if message.to_user_id == Some(user_id) && message.status != MessageStatus::Read {
+                if message.to_user_id == Some(user_id.clone())
+                    && message.status != MessageStatus::Read
+                {
                     message.mark_read();
                     updated_count += 1;
                 }
@@ -338,7 +372,7 @@ impl MessageService {
     }
 
     /// Count unread messages for a user
-    pub fn count_unread_for_user(&self, user_id: EntityId) -> MessageResult<u32> {
+    pub fn count_unread_for_user(&self, user_id: String) -> MessageResult<u32> {
         // In a file-based system, we would need to iterate through all messages
         // This is a simplified implementation that just checks the cache
         let unread_count = {
@@ -346,7 +380,8 @@ impl MessageService {
             cache
                 .values()
                 .filter(|message| {
-                    message.to_user_id == Some(user_id) && message.status == MessageStatus::Sent
+                    message.to_user_id == Some(user_id.clone())
+                        && message.status == MessageStatus::Sent
                 })
                 .count()
         };
@@ -359,7 +394,7 @@ impl MessageService {
     }
 
     /// Get a message by ID
-    pub fn get_message(&self, id: EntityId) -> MessageResult<ChatMessage> {
+    pub fn get_message(&self, id: String) -> MessageResult<ChatMessage> {
         // Try to get from cache first
         {
             let cache = self.cache.lock().unwrap();
@@ -368,27 +403,38 @@ impl MessageService {
             }
         }
 
-        // Otherwise, get from file storage
-        // For this implementation, we'll use a placeholder username and password
-        // In a real implementation, you'd need to search through user directories
-        // or maintain an index to find which user's directory contains the message
-        let username = "placeholder_user";
-        let password = "placeholder_password";
-
-        let stored_message: StoredMessage = self
-            .file_manager
-            .read_encrypted_file(username, &format!("messages/{}.json", id), password)
-            .map_err(|e| MessageError::StorageError(format!("Failed to get message: {}", e)))?;
-
-        let message: ChatMessage = stored_message.into();
+        let message = self
+            .load_message_from_disk(&id)
+            .ok_or_else(|| MessageError::MessageNotFound)?;
 
         // Update cache
         {
             let mut cache = self.cache.lock().unwrap();
-            cache.insert(message.id, message.clone());
+            cache.insert(message.id.clone(), message.clone());
         }
 
         Ok(message)
+    }
+
+    fn load_message_from_disk(&self, id: &str) -> Option<ChatMessage> {
+        let users_dir = self.file_manager.base_path().join("users");
+        let entries = fs::read_dir(users_dir).ok()?;
+        let password = "placeholder_password";
+
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let username = entry.file_name().to_string_lossy().to_string();
+            if let Ok(stored) = self.file_manager.read_encrypted_file::<StoredMessage>(
+                &username,
+                &format!("messages/{}.json", id),
+                password,
+            ) {
+                return Some(stored.into());
+            }
+        }
+        None
     }
 
     /// Get all messages
@@ -412,7 +458,7 @@ impl MessageService {
     }
 
     /// Get messages by sender
-    pub fn get_messages_by_sender(&self, _from_user_id: EntityId) -> Vec<ChatMessage> {
+    pub fn get_messages_by_sender(&self, _from_user_id: String) -> Vec<ChatMessage> {
         // In a file-based system, we would need to iterate through message files
         // This is a simplified implementation that just returns an empty vector
         // A real implementation would need to:
@@ -424,7 +470,7 @@ impl MessageService {
     }
 
     /// Get messages by recipient
-    pub fn get_messages_by_recipient(&self, _to_user_id: EntityId) -> Vec<ChatMessage> {
+    pub fn get_messages_by_recipient(&self, _to_user_id: String) -> Vec<ChatMessage> {
         // In a file-based system, we would need to iterate through message files
         // This is a simplified implementation that just returns an empty vector
         // A real implementation would need to:
@@ -465,9 +511,10 @@ mod tests {
     fn test_create_message() {
         let message_service = setup_test_service();
         let _result = message_service.create_message(
-            1,
+            "owner".to_string(),
+            "test-user-1".to_string(),
             "192.168.1.100:7000".to_string(),
-            Some(2),
+            Some("test-user-2".to_string()),
             Some("192.168.1.101:7000".to_string()),
             "Hello".to_string(),
         );
@@ -485,9 +532,10 @@ mod tests {
     fn test_create_message_invalid_data() {
         let message_service = setup_test_service();
         let result = message_service.create_message(
-            1,
+            "owner".to_string(),
+            "test-user-1".to_string(),
             "192.168.1.100:7000".to_string(),
-            Some(2),
+            Some("test-user-2".to_string()),
             Some("192.168.1.101:7000".to_string()),
             "".to_string(),
         );

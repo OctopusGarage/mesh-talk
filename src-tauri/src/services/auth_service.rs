@@ -1,8 +1,10 @@
-use crate::domain::models::{EntityId, User};
+use crate::domain::models::User;
 use crate::identity::manager::IdentityManager;
 use crate::services::common::{Service, ServiceDependencies, ServiceHealth};
 use crate::storage::file_manager::FileManager;
 
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -52,7 +54,7 @@ pub type AuthResult<T> = Result<T, AuthError>;
 #[derive(Debug, Clone)]
 pub struct Session {
     /// User ID associated with this session
-    pub user_id: EntityId,
+    pub user_id: String,
     /// Session token
     pub token: String,
     /// Timestamp when the session was created
@@ -62,7 +64,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(user_id: EntityId, duration_secs: u64) -> Self {
+    pub fn new(user_id: String, duration_secs: u64) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -202,21 +204,10 @@ impl AuthService {
             .unwrap()
             .as_secs();
 
-        // Generate a numeric ID for the domain User model, using a hash of the UUID to ensure consistency
-        let id = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = DefaultHasher::new();
-            identity_user.user_id.hash(&mut hasher);
-            hasher.finish() as EntityId
-        };
-
         let user = User {
-            id,
+            user_id: identity_user.user_id.clone(),
             name: identity_user.username,
             address: normalized_address.to_string(),
-            identity_id: identity_user.user_id.clone(),
             created_at: identity_user.created_at,
             last_seen: now,
             is_online: false,
@@ -248,21 +239,13 @@ impl AuthService {
                 _ => AuthError::StorageError(format!("Failed to authenticate user: {}", e)),
             })?;
 
-        // Generate a numeric ID for the domain User model, using a hash of the UUID to ensure consistency
-        let id = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = DefaultHasher::new();
-            identity_user.user_id.hash(&mut hasher);
-            hasher.finish() as EntityId
-        };
+        // Print key information during login
+        self.print_key_info(normalized_name, &password)?;
 
         let mut user = User {
-            id,
+            user_id: identity_user.user_id.clone(),
             name: identity_user.username,
             address: identity_user.public_key, // Using public key as address for now
-            identity_id: identity_user.user_id.clone(),
             created_at: identity_user.created_at,
             last_seen: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -272,12 +255,12 @@ impl AuthService {
         };
 
         user.update_last_seen();
-        let user_id = user.id;
+        let user_id = user.user_id.clone();
 
         {
             let mut current_user = self.current_user.lock().unwrap();
             if let Some(existing) = current_user.as_ref() {
-                if existing.id != user_id {
+                if existing.user_id != user_id {
                     return Err(AuthError::AlreadyLoggedIn);
                 }
             }
@@ -294,6 +277,39 @@ impl AuthService {
         Ok((user, token))
     }
 
+    /// Print key information for the user
+    fn print_key_info(&self, username: &str, password: &str) -> AuthResult<()> {
+        // Get private key
+        let private_key_bytes = self
+            .identity_manager
+            .get_user_private_key(username, password)
+            .map_err(|e| AuthError::StorageError(format!("Failed to get private key: {}", e)))?;
+
+        // Print key information
+        println!("=== Account Key Information ===");
+        println!("Account: {}", username);
+        println!(
+            "Private Key File Location: data/users/{}/meta/private_key.enc",
+            username
+        );
+        println!("Private Key (bytes): {:?}", private_key_bytes);
+        println!(
+            "Private Key (base64): {}",
+            general_purpose::STANDARD.encode(&private_key_bytes)
+        );
+
+        // Try to get public key from user info as well
+        let identity_user = self
+            .identity_manager
+            .authenticate_user(username, password)
+            .map_err(|e| AuthError::StorageError(format!("Failed to authenticate user: {}", e)))?;
+        println!("Public Key: {}", identity_user.public_key);
+        println!("User ID: {}", identity_user.user_id);
+        println!("=============================");
+
+        Ok(())
+    }
+
     /// Logout the current user
     pub fn logout(&self, token: String) -> AuthResult<()> {
         let active_user = {
@@ -306,7 +322,7 @@ impl AuthService {
             return Err(AuthError::InvalidCredentials);
         }
 
-        sessions.retain(|_, session| session.user_id != active_user.id);
+        sessions.retain(|_, session| session.user_id != active_user.user_id);
 
         let _now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -318,7 +334,7 @@ impl AuthService {
         // For now, we'll just update the in-memory representation
 
         let mut current_user = self.current_user.lock().unwrap();
-        if current_user.as_ref().map(|user| user.id) == Some(active_user.id) {
+        if current_user.as_ref().map(|user| user.user_id.clone()) == Some(active_user.user_id) {
             *current_user = None;
         }
 
@@ -344,10 +360,9 @@ impl AuthService {
         // For now, we'll create a minimal user object
         // In a more complete implementation, we might want to load more user details
         let user = User {
-            id: session.user_id,
+            user_id: session.user_id.clone(),
             name: "Unknown".to_string(), // We don't have the username in the session
             address: "Unknown".to_string(), // We don't have the address in the session
-            identity_id: String::new(),  // No identity_id available in session
             created_at: session.created_at,
             last_seen: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
