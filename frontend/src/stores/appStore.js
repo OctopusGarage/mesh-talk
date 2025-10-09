@@ -41,6 +41,14 @@ export const useAppStore = defineStore("app", () => {
   // Computed properties
   const isAuthenticated = computed(() => Boolean(user.value));
 
+  function normalizeConversationKey(key) {
+    if (typeof key !== "string") {
+      return null;
+    }
+    const trimmed = key.trim();
+    return trimmed.length ? trimmed : null;
+  }
+
   function conversationKeyForContact(contact) {
     if (!contact || typeof contact !== "object") {
       return null;
@@ -54,8 +62,7 @@ export const useAppStore = defineStore("app", () => {
     if (typeof key !== "string") {
       return null;
     }
-    const trimmed = key.trim();
-    return trimmed.length ? trimmed : null;
+    return normalizeConversationKey(key);
   }
 
   const sortedContacts = computed(() => {
@@ -117,9 +124,23 @@ export const useAppStore = defineStore("app", () => {
           name: discoveredNode.display_label || contact.name,
         };
       }
-      
-      // If no matching discovered node, return contact as is
-      return contact;
+
+      // If no matching discovered node, mark contact as offline
+      const offlineLabel =
+        contact.display_label ||
+        buildNodeDisplayLabel({
+          name: contact.name,
+          username: contact.username,
+          ip: contact.ip,
+          port: contact.listen_port || contact.port,
+        });
+
+      return {
+        ...contact,
+        is_online: false,
+        status: "offline",
+        display_label: offlineLabel,
+      };
     });
 
     return updatedContacts.sort((a, b) => a.name.localeCompare(b.name));
@@ -132,6 +153,22 @@ export const useAppStore = defineStore("app", () => {
 
     return messages.value.filter(
       (message) => messageConversationKey(message) === activeConversation.value,
+    );
+  });
+
+  const activeContact = computed(() => {
+    const activeKey = normalizeConversationKey(activeConversation.value);
+    if (!activeKey) {
+      return null;
+    }
+
+    return (
+      contacts.value.find((contact) => {
+        const contactKey = normalizeConversationKey(
+          conversationKeyForContact(contact),
+        );
+        return contactKey && contactKey === activeKey;
+      }) ?? null
     );
   });
 
@@ -1625,8 +1662,21 @@ export const useAppStore = defineStore("app", () => {
           display_label: discoveredNode.display_label || contact.display_label,
         };
       } else {
-        // If no matching discovered node, keep contact as is
-        return contact;
+        const offlineLabel =
+          contact.display_label ||
+          buildNodeDisplayLabel({
+            name: contact.name,
+            username: contact.username,
+            ip: contact.ip,
+            port: contact.listen_port || contact.port,
+          });
+
+        return {
+          ...contact,
+          is_online: false,
+          status: "offline",
+          display_label: offlineLabel,
+        };
       }
     });
   }
@@ -1687,6 +1737,7 @@ export const useAppStore = defineStore("app", () => {
     // getters
     isAuthenticated,
     sortedContacts,
+    activeContact,
     filteredMessages,
 
     // actions
