@@ -5,6 +5,7 @@
 
 use crate::error::{MeshTalkError, MeshTalkResult, NetworkErrorKind};
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::time::timeout as tokio_timeout;
 
@@ -142,6 +143,24 @@ pub fn aggressive_retry_config() -> RetryConfig {
     }
 }
 
+/// Attempts to infer the primary local IP address used for outbound traffic.
+///
+/// Falls back to 127.0.0.1 when the address cannot be determined.
+pub fn get_preferred_local_ip() -> Option<IpAddr> {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local_addr) = socket.local_addr() {
+                let ip = local_addr.ip();
+                if !ip.is_unspecified() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +218,10 @@ mod tests {
         assert!(result.is_err());
         // Should have tried 3 times (initial + 2 retries)
         assert_eq!(attempt_counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_get_preferred_local_ip_returns_value() {
+        assert!(get_preferred_local_ip().is_some());
     }
 }

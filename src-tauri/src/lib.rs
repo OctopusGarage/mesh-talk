@@ -35,6 +35,7 @@ use crate::domain::models::PeerInfo;
 use crate::events::setup_node_service_events;
 use crate::network::runtime::NetworkRuntime;
 use crate::network::udp::start_udp_broadcast;
+use crate::network::utils::get_preferred_local_ip;
 use crate::services::node_service::NodeService;
 use crate::state::AppState;
 use std::env;
@@ -273,18 +274,32 @@ pub async fn launch_network_with_broadcast(
     // Set up UDP discovery
     log::info!("Setting up UDP discovery...");
     let discovery_service = Arc::clone(&node_service);
-    let udp_discovery_handle: JoinHandle<()> = tokio::spawn(async move {
-        tokio::spawn(crate::network::udp::start_udp_discovery(
-            move |peer_addr, peer_name, peer_username, peer_port, peer_user_id| {
-                let service_clone = discovery_service.clone();
-                tokio::spawn(async move {
-                    // log::info!("[UDP Discovery Callback] Received peer_addr: {}", peer_addr);
-                    let service_port = {
-                        let service = service_clone.lock().await;
-                        service.get_port()
-                    };
+    let local_ip = get_preferred_local_ip();
+    let udp_discovery_handle: JoinHandle<()> = tokio::spawn({
+        let local_ip = local_ip.clone();
+        async move {
+            tokio::spawn(crate::network::udp::start_udp_discovery(
+                move |peer_addr, peer_name, peer_username, peer_port, peer_user_id| {
+                    let service_clone = discovery_service.clone();
+                    let local_ip = local_ip.clone();
+                    tokio::spawn(async move {
+                        // log::info!("[UDP Discovery Callback] Received peer_addr: {}", peer_addr);
+                        let service_port = {
+                            let service = service_clone.lock().await;
+                            service.get_port()
+                        };
 
-                    if peer_addr.port() != service_port {
+                        let is_self = match &local_ip {
+                            Some(ip) => peer_addr.ip() == *ip && peer_addr.port() == service_port,
+                            None => {
+                                peer_addr.ip().is_loopback() && peer_addr.port() == service_port
+                            }
+                        };
+
+                        if is_self {
+                            return;
+                        }
+
                         let service_for_peer = service_clone.clone();
                         {
                             let service = service_for_peer.lock().await;
@@ -320,10 +335,10 @@ pub async fn launch_network_with_broadcast(
                             Some(peer_port),
                             peer_user_id.clone(), // Pass the user_id to the registry
                         );
-                    }
-                });
-            },
-        ));
+                    });
+                },
+            ));
+        }
     });
 
     // Start UDP broadcast only if requested
