@@ -85,6 +85,9 @@ export const useAppStore = defineStore("app", () => {
     const discoveredNodeMap = {};
     const discoveredNodeByAddress = {};
     discoveredNodes.value.forEach(node => {
+      if (!node?.is_connected) {
+        return;
+      }
       if (node.user_id) {
         discoveredNodeMap[node.user_id] = node;
       }
@@ -841,7 +844,7 @@ export const useAppStore = defineStore("app", () => {
     if (!filePath || typeof filePath !== "string") {
       return {
         success: false,
-        error: "请选择要发送的文件",
+        error: "Select a file to send",
       };
     }
 
@@ -857,7 +860,7 @@ export const useAppStore = defineStore("app", () => {
         : null);
 
     if (!targetUserId && !targetAddress) {
-      const error = "请选择一个联系人后再发送文件";
+      const error = "Select a contact before sending a file";
       setError(new Error(error), {
         message: error,
         source: "files.send",
@@ -916,7 +919,7 @@ export const useAppStore = defineStore("app", () => {
     } catch (err) {
       console.error("[APP STORE] Failed to send file", err);
       setError(err, {
-        message: err?.message ?? "发送文件失败",
+        message: err?.message ?? "Failed to send file",
         source: "files.send",
         toast: true,
       });
@@ -926,7 +929,7 @@ export const useAppStore = defineStore("app", () => {
       });
       return {
         success: false,
-        error: err?.message ?? "发送文件失败",
+        error: err?.message ?? "Failed to send file",
       };
     } finally {
       setLoading(false);
@@ -942,7 +945,7 @@ export const useAppStore = defineStore("app", () => {
       dequeueIncomingTransfer(transferId);
     } catch (err) {
       setError(err, {
-        message: err?.message ?? "无法开始接收文件",
+        message: err?.message ?? "Unable to start receiving",
         source: "files.accept",
         toast: true,
       });
@@ -961,7 +964,7 @@ export const useAppStore = defineStore("app", () => {
       await API.files.rejectIncoming(transferId);
     } catch (err) {
       setError(err, {
-        message: err?.message ?? "无法取消接收",
+        message: err?.message ?? "Unable to cancel reception",
         source: "files.reject",
         toast: true,
       });
@@ -988,7 +991,7 @@ export const useAppStore = defineStore("app", () => {
       });
     } catch (err) {
       setError(err, {
-        message: err?.message ?? "无法继续传输",
+        message: err?.message ?? "Unable to resume transfer",
         source: "files.resume",
         toast: true,
       });
@@ -1013,7 +1016,7 @@ export const useAppStore = defineStore("app", () => {
       });
     } catch (err) {
       setError(err, {
-        message: err?.message ?? "无法暂停传输",
+        message: err?.message ?? "Unable to pause transfer",
         source: "files.cancel",
         toast: true,
       });
@@ -1079,7 +1082,7 @@ export const useAppStore = defineStore("app", () => {
       }
     } catch (err) {
       setError(err, {
-        message: err?.message ?? "无法同步传输状态",
+        message: err?.message ?? "Unable to refresh transfer state",
         source: "files.refresh",
         toast: false,
       });
@@ -1365,8 +1368,13 @@ export const useAppStore = defineStore("app", () => {
         const payload = event.payload ?? {};
         console.log("[FRONTEND] Payload nodes:", payload.nodes);
         if (payload.nodes) {
-          console.log("[FRONTEND] Processing", payload.nodes.length, "nodes:");
-          discoveredNodes.value = payload.nodes.map((node) => {
+          const filteredNodes = payload.nodes.filter((node) => {
+            const online = node?.is_connected ?? (node?.status === "online");
+            return online;
+          });
+
+          console.log("[FRONTEND] Processing", filteredNodes.length, "nodes:");
+          discoveredNodes.value = filteredNodes.map((node) => {
             console.log("[FRONTEND] Node:", {
               name: node.name,
               username: node.username,
@@ -1389,6 +1397,43 @@ export const useAppStore = defineStore("app", () => {
           });
           console.log("[FRONTEND] Updated discoveredNodes:", discoveredNodes.value);
         }
+      }),
+      listen("firewall-permission-required", (event) => {
+        const payload = event.payload ?? {};
+        const port = payload.port;
+        if (!port) {
+          return;
+        }
+        const promptMessage =
+          payload.message ??
+          `MeshTalk needs permission to accept inbound connections on TCP port ${port}. Allow access now?`;
+
+        (async () => {
+          const approved = await feedback.confirm({
+            title: "Allow local network access",
+            message: promptMessage,
+            confirmText: "Allow Access",
+            cancelText: "Not now",
+            tone: "warning",
+          });
+
+          if (!approved) {
+            feedback.showInfo("Firewall permission declined", { autoDismiss: 2500 });
+            return;
+          }
+
+          try {
+            await API.network.allowFirewall(port);
+            feedback.showSuccess("Firewall rule applied", { autoDismiss: 2500 });
+          } catch (err) {
+            console.error("[APP STORE] Failed to apply firewall rule", err);
+            setError(err, {
+              message: err?.message ?? "Unable to configure firewall",
+              source: "firewall.allow",
+              toast: true,
+            });
+          }
+        })();
       }),
       listen("file-transfer-progress", (event) => {
         handleFileTransferProgressEvent(event.payload ?? {});

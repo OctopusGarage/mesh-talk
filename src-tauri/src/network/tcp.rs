@@ -1,4 +1,4 @@
-use crate::domain::node_registry::NodeRegistry;
+use crate::domain::node_registry::{NodeRegistry, NodeStatus};
 use crate::error::{MeshTalkError, MeshTalkResult, NetworkErrorKind};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -87,6 +87,7 @@ impl EnhancedTcpConnection {
 pub async fn connect_to_peer<F>(
     addr: SocketAddr,
     peers: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>,
+    node_registry: Arc<Mutex<NodeRegistry>>,
     message_handler: F,
     peer_name: &str,
 ) -> MeshTalkResult<()>
@@ -123,6 +124,8 @@ where
     }
 
     let (reader, writer) = stream.into_split();
+    let registry_for_send = Arc::clone(&node_registry);
+    let registry_for_recv = Arc::clone(&node_registry);
 
     let (tx, mut rx) = mpsc::channel(32);
     peers.lock().unwrap().insert(addr, tx.clone());
@@ -160,6 +163,10 @@ where
             }
         }
         // println!("Message sending task ended: {}", addr);
+        let mut registry = registry_for_send.lock().unwrap();
+        if let Some(node) = registry.get_node_mut(addr) {
+            node.status = NodeStatus::Offline;
+        }
     });
 
     // Spawn task for receiving messages
@@ -194,6 +201,12 @@ where
 
         // println!("Connection disconnected: {}", addr);
         peers.lock().unwrap().remove(&addr);
+        {
+            let mut registry = registry_for_recv.lock().unwrap();
+            if let Some(node) = registry.get_node_mut(addr) {
+                node.status = NodeStatus::Offline;
+            }
+        }
     });
 
     Ok(())
@@ -432,6 +445,13 @@ impl ConnectionManager {
                 }
             }
         }
+
+        {
+            let mut registry = self.node_registry.lock().unwrap();
+            if let Some(node) = registry.get_node_mut(*addr) {
+                node.status = NodeStatus::Offline;
+            }
+        }
     }
 
     /// Remove mapping for a specific user_id
@@ -488,6 +508,7 @@ impl ConnectionManager {
             match connect_to_peer(
                 addr,
                 Arc::clone(&self.peers),
+                Arc::clone(&self.node_registry),
                 message_handler.clone(),
                 &peer_name,
             )

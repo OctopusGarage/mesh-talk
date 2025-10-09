@@ -18,9 +18,14 @@ const { isAuthenticated } = storeToRefs(useAppStore());
 
 // Global error handling
 window.addEventListener("error", (event) => {
+  const message = event?.message ?? event?.error?.message ?? "";
+  if (typeof message === "string" && message.includes("ws://localhost:5173")) {
+    // Ignore Vite dev-server websocket noise when running outside the dev server
+    return;
+  }
   const payload = event?.error ?? event?.message;
   feedback.showError(payload, {
-    message: event?.message ?? "Unexpected application error",
+    message: message || "Unexpected application error",
     title: "Application error",
   });
 });

@@ -13,9 +13,9 @@ use tokio::time::{interval, Duration};
 
 // Network configuration
 const BROADCAST_PORT: u16 = 9999; // default discovery port
-const BROADCAST_INTERVAL: Duration = Duration::from_secs(10); // Increased from 5 to 10 seconds to reduce network traffic
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30); // Increased from 10 to 30 seconds to reduce network traffic
-const REGISTRY_CLEANUP_INTERVAL: Duration = Duration::from_secs(60); // Clean up registry every minute
+const BROADCAST_INTERVAL: Duration = Duration::from_secs(5);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(12);
+const REGISTRY_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 // Message size limits

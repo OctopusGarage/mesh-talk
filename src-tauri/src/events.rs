@@ -35,6 +35,7 @@ pub const EVENT_FILE_TRANSFER_STATUS: &str = "file-transfer-status";
 pub const EVENT_FILE_TRANSFER_PROGRESS: &str = "file-transfer-progress";
 pub const EVENT_FILE_TRANSFER_COMPLETE: &str = "file-transfer-complete";
 pub const EVENT_FILE_TRANSFER_OFFER: &str = "file-transfer-offer";
+pub const EVENT_FIREWALL_PERMISSION_REQUIRED: &str = "firewall-permission-required";
 
 static NODE_EVENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
@@ -222,6 +223,25 @@ fn emit_contact_status_changed<R: Runtime>(
 
     if let Err(e) = app_handle.emit(EVENT_CONTACT_STATUS_CHANGED, event) {
         error!("Failed to emit contact status changed event: {}", e);
+    }
+}
+
+#[derive(Clone, serde::Serialize)]
+struct FirewallPermissionPayload {
+    port: u16,
+    message: Option<String>,
+}
+
+pub fn emit_firewall_permission_required<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    port: u16,
+    message: Option<String>,
+) {
+    if let Err(err) = app_handle.emit(
+        EVENT_FIREWALL_PERMISSION_REQUIRED,
+        FirewallPermissionPayload { port, message },
+    ) {
+        error!("Failed to emit firewall permission event: {}", err);
     }
 }
 
@@ -417,6 +437,7 @@ pub async fn setup_node_service_events(
                 registry
                     .snapshot()
                     .into_iter()
+                    .filter(|entry| entry.status == NodeStatus::Online)
                     .map(|entry| {
                         let ip = entry.addr.ip().to_string();
                         let port = entry.listen_port.unwrap_or(entry.addr.port());

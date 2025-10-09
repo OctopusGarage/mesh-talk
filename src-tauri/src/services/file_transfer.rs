@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
@@ -24,7 +26,11 @@ use tokio::time::timeout;
 use tracing::{error, warn};
 
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64 KiB chunks
+#[cfg(not(test))]
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const ACK_TIMEOUT: Duration = Duration::from_millis(50);
+const CHUNK_ACK_MAX_RETRIES: usize = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TransferDirection {
@@ -435,7 +441,7 @@ impl FileTransferManager {
                 sender_user_id: Some(session.user.user_id.clone()),
                 sender_address: Some(session.user.address.clone()),
                 sender_name: Some(session.user.name.clone()),
-                request_save_path: Some(true),
+                request_save_path: Some(false),
             };
         }
 
@@ -451,25 +457,43 @@ impl FileTransferManager {
             request_save_path: Some(false),
         });
 
-        {
-            let mut state = runtime.lock().await;
-            state.pending_ack = Some(PendingAck {
-                expected_offset: manifest_snapshot.bytes_confirmed,
-                notifier: Arc::new(Notify::new()),
-            });
-        }
-
-        self.send_message(
+        if let Err(err) = FileTransferManager::transmit_with_ack(
+            runtime.clone(),
             &manifest_snapshot.transfer_id,
-            target_user_id.clone(),
-            target_address.clone(),
-            Message::FileOffer(offer_payload),
+            manifest_snapshot.bytes_confirmed,
+            {
+                let manager = self.clone();
+                let message = Message::FileOffer(offer_payload.clone());
+                let target_user_id = target_user_id.clone();
+                let target_address = target_address.clone();
+                let transfer_id = manifest_snapshot.transfer_id.clone();
+                move || {
+                    let manager = manager.clone();
+                    let message = message.clone();
+                    let target_user_id = target_user_id.clone();
+                    let target_address = target_address.clone();
+                    let transfer_id = transfer_id.clone();
+                    Box::pin(async move {
+                        manager
+                            .send_message(
+                                &transfer_id,
+                                target_user_id.clone(),
+                                target_address.clone(),
+                                message.clone(),
+                            )
+                            .await
+                    })
+                }
+            },
+            None,
         )
-        .await?;
-
-        // wait for initial ack before streaming
-        self.wait_for_ack(runtime.clone(), manifest_snapshot.transfer_id.clone())
-            .await?;
+        .await
+        {
+            warn!(
+                "[FileTransfer] Timed out waiting for initial offer acknowledgement ({}): {:?}",
+                transfer_id, err
+            );
+        }
 
         let mut offset = {
             let state = runtime.lock().await;
@@ -501,29 +525,53 @@ impl FileTransferManager {
 
             {
                 let mut state = runtime.lock().await;
-                state.pending_ack = Some(PendingAck {
-                    expected_offset: offset + read as u64,
-                    notifier: Arc::new(Notify::new()),
-                });
                 state.manifest.status = TransferStatus::InProgress;
                 state.manifest.touch();
             }
 
-            self.send_message(
+            FileTransferManager::transmit_with_ack(
+                runtime.clone(),
                 &manifest_snapshot.transfer_id,
-                target_user_id.clone(),
-                target_address.clone(),
-                Message::FileChunk(payload),
+                offset + read as u64,
+                {
+                    let manager = self.clone();
+                    let message = Message::FileChunk(payload.clone());
+                    let target_user_id = target_user_id.clone();
+                    let target_address = target_address.clone();
+                    let transfer_id = manifest_snapshot.transfer_id.clone();
+                    move || {
+                        let manager = manager.clone();
+                        let message = message.clone();
+                        let target_user_id = target_user_id.clone();
+                        let target_address = target_address.clone();
+                        let transfer_id = transfer_id.clone();
+                        Box::pin(async move {
+                            manager
+                                .send_message(
+                                    &transfer_id,
+                                    target_user_id.clone(),
+                                    target_address.clone(),
+                                    message.clone(),
+                                )
+                                .await
+                        })
+                    }
+                },
+                Some(CHUNK_ACK_MAX_RETRIES),
             )
             .await?;
-
-            self.wait_for_ack(runtime.clone(), manifest_snapshot.transfer_id.clone())
-                .await?;
 
             offset = {
                 let state = runtime.lock().await;
                 state.manifest.bytes_confirmed
             };
+
+            emit_file_transfer_status(
+                &manifest_snapshot.transfer_id,
+                TransferStatus::InProgress,
+                None,
+                TransferDirection::Outgoing,
+            );
 
             emit_file_transfer_progress(
                 &manifest_snapshot.transfer_id,
@@ -570,10 +618,63 @@ impl FileTransferManager {
         Ok(())
     }
 
-    async fn wait_for_ack(
-        &self,
+    async fn arm_pending_ack(runtime: Arc<Mutex<TransferRuntime>>, expected_offset: u64) {
+        let notifier = Arc::new(Notify::new());
+        let mut state = runtime.lock().await;
+        state.pending_ack = Some(PendingAck {
+            expected_offset,
+            notifier,
+        });
+    }
+
+    async fn transmit_with_ack<F>(
         runtime: Arc<Mutex<TransferRuntime>>,
-        transfer_id: String,
+        transfer_id: &str,
+        expected_offset: u64,
+        mut send: F,
+        max_retries: Option<usize>,
+    ) -> Result<(), FileTransferError>
+    where
+        F: FnMut() -> Pin<Box<dyn Future<Output = Result<(), FileTransferError>> + Send>>,
+    {
+        let mut attempts = 0usize;
+
+        loop {
+            FileTransferManager::arm_pending_ack(runtime.clone(), expected_offset).await;
+
+            if attempts > 0 {
+                warn!(
+                    "[FileTransfer] Resending transfer {} payload (attempt #{})",
+                    transfer_id,
+                    attempts + 1
+                );
+            }
+
+            send().await?;
+
+            match FileTransferManager::wait_for_ack(runtime.clone(), transfer_id).await {
+                Ok(()) => return Ok(()),
+                Err(FileTransferError::AckTimeout) => {
+                    attempts += 1;
+                    if let Some(max) = max_retries {
+                        if attempts >= max {
+                            warn!(
+                                "[FileTransfer] Transfer {} exceeded ack retries (max {})",
+                                transfer_id, max
+                            );
+                            return Err(FileTransferError::AckTimeout);
+                        }
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn wait_for_ack(
+        runtime: Arc<Mutex<TransferRuntime>>,
+        transfer_id: &str,
     ) -> Result<(), FileTransferError> {
         let notify = {
             let mut state = runtime.lock().await;
@@ -1206,4 +1307,121 @@ async fn compute_file_checksum(path: &Path) -> Result<String, FileTransferError>
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::{sleep, Duration as TokioDuration};
+
+    fn test_manifest(direction: TransferDirection) -> TransferManifest {
+        TransferManifest {
+            transfer_id: "test-transfer".to_string(),
+            direction,
+            file_name: "test.bin".to_string(),
+            local_path: "test.bin".to_string(),
+            file_size: 1024,
+            chunk_size: DEFAULT_CHUNK_SIZE as u64,
+            checksum: None,
+            bytes_confirmed: 0,
+            target_user_id: None,
+            target_address: None,
+            created_at: 0,
+            updated_at: 0,
+            status: TransferStatus::Pending,
+            temp_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_ack_succeeds_after_notification() {
+        let runtime = Arc::new(Mutex::new(TransferRuntime::new(test_manifest(
+            TransferDirection::Outgoing,
+        ))));
+
+        FileTransferManager::arm_pending_ack(runtime.clone(), 0).await;
+
+        let notifier = {
+            let state = runtime.lock().await;
+            state.pending_ack.as_ref().unwrap().notifier.clone()
+        };
+
+        tokio::spawn(async move {
+            sleep(TokioDuration::from_millis(10)).await;
+            notifier.notify_waiters();
+        });
+
+        FileTransferManager::wait_for_ack(runtime.clone(), "test")
+            .await
+            .expect("ack should be received");
+    }
+
+    #[tokio::test]
+    async fn transmit_with_ack_retries_until_notified() {
+        let runtime = Arc::new(Mutex::new(TransferRuntime::new(test_manifest(
+            TransferDirection::Outgoing,
+        ))));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let runtime_for_send = runtime.clone();
+        let attempts_for_send = attempts.clone();
+
+        FileTransferManager::transmit_with_ack(
+            runtime.clone(),
+            "test",
+            128,
+            move || {
+                let runtime = runtime_for_send.clone();
+                let attempts = attempts_for_send.clone();
+                Box::pin(async move {
+                    let current = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if current == 3 {
+                        let notifier = {
+                            let state = runtime.lock().await;
+                            state.pending_ack.as_ref().unwrap().notifier.clone()
+                        };
+                        tokio::spawn(async move {
+                            sleep(TokioDuration::from_millis(10)).await;
+                            notifier.notify_waiters();
+                        });
+                    }
+                    Ok(())
+                })
+            },
+            Some(5),
+        )
+        .await
+        .expect("ack should arrive before retry limit");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn transmit_with_ack_fails_after_max_retries() {
+        let runtime = Arc::new(Mutex::new(TransferRuntime::new(test_manifest(
+            TransferDirection::Outgoing,
+        ))));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = FileTransferManager::transmit_with_ack(
+            runtime.clone(),
+            "test",
+            256,
+            move || {
+                let attempts = attempts_for_send.clone();
+                Box::pin(async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            },
+            Some(3),
+        )
+        .await;
+
+        assert!(matches!(result, Err(FileTransferError::AckTimeout)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
 }

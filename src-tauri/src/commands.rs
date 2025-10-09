@@ -1,14 +1,18 @@
 use crate::api::AppConfig;
 use crate::domain::message::Message;
 use crate::domain::models::{ChatMessage, Contact, MessageStatus, User};
-use crate::events::{emit_contact_added, emit_network_status_changed, emit_node_port_changed};
+use crate::events::{
+    emit_contact_added, emit_firewall_permission_required, emit_network_status_changed,
+    emit_node_port_changed,
+};
+use crate::platform::firewall::{self, FirewallStatus};
 use crate::services::auth_service::AuthError;
 use crate::services::file_transfer::{FileTransferHandle, FileTransferManager, TransferManifest};
 use crate::services::node_service::{NodeService, NOTIFICATION_SERVICE};
 use crate::state::{AppState, SessionInfo};
 // use crate::utils::error_handling::{map_mesh_talk_error_to_command_error, validation_error, authentication_error, service_error, network_error, ResultExt};
 
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -366,6 +370,28 @@ async fn start_network_impl(
             emit_node_port_changed(&app_handle_clone, actual_port, current_ip.clone());
             emit_network_status_changed(&app_handle_clone, "online".to_string(), 0);
 
+            let firewall_handle = app_handle_clone.clone();
+            tokio::spawn(async move {
+                match tokio::task::spawn_blocking(move || firewall::check_firewall(actual_port))
+                    .await
+                {
+                    Ok(result) => {
+                        if matches!(result.status, FirewallStatus::NeedsPermission) {
+                            emit_firewall_permission_required(
+                                &firewall_handle,
+                                actual_port,
+                                result.message,
+                            );
+                        } else if let Some(msg) = result.message {
+                            info!("Firewall check: {}", msg);
+                        }
+                    }
+                    Err(err) => {
+                        warn!("Failed to perform firewall check: {}", err);
+                    }
+                }
+            });
+
             Ok(NetworkStartResult {
                 success: true,
                 port: Some(actual_port),
@@ -542,6 +568,14 @@ pub async fn register(
     app_state: tauri::State<'_, AppState>,
 ) -> Result<RegisterResult, String> {
     register_impl(username, password, app_state.inner()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn allow_firewall_port(port: u16) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || firewall::allow_firewall(port))
+        .await
+        .map_err(|err| err.to_string())??;
+    Ok(())
 }
 
 fn register_impl(

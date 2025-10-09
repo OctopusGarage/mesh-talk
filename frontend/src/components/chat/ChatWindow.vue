@@ -17,7 +17,7 @@
         <template v-if="message.kind === 'file' && message.file">
           <div class="file-message">
             <div class="file-header">
-              <span class="file-name">{{ message.file.fileName || '文件' }}</span>
+              <span class="file-name">{{ message.file.fileName || 'File' }}</span>
               <span class="file-size">{{ formatBytes(message.file.fileSize) }}</span>
             </div>
             <div class="file-progress">
@@ -36,7 +36,7 @@
                 class="file-action"
                 @click.stop="$emit('resumeTransfer', message.file.transferId)"
               >
-                继续
+                Continue
               </button>
               <button
                 v-if="canCancel(message)"
@@ -44,7 +44,7 @@
                 class="file-action"
                 @click.stop="$emit('cancelTransfer', message.file.transferId)"
               >
-                暂停
+                Pause
               </button>
               <button
                 v-if="canOpen(message)"
@@ -52,13 +52,13 @@
                 class="file-action"
                 @click.stop="$emit('openTransfer', message.file)"
               >
-                打开
+                Open
               </button>
             </div>
           </div>
         </template>
         <template v-else>
-          <span class="content" title="右键复制消息">
+          <span class="content" title="Right-click to copy">
             {{ message.content }}
           </span>
         </template>
@@ -205,14 +205,14 @@ const renderFileStatus = (message) => {
   const status = message.file.status ?? "pending";
   switch (status) {
     case "completed":
-      return "传输完成";
+      return "Transfer complete";
     case "in_progress":
     case "pending":
-      return `正在传输 · ${formatBytes(message.file.bytesTransferred)} / ${formatBytes(message.file.fileSize)}`;
+      return `Transferring · ${formatBytes(message.file.bytesTransferred)} / ${formatBytes(message.file.fileSize)}`;
     case "paused":
-      return "已暂停";
+      return "Paused";
     case "failed":
-      return message.file.error || "传输失败";
+      return message.file.error || "Transfer failed";
     default:
       return status;
   }

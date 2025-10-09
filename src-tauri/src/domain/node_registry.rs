@@ -22,7 +22,7 @@ fn heartbeat_timeout_duration() -> Duration {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)
-        .unwrap_or_else(|| Duration::from_secs(60)) // Change from 30 to 60 seconds
+        .unwrap_or_else(|| Duration::from_secs(20))
 }
 
 /// Discovered node information
@@ -302,26 +302,18 @@ impl NodeRegistry {
             .collect()
     }
 
-    /// Remove timed out nodes from the registry and return their addresses.
+    /// Mark timed out nodes as offline and return their addresses.
     pub fn remove_timed_out_nodes(&mut self) -> Vec<SocketAddr> {
-        let mut to_remove = Vec::new();
+        let mut timed_out = Vec::new();
 
-        // Collect addresses of timed out nodes
-        for (addr, node) in &self.nodes {
+        for (addr, node) in self.nodes.iter_mut() {
             if node.is_timed_out() {
-                to_remove.push(*addr);
+                node.status = NodeStatus::Offline;
+                timed_out.push(*addr);
             }
         }
 
-        // Remove timed out nodes and collect their addresses
-        let mut removed_addrs = Vec::new();
-        for addr in to_remove {
-            if self.nodes.remove(&addr).is_some() {
-                removed_addrs.push(addr);
-            }
-        }
-
-        removed_addrs
+        timed_out
     }
 
     /// Get a node by user_id
@@ -536,8 +528,9 @@ mod tests {
 
         let timed_out = registry.remove_timed_out_nodes();
         assert_eq!(timed_out, vec![addr1]);
-        assert_eq!(registry.len(), 1); // Should be 1 since addr1 was removed
-        assert!(registry.get_node(addr1).is_none()); // Node should no longer exist in registry
+        assert_eq!(registry.len(), 2); // Nodes remain but status should change
+        let node1 = registry.get_node(addr1).expect("node1 exists");
+        assert_eq!(node1.status, NodeStatus::Offline);
         assert!(registry.get_node(addr2).is_some()); // Node 2 should still be there
     }
 }

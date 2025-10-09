@@ -48,6 +48,16 @@ export const useFeedbackStore = defineStore("feedback", () => {
   const toasts = ref([]);
   const activeTasks = reactive(new Map());
   const lastError = ref(null);
+  const dialog = reactive({
+    visible: false,
+    title: "",
+    message: "",
+    detail: "",
+    confirmText: "Confirm",
+    cancelText: "Cancel",
+    tone: "info",
+    resolver: null,
+  });
 
   function createToast({
     message,
@@ -158,11 +168,46 @@ export const useFeedbackStore = defineStore("feedback", () => {
   const isBusy = computed(() => activeTasks.size > 0);
   const tasks = computed(() => Array.from(activeTasks.values()));
 
+  function openDialog(options) {
+    Object.assign(dialog, {
+      visible: true,
+      title: options.title ?? defaultTitle(options.tone ?? "info"),
+      message: options.message ?? "",
+      detail: options.detail ?? "",
+      confirmText: options.confirmText ?? "Confirm",
+      cancelText: options.cancelText ?? "Cancel",
+      tone: options.tone ?? "info",
+    });
+  }
+
+  function resolveDialog(result) {
+    dialog.visible = false;
+    const resolver = dialog.resolver;
+    dialog.resolver = null;
+    dialog.title = "";
+    dialog.message = "";
+    dialog.detail = "";
+    if (resolver) {
+      resolver(result);
+    }
+  }
+
+  function confirm(options = {}) {
+    if (dialog.visible) {
+      return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+      dialog.resolver = resolve;
+      openDialog(options);
+    });
+  }
+
   return {
     toasts,
     tasks,
     isBusy,
     lastError,
+    dialog,
     createToast,
     dismissToast,
     clearToasts,
@@ -173,5 +218,7 @@ export const useFeedbackStore = defineStore("feedback", () => {
     clearLastError,
     beginTask,
     endTask,
+    confirm,
+    resolveDialog,
   };
 });

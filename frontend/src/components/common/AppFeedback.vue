@@ -36,6 +36,28 @@
         </div>
       </section>
     </Transition>
+
+    <Transition name="scale-fade">
+      <section v-if="dialog.visible" class="dialog-backdrop" role="dialog" aria-modal="true">
+        <div class="dialog" :data-tone="dialog.tone">
+          <header class="dialog__header">
+            <h2 class="dialog__title">{{ dialog.title }}</h2>
+          </header>
+          <main class="dialog__body">
+            <p class="dialog__message">{{ dialog.message }}</p>
+            <pre v-if="dialog.detail" class="dialog__detail">{{ dialog.detail }}</pre>
+          </main>
+          <footer class="dialog__actions">
+            <button type="button" class="btn btn-outline" @click="resolve(false)">
+              {{ dialog.cancelText }}
+            </button>
+            <button type="button" class="btn btn-primary" @click="resolve(true)">
+              {{ dialog.confirmText }}
+            </button>
+          </footer>
+        </div>
+      </section>
+    </Transition>
   </div>
 </template>
 
@@ -48,9 +70,11 @@ const feedback = useFeedbackStore();
 const toasts = computed(() => feedback.toasts);
 const isBusy = computed(() => feedback.isBusy);
 const tasks = computed(() => feedback.tasks);
+const dialog = computed(() => feedback.dialog);
 
 // Methods
 const dismiss = (id) => feedback.dismissToast(id);
+const resolve = (result) => feedback.resolveDialog(result);
 </script>
 
 <style scoped>
@@ -153,6 +177,121 @@ const dismiss = (id) => feedback.dismissToast(id);
   border: 1px solid rgba(148, 163, 184, 0.25);
   overflow-x: auto;
   white-space: pre-wrap;
+}
+
+.scale-fade-enter-active,
+.scale-fade-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.scale-fade-enter-from,
+.scale-fade-leave-to {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(6px);
+  display: grid;
+  place-items: center;
+  padding: 2.5rem 1.5rem;
+  pointer-events: auto;
+  z-index: 1000;
+}
+
+.dialog {
+  width: min(420px, 90vw);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(17, 24, 39, 0.92));
+  border-radius: 20px;
+  border: 1px solid rgba(94, 234, 212, 0.25);
+  box-shadow: 0 28px 55px rgba(15, 23, 42, 0.35);
+  color: #e2e8f0;
+  pointer-events: auto;
+  overflow: hidden;
+}
+
+.dialog[data-tone="warning"] {
+  border-color: rgba(250, 204, 21, 0.35);
+}
+
+.dialog[data-tone="error"] {
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.dialog__header {
+  padding: 1.4rem 1.6rem 0.6rem;
+}
+
+.dialog__title {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+}
+
+.dialog__body {
+  padding: 0 1.6rem 1.2rem;
+}
+
+.dialog__message {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.dialog__detail {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 0.9rem 1.6rem 1.6rem;
+}
+
+.btn {
+  pointer-events: auto;
+  border-radius: 999px;
+  padding: 0.55rem 1.4rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.btn:focus-visible {
+  outline: 2px solid rgba(94, 234, 212, 0.6);
+  outline-offset: 2px;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.btn.btn-outline {
+  background: transparent;
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #cbd5f5;
+}
+
+.btn.btn-primary {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.92), rgba(6, 182, 212, 0.95));
+  color: #0f172a;
+  box-shadow: 0 12px 30px rgba(6, 182, 212, 0.35);
+}
+
+.btn.btn-primary:hover {
+  box-shadow: 0 16px 38px rgba(6, 182, 212, 0.45);
 }
 
 .fade-enter-active,

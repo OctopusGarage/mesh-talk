@@ -78,6 +78,7 @@ const networkAPI = {
   getDiscoveredNodes: () => invoke("get_discovered_nodes"),
   startNodeDiscovery: () => invoke("start_node_discovery"),
   stopNodeDiscovery: () => invoke("stop_node_discovery"),
+  allowFirewall: (port) => invoke("allow_firewall_port", { port }),
 };
 
 // Combined API service

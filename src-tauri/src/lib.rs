@@ -200,7 +200,8 @@ pub fn run_tauri() {
             commands::cancel_file_transfer,
             commands::list_file_transfers,
             commands::accept_incoming_file_transfer,
-            commands::reject_incoming_file_transfer
+            commands::reject_incoming_file_transfer,
+            commands::allow_firewall_port
         ])
         .run(tauri::generate_context!())
         .map_err(|e| log::error!("Error while running tauri application: {}", e))

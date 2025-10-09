@@ -3,6 +3,7 @@
 //! This module provides a unified interface for platform-specific functionality
 //! such as secure storage, notifications, and system integration.
 
+pub mod firewall;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -13,6 +14,7 @@ mod windows;
 #[cfg(test)]
 mod tests;
 
+pub use firewall::*;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 #[cfg(target_os = "macos")]

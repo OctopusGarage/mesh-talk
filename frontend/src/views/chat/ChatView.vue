@@ -49,7 +49,7 @@
                 </div>
                 <span
                   class="contact-status-icon"
-                  :class="contact.status || 'offline'"
+                  :class="(contact.status || 'offline').toLowerCase()"
                 ></span>
               </div>
             </li>
@@ -325,6 +325,10 @@ const discoveredNodeList = computed(() => {
   const uniqueAddresses = new Set();
   return discoveredNodes.value
     .filter((node) => {
+      const online = node?.is_connected ?? (node?.status === "online");
+      if (!online) {
+        return false;
+      }
       if (!node?.address) {
         return false;
       }
@@ -467,12 +471,12 @@ const handleAttach = async () => {
 
     const result = await store.sendFile(filePath, activeContact.value);
     if (!result.success) {
-      feedback.showError(result.error ?? "发送文件失败");
+      feedback.showError(result.error ?? "Failed to send file");
     } else {
-      feedback.showInfo("文件传输已开始", { autoDismiss: 2000 });
+      feedback.showInfo("File transfer started", { autoDismiss: 2000 });
     }
   } catch (error) {
-    feedback.showError(error.message ?? "发送文件失败");
+    feedback.showError(error.message ?? "Failed to send file");
     await Logger.error("send-file-failed", {
       error: error.message,
     });
@@ -497,13 +501,13 @@ const handleOpenTransfer = async (fileMeta) => {
   const targetPath =
     fileMeta?.localPath ?? fileMeta?.path ?? fileTransfers.value?.[fileMeta?.transferId]?.localPath;
   if (!targetPath) {
-    feedback.showError("文件尚未可用");
+    feedback.showError("File not available yet");
     return;
   }
   try {
     await openShell(targetPath);
   } catch (error) {
-    feedback.showError(error.message ?? "无法打开文件");
+    feedback.showError(error.message ?? "Unable to open file");
     await Logger.error("open-file-failed", {
       error: error.message,
       path: targetPath,
@@ -541,13 +545,13 @@ const processNextIncomingTransfer = async () => {
     const savePath = normalizeSelectionPath(selection);
     if (!savePath) {
       await store.rejectIncomingFileTransfer(next.transferId);
-      feedback.showInfo("已取消接收", { autoDismiss: 2000 });
+      feedback.showInfo("Reception cancelled", { autoDismiss: 2000 });
     } else {
       await store.acceptIncomingFileTransfer(next.transferId, savePath);
-      feedback.showInfo("开始接收文件", { autoDismiss: 2000 });
+      feedback.showInfo("Receiving file", { autoDismiss: 2000 });
     }
   } catch (error) {
-    feedback.showError(error.message ?? "无法接收文件");
+    feedback.showError(error.message ?? "Unable to receive file");
     await Logger.error("accept-file-failed", {
       transferId: next.transferId,
       error: error.message,

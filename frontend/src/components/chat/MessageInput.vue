@@ -12,7 +12,7 @@
       class="attach"
       :disabled="disabled"
       @click="emitAttach"
-      title="附加文件"
+      title="Attach file"
     >
       📎
     </button>
