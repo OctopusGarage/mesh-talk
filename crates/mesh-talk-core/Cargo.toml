@@ -1,0 +1,66 @@
+[package]
+name = "mesh-talk-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mesh-Talk core: a serverless, end-to-end-encrypted LAN messaging protocol — identity & device certificates, an encrypted event log with peer sync, Double Ratchet + sender-key forward secrecy, a Noise transport, LAN discovery, a store-and-forward post office, and the node runtime. UI-free; the basis for an SDK."
+
+[features]
+# TEST-ONLY: collapses the password KDFs (Argon2 + PBKDF2) to a trivial cost so downstream
+# test suites (notably src-tauri, which links this crate normally and so doesn't see our own
+# `cfg(test)`) don't pay ~12s per key derivation. Enable it ONLY from `[dev-dependencies]`
+# (see src-tauri/Cargo.toml): Cargo does NOT activate a dev-dependency-only feature for normal
+# `cargo build`/release builds, so production key strength is never affected. Never list this
+# under `[dependencies]` or `default`.
+fast-test-kdf = []
+
+[lints]
+workspace = true
+
+[lib]
+name = "mesh_talk_core"
+path = "src/lib.rs"
+
+# A headless node, usable on its own and as the reference SDK consumer.
+[[bin]]
+name = "mesh-talk-node"
+path = "src/bin/mesh-talk-node.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+rand_core = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+bincode = { workspace = true }
+uuid = { workspace = true }
+aes-gcm = { workspace = true }
+pbkdf2 = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+snow = { workspace = true }
+zeroize = { workspace = true }
+argon2 = { workspace = true }
+socket2 = { workspace = true }
+if-addrs = { workspace = true }
+clap = { workspace = true }
+
+# Unix-only: a `kill(pid, 0)` liveness probe so the CLI's data-dir lockfile can detect a
+# lock left by a crashed/killed node and reclaim it. Already in the build graph transitively
+# (via socket2/snow), so this adds no new compilation.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand_chacha = "0.3" # seeded CSPRNG for deterministic property tests (rand_core 0.6 SeedableRng)
+# Self-dev-dependency on our OWN crate, activating `fast-test-kdf`. This is the lever that
+# makes the multi-process integration rigs fast: when Cargo builds the test targets it unifies
+# features for `mesh-talk-core`, so the `mesh-talk-node` binary handed to the tests via
+# `CARGO_BIN_EXE_mesh-talk-node` is ALSO compiled with `fast-test-kdf` — collapsing each node's
+# cold start from ~60-70s (real Argon2/PBKDF2) to ~instant. Cargo does NOT activate a
+# dev-dependency-only feature for `cargo build`/release, so production key strength is untouched.
+mesh-talk-core = { path = ".", features = ["fast-test-kdf"] }

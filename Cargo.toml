@@ -1,6 +1,61 @@
 [workspace]
-members = ["src-tauri"]
+members = ["crates/mesh-talk-core", "src-tauri"]
 resolver = "2"
 
-# This workspace aggregates all the Tauri projects
-# The actual Tauri application is in src-tauri/
+# Layered workspace:
+#   crates/mesh-talk-core — the UI-free protocol core (the SDK foundation)
+#   src-tauri             — the Tauri desktop app, a thin shell over the core
+# Shared package metadata + dependency versions live here so the two crates never
+# drift apart. Each crate opts in with `<dep>.workspace = true`.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/OctopusGarage/mesh-talk"
+
+# Lint guardrails shared by both crates (each opts in with `[lints] workspace = true`).
+# These are enforced by `cargo clippy` locally (make lint / pre-commit) and in CI.
+[workspace.lints.clippy]
+# Lock-correctness: holding a std Mutex/RwLock guard across an `.await` can deadlock
+# the async runtime (the guard isn't released while the task is parked). The audit's
+# P5 fixed the existing cases; `deny` keeps any new one out.
+await_holding_lock = "deny"
+# Performance: flag accidentally-huge async state machines (a large future moved
+# around / boxed on every poll). `warn` — informational, not gating.
+large_futures = "warn"
+
+[workspace.dependencies]
+# Async + serialization
+tokio = { version = "1.28", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+# Logging
+log = "0.4.28"
+tracing = "0.1.41"
+# Encoding
+base64 = "0.21"
+hex = "0.4"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+# Cryptography
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+hkdf = "0.12"
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+snow = "0.9"
+zeroize = "1"
+argon2 = { version = "0.5", features = ["std"] }
+# RNG: use rand_core 0.6 directly (exactly what the dalek crates need) instead of pinning the
+# full `rand` 0.8. The desktop app uses `rand` 0.9 locally (see src-tauri).
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Networking
+socket2 = { version = "0.5", features = ["all"] }
+if-addrs = "0.15"
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+# Misc
+lazy_static = "1.4"
+# Dev
+tempfile = "3.8"

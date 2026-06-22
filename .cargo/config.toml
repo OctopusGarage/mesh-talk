@@ -1,0 +1,19 @@
+# Project-wide resource limits to keep cargo from saturating the CPU.
+#
+# Rationale: cargo sizes both compilation and test parallelism to the number of
+# CPU cores by default, which pins all cores. (Test builds use cheap KDF params via
+# cfg(test)/the fast-test-kdf feature, so the suite is no longer KDF-bound — but a
+# full parallel compile can still saturate a small machine.) These caps apply to
+# EVERY cargo invocation in this tree (CI, contributors, and AI sessions) automatically.
+#
+# Tuned for an 8-core machine at a "gentle" ~half-cores level. Adjust the two
+# numbers if you change machines.
+
+[build]
+# Cap parallel compilation units (codegen jobs). ~half of logical cores.
+jobs = 4
+
+[env]
+# Cap libtest's parallel test threads so the suite doesn't pin every core at once.
+# Honored by the test harness produced by `cargo test`.
+RUST_TEST_THREADS = "4"

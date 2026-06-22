@@ -1,0 +1,96 @@
+[package]
+name = "mesh-talk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mesh-talk-core = { path = "../crates/mesh-talk-core" }
+
+# Detach from the parent workspace: cargo-fuzz needs a nightly toolchain + libfuzzer, so
+# this crate must NOT be built by the stable `cargo build/test/clippy --workspace` gate.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "announce_decode"
+path = "fuzz_targets/announce_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_body_decode"
+path = "fuzz_targets/message_body_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dm_envelope_decode"
+path = "fuzz_targets/dm_envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reaction_envelope_decode"
+path = "fuzz_targets/reaction_envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reaction_payload_decode"
+path = "fuzz_targets/reaction_payload_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ratchet_header_decode"
+path = "fuzz_targets/ratchet_header_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ratchet_state_deserialize"
+path = "fuzz_targets/ratchet_state_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sender_key_deserialize"
+path = "fuzz_targets/sender_key_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sender_key_distribution_decode"
+path = "fuzz_targets/sender_key_distribution_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_meta_decode"
+path = "fuzz_targets/channel_meta_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_manifest_decode"
+path = "fuzz_targets/file_manifest_decode.rs"
+test = false
+doc = false
+bench = false
