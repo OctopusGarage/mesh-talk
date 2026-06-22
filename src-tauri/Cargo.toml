@@ -1,7 +1,10 @@
 [package]
 name = "mesh-talk"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mesh-Talk desktop app (Tauri) — a thin UI shell over mesh-talk-core."
 default-run = "mesh-talk"
 
 [build-dependencies]
@@ -10,52 +13,50 @@ tauri-build = { version = "2", features = [] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-macos-platform = ["keyring/apple-native"]
 
 [dependencies]
-tokio = { version = "1.28", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-clap = { version = "4.4", features = ["derive"] }
-tauri = { version = "2", features = ["tray-icon", "devtools"] }
+# The protocol core (the SDK layer this app is built on).
+mesh-talk-core = { path = "../crates/mesh-talk-core" }
+# Tauri shell
+# NOTE: do NOT enable the "devtools" feature — it ships the webview inspector (right-click
+# → Inspect / console) in RELEASE builds too. Debug builds still get devtools automatically
+# via debug_assertions, which is all lib.rs's open_devtools() needs.
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2.3"
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
-chrono = { version = "0.4", features = ["serde"] }
-lazy_static = "1.4"
-rand = "0.8"
-argon2 = { version = "0.5", features = ["std"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-async-trait = "0.1"
-anyhow = "1"
-keyring = { version = "3.6.3", optional = true }
-libsignal-rust = "0.1.0"
-socket2 = { version = "0.5", features = ["all"] }
-# Storage dependencies
-aes-gcm = "0.10"
-pbkdf2 = "0.12"
-sha2 = "0.10"
-bincode = "1.3"
-# Identity dependencies
-ed25519-dalek = "2.0"
-base64 = "0.21"
-uuid = { version = "1.0", features = ["v4", "serde"] }
 tauri-plugin-log = "2"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["chrono"] }
-tracing-appender = "0.2.3"
-tracing-log = "0.2.0"
-log = "0.4.28"
-hex = "0.4"
-# For RSA encryption test
-rsa = { version = "0.9", features = ["std"] }
+tauri-plugin-autostart = "2"
+# Desktop integration: focus-existing-instance, restore window geometry, open/reveal files.
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-opener = "2"
+# Shared (versions from the workspace)
+tokio = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }
+tracing = { workspace = true }
+rand = "0.9" # session-token generation; already in the tree via tauri-plugin-notification
+hex = { workspace = true }
+lazy_static = { workspace = true }
+serde_json = "1" # persist app settings as JSON in the app config dir
+# "Stay signed in": store the login password in the OS keychain (macOS Keychain,
+# Windows Credential Manager, Linux Secret Service) — never on plaintext disk.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 [dev-dependencies]
-once_cell = "1.19"
-criterion = { version = "0.5", features = ["async_tokio"] }
-tempfile = "3.8"
-futures = "0.3"
+tempfile = { workspace = true }
+serde_json = "1"
+# Collapse the password KDFs (Argon2 + PBKDF2) to a trivial cost FOR TESTS ONLY. Cargo activates
+# a dev-dependency feature only when building test/example/bench targets, never for `cargo build`
+# or release, so the shipped app keeps full-strength key derivation. Without this, this crate's
+# auth_service tests pay ~12s per derivation (≈200s total) because it links mesh-talk-core as a
+# normal (non-test) dependency and so doesn't inherit the core crate's own `cfg(test)` cheap path.
+mesh-talk-core = { path = "../crates/mesh-talk-core", features = ["fast-test-kdf"] }
+
+[lints]
+workspace = true
 
 [lib]
 name = "mesh_talk"
@@ -64,7 +65,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "mesh-talk"
 path = "src/main.rs"
-
-[[bin]]
-name = "mesh-talk-cli"
-path = "src/bin/mesh-talk-cli.rs"

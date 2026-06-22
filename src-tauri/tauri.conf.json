@@ -14,10 +14,15 @@
     "windows": [
       {
         "title": "Mesh-Talk",
-        "width": 800,
-        "height": 650,
+        "width": 1040,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 520,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "dragDropEnabled": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

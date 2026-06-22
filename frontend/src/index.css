@@ -1,0 +1,181 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  "Ink & Signal" design tokens.
+  Dark is the hero (sustained ink surfaces); light is a calm cool-paper.
+  ONE confident teal "signal" accent (--primary / --signal). Boldness is spent on the
+  SIGNATURE — cryptographic identity (--verified) and presence (--signal) — everything
+  else stays quiet and disciplined.
+
+  shadcn CSS-var NAMES are preserved so existing components inherit automatically;
+  only the values changed + a few custom vars (--signal / --verified / --mention) added.
+*/
+@layer base {
+  :root {
+    /* LIGHT — calm cool-paper */
+    --background: 210 20% 98%;
+    --foreground: 220 28% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 28% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 28% 10%;
+    --primary: 174 72% 33%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 215 20% 94%;
+    --secondary-foreground: 220 28% 12%;
+    --muted: 215 20% 95%;
+    --muted-foreground: 220 10% 42%;
+    --accent: 215 24% 92%;
+    --accent-foreground: 220 28% 12%;
+    --destructive: 0 72% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 215 20% 88%;
+    --input: 215 20% 86%;
+    --ring: 174 72% 33%;
+
+    /* Signature accents — the only place we spend boldness. */
+    --signal: 174 72% 33%; /* = primary teal */
+    --verified: 154 64% 34%;
+    --mention: 32 90% 42%;
+
+    /* Own chat bubble: a softer, lighter teal than the deep --signal so a large filled
+       bubble reads comfortable (not heavy) against the paper background. */
+    --bubble-own: 174 58% 43%;
+
+    --radius: 0.625rem;
+  }
+
+  .dark {
+    /* DARK (hero) — sustained ink surfaces */
+    --background: 220 24% 7%;
+    --foreground: 220 14% 92%;
+    --card: 220 22% 10%;
+    --card-foreground: 220 14% 92%;
+    --popover: 220 24% 9%;
+    --popover-foreground: 220 14% 92%;
+    --primary: 172 66% 50%;
+    --primary-foreground: 220 30% 7%;
+    --secondary: 220 18% 15%;
+    --secondary-foreground: 220 14% 92%;
+    --muted: 220 18% 14%;
+    --muted-foreground: 218 12% 62%;
+    --accent: 218 22% 17%;
+    --accent-foreground: 220 14% 95%;
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 220 20% 16%;
+    --input: 220 18% 18%;
+    --ring: 172 66% 50%;
+
+    --signal: 172 66% 50%; /* = primary teal */
+    --verified: 154 60% 52%;
+    --mention: 38 92% 55%;
+
+    /* Own chat bubble: slightly softer/less neon than the raw signal accent so the filled
+       bubble is calm rather than loud against the ink surfaces. */
+    --bubble-own: 173 52% 44%;
+  }
+
+  /* Pure-black (OLED) variant: layered on top of `.dark`, it pushes the near-black
+     surfaces to true black so OLED pixels switch fully off. Borders/inputs use the
+     new ink hues (slightly cooler) so structure stays visible against the black. */
+  .oled {
+    --background: 0 0% 0%;
+    --card: 0 0% 3%;
+    --popover: 0 0% 4%;
+    --secondary: 220 14% 8%;
+    --muted: 220 14% 8%;
+    --accent: 220 14% 11%;
+    --border: 220 14% 15%;
+    --input: 220 14% 17%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1;
+    /* Crisper text rendering for a premium feel. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  /* Teal-tinted selection — a quiet signal of the brand accent. */
+  ::selection {
+    background-color: hsl(var(--signal) / 0.28);
+    color: hsl(var(--foreground));
+  }
+
+  /* Subtle, app-like scrollbars. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.5);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* macOS overlay title bar (tauri `titleBarStyle: "Overlay"`): the native traffic-lights
+     float over the top-left of our content. `data-os="macos"` is set on <html> only inside
+     the Tauri webview on a Mac (see lib/platform.ts), so Windows/Linux/browser get nothing.
+     Push the sidebar header's content down/right so the self-identity crest clears the
+     red/yellow/green buttons (~x 12–76, y ~8–28). The conversation header sits to the right
+     of the sidebar, so it only needs the matching top offset for visual alignment. */
+  html[data-os="macos"] [data-titlebar-inset] {
+    padding-top: 1.75rem;
+  }
+  html[data-os="macos"] [data-titlebar-inset="left"] {
+    padding-left: 4.75rem;
+  }
+
+  /* Respect the OS "reduce motion" preference: neutralize animations & transitions
+     globally (covers Radix/shadcn dialog/popover enter-exit animations, spinners,
+     hover transitions, smooth scrolling, and the presence breathing pulse). JS-driven
+     motion (framer) is covered separately via useMotionOK(). */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* Presence "breathing" pulse for the online status dot. Halts under reduced-motion
+   via the global media query above. */
+@keyframes presence-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.15;
+    transform: scale(2.4);
+  }
+}

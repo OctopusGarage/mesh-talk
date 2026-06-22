@@ -1,9 +1,0 @@
-pub mod contact;
-pub mod discovery;
-pub mod errors;
-pub mod integration;
-pub mod manager;
-pub mod public_key_encryption;
-pub mod request;
-pub mod service;
-pub mod tests;

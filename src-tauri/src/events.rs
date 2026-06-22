@@ -1,896 +1,239 @@
-use crate::commands::ChatMessageInfo;
-use crate::domain::node_registry::NodeStatus;
-use crate::perf_monitor;
-use crate::services::file_transfer::{TransferDirection, TransferStatus};
-use crate::services::node_service::{MessageEvent, NodeService};
-use crate::state::AppState;
-use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+//! Tauri events emitted to the frontend by the node. (Legacy
+//! message/contact/network/file-transfer events were retired with the legacy stack.)
+
+use crate::settings::SettingsState;
+use mesh_talk_core::eventlog::event::EventId;
 use tauri::{Emitter, Manager, Runtime};
-use tokio::sync::Mutex;
-use tokio::time::Duration;
-use tracing::{error, info};
+use tauri_plugin_notification::NotificationExt;
 
-#[derive(Clone, Debug)]
-struct ContactStatusChange {
-    address: SocketAddr,
-    node_name: String,
-    username: Option<String>,
-    listen_port: Option<u16>,
-    is_online: bool,
-}
+/// How many characters of a message body we surface in a notification preview.
+const PREVIEW_LEN: usize = 80;
 
-// Event names
-pub const EVENT_MESSAGE_RECEIVED: &str = "message-received";
-pub const EVENT_CONTACT_STATUS_CHANGED: &str = "contact-status-changed";
-pub const EVENT_CONTACT_REQUEST_RECEIVED: &str = "contact-request-received";
-pub const EVENT_CONTACT_RESPONSE_RECEIVED: &str = "contact-response-received";
-pub const EVENT_CONTACT_ADDED: &str = "contact-added";
-pub const EVENT_NETWORK_STATUS_CHANGED: &str = "network-status-changed";
-pub const EVENT_NODE_PORT_CHANGED: &str = "node-port-changed";
-pub const EVENT_NODES_DISCOVERED: &str = "nodes-discovered";
-pub const EVENT_FILE_TRANSFER_STATUS: &str = "file-transfer-status";
-pub const EVENT_FILE_TRANSFER_PROGRESS: &str = "file-transfer-progress";
-pub const EVENT_FILE_TRANSFER_COMPLETE: &str = "file-transfer-complete";
-pub const EVENT_FILE_TRANSFER_OFFER: &str = "file-transfer-offer";
-pub const EVENT_FIREWALL_PERMISSION_REQUIRED: &str = "firewall-permission-required";
-
-static NODE_EVENT_APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
-
-pub fn set_node_event_app_handle(app_handle: &tauri::AppHandle) {
-    let _ = NODE_EVENT_APP_HANDLE.set(app_handle.clone());
-}
-
-pub fn with_node_event_app_handle<F>(f: F)
-where
-    F: FnOnce(&tauri::AppHandle),
-{
-    if let Some(handle) = NODE_EVENT_APP_HANDLE.get() {
-        f(handle);
+/// Fire a native notification for an incoming item, but only when it would
+/// actually be useful: notifications are enabled in settings AND the main window
+/// is not currently focused (no point pinging the user about a message they can
+/// already see). Best-effort — failures are logged, never propagated.
+///
+/// `body` must contain only what the UI already shows (decoded plaintext / a
+/// generic "sent a file"); never raw ciphertext or anything more than the chat view.
+fn notify_if_unfocused<R: Runtime>(app_handle: &tauri::AppHandle<R>, title: &str, body: &str) {
+    // Respect the user's toggle.
+    let enabled = app_handle
+        .try_state::<SettingsState>()
+        .map(|s| s.get().notifications)
+        .unwrap_or(true);
+    if !enabled {
+        return;
     }
-}
 
-// Event data structures
-#[derive(serde::Serialize, Clone)]
-pub struct MessageReceivedEvent {
-    pub message: ChatMessageInfo,
-    pub sender_name: String,
-    pub sender_address: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contact_id: Option<String>,
-    pub is_unread: bool,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct FileTransferOfferEvent {
-    pub transfer_id: String,
-    pub file_name: String,
-    pub file_size: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checksum: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sender_user_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sender_address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sender_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_save_path: Option<bool>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct ContactStatusChangedEvent {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contact_id: Option<String>,
-    pub address: String,
-    pub ip: String,
-    pub status: String, // online, offline, away, etc.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub listen_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_label: Option<String>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct ContactRequestReceivedEvent {
-    pub requester_public_key: String,
-    pub requester_alias: String,
-    pub timestamp: u64,
-    pub request_json: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct ContactResponseReceivedEvent {
-    pub responder_public_key: String,
-    pub responder_alias: String,
-    pub approved: bool,
-    pub timestamp: u64,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct ContactAddedEvent {
-    pub public_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct NetworkStatusChangedEvent {
-    pub status: String, // connected, disconnected, connecting, etc.
-    pub peer_count: usize,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct NodePortChangedEvent {
-    pub port: u16,
-    pub ip: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct NodesDiscoveredEvent {
-    pub nodes: Vec<DiscoveredNodeInfo>,
-}
-
-#[derive(serde::Serialize, Clone)]
-pub struct DiscoveredNodeInfo {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    pub address: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub listen_port: Option<u16>,
-    pub ip: String,
-    pub port: u16,
-    pub display_label: String,
-    pub is_connected: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_seen: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_ip: Option<String>,
-}
-
-// Function to emit a message received event
-async fn emit_message_received<R: Runtime>(app_handle: tauri::AppHandle<R>, event: MessageEvent) {
-    let payload = build_message_event_payload(&app_handle, &event);
-
-    if let Err(e) = app_handle.emit(EVENT_MESSAGE_RECEIVED, payload) {
-        error!("Failed to emit message received event: {}", e);
-    }
-}
-
-// Function to emit a contact status changed event
-fn emit_contact_status_changed<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    change: ContactStatusChange,
-) {
-    let address = change.address.to_string();
-    let status = if change.is_online {
-        "online".to_string()
-    } else {
-        "offline".to_string()
-    };
-
-    let (contact_id, name_override) = {
-        let app_state: tauri::State<AppState> = app_handle.state();
-        if let Some(session) = app_state.session().get() {
-            app_state
-                .contact_service()
-                .find_contact_by_address(
-                    session.user.name.clone(),
-                    session.user.user_id.clone(),
-                    &address,
-                )
-                .map(|contact| (Some(contact.id), Some(contact.name)))
-                .unwrap_or((None, None))
-        } else {
-            (None, None)
+    // Skip when the window is focused — the message is already on screen.
+    if let Some(window) = app_handle.get_webview_window("main") {
+        if window.is_focused().unwrap_or(false) {
+            return;
         }
-    };
-
-    let node_name = name_override.unwrap_or(change.node_name.clone());
-    let listen_port = change.listen_port.or(Some(change.address.port()));
-    let display_label = format!(
-        "{} • {} • {}:{}",
-        node_name,
-        change
-            .username
-            .clone()
-            .unwrap_or_else(|| "Unknown".to_string()),
-        change.address.ip(),
-        listen_port.unwrap_or(change.address.port())
-    );
-
-    let event = ContactStatusChangedEvent {
-        contact_id,
-        address,
-        ip: change.address.ip().to_string(),
-        status,
-        node_name: Some(node_name),
-        username: change.username.clone(),
-        listen_port,
-        display_label: Some(display_label),
-    };
-
-    if let Err(e) = app_handle.emit(EVENT_CONTACT_STATUS_CHANGED, event) {
-        error!("Failed to emit contact status changed event: {}", e);
-    }
-}
-
-#[derive(Clone, serde::Serialize)]
-struct FirewallPermissionPayload {
-    port: u16,
-    message: Option<String>,
-}
-
-pub fn emit_firewall_permission_required<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    port: u16,
-    message: Option<String>,
-) {
-    if let Err(err) = app_handle.emit(
-        EVENT_FIREWALL_PERMISSION_REQUIRED,
-        FirewallPermissionPayload { port, message },
-    ) {
-        error!("Failed to emit firewall permission event: {}", err);
-    }
-}
-
-// Function to emit a network status changed event
-pub fn emit_network_status_changed<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    status: String,
-    peer_count: usize,
-) {
-    let event = NetworkStatusChangedEvent { status, peer_count };
-
-    if let Err(e) = app_handle.emit(EVENT_NETWORK_STATUS_CHANGED, event) {
-        error!("Failed to emit network status changed event: {}", e);
-    }
-}
-
-pub fn emit_node_port_changed<R: Runtime>(app_handle: &tauri::AppHandle<R>, port: u16, ip: String) {
-    let event = NodePortChangedEvent { port, ip };
-    if let Err(e) = app_handle.emit(EVENT_NODE_PORT_CHANGED, event) {
-        error!("Failed to emit node port changed event: {}", e);
-    }
-}
-
-pub fn emit_nodes_discovered<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    nodes: Vec<DiscoveredNodeInfo>,
-) {
-    // Debug logging: Print the complete data packet being sent
-    println!(
-        "[EVENTS DEBUG] Emitting nodes-discovered event with {} nodes",
-        nodes.len()
-    );
-    for (i, node) in nodes.iter().enumerate() {
-        println!(
-            "  [Node {}] Name: {}, Username: {:?}, Address: {}, IP: {}, Port: {}, User ID: {:?}, Source IP: {:?}",
-            i, node.name, node.username, node.address, node.ip, node.port, node.user_id, node.source_ip
-        );
     }
 
-    let event = NodesDiscoveredEvent { nodes };
-    if let Err(e) = app_handle.emit(EVENT_NODES_DISCOVERED, event) {
-        error!("Failed to emit nodes discovered event: {}", e);
-    }
-}
-
-pub fn emit_contact_request_received<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    requester_public_key: String,
-    requester_alias: String,
-    request_json: String,
-) {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(std::time::Duration::from_secs(0))
-        .as_secs();
-
-    let event = ContactRequestReceivedEvent {
-        requester_public_key,
-        requester_alias,
-        timestamp,
-        request_json,
-    };
-
-    if let Err(e) = app_handle.emit(EVENT_CONTACT_REQUEST_RECEIVED, event) {
-        error!("Failed to emit contact request received event: {}", e);
-    }
-}
-
-pub fn emit_contact_response_received<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    responder_public_key: String,
-    responder_alias: String,
-    approved: bool,
-    timestamp: u64,
-) {
-    let event = ContactResponseReceivedEvent {
-        responder_public_key,
-        responder_alias,
-        approved,
-        timestamp,
-    };
-
-    if let Err(e) = app_handle.emit(EVENT_CONTACT_RESPONSE_RECEIVED, event) {
-        error!("Failed to emit contact response received event: {}", e);
-    }
-}
-
-pub fn emit_contact_added<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    public_key: String,
-    alias: Option<String>,
-    address: Option<String>,
-) {
-    let event = ContactAddedEvent {
-        public_key,
-        alias,
-        address,
-    };
-
-    if let Err(e) = app_handle.emit(EVENT_CONTACT_ADDED, event) {
-        error!("Failed to emit contact added event: {}", e);
-    }
-}
-
-// Function to set up event listeners for the NodeService
-pub async fn setup_node_service_events(
-    node_service: Arc<Mutex<NodeService>>,
-    app_handle: tauri::AppHandle,
-) {
-    let _timer = perf_monitor!("setup_node_service_events");
-    set_node_event_app_handle(&app_handle);
-
-    // Clone the app handle for use in the async block
-    let app_handle_clone = app_handle.clone();
-
-    // Register a message handler with the NodeService
+    if let Err(e) = app_handle
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
     {
-        let service = node_service.lock().await;
-        let app_handle = app_handle_clone.clone();
-        service
-            .register_message_handler(move |event| {
-                let app_handle = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    emit_message_received(app_handle, event).await;
-                });
-            })
-            .await;
+        log::warn!("Failed to show notification: {e}");
     }
-
-    let contact_handle = app_handle.clone();
-    let network_handle = app_handle.clone();
-    let _nodes_handle = app_handle.clone();
-    let node_for_status = Arc::clone(&node_service);
-    tauri::async_runtime::spawn(async move {
-        let mut previous_status: HashMap<SocketAddr, bool> = HashMap::new();
-        let mut last_network_online: Option<bool> = None;
-
-        loop {
-            let (changes, new_status_map, connected_count) = {
-                let service = node_for_status.lock().await;
-                let peers_arc = service.get_peers();
-                let connected: HashSet<SocketAddr> =
-                    peers_arc.lock().unwrap().keys().copied().collect();
-
-                let mut peer_info_map = service.node.peer_info.lock().unwrap();
-                let (changes, statuses) =
-                    compute_peer_status_deltas(&mut peer_info_map, &previous_status, &connected);
-                (changes, statuses, connected.len())
-            };
-
-            for change in changes {
-                emit_contact_status_changed(&contact_handle, change);
-            }
-
-            let network_online = connected_count > 0 || {
-                // Check if we have any peers at all, even if not connected yet
-                let service = node_for_status.lock().await;
-                let peers_arc = service.get_peers();
-                let peer_count = peers_arc.lock().unwrap().len();
-                peer_count > 0
-            };
-
-            if last_network_online != Some(network_online) {
-                emit_network_status_changed(
-                    &network_handle,
-                    if network_online {
-                        "connected".to_string()
-                    } else {
-                        "disconnected".to_string()
-                    },
-                    connected_count,
-                );
-                last_network_online = Some(network_online);
-            }
-
-            previous_status = new_status_map;
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    });
-
-    // Add a task to periodically emit discovered nodes
-    let nodes_discovery_handle = app_handle.clone();
-    let node_for_discovery = Arc::clone(&node_service);
-    tauri::async_runtime::spawn(async move {
-        loop {
-            // Get discovered nodes and emit them
-            let nodes = {
-                let service = node_for_discovery.lock().await;
-                let registry = service.node_registry.lock().unwrap();
-                let peer_info_map = service.node.peer_info.lock().unwrap();
-
-                registry
-                    .snapshot()
-                    .into_iter()
-                    .filter(|entry| entry.status == NodeStatus::Online)
-                    .map(|entry| {
-                        let ip = entry.addr.ip().to_string();
-                        let port = entry.listen_port.unwrap_or(entry.addr.port());
-                        let username_clone = entry.username.clone();
-                        let display_label = format!(
-                            "{} • {} • {}:{}",
-                            entry.name,
-                            username_clone
-                                .clone()
-                                .unwrap_or_else(|| "Unknown".to_string()),
-                            ip,
-                            port
-                        );
-
-                        // Try to get the source IP from peer_info if available
-                        let source_ip = peer_info_map
-                            .get(&entry.addr)
-                            .and_then(|peer_info| peer_info.ip.clone());
-
-                        DiscoveredNodeInfo {
-                            name: entry.name,
-                            username: username_clone,
-                            address: entry.addr.to_string(),
-                            listen_port: entry.listen_port,
-                            ip,
-                            port,
-                            display_label,
-                            is_connected: entry.status == NodeStatus::Online,
-                            last_seen: None, // In a full implementation, we would track this
-                            user_id: entry.user_id.clone(),
-                            source_ip,
-                        }
-                    })
-                    .collect::<Vec<DiscoveredNodeInfo>>()
-            };
-
-            emit_nodes_discovered(&nodes_discovery_handle, nodes);
-
-            // Wait for 2 seconds before next update
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-        }
-    });
-
-    // Add a task to periodically monitor IP changes and emit updates
-    let ip_monitor_handle = app_handle.clone();
-    let node_for_ip_monitor = Arc::clone(&node_service);
-    tauri::async_runtime::spawn(async move {
-        let mut previous_ip: Option<String> = None;
-
-        loop {
-            // Get current IP address
-            let current_ip = get_local_ip_from_socket().unwrap_or_else(|| "127.0.0.1".to_string());
-
-            // Check if IP has changed
-            if let Some(prev_ip) = &previous_ip {
-                if prev_ip != &current_ip {
-                    // IP has changed, emit the event
-                    let service = node_for_ip_monitor.lock().await;
-                    let port = service.get_port();
-                    drop(service); // Release the lock before emitting the event
-
-                    emit_node_port_changed(&ip_monitor_handle, port, current_ip.clone());
-                    info!("IP address changed from {} to {}", prev_ip, current_ip);
-                }
-            }
-
-            // Update previous IP for next comparison
-            previous_ip = Some(current_ip);
-
-            // Check for IP changes every 10 seconds
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
-    });
 }
 
-/// Helper function to get the local IP address
-fn get_local_ip_from_socket() -> Option<String> {
-    // Try to infer the outward-facing interface without performing a full TCP handshake.
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:80").is_ok() {
-            if let Ok(local_addr) = socket.local_addr() {
-                let ip = local_addr.ip();
-                if !ip.is_unspecified() {
-                    return Some(ip.to_string());
-                }
-            }
-        }
+/// Truncate a preview to a sane length on a char boundary, appending an ellipsis.
+fn preview(text: &str) -> String {
+    if text.chars().count() <= PREVIEW_LEN {
+        return text.to_string();
     }
-
-    // Fallback to localhost when we cannot determine a better address.
-    Some("127.0.0.1".to_string())
+    let truncated: String = text.chars().take(PREVIEW_LEN).collect();
+    format!("{truncated}…")
 }
 
-fn build_message_event_payload<R: Runtime>(
+/// A received DM, surfaced to the `/` UI.
+pub const EVENT_DM_RECEIVED: &str = "dm-received";
+/// A received channel message.
+pub const EVENT_CHANNEL_MESSAGE: &str = "channel-message";
+/// A received file (DM or channel).
+pub const EVENT_FILE_RECEIVED: &str = "file-received";
+/// Progress of an in-flight file send or save (throttled).
+pub const EVENT_FILE_PROGRESS: &str = "file-progress";
+/// A peer propagated their avatar (a signed profile) to us.
+pub const EVENT_PROFILE_RECEIVED: &str = "profile-received";
+
+#[derive(serde::Serialize, Clone)]
+pub struct ProfileReceivedEvent {
+    /// The sender's account id (the key the UI renders avatars by).
+    pub account_id: String,
+    /// The avatar data-URL, or `None` when the peer cleared their avatar.
+    pub avatar: Option<String>,
+}
+
+/// Emit a received peer profile (avatar update) to the frontend. The avatar bytes are the
+/// data-URL string the sender's UI produced; we pass them through verbatim (lossily UTF-8
+/// decoded — a data-URL is ASCII, so this is lossless in practice).
+pub fn emit_profile_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    event: &MessageEvent,
-) -> MessageReceivedEvent {
-    if let Some(app_state) = app_handle.try_state::<AppState>() {
-        build_message_event_payload_with_state(event, Some(app_state.inner()))
-    } else {
-        build_message_event_payload_with_state(event, None)
+    account_id: String,
+    avatar: Option<Vec<u8>>,
+) {
+    let event = ProfileReceivedEvent {
+        account_id,
+        avatar: avatar.map(|a| String::from_utf8_lossy(&a).into_owned()),
+    };
+    if let Err(e) = app_handle.emit(EVENT_PROFILE_RECEIVED, event) {
+        log::error!("Failed to emit profile event: {e}");
     }
 }
 
-fn build_message_event_payload_with_state(
-    event: &MessageEvent,
-    app_state: Option<&AppState>,
-) -> MessageReceivedEvent {
-    let fallback = || fallback_message_event(event);
+#[derive(serde::Serialize, Clone)]
+pub struct DmReceivedEvent {
+    pub from: String,
+    pub from_name: String,
+    pub text: String,
+    pub reply_to: Option<String>, // hex EventId of the parent message, if any
+}
 
-    let Some(app_state) = app_state else {
-        return fallback();
+#[derive(serde::Serialize, Clone)]
+pub struct ChannelMessageEvent {
+    pub channel_id: String, // hex
+    pub channel_name: String,
+    pub from: String,
+    pub text: String,
+    pub reply_to: Option<String>, // hex EventId of the parent message, if any
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct FileProgressEvent {
+    pub file_conv: String,       // hex — the per-file conversation handle
+    pub direction: &'static str, // "send" | "save"
+    pub done: u32,
+    pub total: u32,
+}
+
+/// A throttled emitter for file-transfer progress: coalesces to ~10 emits/s but
+/// ALWAYS emits the terminal `done == total`. Construct one per transfer; call
+/// [`ProgressThrottle::emit`] on each chunk callback.
+pub struct ProgressThrottle<R: Runtime> {
+    app_handle: tauri::AppHandle<R>,
+    file_conv: String,
+    direction: &'static str,
+    last: std::time::Instant,
+}
+
+impl<R: Runtime> ProgressThrottle<R> {
+    /// ~10 emits/s.
+    const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+    pub fn new(
+        app_handle: tauri::AppHandle<R>,
+        file_conv: String,
+        direction: &'static str,
+    ) -> Self {
+        // Back-date so the first progress tick always emits.
+        Self {
+            app_handle,
+            file_conv,
+            direction,
+            last: std::time::Instant::now() - Self::MIN_INTERVAL,
+        }
+    }
+
+    pub fn emit(&mut self, done: u32, total: u32) {
+        let terminal = done >= total;
+        if !terminal && self.last.elapsed() < Self::MIN_INTERVAL {
+            return;
+        }
+        self.last = std::time::Instant::now();
+        let event = FileProgressEvent {
+            file_conv: self.file_conv.clone(),
+            direction: self.direction,
+            done,
+            total,
+        };
+        if let Err(e) = self.app_handle.emit(EVENT_FILE_PROGRESS, event) {
+            log::error!("Failed to emit file-progress event: {e}");
+        }
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct FileReceivedEvent {
+    pub conv: String, // hex (channel id for a channel file; the DM conv otherwise)
+    pub from: String, // sender user-id
+    pub name: String,
+    pub size: u64,
+    pub mime: String,      // so the UI can decide image/video/other
+    pub file_conv: String, // hex — pass to save
+}
+
+/// Emit a received DM to the frontend (text decoded lossily for display).
+pub fn emit_dm_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    from: String,
+    from_name: String,
+    text: Vec<u8>,
+    reply_to: Option<EventId>,
+) {
+    let event = DmReceivedEvent {
+        from,
+        from_name,
+        text: String::from_utf8_lossy(&text).into_owned(),
+        reply_to: reply_to.map(|id| hex::encode(id.as_bytes())),
     };
+    notify_if_unfocused(app_handle, &event.from_name, &preview(&event.text));
+    if let Err(e) = app_handle.emit(EVENT_DM_RECEIVED, event) {
+        log::error!("Failed to emit dm event: {e}");
+    }
+}
 
-    let Some(session) = app_state.session().get() else {
-        return fallback();
+pub fn emit_channel_message<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    channel_id: String,
+    channel_name: String,
+    from: String,
+    text: Vec<u8>,
+    reply_to: Option<EventId>,
+) {
+    let event = ChannelMessageEvent {
+        channel_id,
+        channel_name,
+        from,
+        text: String::from_utf8_lossy(&text).into_owned(),
+        reply_to: reply_to.map(|id| hex::encode(id.as_bytes())),
     };
-
-    let sender_address = if event.from_address.trim().is_empty() {
-        "unknown".to_owned()
-    } else {
-        event.from_address.clone()
-    };
-    let sender_name = event
-        .sender_name
-        .clone()
-        .unwrap_or_else(|| sender_address.clone());
-    let from_user_id = event
-        .from_user_id
-        .clone()
-        .unwrap_or_else(|| "unknown_sender".to_string());
-
-    let message_service = app_state.message_service();
-
-    let persisted_message = message_service
-        .create_message(
-            session.user.name.clone(),
-            from_user_id,
-            sender_address.clone(),
-            Some(session.user.user_id.clone()),
-            Some(session.user.address.clone()),
-            event.content.clone(),
-        )
-        .map_err(|err| {
-            error!("Failed to persist incoming message: {:?}", err);
-        })
-        .ok()
-        .and_then(|message| {
-            let message_id = message.id.clone(); // Store the ID before move
-            if let Err(err) = message_service.mark_delivered(message_id.clone()) {
-                error!("Failed to mark incoming message as delivered: {:?}", err);
-            }
-
-            message_service
-                .get_message(message_id)
-                .map_err(|err| {
-                    error!("Failed to reload persisted message: {:?}", err);
-                })
-                .ok()
-                .or(Some(message))
-        });
-
-    let contact_service = app_state.contact_service();
-    let contact = contact_service.find_contact_by_address(
-        session.user.name.clone(),
-        session.user.user_id.clone(),
-        &sender_address,
+    notify_if_unfocused(
+        app_handle,
+        &format!("# {}", event.channel_name),
+        &preview(&event.text),
     );
-    let sender_name = contact
-        .as_ref()
-        .map(|contact| contact.name.clone())
-        .unwrap_or(sender_name);
-    let contact_id = contact.as_ref().map(|contact| contact.id.clone());
-
-    if let Some(message) = persisted_message {
-        return MessageReceivedEvent {
-            message: ChatMessageInfo::from(message),
-            sender_name,
-            sender_address,
-            contact_id,
-            is_unread: false, // Since this message was persisted, it might not be unread
-        };
+    if let Err(e) = app_handle.emit(EVENT_CHANNEL_MESSAGE, event) {
+        log::error!("Failed to emit channel event: {e}");
     }
-
-    fallback()
 }
 
-fn fallback_message_event(event: &MessageEvent) -> MessageReceivedEvent {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-
-    let sender_address = if event.from_address.trim().is_empty() {
-        "unknown".to_string()
-    } else {
-        event.from_address.clone()
+pub fn emit_file_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    conv: String,
+    from: String,
+    name: String,
+    size: u64,
+    mime: String,
+    file_conv: String,
+) {
+    let event = FileReceivedEvent {
+        conv,
+        from,
+        name,
+        size,
+        mime,
+        file_conv,
     };
-    let sender_name = event
-        .sender_name
-        .clone()
-        .unwrap_or_else(|| sender_address.clone());
-    let from_user_id = event.from_user_id.clone().unwrap_or_default();
-
-    MessageReceivedEvent {
-        message: ChatMessageInfo {
-            id: String::new(),
-            from_user_id,
-            from_address: sender_address.clone(),
-            to_user_id: event.to_user_id.clone(),
-            to_address: event.to_address.clone(),
-            content: event.content.clone(),
-            sent_at: timestamp,
-            delivered_at: None,
-            read_at: None,
-            status: 0,
-        },
-        sender_name,
-        sender_address,
-        contact_id: None,
-        is_unread: true, // Default to true for fallback messages (incoming messages)
+    notify_if_unfocused(app_handle, &event.from, "sent a file");
+    if let Err(e) = app_handle.emit(EVENT_FILE_RECEIVED, event) {
+        log::error!("Failed to emit file event: {e}");
     }
-}
-
-fn compute_peer_status_deltas(
-    peer_info_map: &mut HashMap<SocketAddr, crate::domain::models::PeerInfo>,
-    previous_status: &HashMap<SocketAddr, bool>,
-    connected: &HashSet<SocketAddr>,
-) -> (Vec<ContactStatusChange>, HashMap<SocketAddr, bool>) {
-    let mut new_status_map = HashMap::new();
-    let mut changes = Vec::new();
-
-    for addr in connected {
-        peer_info_map.entry(*addr).or_insert_with(|| {
-            let mut info = crate::domain::models::PeerInfo::new(
-                *addr,
-                format!("Unknown-{}", addr.port()),
-                None,
-                Some(addr.port()),
-            );
-            info.mark_connected();
-            info
-        });
-    }
-
-    for (addr, info) in peer_info_map.iter_mut() {
-        let is_now_connected = connected.contains(addr);
-        if is_now_connected && !info.is_connected {
-            info.mark_connected();
-        } else if !is_now_connected && info.is_connected {
-            info.mark_disconnected();
-        }
-
-        let prev = previous_status.get(addr).copied().unwrap_or(false);
-        if prev != is_now_connected {
-            changes.push(ContactStatusChange {
-                address: *addr,
-                node_name: info.node_name.clone(),
-                username: info.username.clone(),
-                listen_port: info.listen_port,
-                is_online: is_now_connected,
-            });
-        }
-
-        new_status_map.insert(*addr, is_now_connected);
-    }
-
-    (changes, new_status_map)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::models::PeerInfo;
-    use crate::domain::models::User;
-    use crate::services::auth_service::AuthService;
-    use crate::services::contact_service::ContactService;
-    use crate::services::message_service::MessageService;
-    use crate::state::AppState;
-
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
-
-    fn addr(port: u16) -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
-    }
-
-    #[test]
-    fn compute_peer_status_detects_online_change() {
-        let mut peer_info = HashMap::new();
-        let address = addr(7001);
-        peer_info.insert(
-            address,
-            PeerInfo::new(address, "peer".into(), None, Some(address.port())),
-        );
-
-        let previous = HashMap::new();
-        let connected = HashSet::from([address]);
-
-        let (changes, statuses) = compute_peer_status_deltas(&mut peer_info, &previous, &connected);
-
-        assert_eq!(changes.len(), 1);
-        assert!(changes[0].is_online);
-        assert_eq!(statuses.get(&address), Some(&true));
-    }
-
-    #[test]
-    fn compute_peer_status_detects_offline_change() {
-        let mut peer_info = HashMap::new();
-        let address = addr(7002);
-        let mut info = PeerInfo::new(address, "peer".into(), None, Some(address.port()));
-        info.mark_connected();
-        peer_info.insert(address, info);
-
-        let previous = HashMap::from([(address, true)]);
-        let connected = HashSet::new();
-
-        let (changes, statuses) = compute_peer_status_deltas(&mut peer_info, &previous, &connected);
-
-        assert_eq!(changes.len(), 1);
-        assert!(!changes[0].is_online);
-        assert_eq!(statuses.get(&address), Some(&false));
-    }
-
-    #[test]
-    fn build_payload_persists_message_and_uses_contact_name() {
-        // Create a temporary directory for test data
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
-        let data_path = temp_dir.path().to_str().unwrap().to_string();
-
-        let file_manager = crate::storage::file_manager::FileManager::new(data_path.into());
-
-        // Initialize services with file manager
-        let auth_service = AuthService::new(Arc::new(
-            crate::identity::manager::IdentityManager::new(file_manager.clone()),
-        ));
-        let identity_manager = crate::identity::manager::IdentityManager::new(file_manager.clone());
-        let contact_manager = Arc::new(crate::contacts::manager::ContactManager::new(
-            file_manager.clone(),
-            identity_manager,
-        ));
-        let contact_service = ContactService::new(contact_manager);
-        let message_service = MessageService::new(Arc::new(file_manager));
-
-        let app_state = AppState::new(
-            auth_service.clone(),
-            contact_service.clone(),
-            message_service.clone(),
-            Arc::new(crate::api::AppConfig::default()),
-        );
-
-        let local_user = User::new(
-            "test-user-uuid".to_string(),
-            "local-user".into(),
-            "127.0.0.1:7000".into(),
-        );
-        app_state.session().set("token".into(), local_user.clone());
-
-        let event = MessageEvent {
-            from_address: "192.168.0.2:9000".into(),
-            sender_name: Some("peer-one".into()),
-            from_user_id: Some("peer-user".into()),
-            to_user_id: Some(local_user.user_id.clone()),
-            to_address: Some(local_user.address.clone()),
-            content: "Hello from the network".into(),
-        };
-
-        let payload = build_message_event_payload_with_state(&event, Some(&app_state));
-
-        assert!(!payload.message.id.is_empty()); // Check that the message id is not empty instead of > 0
-        assert_eq!(payload.message.content, "Hello from the network");
-        assert_eq!(payload.message.to_user_id, Some(local_user.user_id));
-        assert_eq!(payload.sender_name, "peer-one");
-        assert_eq!(payload.sender_address, "192.168.0.2:9000");
-        assert!(payload.contact_id.is_none());
-        assert_eq!(payload.message.status, 1); // Delivered
-
-        let persisted = app_state
-            .message_service()
-            .get_message(payload.message.id)
-            .expect("message persisted");
-        assert_eq!(persisted.content, "Hello from the network");
-    }
-}
-
-pub fn emit_file_transfer_status(
-    transfer_id: &str,
-    status: TransferStatus,
-    error: Option<String>,
-    direction: TransferDirection,
-) {
-    with_node_event_app_handle(|handle| {
-        let _ = handle.emit(
-            EVENT_FILE_TRANSFER_STATUS,
-            serde_json::json!({
-                "transferId": transfer_id,
-                "status": format!("{status:?}").to_lowercase(),
-                "direction": match direction {
-                    TransferDirection::Incoming => "incoming",
-                    TransferDirection::Outgoing => "outgoing",
-                },
-                "error": error,
-            }),
-        );
-    });
-}
-
-pub fn emit_file_transfer_progress(
-    transfer_id: &str,
-    bytes: u64,
-    total: u64,
-    direction: TransferDirection,
-) {
-    with_node_event_app_handle(|handle| {
-        let _ = handle.emit(
-            EVENT_FILE_TRANSFER_PROGRESS,
-            serde_json::json!({
-                "transferId": transfer_id,
-                "bytes": bytes,
-                "total": total,
-                "direction": match direction {
-                    TransferDirection::Incoming => "incoming",
-                    TransferDirection::Outgoing => "outgoing",
-                }
-            }),
-        );
-    });
-}
-
-pub fn emit_file_transfer_complete(
-    transfer_id: &str,
-    path: String,
-    direction: TransferDirection,
-    checksum_valid: bool,
-) {
-    with_node_event_app_handle(|handle| {
-        let _ = handle.emit(
-            EVENT_FILE_TRANSFER_COMPLETE,
-            serde_json::json!({
-                "transferId": transfer_id,
-                "path": path,
-                "direction": match direction {
-                    TransferDirection::Incoming => "incoming",
-                    TransferDirection::Outgoing => "outgoing",
-                },
-                "checksumValid": checksum_valid,
-            }),
-        );
-    });
-}
-
-pub fn emit_file_transfer_offer(event: FileTransferOfferEvent) {
-    with_node_event_app_handle(|handle| {
-        let _ = handle.emit(EVENT_FILE_TRANSFER_OFFER, event);
-    });
 }
