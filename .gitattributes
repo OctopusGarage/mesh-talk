@@ -1,0 +1,25 @@
+# Normalize line endings: text auto-detected, scripts always LF.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+
+# Exclude dev-only files from `git archive` / GitHub source tarballs.
+# A consumer building from source needs: src-tauri/, frontend/, Cargo.*,
+# Makefile, tauri.conf.json, README.md, LICENSE.
+/.github          export-ignore
+/.claude          export-ignore
+/.vscode          export-ignore
+/docs             export-ignore
+/hooks            export-ignore
+/scripts          export-ignore
+/specifications   export-ignore
+/.editorconfig    export-ignore
+/.gitattributes   export-ignore
+/.gitignore       export-ignore
+/.gitleaks.toml   export-ignore
+/.mcp.json        export-ignore
+/renovate.json    export-ignore
+/AGENTS.md        export-ignore
+/CONTRIBUTING.md  export-ignore
+/CONTEXT.md       export-ignore

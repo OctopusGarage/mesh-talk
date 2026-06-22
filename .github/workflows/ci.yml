@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Read-only: every job just checks out and runs tooling — nothing writes back.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      # Tauri targets desktop on all three platforms: verify on Linux (fast, with the
+      # GTK/WebKit deps + coverage), macOS, and Windows (so a Windows-only regression is
+      # caught on every push, not only at release time).
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Tauri v2 system libraries (Linux only).
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The Tauri build reads frontendDist (../frontend/dist), so build the
+      # frontend before any cargo step.
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Lint frontend (ESLint)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Rustfmt (check)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Linux runs the suite under llvm-cov (below); macOS + Windows run it directly.
+      # --workspace so BOTH crates (mesh-talk-core + the app) are tested, not just the app.
+      - name: Test (macOS + Windows)
+        if: matrix.os != 'ubuntu-latest'
+        working-directory: src-tauri
+        run: cargo test --workspace
+
+      # On Linux, run the tests through llvm-cov so we get coverage in the same
+      # pass (avoids compiling/running the suite twice).
+      - name: Install cargo-llvm-cov
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Test + coverage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: src-tauri
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: src-tauri/lcov.info
+          fail_ci_if_error: false
+
+      - name: Spelling (typos)
+        if: matrix.os == 'ubuntu-latest'
+        uses: crate-ci/typos@v1
+
+      - name: Shellcheck scripts
+        if: matrix.os == 'ubuntu-latest'
+        run: shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh
+
+      - name: Install supply-chain tools
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-machete
+
+      # Unused dependencies (knip's Rust equivalent). Cargo.toml files at root.
+      - name: Unused dependencies (cargo-machete)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo machete
+
+      # Advisories + licenses + bans + sources (config: deny.toml).
+      - name: Supply-chain policy (cargo-deny)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo deny check
+
+  # Stable name for the branch-protection required check: stays "verify" no
+  # matter how the matrix above evolves.
+  verify:
+    needs: checks
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All matrix checks passed
+        run: test "${{ needs.checks.result }}" = "success"

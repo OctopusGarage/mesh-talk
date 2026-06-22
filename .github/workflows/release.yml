@@ -4,10 +4,12 @@ on:
   push:
     tags:
       - "v*"  # Triggered when pushing tags
+  workflow_dispatch: {}  # Manual run: builds all platforms + uploads artifacts (no GitHub Release)
 
 permissions:
-  contents: write  
-  id-token: write
+  contents: write
+  id-token: write       # OIDC for cosign keyless signing + SLSA attestation
+  attestations: write   # actions/attest-build-provenance writes signed provenance
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,15 +28,18 @@ jobs:
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
 
     steps:
       # 1️⃣ Checkout
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 2️⃣ Setup Node.js
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
 
@@ -56,9 +61,22 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc
 
+      # Linux needs the Tauri GTK/WebKit stack (+ protoc) to build the AppImage/deb/rpm.
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            protobuf-compiler
+
       # 4️⃣ Cache Cargo
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -88,7 +106,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
-          TAG=${GITHUB_REF#refs/tags/}
+          TAG="${GITHUB_REF_NAME}"
 
           for pattern in \
             target/*/release/bundle/nsis/*.exe \
@@ -138,14 +156,14 @@ jobs:
 
       # 9️⃣ Install cosign
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.6.0
+        uses: sigstore/cosign-installer@v4.1.2
 
       # 🔟 Package and sign artifacts
       - name: Package and sign artifacts
         shell: bash
         run: |
           set -euo pipefail
-          TAG=${GITHUB_REF#refs/tags/}
+          TAG="${GITHUB_REF_NAME}"
           mkdir -p release_zips
 
           OS_NAME=""
@@ -194,11 +212,47 @@ jobs:
           echo "✅ Bundle signature generated: $BUNDLE_FILE"
           ls -lh release_zips
 
-      # 1️⃣1️⃣ Upload zipped artifacts + bundle to GitHub Release
+      # 🔏 SLSA build provenance: a GitHub-native, signed attestation of exactly which
+      # repo/commit/workflow produced this artifact. Verified by `gh attestation verify`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "release_zips/*.zip"
+
+      # 📦 SBOM (CycloneDX): full dependency inventory for supply-chain auditing. Generated
+      # once on Linux (deps are platform-independent) and shipped with the release.
+      - name: Generate SBOM (CycloneDX)
+        if: runner.os == 'Linux'
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: release_zips/mesh-talk.cdx.json
+          upload-artifact: false
+
+      # 1️⃣1️⃣ Always expose the signed zips (+ SBOM) as workflow artifacts — lets a manual
+      # `workflow_dispatch` run be downloaded + verified without cutting a real release.
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-talk-${{ matrix.os }}-${{ matrix.target }}
+          path: release_zips/*
+          if-no-files-found: error
+
+      # 1️⃣2️⃣ On a version tag only: build the release body (verification + usage notes, with
+      # the tag substituted in) and publish the artifacts to the GitHub Release.
+      - name: Prepare release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: sed "s/__TAG__/${GITHUB_REF_NAME}/g" .github/release-notes.md > release_notes.md
+
       - name: Upload zipped artifacts and signature bundle to GitHub Release
-        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          body_path: release_notes.md
+          generate_release_notes: true # append an auto changelog under the notes above
           files: release_zips/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

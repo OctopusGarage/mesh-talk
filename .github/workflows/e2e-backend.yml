@@ -1,0 +1,43 @@
+name: Backend E2E
+
+# Multi-process backend end-to-end tests: real `mesh-talk-node` processes over UDP
+# discovery + TCP (two-node DM, message history across restart, post-office offline
+# delivery). These are `#[ignore]`d so the normal `cargo test` skips them; this workflow
+# runs them explicitly via `make e2e`. They are fast + reliable in CI because the spawned
+# binary builds with the `fast-test-kdf` feature (cheap argon2 in test builds only — the
+# shipped binary is unaffected). The browser/UI E2E lives in `e2e-ui.yml`.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 5 * * 3" # Wednesdays 05:00 UTC
+  workflow_dispatch:
+
+# Read-only: builds the core crate + node binary and runs the integration rigs.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend-e2e:
+    name: Multi-process E2E
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # mesh-talk-core + the mesh-talk-node binary are UI-free (no GTK/WebKit needed).
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # Runs the `#[ignore]`d integration rigs serially (--test-threads=1) under nice,
+      # exactly as a contributor runs `make e2e` locally.
+      - name: Run multi-process E2E
+        run: make e2e

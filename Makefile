@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test clean check
+.PHONY: dev build test e2e clean check
 
 dev: install-deps frontend-install
 	@echo "Development environment configured!"
@@ -11,7 +11,14 @@ build:
 	cd src-tauri && cargo build --release
 
 test:
-	cd src-tauri && cargo test
+	cargo test --workspace
+
+# End-to-end integration tests: real `mesh-talk-node` processes over UDP discovery +
+# TCP (two-node DM, history-across-restart, post-office offline delivery). `#[ignore]`d
+# by default (real UDP-multicast discovery + node cold starts), so run them explicitly here. Serial
+# (--test-threads=1) to avoid discovery-port / CPU contention between the heavy processes.
+e2e:
+	nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli -- --ignored --test-threads=1
 
 clean:
 	cd src-tauri && cargo clean
@@ -39,7 +46,7 @@ check:
 	./scripts/check-health.sh
 
 lint:
-	cd src-tauri && cargo clippy -- -D warnings
+	cargo clippy --workspace -- -D warnings
 
 fix:
 	cd src-tauri && cargo clippy --fix --allow-dirty --allow-staged
@@ -68,7 +75,8 @@ help:
 	@echo "Usage:"
 	@echo "  make dev              Set up the development environment"
 	@echo "  make build            Build the application for release"
-	@echo "  make test             Run tests"
+	@echo "  make test             Run the workspace unit/integration tests"
+	@echo "  make e2e              Run the end-to-end multi-process tests (slow)"
 	@echo "  make clean            Clean build artifacts"
 	@echo "  make check            Run all quality checks"
 	@echo "  make lint             Run linting tools"

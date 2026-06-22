@@ -1,10 +1,16 @@
 #!/bin/bash
 set -e
-# pre-commit hook: Run code quality checks
+# pre-commit hook: Run the FAST local quality gate.
+#
+# Fast gate = formatting, clippy, frontend lint/tests, and the in-memory Rust unit slice
+# (cheap thanks to test-only KDF params). The slow/heavy pieces — full `cargo test --workspace`,
+# the verbose workspace + frontend builds, and the supply-chain/secret/typos scans — are SKIPPED
+# here and run in CI (.github/workflows/ci.yml) on every push, so coverage is not lost. Run the
+# full local gate any time with `./scripts/check-health.sh` (no --fast).
 
-# Run unified health check script
+# Run unified health check script in fast mode
 chmod +x scripts/check-health.sh
-./scripts/check-health.sh
+./scripts/check-health.sh --fast
 
 # Ensure all changes are staged after auto-fixes
 git add -A

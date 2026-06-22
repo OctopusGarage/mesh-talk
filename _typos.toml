@@ -1,0 +1,31 @@
+# typos (crate-ci) — source spell checker config.
+# https://github.com/crate-ci/typos
+
+[default.extend-words]
+# sed branch-to-label syntax in scripts/clean_commit.sh ( ...;/\n$/ba ).
+ba = "ba"
+# "pn" / "PN" is the Double Ratchet "previous sending chain length" variable
+# (Signal Double Ratchet spec), used throughout src-tauri/src/ratchet and its docs.
+pn = "pn"
+# "abd" is a test byte-string literal (file_checksum(b"abc") vs b"abd")).
+abd = "abd"
+
+[default.extend-identifiers]
+# "UPnP" (Universal Plug and Play) trips the Pn->On heuristic.
+UPnP = "UPnP"
+
+[files]
+extend-exclude = [
+  "Cargo.lock",
+  "frontend/package-lock.json",
+  "package-lock.json",
+  "src-tauri/icons/**",
+  "specifications/**/*.md",
+  # UI translation catalogs: intentionally non-English (es/ja/zh-Hans/zh-Hant/yue),
+  # so the English spell-checker would flag every localized word (foto, contactos, tema…).
+  "frontend/src/locales/**",
+  # Generated coverage artifacts (function-name fragments trip the checker).
+  "**/lcov.info",
+  "**/*.info",
+  "**/coverage/**",
+]

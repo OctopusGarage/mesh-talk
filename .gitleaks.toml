@@ -1,0 +1,16 @@
+# Gitleaks config — extends the default ruleset with a narrow allowlist.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths that legitimately contain key-shaped strings (test fixtures, lockfiles, generated keys, design-doc prose/examples)."
+paths = [
+  '''Cargo\.lock''',
+  '''.*package-lock\.json''',
+  '''src-tauri/src/.*tests?\.rs''',
+  '''src-tauri/src/commands\.rs''',
+  # Design docs / specs / plans are prose with illustrative example values
+  # (hashes, ids, snippets) that trip the entropy heuristic — no real secrets.
+  '''docs/.*\.md''',
+  '''specifications/.*\.md''',
+]

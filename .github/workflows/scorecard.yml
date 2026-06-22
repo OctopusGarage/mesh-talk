@@ -1,0 +1,45 @@
+name: Scorecard
+
+# OpenSSF Scorecard: an automated, industry-recognized assessment of this repo's security
+# posture (branch protection, signed releases, pinned deps, SAST, token permissions, …).
+# Results are published to the public OpenSSF API that backs the README badge. We do NOT upload
+# them to GitHub code-scanning: Scorecard reports posture/process metrics (e.g. Code-Review,
+# CII-Best-Practices, upstream Vulnerabilities), not code defects, so they don't belong in the
+# code-scanning alerts list — that page is reserved for real code findings (CodeQL). See the
+# badge / scorecard.dev viewer for the posture score.
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+# Top-level least-privilege; the job elevates only what it needs.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC, to publish results to the OpenSSF API (badge)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true # feeds the public badge at api.securityscorecards.dev
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5

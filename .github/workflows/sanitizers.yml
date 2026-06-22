@@ -1,0 +1,59 @@
+name: Sanitizers
+
+# Memory-safety / leak guardrail: runs the pure-Rust core test suite under
+# AddressSanitizer (ASan, which embeds LeakSanitizer) so a genuine leak or
+# use-after-free in the protocol core fails the build.
+#
+# Scope: ONLY `mesh-talk-core --lib` (the UI-free core). The Tauri app links
+# GTK/WebKit C libraries whose internals trip ASan with false positives we can't
+# fix from here, so the app is deliberately excluded.
+#
+# Triggers: weekly schedule + manual dispatch only. ASan needs the nightly
+# toolchain + `-Z build-std` (a full std rebuild), which is slow and nightly-
+# dependent, so it is NOT run on every push/PR (those are covered by ci.yml).
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+# Read-only: just checks out and runs the test suite under the sanitizer.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  asan:
+    name: ASan + LeakSanitizer (core)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # ASan instrumentation + `-Z build-std` both require nightly; `rust-src` is
+      # the std source `-Z build-std` recompiles against the sanitizer runtime.
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: sanitizers
+
+      # Run the core lib tests instrumented with AddressSanitizer. LeakSanitizer
+      # is part of ASan; `detect_leaks=1` makes a leaked allocation fail the run.
+      # `-Z build-std` rebuilds std with the same instrumentation so allocations
+      # inside std are tracked too (and so std doesn't taint the report).
+      - name: Test under AddressSanitizer
+        env:
+          RUSTFLAGS: "-Zsanitizer=address"
+          RUSTDOCFLAGS: "-Zsanitizer=address"
+          ASAN_OPTIONS: "detect_leaks=1"
+        run: |
+          cargo +nightly test \
+            -p mesh-talk-core --lib \
+            -Z build-std \
+            --target x86_64-unknown-linux-gnu

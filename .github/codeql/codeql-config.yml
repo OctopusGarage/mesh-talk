@@ -1,0 +1,19 @@
+name: "mesh-talk CodeQL config"
+
+# CodeQL runs the default query suite, with one query excluded.
+#
+# `rust/hard-coded-cryptographic-value` is a structural mismatch for this codebase and
+# produces only false positives here. It flags two patterns we use pervasively and have
+# verified are safe:
+#   1. zero-initialized buffers that are immediately overwritten with real entropy or read
+#      from disk, e.g. `let mut salt = [0u8; SALT_SIZE]; OsRng.fill_bytes(&mut salt);`
+#      (the `[0u8; N]` literal is flagged even though no constant value survives); and
+#   2. fixed test fixtures inside `#[cfg(test)]` — a literal `"pw"` test password, fixed
+#      `[1u8; 32]` conversation ids — which never ship.
+# The query cannot distinguish init-then-fill buffers from a real hard-coded key, so it
+# can't be satisfied without contorting safe code. Actual secret material is guarded by
+# gitleaks (secret scanning) plus review; excluding this one query keeps the security
+# signal high without recurring manual dismissals.
+query-filters:
+  - exclude:
+      id: rust/hard-coded-cryptographic-value

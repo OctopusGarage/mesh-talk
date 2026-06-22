@@ -1,0 +1,99 @@
+name: glib 0.20 bump watch
+
+# glib 0.18.5 is pinned transitively: tauri -> gtk "^0.18" -> glib 0.18. glib 0.20
+# (which fixes the unsoundness advisory GHSA-wrw7-89jp-8q8g) needs gtk 0.19+/gtk4,
+# which tauri 2.x does not yet use. This monthly job probes whether a newer tauri has
+# lifted that gate; if so it builds + tests with glib bumped and opens a PR. While the
+# gate holds it is a cheap no-op (just dependency resolution — no system deps, no build).
+on:
+  schedule:
+    - cron: '0 8 1 * *' # 1st of each month, 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Probe whether tauri's gtk stack now allows glib 0.20
+        id: probe
+        run: |
+          set -euo pipefail
+          # Pull the latest compatible tauri; if its gtk stack moved to glib 0.20 the
+          # transitive glib version rises automatically. (Run from the workspace root,
+          # where Cargo.lock lives.)
+          cargo update -p tauri
+          maxglib=$(awk '/^\[\[package\]\]/{n=""} /^name = /{gsub(/"/,"");n=$3} /^version = /{gsub(/"/,"");if(n=="glib")print $3}' Cargo.lock | sort -V | tail -1)
+          echo "Resolved glib: ${maxglib:-none}"
+          if [ -n "${maxglib:-}" ] \
+             && [ "$(printf '%s\n%s\n' 0.20.0 "$maxglib" | sort -V | head -1)" = "0.20.0" ] \
+             && [ "$maxglib" != "0.18.5" ]; then
+            echo "lifted=true" >> "$GITHUB_OUTPUT"
+            echo "glib_version=$maxglib" >> "$GITHUB_OUTPUT"
+          else
+            echo "lifted=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::glib 0.20 still gated by tauri's gtk stack (stays ${maxglib:-0.18.x}); no change."
+            git checkout -- Cargo.lock
+          fi
+
+      - name: Install Tauri system dependencies
+        if: steps.probe.outputs.lifted == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: actions/setup-node@v6
+        if: steps.probe.outputs.lifted == 'true'
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend (the Tauri build reads frontend/dist)
+        if: steps.probe.outputs.lifted == 'true'
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build + test with glib bumped
+        if: steps.probe.outputs.lifted == 'true'
+        working-directory: src-tauri
+        run: |
+          cargo build --lib --bins
+          cargo test --lib -- --test-threads=2
+
+      - name: Open a PR with the bump
+        if: steps.probe.outputs.lifted == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          add-paths: Cargo.lock
+          branch: chore/glib-0.20
+          delete-branch: true
+          commit-message: "chore(deps): bump glib to ${{ steps.probe.outputs.glib_version }} (gtk stack now supports it)"
+          title: "chore(deps): bump glib to 0.20 (gtk stack now supports it)"
+          body: |
+            tauri's gtk stack now resolves glib `${{ steps.probe.outputs.glib_version }}`, lifting the
+            `tauri -> gtk ^0.18 -> glib 0.18` pin that held glib at 0.18.5.
+
+            This closes the glib unsoundness advisory **GHSA-wrw7-89jp-8q8g**.
+            `cargo build --lib --bins` and `cargo test --lib` passed on the workflow runner.
+
+            Auto-opened by `.github/workflows/glib-0.20-watch.yml`. Review before merging
+            (GITHUB_TOKEN-authored PRs don't trigger `ci.yml` automatically — close/reopen
+            or push an empty commit to run the full CI suite).

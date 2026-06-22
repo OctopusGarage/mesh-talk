@@ -1,0 +1,43 @@
+version: 2
+updates:
+  # Rust crates (workspace Cargo.lock at repo root).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # One PR/week for minor+patch bumps (auto-merge once CI is green).
+      # Majors stay ungrouped so each gets its own PR for manual review.
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Frontend npm dependencies.
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # TypeScript 6 can't be installed yet: react-i18next pins `peerOptional
+      # typescript@^5`, so `npm ci` fails ERESOLVE. Skip the TS major bump until the
+      # ecosystem allows TS 6; revisit then as a deliberate migration (not an auto-bump).
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions versions used in workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
