@@ -52,17 +52,25 @@ Scope should identify the component or module affected by the commit:
 ## Examples
 
 ```
-feat(network): implement libp2p peer discovery
+feat(discovery): sign UDP announce and group devices by account
 
-- Add Kademlia DHT for peer discovery
-- Implement mDNS for local network discovery
-- Add peer address book for storing discovered peers
+- Add Ed25519 signature over the announce payload
+- Carry the device certificate and verify it against the account key
+- Group discovered devices by account in the roster
 ```
 
 ```
-fix(crypto): resolve session establishment failure
+fix(ratchet): resolve session establishment failure
 
 - Fix race condition in double ratchet initialization
 - Add proper error handling for key exchange failures
 - Update unit tests to cover edge cases
 ```
+
+## Signing & Hooks
+
+Commits **must be GPG-signed**. `scripts/setup-hooks.sh` (run by `make dev`) points
+`core.hooksPath` at `hooks/` and enables `commit.gpgsign`; the `pre-push` hook rejects any
+commit lacking a `gpgsig`. The `commit-msg` and `pre-commit` hooks run a fast quality slice
+locally before each commit. Generate a key with `gpg --full-generate-key` and set it via
+`git config --global user.signingkey <KEY_ID>` if you don't have one.

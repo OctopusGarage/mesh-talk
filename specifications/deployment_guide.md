@@ -1,11 +1,11 @@
 # Mesh-Talk Deployment Guide
 
-This guide provides instructions for deploying Mesh-Talk on different platforms including macOS, Windows, and Linux. Mesh-Talk can be deployed in two versions: a Command Line Interface (CLI) version and a Graphical User Interface (GUI) version built with Tauri.
+This guide provides instructions for deploying Mesh-Talk on different platforms including macOS, Windows, and Linux. Mesh-Talk ships as a desktop app built with Tauri (the `mesh-talk` binary); a headless node binary (`mesh-talk-node`) is also available for testing and for running a post-office relay.
 
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
-2. [CLI Version Deployment](#cli-version-deployment)
+2. [Headless Node Deployment](#headless-node-deployment)
 3. [GUI Version Deployment](#gui-version-deployment)
 4. [Platform-Specific Instructions](#platform-specific-instructions)
    - [macOS](#macos)
@@ -40,49 +40,58 @@ Before deploying Mesh-Talk, ensure you have the following tools installed:
 - Development packages for GTK and WebKit
 - For Debian/Ubuntu: `sudo apt install libwebkit2gtk-4.0-dev build-essential curl wget libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`
 
-## CLI Version Deployment
+## Headless Node Deployment
 
-The CLI version of Mesh-Talk provides a command-line interface for local network chatting.
+`mesh-talk-node` is the headless node binary — a CLI over the same core, useful for
+testing on a server and for running an always-on **post office** relay.
 
-### Building the CLI Version
+### Building the node
 
 1. Navigate to the project root directory:
    ```bash
    cd mesh-talk
    ```
 
-2. Build the CLI version:
+2. Build the node binary (the bin lives in the `mesh-talk-core` crate):
    ```bash
-   cd src-tauri
-   cargo build --release
+   cargo build --release -p mesh-talk-core --bin mesh-talk-node
    ```
 
 3. The compiled binary will be located at:
-   - macOS/Linux: `target/release/mesh-talk`
-   - Windows: `target/release/mesh-talk.exe`
+   - macOS/Linux: `target/release/mesh-talk-node`
+   - Windows: `target/release/mesh-talk-node.exe`
 
-### Running the CLI Version
+### Running the node
 
-Execute the binary with the required parameters:
 ```bash
-./mesh-talk --name "YourName" --port 7000
+# a normal headless node
+./mesh-talk-node --keystore ~/.mesh-talk/node.keystore --password "<pw>" --name "YourName"
+# run as a store-and-forward relay
+./mesh-talk-node --keystore ~/.mesh-talk/relay.keystore --password "<pw>" --name "relay" --post-office
 ```
 
 Parameters:
-- `--name` or `-n`: Your display name in the chat
-- `--port` or `-p`: TCP port to listen on (default: 7000)
+- `--keystore`: path to the encrypted identity keystore (created if absent) — **required**
+- `--password`: password that encrypts the keystore — **required**
+- `--name`: this node's display name on the LAN — **required**
+- `--port`: TCP port for peer connections (default: OS-assigned)
+- `--discovery-port`: UDP discovery port (default: 47474; must match across peers)
+- `--post-office`: run in relay mode (stores-and-forwards still-encrypted events for
+  offline peers)
 
-### Installing the CLI Version System-Wide
+Discovery uses signed UDP **multicast** (group `224.0.0.167`, port 47474 by default);
+peer connections are Noise-encrypted TCP on an OS-assigned (or `--port`) port. The host
+firewall must permit UDP 47474 (multicast 224.0.0.167) and the chosen TCP port.
 
-To make the CLI version available system-wide:
+### Installing the node system-wide
 
 #### macOS/Linux
 ```bash
-sudo cp target/release/mesh-talk /usr/local/bin/
+sudo cp target/release/mesh-talk-node /usr/local/bin/
 ```
 
 #### Windows
-Copy the `mesh-talk.exe` file to a directory in your PATH, or add the target directory to your PATH environment variable.
+Copy the `mesh-talk-node.exe` file to a directory in your PATH, or add the target directory to your PATH environment variable.
 
 ## GUI Version Deployment
 
@@ -233,15 +242,18 @@ node --version  # Should be 16 or higher
 3. Check system logs for error messages
 
 #### Network Discovery Not Working
-1. Ensure UDP port 9999 is not blocked by firewall
-2. Check that all nodes are on the same local network
-3. Verify that broadcast is enabled on your network
+1. Ensure UDP port 47474 (multicast group 224.0.0.167) is not blocked by firewall
+2. Check that all nodes are on the same local network segment
+3. Verify that the network allows multicast/UDP between hosts (some guest/AP-isolated
+   Wi-Fi blocks it); on macOS the app ships the `com.apple.developer.networking.multicast`
+   entitlement so the OS permits multicast
 
-#### Database Issues
-Mesh-Talk uses SQLite for local storage. If you encounter database issues:
+#### Local Storage Issues
+Mesh-Talk stores data as encrypted files under `~/.mesh-talk` (no database). If a store
+appears corrupt:
 1. Close the application
-2. Backup and remove the database file (usually in the application data directory)
-3. Restart the application to create a new database
+2. Back up and remove the affected per-account directory under `~/.mesh-talk/accounts/`
+3. Restart the application to re-create the stores (history not held by a peer/post office is lost)
 
 ### Platform-Specific Troubleshooting
 
@@ -269,4 +281,4 @@ For additional help, please:
 3. Create a new issue with detailed information about your problem
 
 Version: 0.1.0
-Last Updated: 2025-09-19
+Last Updated: 2026-06-22

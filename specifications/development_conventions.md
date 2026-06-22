@@ -4,7 +4,7 @@ This document outlines the development conventions, coding standards, and best p
 
 ## Code Organization
 
-1. **Module Structure**: Follow the module structure outlined in `project_structure.md`
+1. **Module Structure**: Follow the module structure described in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)
 2. **Separation of Concerns**: Keep UI, business logic, and data access layers separate
 3. **Reusability**: Design components and functions to be reusable where appropriate
 4. **Single Responsibility**: Each module should have a single responsibility
@@ -37,7 +37,10 @@ This document outlines the development conventions, coding standards, and best p
 
 1. **Unit Tests**: Write unit tests for all public functions
 2. **Integration Tests**: Write integration tests for major components
-3. **Test Organization**: Place unit tests in the same file as the code, and integration tests in the `tests/` directory
+3. **Test Organization**: Three layers — inline `#[cfg(test)]` unit tests next to the code
+   (`cargo test -p mesh-talk-core --lib`), multi-process backend E2E rigs in
+   `crates/mesh-talk-core/tests/` (`make e2e`), and Playwright UI E2E in `frontend/`
+   (`npm run e2e`). See [`testing_guidelines.md`](testing_guidelines.md).
 4. **Test Structure**: Structure tests with Arrange, Act, Assert (AAA pattern)
 5. **Descriptive Names**: Use descriptive test names that explain what is being tested
 6. **One Assert Per Test**: Aim for one assertion per test when possible
@@ -87,17 +90,19 @@ This document outlines the development conventions, coding standards, and best p
 
 1. **Key Management**:
    - Never store private keys in plain text
-   - Use system keychains for secure key storage (macOS Keychain, Windows DPAPI, Linux Secret Service)
-   - Implement fallback encryption for keys when system keychains are not available
-   - Rotate keys periodically according to security requirements
+   - Identity/account keystores and all stores are encrypted at rest with
+     PBKDF2-HMAC-SHA256 (600k rounds) + AES-256-GCM under the login password
+     (`storage/encryption.rs`); zeroize sensitive material on drop
+   - Forward secrecy via the Double Ratchet (DMs) and the sender-key ratchet (channels);
+     rotate channel epochs on membership change
 2. **Data Protection**:
    - Encrypt sensitive data at rest
    - Use secure communication channels (Noise protocol) for data in transit
    - Implement proper access controls for sensitive operations
 3. **Input Validation**:
-   - Validate all user inputs to prevent injection attacks
-   - Sanitize data before storing or processing
-   - Use parameterized queries for database operations
+   - Validate all user inputs and re-verify every decoded wire payload (hash + signature
+     on ingest); treat all network input as untrusted
+   - Bound allocations driven by attacker-controlled lengths when decoding frames
 4. **Error Handling**:
    - Never expose sensitive information in error messages
    - Log errors securely for debugging without exposing sensitive data
@@ -105,14 +110,14 @@ This document outlines the development conventions, coding standards, and best p
 
 ## Performance Best Practices
 
-1. **Database Optimization**:
-   - Create appropriate indexes for frequently queried fields
-   - Use pagination for large result sets
-   - Optimize queries to minimize database load
+1. **Storage**:
+   - There is no database — state is held in encrypted, append-only file logs
+     (`storage::EncryptedRecordLog`); keep on-disk formats versioned and forward-compatible
+   - Page large histories at the API boundary rather than loading everything at once
 2. **Network Efficiency**:
-   - Minimize message size using efficient serialization (Protocol Buffers or MessagePack)
-   - Implement compression for large messages when beneficial
-   - Use connection pooling for database and network connections
+   - Wire formats are versioned **bincode** (magic + version byte, multi-version decode);
+     keep them compact and stable
+   - Sync large conversations in bounded rounds (frame-budgeted) rather than one payload
 3. **Resource Management**:
    - Properly manage memory allocation and deallocation
    - Close connections and files when no longer needed

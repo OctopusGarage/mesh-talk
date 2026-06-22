@@ -2,6 +2,15 @@
 
 This document describes the platform-specific permissions and configurations implemented for Mesh-Talk to ensure proper operation across different operating systems.
 
+> **Networking note (all platforms):** Mesh-Talk discovers peers via signed UDP
+> **multicast** (group `224.0.0.167`, port `47474` by default) and connects over
+> Noise-encrypted TCP on an OS-assigned port. The host firewall must permit UDP 47474
+> and the chosen TCP port.
+>
+> **At-rest secrets (all platforms):** identity/account keystores and every store are
+> encrypted with PBKDF2-HMAC-SHA256 (600k rounds) + AES-256-GCM under the login password
+> and held as files under `~/.mesh-talk/` — Mesh-Talk does **not** use OS keychains.
+
 ## Windows
 
 ### Permissions and Configurations
@@ -16,11 +25,13 @@ This document describes the platform-specific permissions and configurations imp
 
 ### Secure Storage
 
-Windows applications can use the Data Protection API (DPAPI) for secure storage of sensitive information. The current implementation is a placeholder that will be enhanced to use the actual DPAPI.
+Secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the at-rest note above),
+not via DPAPI.
 
 ### Notifications
 
-Windows notifications are supported through the Windows Notification API. The current implementation is a placeholder that will be enhanced to use the actual Windows notification system.
+Windows notifications are delivered through `tauri-plugin-notification` (the native
+Windows toast system).
 
 ## Linux
 
@@ -30,21 +41,27 @@ Windows notifications are supported through the Windows Notification API. The cu
 
 ### Secure Storage
 
-Linux applications can use the Secret Service API for secure storage of sensitive information. The current implementation is a placeholder that will be enhanced to use the actual Secret Service API.
+Secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the at-rest note above),
+not via the Secret Service API.
 
 ### Notifications
 
-Linux notifications are supported through D-Bus. The current implementation is a placeholder that will be enhanced to use the actual D-Bus notification system.
+Linux notifications are delivered through `tauri-plugin-notification` (D-Bus desktop
+notifications).
 
 ## macOS
 
 ### Permissions and Configurations
 
-1. **Entitlements**: The entitlements.plist file specifies the permissions required by the application, including:
-   - App Sandbox
-   - Network client access
-   - Network server access
-   - File system access for user-selected files
+1. **Entitlements**: `src-tauri/entitlements.plist` specifies the permissions required by
+   the application:
+   - App Sandbox (`com.apple.security.app-sandbox`)
+   - Network client access (`com.apple.security.network.client`)
+   - Network server access (`com.apple.security.network.server`)
+   - **Multicast networking** (`com.apple.developer.networking.multicast`) — required so
+     the sandbox permits the UDP multicast discovery (group `224.0.0.167`)
+   - File-system access for user-selected files
+     (`com.apple.security.files.user-selected.read-write`) — used by file send/save
 
 2. **Code Signing**: Configuration for code signing with a developer ID and provider short name.
 
@@ -52,8 +69,9 @@ Linux notifications are supported through D-Bus. The current implementation is a
 
 ### Secure Storage
 
-macOS applications can use the Keychain Services for secure storage of sensitive information. The current implementation uses the keyring crate to interact with the macOS Keychain.
+Secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the at-rest note above),
+not via Keychain Services.
 
 ### Notifications
 
-macOS notifications are supported through the Notification Center. The current implementation uses the notify-rust crate to interact with the macOS notification system.
+macOS notifications are delivered through `tauri-plugin-notification` (Notification Center).

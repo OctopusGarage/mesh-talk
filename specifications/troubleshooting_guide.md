@@ -25,37 +25,38 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
 **Possible Causes and Solutions:**
 
 1. **Firewall Blocking UDP Traffic**
-   - Mesh-Talk uses UDP port 9999 for peer discovery
-   - Ensure your firewall allows UDP traffic on port 9999
+   - Mesh-Talk discovers peers via signed UDP **multicast** (group `224.0.0.167`,
+     port `47474` by default) plus a unicast /24 scan fallback
+   - Ensure your firewall allows UDP traffic on port 47474 (and the OS-assigned TCP port)
    - On macOS:
      ```bash
      sudo pfctl -f /etc/pf.conf
      ```
    - On Ubuntu/Debian:
      ```bash
-     sudo ufw allow 9999/udp
+     sudo ufw allow 47474/udp
      ```
    - On Windows:
      - Open Windows Defender Firewall
      - Allow an app through the firewall
-     - Add Mesh-Talk or allow port 9999 UDP
+     - Add Mesh-Talk or allow port 47474 UDP
 
 2. **Network Segmentation**
    - Mesh-Talk only works within the same local network segment
-   - Routers and switches may block broadcast traffic
+   - Routers and switches may block multicast traffic
    - Verify all users are on the same subnet (e.g., 192.168.1.x)
 
-3. **Broadcast Disabled**
-   - Some networks disable broadcast traffic
-   - Contact your network administrator to enable broadcast
-   - Consider using a different network or VPN
+3. **Multicast Disabled**
+   - Some networks (guest / AP-isolated Wi-Fi) block multicast and inter-host UDP
+   - Contact your network administrator to enable multicast, or use a different network
+   - On macOS the app ships the `com.apple.developer.networking.multicast` entitlement
+     so the OS permits multicast — no extra user action is needed
 
-4. **Incorrect Network Interface**
-   - Mesh-Talk binds to all available network interfaces by default
-   - If you have multiple network interfaces, specify the correct one:
-     ```bash
-     ./mesh-talk --name "YourName" --port 7000
-     ```
+4. **Multiple Network Interfaces**
+   - Mesh-Talk joins the multicast group on every non-loopback IPv4 interface and
+     periodically re-joins as interfaces change — there is no interface flag to set
+   - If discovery is flaky, ensure the intended interface is up and on the same subnet
+     as the peers
 
 ### Partial Discovery
 
@@ -65,8 +66,8 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
 
 **Solutions:**
 1. **Timing Issues**
-   - Mesh-Talk sends discovery broadcasts every 5 seconds
-   - Wait for 10-15 seconds for all peers to appear
+   - Mesh-Talk re-announces over multicast every 2 seconds (with a startup burst)
+   - Wait ~10-15 seconds for all peers to appear
    - Restart the application if peers still don't appear
 
 2. **Network Load**
@@ -83,9 +84,10 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
 - Application fails to start
 
 **Solutions:**
-1. **Use a Different Port**
+1. **Use a Different Port** (headless node)
    ```bash
-   ./mesh-talk --name "YourName" --port 7001
+   ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore --password "<pw>" \
+     --name "YourName" --port 7001
    ```
 
 2. **Find and Kill the Process Using the Port**
@@ -170,9 +172,10 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
    - Check router and firewall settings
 
 3. **Application Logs**
-   - Run with debug logging to see detailed information:
+   - Run the headless node with debug logging to see detailed information:
      ```bash
-     RUST_LOG=debug ./mesh-talk --name "YourName" --port 7000
+     RUST_LOG=debug ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore \
+       --password "<pw>" --name "YourName"
      ```
 
 ## Platform-Specific Issues
@@ -218,7 +221,7 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
 
 3. **Firewall Configuration**
    - Allow Mesh-Talk through Windows Firewall
-   - Add both UDP port 9999 and TCP ports to exceptions
+   - Add UDP port 47474 (multicast 224.0.0.167) and the OS-assigned TCP port to exceptions
 
 ### Linux Issues
 
@@ -317,9 +320,11 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
    - Limit the number of simultaneous connections
    - Reduce message frequency
 
-2. **Check for Loops**
-   - Ensure there are no message loops in your network
-   - Verify that messages aren't being broadcast back to senders
+2. **Check Sync Activity**
+   - Messages sync as a bounded, append-only event log between the participating
+     devices — they are not broadcast to every peer
+   - A very large or frequently-changing conversation can drive repeated sync rounds;
+     restart the application if CPU stays pinned
 
 3. **System Monitoring**
    - Use system monitoring tools to identify the cause
@@ -352,21 +357,23 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
 For detailed troubleshooting information, enable debug logging:
 
 ```bash
-RUST_LOG=debug ./mesh-talk --name "YourName" --port 7000
+RUST_LOG=debug ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore \
+  --password "<pw>" --name "YourName"
 ```
 
 For even more detailed logging:
 
 ```bash
-RUST_LOG=trace ./mesh-talk --name "YourName" --port 7000
+RUST_LOG=trace ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore \
+  --password "<pw>" --name "YourName"
 ```
 
 ### Network Diagnostics
 
-1. **Check UDP Broadcast**
+1. **Check UDP Multicast Announces**
    ```bash
-   # Listen for UDP packets on port 9999
-   sudo tcpdump -i any udp port 9999
+   # Listen for discovery packets on the multicast port
+   sudo tcpdump -i any udp port 47474
    ```
 
 2. **Check TCP Connections**
@@ -383,16 +390,16 @@ RUST_LOG=trace ./mesh-talk --name "YourName" --port 7000
 
 ### Configuration Files
 
-Mesh-Talk stores configuration and data in platform-specific locations:
+Mesh-Talk anchors its data and configuration under the home directory:
 
-- **macOS**: `~/Library/Application Support/mesh-talk/`
-- **Windows**: `%APPDATA%\\mesh-talk\\`
-- **Linux**: `~/.local/share/mesh-talk/`
+- **macOS / Linux**: `~/.mesh-talk/`
+- **Windows**: `%USERPROFILE%\.mesh-talk\`
 
-Check these directories for:
-- Database files (SQLite)
+Per-account encrypted stores live under `~/.mesh-talk/accounts/<user_id>/`. Check these
+directories for:
+- Encrypted data stores (event logs, device/account keystores, ratchet + sender-key state)
+- Per-account history and config (`config_store`)
 - Log files
-- Configuration files
 
 ## Getting Help
 
@@ -421,6 +428,6 @@ If you're unable to resolve your issue using this guide:
 ## Version Information
 
 This troubleshooting guide applies to Mesh-Talk version 0.1.0.
-Last updated: September 19, 2025
+Last updated: June 22, 2026
 
 For the latest version of this guide, please refer to the official documentation.

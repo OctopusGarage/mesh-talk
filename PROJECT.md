@@ -1,310 +1,65 @@
 # Project Context for `mesh-talk`
 
-This document serves as the main project specification and context file for AI tools. For detailed information about various aspects of the project, please refer to the documentation files in the `specifications/` directory.
+This is the main context file for AI tools. For the authoritative technical reference see
+**[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**; for the domain model see
+**[`CONTEXT.md`](CONTEXT.md)**. The `specifications/` directory holds the project overview
+and the process/convention docs linked below.
 
 ## Project Overview
 
-Mesh-Talk is a secure, decentralized desktop chat application built with Rust and Tauri that enables users to communicate directly with others on the same network using peer-to-peer connections.
+Mesh-Talk is a **serverless, end-to-end-encrypted desktop chat app** (Rust + Tauri 2 +
+React). Peers on the same LAN discover each other over Ed25519-signed UDP multicast announces,
+connect directly over a Noise-encrypted channel, and store messages as an append-only,
+hash-linked event log that syncs CRDT-style. An elected "post office" peer stores-and-
+forwards (still-encrypted) events for offline recipients.
 
-### Current Implementation
+### Technology Stack
+- **Language**: Rust 2021 · **Desktop**: Tauri 2.x · **Frontend**: React + TypeScript + Tailwind + shadcn/ui (Vite)
+- **Async**: Tokio · **Serialization**: bincode (wire/at-rest), serde_json (IPC)
+- **Crypto**: Ed25519 + X25519 (dalek; keeps `rand` 0.8), Noise_XX (snow), Double Ratchet
+  + sender-key group ratchet, AES-256-GCM + ChaChaPoly, SHA-256/HKDF, PBKDF2-600k at rest
+- **CLI**: clap (the `mesh-talk-node` headless / `--post-office` relay binary)
 
-#### Technology Stack
-
-- **Language**: Rust 2021
-- **Frontend Framework**: Vue.js 3 with Composition API
-- **Desktop Framework**: Tauri 2.x
-- **Async Runtime**: Tokio
-- **Serialization**: serde, serde_json
-- **UI State Management**: Pinia
-- **Encryption**: Signal Protocol via libsignal-rust
-- **Command-line Parsing**: clap
-
-#### Core Features
-
-1. Decentralized peer-to-peer communication without a central server
-2. Automatic peer discovery using UDP broadcast
-3. Secure end-to-end encrypted messaging using Signal Protocol
-4. Real-time messaging between connected peers via TCP connections
-5. Contact management with discovery and request/accept workflows
-6. Cross-platform desktop application (Windows, macOS, Linux)
-7. System tray integration and desktop notifications
-8. Encrypted local data storage
-
-#### Network Implementation
-
-- UDP broadcast discovery for local network peer detection
-- TCP connections for reliable peer-to-peer communication
-- JSON encoding for message exchange
-- Heartbeat mechanism for connection health monitoring
-- Automatic reconnection for dropped connections
-- Thread-safe peer management using Arc and Mutex
-
-#### Security Features
-
-- End-to-end encryption using Signal Protocol
-- Digital signatures for contact requests using Ed25519
-- Encrypted local storage with AES-GCM
-- Secure key management with platform-specific keychains
-- Password hashing with Argon2
+### Features
+1:1 DMs + group channels with forward secrecy, file sharing, reactions, replies/threads,
+@mentions, search, multi-device (one account across devices via device linking +
+account-addressed fan-out), system-tray integration, encrypted local storage.
 
 ## AI Tool Compatibility
 
-This project specification is designed to be compatible with various AI coding assistants, including:
+This spec is designed to be usable by AI coding assistants (Claude Code, Codex, Gemini
+CLI, Copilot, etc.). Conventions for agents live in [`AGENTS.md`](AGENTS.md).
 
-- Qwen Code
-- Gemini CLI
-- Claude Code
-- GitHub Copilot
-- Other AI-powered development tools
+## Key Documentation
 
-The structured organization and comprehensive documentation make it easy for AI tools to understand the project context and provide relevant assistance.
-
-## Development Conventions and Coding Standards
-
-For development conventions, coding standards, and best practices, see [@specifications/development_conventions.md](specifications/development_conventions.md).
-
-## Project Structure and Organization
-
-For detailed information about the project structure, see [@specifications/project_structure.md](specifications/project_structure.md).
-
-## Implementation Tasks and Progress
-
-For a consolidated list of implementation tasks and their completion status, see [@specifications/TODO.md](specifications/TODO.md).
-
-This file provides:
-- Overview of completed project setup tasks
-- Checklist of implementation tasks organized by module
-- Progress tracking for all implementation tasks
-
-To view the current status of all tasks and track progress, please refer to [@specifications/TODO.md](specifications/TODO.md).
-
-## Git Commit Standards
-
-For Git commit standards and conventions, see [@specifications/git_standards.md](specifications/git_standards.md).
-
-## Backend Architecture (Tauri/Rust)
-
-The backend is built using Rust with Tauri, providing a secure desktop application framework that communicates with the frontend via a well-defined command interface.
-
-### Directory Structure
-
-```
-src-tauri/
-├── src/
-│   ├── bin/                    # Binary executables
-│   │   └── mesh-talk-cli.rs    # CLI application entry point
-│   ├── api.rs                  # Configuration management and CLI arguments
-│   ├── commands.rs             # Tauri command handlers (frontend API endpoints)
-│   ├── domain/                 # Core domain models and business logic
-│   │   ├── message.rs          # Message protocol and structure
-│   │   ├── models.rs           # Core data models (User, Contact, ChatMessage, etc.)
-│   │   ├── node.rs             # Node representation
-│   │   └── node_registry.rs    # Node registry for discovered nodes
-│   ├── services/               # Business logic services
-│   │   ├── auth_service.rs     # Authentication service
-│   │   ├── contact_service.rs   # Contact management service
-│   │   ├── message_service.rs  # Message handling service
-│   │   ├── node_service.rs     # Core network node service
-│   │   ├── notification_service.rs # Notification service
-│   │   ├── contact_request_service.rs # Contact request handling
-│   │   └── common.rs           # Common service utilities
-│   ├── network/                # Network communication layer
-│   │   ├── tcp.rs              # TCP connection management
-│   │   ├── udp.rs              # UDP broadcast and discovery
-│   │   ├── reconnection.rs      # Connection reconnection logic
-│   │   ├── runtime.rs          # Network runtime management
-│   │   └── utils.rs            # Network utilities (retry logic, timeouts)
-│   ├── identity/               # User authentication and identity
-│   │   ├── auth.rs             # Authentication logic
-│   │   ├── keys.rs             # Key pair generation and management
-│   │   ├── user.rs             # User model
-│   │   ├── manager.rs          # Identity management
-│   │   └── errors.rs           # Identity-related errors
-│   ├── contacts/               # Contact management
-│   │   ├── contact.rs          # Contact model
-│   │   ├── manager.rs          # Contact list management
-│   │   ├── service.rs          # Contact service
-│   │   ├── request.rs          # Contact request handling
-│   │   ├── discovery.rs        # Contact discovery service
-│   │   └── integration.rs       # Contact discovery integration
-│   ├── crypto/                 # Cryptography and encryption
-│   │   ├── keys.rs             # Key management
-│   │   ├── session.rs          # Session management
-│   │   ├── signal.rs           # Signal Protocol integration
-│   │   └── storage.rs          # Secure key storage
-│   ├── storage/                # Data persistence
-│   │   ├── file_manager.rs     # File system operations
-│   │   ├── encryption.rs       # Data encryption
-│   │   ├── serialization.rs   # Data serialization
-│   │   └── errors.rs          # Storage-related errors
-│   ├── notifications/          # Notification system
-│   │   ├── desktop.rs         # Desktop notification manager
-│   │   ├── settings.rs         # Notification settings
-│   │   └── tray.rs             # System tray integration
-│   ├── platform/               # Platform-specific implementations
-│   │   ├── linux.rs            # Linux-specific functionality
-│   │   ├── macos.rs            # macOS-specific functionality
-│   │   └── windows.rs          # Windows-specific functionality
-│   ├── state.rs                # Shared application state management
-│   ├── events.rs               # Event emission and handling
-│   ├── tray.rs                 # System tray menu and interactions
-│   ├── error.rs                # Custom error types
-│   ├── user_friendly_errors.rs  # User-friendly error messages
-│   ├── utils/                  # Utility functions
-│   │   └── error_handling.rs   # Error handling utilities
-│   └── lib.rs                  # Library exports and main application logic
-├── Cargo.toml                  # Rust dependencies and build configuration
-└── tauri.conf.json             # Tauri configuration
-
-```
-
-### Architecture Layers
-
-1. **API Layer**: Defines Tauri commands that the frontend can call (in `commands.rs`)
-2. **Service Layer**: Business logic and coordination (in `services/`)
-3. **Domain Layer**: Core data models and pure business logic (in `domain/`)
-4. **Infrastructure Layer**: Network, storage, identity, notifications (in respective modules)
-5. **Platform Layer**: OS-specific functionality (in `platform/`)
-
-### Key Components
-
-- `NodeService`: Core network node functionality managing TCP/UDP connections
-- `AuthService`: User authentication and session management  
-- `ContactService`: Contact list and relationship management
-- `MessageService`: Message persistence and retrieval
-- `Network Runtime`: Manages TCP listener, UDP discovery/broadcast, and reconnection
-- `AppState`: Shared state between Tauri commands
-- `Events`: Event emission system for real-time updates to frontend
-
-### Protocol Implementation
-
-The application implements a custom protocol with the following features:
-- Protocol magic number: 0x4D455348 ("MESH")
-- Protocol version: 1
-- UDP broadcast for node discovery
-- TCP for reliable message delivery
-- Heartbeat mechanism for connection health
-- JSON message encoding with automatic retry and timeout logic
-
-## Frontend Architecture
-
-The frontend is built using Vue.js 3 with the following organized structure:
-
-### Directory Structure
-
-```
-frontend/src/
-├── components/           # Reusable UI components organized by feature
-│   ├── chat/            # Chat-specific components (ChatWindow.vue, MessageInput.vue)
-│   ├── common/          # Shared components (AppFeedback.vue)
-│   └── contacts/        # Contact/network components (ContactList.vue, DiscoveryList.vue)
-├── composables/         # Business logic hooks organized by feature
-│   ├── auth/            # Authentication logic (useAuth.js)
-│   └── chat/            # Chat real-time logic (useRealTimeMessages.js)
-├── services/            # API communication layer (new)
-│   └── api.js           # Centralized API functions with organized namespaces
-├── stores/              # Global state management (Pinia stores)
-│   ├── appStore.js      # Main application store
-│   └── feedbackStore.js # User feedback and notifications store
-├── views/               # Page-level components
-│   ├── auth/            # Authentication views (LoginView.vue)
-│   └── chat/            # Main chat view (ChatView.vue)
-├── router/              # Route definitions
-├── styles/              # CSS styles (global.css)
-└── main.js              # Application entry point
-```
-
-### Architecture Layers
-
-1. **Components Layer**: Reusable UI elements that render HTML and handle user interactions
-2. **Composables Layer**: Business logic hooks that can be shared across components
-3. **Services Layer**: API communication layer that centralizes all external calls
-4. **Stores Layer**: Global state management using Pinia for application state
-
-### API Service Organization
-
-The `services/api.js` file provides organized namespaces:
-
-- `authAPI` - Authentication functions (login, register, logout)
-- `nodeAPI` - Node-related functions (getNodeInfo, connectToNode)
-- `contactsAPI` - Contact management (getContacts, updateContact, etc.)
-- `messagesAPI` - Message functions (getMessages, sendMessage, etc.)
-- `networkAPI` - Network discovery functions (getDiscoveredNodes, etc.)
-
-### Page Layout Structure
-
-#### Login Page (LoginView.vue)
-- **Route**: `/login`
-- **Layout**: Centered authentication panel with tabs for sign-in and registration
-- **Components**: 
-  - Username/password inputs with validation
-  - Switchable tabs for login/register
-  - Form validation and error handling
-  - Responsive design with centered panel
-
-#### Main Chat Page (ChatView.vue) 
-- **Route**: `/` (requires authentication)
-- **Layout**: Two-column responsive grid layout
-- **Left Column**:
-  - ChatWindow component for message display
-  - MessageInput component for sending messages
-  - Full height flex layout
-- **Right Column**: Stacked panels
-  - **Contacts Panel**: List of connected contacts
-  - **Discovery Panel**: List of discovered nodes on network
-  - **Node Panel**: Current node information (status, peers, unread count, logout button)
-
-### Routing and Authentication Flow
-- Authentication guard redirects unauthenticated users from `/` to `/login`
-- After successful login, users are redirected from `/login` to `/` (chat page)
-- When logged out, users are redirected from `/` to `/login`
-- Protected routes use `meta: { requiresAuth: true }` configuration
-
-This architecture ensures separation of concerns, reduces code redundancy, and improves maintainability.
-
-## Key Technology Stack
-
-For information about the technology stack, see [@specifications/tech_stack.md](specifications/tech_stack.md).
-
-## Task Completion Criteria
-
-For task completion criteria, see [@specifications/task_completion_criteria.md](specifications/task_completion_criteria.md).
-
-## Future Plans (Based on TODO.md)
-
-### Technology Selection and Initialization
-
-1. Continue enhancing Tauri + Vue.js GUI framework
-2. Further integrate Signal Protocol encryption library
-3. Enhance SQLite database integration for data persistence
-
-## Development Recommendations
-
-Based on the detailed analysis in TODO.md, it is recommended to proceed with development in a modular way:
-
-1. `feature/net`: Continue enhancing network capabilities with improved reliability
-2. `feature/notifications`: Continue improving system notifications and user feedback
-3. `feature/ui`: Continue enhancing GUI interface for better user experience
-4. `feature/cli-enhancements`: Improve CLI functionality and user experience
-5. `feature/port-handling`: Handle UDP/TCP port conflicts and dynamic allocation
+- Architecture (authoritative): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Domain model: [`CONTEXT.md`](CONTEXT.md)
+- Design specs + implementation plans: `docs/superpowers/specs/`, `docs/superpowers/plans/`
+- Development conventions: [`specifications/development_conventions.md`](specifications/development_conventions.md)
+- Project structure + tech stack: see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (and the Tech Stack section above)
+- Git standards: [`specifications/git_standards.md`](specifications/git_standards.md)
+- Task completion criteria: [`specifications/task_completion_criteria.md`](specifications/task_completion_criteria.md)
+- Status: [`specifications/TODO.md`](specifications/TODO.md)
 
 ## Important Considerations
 
-1. Signal Implementation and Compatibility: Continue implementing as "signal-compatible bidirectional ratchet implementation"
-2. NAT Traversal Uncertainty: Must support relays, and user experience should be clear when direct connection is not possible
-3. Key Backup: Need to provide secure backup (encrypted export) mechanism
-4. Offline Messages: P2P + no central storage means offline messages depend on relays or the recipient coming online to resend/poll
-5. Dependency Vulnerabilities: Regularly use `cargo-audit` and set up dependency update processes
+1. **Forward secrecy** — DMs use a Double Ratchet; channels use a sender-key ratchet that
+   rotates on membership change. Don't weaken these when extending messaging.
+2. **The post office only sees ciphertext** — never route plaintext through a relay.
+3. **Offline delivery** depends on the post office or the recipient coming back online and
+   syncing; there is no central store.
+4. **`rand` stays at 0.8** — the dalek crates require `rand_core` 0.6; bumping breaks the build.
+5. **Dependencies** — `cargo-deny` + `cargo-audit` run in the gate; keep advisories clean.
+6. **Known gaps** — device linking has no SAS/key-pinning (LAN MITM window); backfill
+   history travels as plaintext over the Noise channel.
 
 ## Plan Adjustment Guidance
 
-If any implementation plan proves unsuitable during development, the following approach should be taken:
+If an implementation plan proves unsuitable during development:
 
-1. **Assess the Issue**: Identify why the current plan is not working and document the specific problems encountered
-2. **Adjust the Plan**: Modify the implementation approach based on new information or challenges discovered
-3. **Update Documentation**: Revise relevant specification documents in `specifications/task_specs/` to reflect the adjusted plan
-4. **Update Task Tracking**: Modify the TODO.md file to reflect any changes in task scope or approach
-5. **Continue Implementation**: Proceed with the updated plan, ensuring all team members are aware of the changes
-6. **Document Lessons Learned**: Record any insights gained from the plan adjustment for future reference
-
-This iterative approach ensures that development can continue smoothly even when initial plans need to be modified, while maintaining proper documentation and task tracking.
+1. **Assess** — document why the current plan is not working.
+2. **Adjust** — modify the approach based on what was learned.
+3. **Update docs** — revise `docs/superpowers/` and `docs/ARCHITECTURE.md` to match.
+4. **Update status** — reflect scope changes in `specifications/TODO.md`.
+5. **Continue** — proceed with the updated plan.
+6. **Capture lessons** — record insights for future reference.
