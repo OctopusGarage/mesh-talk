@@ -113,6 +113,33 @@
     height: 100%;
   }
 
+  /* Native-app feel (not a web page): UI chrome — names, labels, timestamps, buttons,
+     nav — is NOT drag-selectable, and shows no text I-beam. Real content stays selectable:
+     form fields, and anything marked `.selectable` (message text uses Tailwind's
+     `select-text`, which wins over this by class specificity). */
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+  input,
+  textarea,
+  [contenteditable="true"],
+  .selectable,
+  .selectable * {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  input,
+  textarea,
+  [contenteditable="true"] {
+    cursor: auto;
+  }
+  /* No ghost image-drag (a web trace); the app's own drag/drop handlers still work. */
+  img {
+    -webkit-user-drag: none;
+  }
+
   /* Teal-tinted selection — a quiet signal of the brand accent. */
   ::selection {
     background-color: hsl(var(--signal) / 0.28);

@@ -20,6 +20,10 @@
     "remove": "Quitar foto",
     "editOwn": "Cambiar tu foto",
     "editContact": "Cambiar la foto de {{name}}",
+    "gallery": "Elegir de la galería…",
+    "galleryTitle": "Elige un avatar",
+    "galleryHint": "Toca uno para usarlo.",
+    "editGroup": "Cambiar foto del grupo",
     "crop": {
       "title": "Recortar foto",
       "description": "Arrastra para reposicionar y haz zoom para encuadrar tu foto.",
@@ -57,6 +61,9 @@
     "pinned": "Fijado",
     "contactsOnLan_one": "{{count}} contacto en la red local",
     "contactsOnLan_other": "{{count}} contactos en la red local",
+    "localNetwork": "Red local",
+    "peopleOnLan_one": "{{count}} persona en línea en la LAN",
+    "peopleOnLan_other": "{{count}} personas en línea en la LAN",
     "pin": "Fijar arriba",
     "unpin": "Dejar de fijar",
     "rename": "Renombrar",
@@ -276,7 +283,8 @@
     "title": "Miembros",
     "description": "Todos los del canal.",
     "addPeer": "Añadir un contacto",
-    "owner": "Propietario"
+    "owner": "Propietario",
+    "openDm": "Enviar un mensaje"
   },
   "createChannel": {
     "trigger": "Nuevo canal",

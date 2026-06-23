@@ -43,6 +43,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
 import { useAuth } from "@/store/auth";
 import { chat } from "@/lib/api";
+import { GroupAvatar } from "@/components/GroupAvatar";
 import { convKey, useChat, type Conversation } from "@/store/chat";
 import {
   presenceLabel,
@@ -60,19 +61,6 @@ function accountConv(a: AccountInfo, name: string): Conversation {
 }
 function channelConv(c: ChannelInfo, name: string): Conversation {
   return { kind: "channel", id: c.channel_id, name };
-}
-
-/** A compact mesh/group sigil for channels (distinct from a person's IdentityGlyph). */
-function ChannelGlyph({ size = 36 }: { size?: number }) {
-  return (
-    <div
-      className="flex shrink-0 items-center justify-center rounded-[28%] border border-border bg-secondary text-muted-foreground"
-      style={{ width: size, height: size }}
-      aria-hidden
-    >
-      <Network style={{ width: size * 0.5, height: size * 0.5 }} />
-    </div>
-  );
 }
 
 function Row({
@@ -125,7 +113,7 @@ function Row({
       >
         <div className="relative">
           {channel ? (
-            <ChannelGlyph />
+            <GroupAvatar channelId={conv.id} size={36} title={conv.name} />
           ) : (
             <IdentityGlyph seed={conv.id} size={36} title={conv.name} />
           )}
@@ -346,7 +334,14 @@ export function Sidebar() {
   const { t } = useTranslation();
   const accounts = useChat((s) => s.accounts);
   const channels = useChat((s) => s.channels);
+  const peers = useChat((s) => s.peers);
   const favorites = useChat((s) => s.favorites);
+  // People currently discovered on the LAN (distinct by account, falling back to device for
+  // an unpaired peer) — discovery expires gone peers, so this is the live "who's around" count.
+  const onlinePeople = useMemo(
+    () => new Set(peers.map((p) => p.account_id ?? p.user_id)).size,
+    [peers],
+  );
   const togglePinned = useChat((s) => s.togglePinned);
   const setAlias = useChat((s) => s.setAlias);
   const myId = useChat((s) => s.myId);
@@ -485,6 +480,7 @@ export function Sidebar() {
             <AvatarEditMenu
               id={myAccountId || myId || username}
               ariaLabel={t("avatar.editOwn")}
+              pack="players"
             >
               <IdentityGlyph
                 seed={myAccountId || myId || username}
@@ -613,19 +609,29 @@ export function Sidebar() {
         )}
         <span
           className="flex-1 truncate"
-          title={
-            ssid
-              ? `${ssid} · ${t("sidebar.contactsOnLan", { count: accounts.length })}`
-              : undefined
-          }
+          title={ssid ?? t("sidebar.localNetwork")}
         >
-          {ssid ?? t("sidebar.contactsOnLan", { count: accounts.length })}
+          {ssid ?? t("sidebar.localNetwork")}
+        </span>
+        {/* Live LAN headcount — restored from the old footer text; a breathing signal dot +
+            the number of people currently discovered around us. Always visible (the SSID can
+            grow long and truncate), with the full phrase in the tooltip. */}
+        <span
+          data-testid="lan-online-count"
+          className="flex shrink-0 items-center gap-1 tabular-nums"
+          title={t("sidebar.peopleOnLan", { count: onlinePeople })}
+        >
+          <PresenceDot
+            status={onlinePeople > 0 ? "online" : "offline"}
+            size="sm"
+          />
+          {onlinePeople}
         </span>
         {/* App brand mark — quiet, in the status footer (distinct from the user's
             IdentityGlyph in the header above). */}
         <Logo
           size={16}
-          className="mr-1.5 shrink-0 opacity-80"
+          className="ml-1.5 shrink-0 opacity-80"
           title="Mesh-Talk"
         />
       </div>

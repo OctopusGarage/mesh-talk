@@ -328,6 +328,89 @@ mod tests {
     }
 
     #[test]
+    fn compaction_never_drops_a_referenced_profile() {
+        // THE safety invariant: a superseded profile that a later event references as a parent
+        // (the legacy / cross-version case, where profiles used to be heads) must be KEPT —
+        // dropping it would dangle that child → MissingParents → message loss. Only
+        // UNREFERENCED superseded profiles are ever dropped.
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let conv = ConversationId::new([1u8; 32]);
+
+        let msg = mk(&id, 1, 1, b"hi");
+        let msg_id = msg.id;
+        log.append(msg).unwrap();
+
+        // An old profile, then a MESSAGE that references it as a parent (the legacy shape).
+        let p0 = Event::new(
+            &id,
+            conv,
+            2,
+            vec![msg_id],
+            2,
+            0,
+            EventKind::Profile,
+            b"old".to_vec(),
+        );
+        let p0_id = p0.id;
+        log.append(p0).unwrap();
+        let m2 = Event::new(
+            &id,
+            conv,
+            3,
+            vec![p0_id],
+            3,
+            0,
+            EventKind::Message,
+            b"m2".to_vec(),
+        );
+        log.append(m2).unwrap();
+
+        // 10 newer, unreferenced profiles (current shape) → 9 droppable, 1 newest kept.
+        let mut newest_id = p0_id;
+        for i in 0..10u64 {
+            let p = Event::new(
+                &id,
+                conv,
+                4 + i,
+                vec![msg_id],
+                4 + i,
+                0,
+                EventKind::Profile,
+                format!("new{i}").into_bytes(),
+            );
+            newest_id = p.id;
+            log.append(p).unwrap();
+        }
+
+        let dropped = log.compact_superseded_profiles(&conv).unwrap();
+        assert_eq!(
+            dropped, 9,
+            "only the 9 superseded UNREFERENCED profiles drop"
+        );
+        let ids: Vec<_> = log.events(&conv).iter().map(|e| e.id).collect();
+        assert!(
+            ids.contains(&p0_id),
+            "the referenced (superseded) profile is KEPT — never dangle its child"
+        );
+        assert!(
+            ids.contains(&newest_id),
+            "the newest unreferenced profile is kept"
+        );
+        // Every remaining event's parents are still present (no dangling parents).
+        let present: std::collections::HashSet<_> = ids.iter().copied().collect();
+        for e in log.events(&conv) {
+            for parent in &e.parents {
+                assert!(
+                    present.contains(parent),
+                    "compaction left a dangling parent"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn below_threshold_profiles_are_not_compacted() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();

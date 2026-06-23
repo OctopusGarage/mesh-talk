@@ -20,6 +20,10 @@
     "remove": "移除頭像",
     "editOwn": "換你個頭像",
     "editContact": "換 {{name}} 個頭像",
+    "gallery": "喺圖庫揀…",
+    "galleryTitle": "揀個頭像",
+    "galleryHint": "撳一個嚟用。",
+    "editGroup": "換群組頭像",
     "crop": {
       "title": "裁頭像",
       "description": "拖嚟調位置，縮放嚟揀個構圖。",
@@ -57,6 +61,9 @@
     "pinned": "釘咗",
     "contactsOnLan_one": "區域網入面有 {{count}} 個聯絡人",
     "contactsOnLan_other": "區域網入面有 {{count}} 個聯絡人",
+    "localNetwork": "區域網",
+    "peopleOnLan_one": "區域網 {{count}} 人在線",
+    "peopleOnLan_other": "區域網 {{count}} 人在線",
     "pin": "釘喺最頂",
     "unpin": "唔釘喇",
     "rename": "改名",
@@ -276,7 +283,8 @@
     "title": "成員",
     "description": "呢個頻道入面所有人。",
     "addPeer": "加個對方",
-    "owner": "群主"
+    "owner": "群主",
+    "openDm": "傾偈"
   },
   "createChannel": {
     "trigger": "開新頻道",

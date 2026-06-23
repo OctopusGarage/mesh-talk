@@ -32,6 +32,7 @@ export function MembersDialog() {
   const myName = useAuth((s) => s.user?.username ?? "");
   const addMember = useChat((s) => s.addMember);
   const removeMember = useChat((s) => s.removeMember);
+  const openConversation = useChat((s) => s.open);
   // Whole presence map (the dialog reads many ids at once; one subscription).
   const presenceMap = usePresence((s) => s.map);
   const [open, setOpen] = useState(false);
@@ -97,20 +98,46 @@ export function MembersDialog() {
               ? myAccountId || m.user_id
               : (accountOf(m.user_id) ?? m.user_id);
             const memberIsOwner = m.user_id === channelOwner;
+            // Tapping a member opens a 1:1 chat with them — but only when it's someone else
+            // AND we know their account (a DM is account-addressed; an offline member we've
+            // never met has no known account, so the row is non-interactive).
+            const dmAccount = isSelf ? null : accountOf(m.user_id);
+            const openDm = () => {
+              if (!dmAccount) return;
+              openConversation({ kind: "account", id: dmAccount, name });
+              setOpen(false);
+            };
             return (
               <motion.div
                 key={m.user_id}
                 variants={fadeSlideUp}
                 className="group flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-accent/50"
               >
-                <div className="min-w-0 flex-1">
-                  <IdentityCrest
-                    id={crestId}
-                    name={name}
-                    status={status}
-                    variant="compact"
-                  />
-                </div>
+                {dmAccount ? (
+                  <button
+                    type="button"
+                    onClick={openDm}
+                    data-testid={`member-dm-${m.user_id}`}
+                    title={t("members.openDm")}
+                    className="min-w-0 flex-1 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <IdentityCrest
+                      id={crestId}
+                      name={name}
+                      status={status}
+                      variant="compact"
+                    />
+                  </button>
+                ) : (
+                  <div className="min-w-0 flex-1">
+                    <IdentityCrest
+                      id={crestId}
+                      name={name}
+                      status={status}
+                      variant="compact"
+                    />
+                  </div>
+                )}
                 {memberIsOwner && (
                   <span
                     className="shrink-0 rounded-full bg-signal/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-signal"

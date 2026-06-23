@@ -71,7 +71,7 @@ export function Composer({
   onSend: (text: string) => void;
   onAttach?: () => void;
   /** Send an image pasted from the clipboard (bytes + file extension). */
-  onPasteImage?: (bytes: Uint8Array, ext: string) => void;
+  onPasteImage?: (bytes: Uint8Array, ext: string, name?: string) => void;
   /** Capture a screenshot and send it (hideWindow = hide the app first). */
   onScreenshot?: (hideWindow: boolean) => void;
   placeholder: string;
@@ -165,15 +165,22 @@ export function Composer({
       .catch(() => {});
   };
 
-  // Dedicated "send image" button: pick an image file and send it through the same path
+  // Dedicated "send image/video" button: pick a media file and send it through the same path
   // as a pasted/screenshot image (renders inline). Separate from the generic attach (any file).
+  // Accepts video too (a .mov etc. previews inline); the REAL filename is passed through, so
+  // the chat shows "clip.mov" — not a MIME-derived "pasted-….quicktim" — and it previews.
   const pickImage = async () => {
     if (!onPasteImage) return;
-    const file = await pickImageFile();
+    const file = await pickImageFile("image/*,video/*");
     if (!file) return;
-    const ext = (file.type.split("/")[1] || "png").toLowerCase();
+    // Prefer the file's own extension (a real .mov stays .mov); fall back to the MIME subtype.
+    const ext = (
+      file.name.split(".").pop() ||
+      file.type.split("/")[1] ||
+      "png"
+    ).toLowerCase();
     const buf = await file.arrayBuffer();
-    onPasteImage(new Uint8Array(buf), ext);
+    onPasteImage(new Uint8Array(buf), ext, file.name);
   };
 
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {

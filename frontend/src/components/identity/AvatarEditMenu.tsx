@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Camera, ImagePlus, Trash2 } from "lucide-react";
+import { Camera, ImagePlus, LayoutGrid, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   Popover,
@@ -10,6 +10,8 @@ import { pickImageFile } from "@/lib/avatarImage";
 import { useAvatar, useAvatars } from "@/store/avatars";
 import { cn } from "@/lib/utils";
 import { AvatarCropDialog } from "@/features/chat/AvatarCropDialog";
+import { AvatarGallery } from "@/components/AvatarGallery";
+import type { AvatarPackName } from "@/lib/avatarPacks";
 
 /**
  * AvatarEditMenu — wraps an identity glyph (its `children`) in a button that opens a small
@@ -22,15 +24,19 @@ export function AvatarEditMenu({
   children,
   className,
   ariaLabel,
+  pack,
 }: {
   id: string;
   children: React.ReactNode;
   className?: string;
   ariaLabel: string;
+  /** Built-in preset pack offered alongside "upload" (players for people, clubs for groups). */
+  pack?: AvatarPackName;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [cropFile, setCropFile] = useState<File | null>(null);
+  const [gallery, setGallery] = useState(false);
   const hasPhoto = useAvatar(id) !== undefined;
   const setAvatar = useAvatars((s) => s.setAvatar);
 
@@ -75,6 +81,19 @@ export function AvatarEditMenu({
             <ImagePlus className="h-4 w-4 text-muted-foreground" />
             {hasPhoto ? t("avatar.change") : t("avatar.set")}
           </button>
+          {pack && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setGallery(true);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent"
+            >
+              <LayoutGrid className="h-4 w-4 text-muted-foreground" />
+              {t("avatar.gallery")}
+            </button>
+          )}
           {hasPhoto && (
             <button
               type="button"
@@ -95,6 +114,17 @@ export function AvatarEditMenu({
         }}
         onCancel={() => setCropFile(null)}
       />
+      {pack && (
+        <AvatarGallery
+          pack={pack}
+          open={gallery}
+          onPick={(dataUrl) => {
+            setGallery(false);
+            void setAvatar(id, dataUrl);
+          }}
+          onClose={() => setGallery(false)}
+        />
+      )}
     </>
   );
 }

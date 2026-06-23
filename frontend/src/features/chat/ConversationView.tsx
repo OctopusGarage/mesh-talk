@@ -4,7 +4,12 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ChevronDown, Loader2, MessagesSquare, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { IdentityCrest, PresenceDot } from "@/components/identity";
+import {
+  IdentityCrest,
+  PresenceDot,
+  AvatarEditMenu,
+} from "@/components/identity";
+import { GroupAvatar } from "@/components/GroupAvatar";
 import { Composer } from "./Composer";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
@@ -147,9 +152,9 @@ function ChannelHeader({
   return (
     <div className="flex min-w-0 items-center gap-3">
       <div className="relative">
-        <div className="flex h-9 w-9 items-center justify-center rounded-[28%] border border-border bg-secondary text-muted-foreground">
-          <MessagesSquare className="h-4 w-4" />
-        </div>
+        <AvatarEditMenu id={id} ariaLabel={t("avatar.editGroup")} pack="clubs">
+          <GroupAvatar channelId={id} size={36} title={name} />
+        </AvatarEditMenu>
         <PresenceDot
           status={status}
           size="md"
@@ -316,11 +321,16 @@ export function ConversationView() {
     [active, members],
   );
 
-  // Route image bytes (clipboard paste or screenshot) through the normal file-send
-  // pipeline: write to a temp file, then send the path.
-  const sendImageBytes = async (bytes: Uint8Array, ext: string) => {
+  // Route picked/pasted media bytes through the normal file-send pipeline: write to a temp
+  // file, then send the path. `name` (the picker has one) is kept so the real filename +
+  // extension survive to the chat list and the inline preview.
+  const sendImageBytes = async (
+    bytes: Uint8Array,
+    ext: string,
+    name?: string,
+  ) => {
     try {
-      const path = await chatApi.writeTempFile(Array.from(bytes), ext);
+      const path = await chatApi.writeTempFile(Array.from(bytes), ext, name);
       // Image button / paste / screenshot → media intent (inline preview).
       await sendFile(path, true);
     } catch (e) {

@@ -20,6 +20,10 @@
     "remove": "写真を削除",
     "editOwn": "自分の写真を変更",
     "editContact": "{{name}} の写真を変更",
+    "gallery": "ギャラリーから選択…",
+    "galleryTitle": "アバターを選択",
+    "galleryHint": "タップして使用します。",
+    "editGroup": "グループ写真を変更",
     "crop": {
       "title": "写真を切り抜き",
       "description": "ドラッグで位置を調整し、ズームで構図を決めます。",
@@ -57,6 +61,9 @@
     "pinned": "ピン留め済み",
     "contactsOnLan_one": "LAN上に{{count}}人の連絡先",
     "contactsOnLan_other": "LAN上に{{count}}人の連絡先",
+    "localNetwork": "ローカルネットワーク",
+    "peopleOnLan_one": "LAN に {{count}} 人オンライン",
+    "peopleOnLan_other": "LAN に {{count}} 人オンライン",
     "pin": "先頭にピン留め",
     "unpin": "ピン留めを解除",
     "rename": "名前を変更",
@@ -276,7 +283,8 @@
     "title": "メンバー",
     "description": "このチャンネルの全員。",
     "addPeer": "相手を追加",
-    "owner": "オーナー"
+    "owner": "オーナー",
+    "openDm": "メッセージを送る"
   },
   "createChannel": {
     "trigger": "新しいチャンネル",

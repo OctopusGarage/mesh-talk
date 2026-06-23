@@ -217,6 +217,8 @@ interface ChatState {
   peers: PeerInfo[];
   accounts: AccountInfo[];
   channels: ChannelInfo[];
+  /** Each channel's members (by channel_id), cached for the composite group avatar. */
+  channelMembersById: Record<string, ChannelMemberInfo[]>;
   active: Conversation | null;
   messages: Record<string, ChatMessage[]>;
   reactions: Record<string, ReactionInfo[]>;
@@ -263,6 +265,7 @@ export const useChat = create<ChatState>((set, get) => ({
   peers: [],
   accounts: [],
   channels: [],
+  channelMembersById: {},
   active: null,
   messages: {},
   reactions: {},
@@ -368,6 +371,7 @@ export const useChat = create<ChatState>((set, get) => ({
       peers: [],
       accounts: [],
       channels: [],
+      channelMembersById: {},
       active: null,
       messages: {},
       reactions: {},
@@ -418,6 +422,21 @@ export const useChat = create<ChatState>((set, get) => ({
         chat.listChannels(),
       ]);
       set({ peers, accounts, channels });
+      // Cache each channel's members for the composite group avatar (best-effort per
+      // channel; a single failure just leaves that channel's montage on its fallback).
+      const memberEntries = await Promise.all(
+        channels.map(async (c) => {
+          try {
+            return [
+              c.channel_id,
+              (await chat.channelMembers(c.channel_id)).members,
+            ] as const;
+          } catch {
+            return [c.channel_id, [] as ChannelMemberInfo[]] as const;
+          }
+        }),
+      );
+      set({ channelMembersById: Object.fromEntries(memberEntries) });
     } catch {
       // node may still be starting; ignore
     }

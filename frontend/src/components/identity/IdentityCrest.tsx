@@ -56,7 +56,11 @@ export function IdentityCrest({
     <div className={cn("flex items-center gap-3", className)}>
       <div className="relative">
         {editAvatarId ? (
-          <AvatarEditMenu id={editAvatarId} ariaLabel={editAvatarLabel ?? name}>
+          <AvatarEditMenu
+            id={editAvatarId}
+            ariaLabel={editAvatarLabel ?? name}
+            pack="players"
+          >
             {glyph}
           </AvatarEditMenu>
         ) : (

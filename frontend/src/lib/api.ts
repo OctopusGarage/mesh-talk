@@ -135,9 +135,11 @@ export const chat = {
    * chunk prune + restart, unlike readFile (transient chunks). Rejects if none is stored. */
   readMedia: (fileConv: string) =>
     invoke<ArrayBuffer>("read_media", { fileConv }),
-  /** Write pasted bytes to a temp file and return its path, to feed the file-send pipeline. */
-  writeTempFile: (bytes: number[], ext: string) =>
-    invoke<string>("write_temp_file", { bytes, ext }),
+  /** Write picked/pasted bytes to a temp file and return its path, to feed the file-send
+   *  pipeline. `name` (the picker has one) is kept verbatim so the real filename + extension
+   *  survive; without it a `pasted-<ts>.<ext>` name is synthesized for clipboard bytes. */
+  writeTempFile: (bytes: number[], ext: string, name?: string) =>
+    invoke<string>("write_temp_file", { bytes, ext, name }),
   /**
    * Capture a screenshot as PNG bytes. When `hideWindow` is true the app window is hidden
    * during the capture and restored after. Resolves to empty bytes if the user cancels.

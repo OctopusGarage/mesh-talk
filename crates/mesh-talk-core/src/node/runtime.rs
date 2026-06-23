@@ -9,6 +9,7 @@ use crate::eventlog::LogError;
 use crate::identity::account_keystore;
 use crate::identity::device::PublicIdentity;
 use crate::identity::keystore;
+use crate::node::name_directory::NameDirectory;
 use crate::node::{HistoryEntry, Node, NodeError, ReceivedDm};
 use crate::transport::net::discovery_socket;
 use std::path::Path;
@@ -66,6 +67,9 @@ impl From<std::io::Error> for RuntimeError {
 pub struct NodeRuntime {
     node: Arc<Node>,
     roster: Arc<Mutex<Roster>>,
+    /// Durable directory of last-seen peer display names. Outlives the live roster (which
+    /// evicts a peer ~30s after it stops announcing), so an offline member keeps its name.
+    names: Arc<Mutex<NameDirectory>>,
     user_id: String,
     account_id: String,
     /// The display name this node advertises (for the diagnostics page).
@@ -146,6 +150,13 @@ impl NodeRuntime {
         // to the blocking pool so it doesn't monopolize a tokio worker during cold start;
         // `open_with_account` internally parallelizes those KDFs across scoped threads, so
         // the behavior (and result) is identical — just off the reactor.
+        // Open the durable name directory in parallel with the node (its own password KDF),
+        // so it doesn't add a serial step to cold start.
+        let names_handle = {
+            let names_path = dir.join("names.log");
+            let password = password.to_string();
+            tokio::task::spawn_blocking(move || NameDirectory::open(&names_path, &password))
+        };
         let node = {
             let roster = Arc::clone(&roster);
             let messages_log = dir.join("messages.log");
@@ -167,6 +178,9 @@ impl NodeRuntime {
             .await
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
         };
+        let names = Arc::new(Mutex::new(names_handle.await.map_err(|e| {
+            RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
+        })??));
 
         let socket = Arc::new(discovery_socket(discovery_port)?);
 
@@ -228,16 +242,28 @@ impl NodeRuntime {
         {
             let node = Arc::clone(&node);
             let roster = Arc::clone(&roster);
+            let names = Arc::clone(&names);
             tasks.push(tokio::spawn(async move {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 loop {
-                    let newcomers: Vec<PeerRecord> = {
+                    let peers: Vec<PeerRecord> = {
                         let r = roster.lock().expect("roster mutex not poisoned");
                         r.peers()
-                            .into_iter()
-                            .filter(|p| !p.post_office && seen.insert(p.public.user_id()))
-                            .collect()
                     };
+                    // Remember every peer's announced name durably, so a member that later
+                    // goes offline (and is evicted from the live roster) still shows a name.
+                    // `record` is a no-op when unchanged, so this doesn't grow the log.
+                    {
+                        let mut dir = names.lock().expect("names mutex not poisoned");
+                        for p in &peers {
+                            let _ = dir.record(&p.public.user_id(), &p.name);
+                        }
+                    }
+                    // Re-publish our avatar to peers we hadn't seen before (a no-op if we've
+                    // set no avatar). `seen` only tracks ids, so this stays bounded.
+                    let newcomers = peers
+                        .into_iter()
+                        .filter(|p| !p.post_office && seen.insert(p.public.user_id()));
                     for peer in newcomers {
                         node.republish_profile_to(&peer).await;
                     }
@@ -249,6 +275,7 @@ impl NodeRuntime {
         Ok(NodeRuntime {
             node,
             roster,
+            names,
             user_id: self_uid,
             account_id,
             display_name: display_name.to_string(),
@@ -295,6 +322,25 @@ impl NodeRuntime {
             .lock()
             .expect("roster mutex not poisoned")
             .peers()
+    }
+
+    /// The display name for a device `user_id`: the live roster's (freshest) if the peer is
+    /// currently around, else the last name we durably recorded — so a member that went
+    /// offline (and was evicted from the roster) still resolves to a name instead of a raw id.
+    pub fn display_name_for(&self, user_id: &str) -> Option<String> {
+        let live = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .get(user_id)
+            .map(|p| p.name.clone())
+            .filter(|n| !n.is_empty());
+        live.or_else(|| {
+            self.names
+                .lock()
+                .expect("names mutex not poisoned")
+                .name_for_user(user_id)
+        })
     }
 
     /// The public identity of a known peer (to derive its DM conversation), if known.

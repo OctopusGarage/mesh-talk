@@ -388,25 +388,22 @@ pub async fn channel_members(
     let channel = parse_channel_id(&channel_id)?;
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    // Build a user_id -> display name map from the known roster so members show a
-    // friendly name when we know one; otherwise fall back to the user_id.
-    let mut names: std::collections::HashMap<String, String> = rt
-        .peers()
-        .into_iter()
-        .map(|p| (p.public.user_id(), p.name))
-        .collect();
-    // We are never in our own discovery roster, so add ourselves explicitly — otherwise
-    // the self member falls back to its raw user_id (hex) instead of our display name.
-    names.insert(rt.user_id().to_string(), rt.display_name().to_string());
+    // Resolve each member's display name via the runtime, which checks the LIVE roster
+    // first and then the DURABLE name directory — so a member that's gone offline (and so
+    // been evicted from the roster) still shows the last name we saw, not a raw hex id.
+    // Ourselves: we're never in our own roster, so use our own advertised name.
+    let self_uid = rt.user_id();
     let members = rt
         .channel_members(channel)
         .into_iter()
         .map(|p| {
             let user_id = p.user_id();
-            let name = names
-                .get(&user_id)
-                .cloned()
-                .unwrap_or_else(|| user_id.clone());
+            let name = if user_id == self_uid {
+                rt.display_name().to_string()
+            } else {
+                rt.display_name_for(&user_id)
+                    .unwrap_or_else(|| user_id.clone())
+            };
             ChannelMemberInfo { user_id, name }
         })
         .collect();
@@ -654,6 +651,7 @@ pub async fn write_temp_file(
     app: tauri::AppHandle,
     bytes: Vec<u8>,
     ext: String,
+    name: Option<String>,
 ) -> Result<String, CommandError> {
     // Bound a pasted image to a sane size so a paste can't write an arbitrarily large temp
     // file (the file pipeline enforces its own hard limit on the subsequent send).
@@ -661,33 +659,47 @@ pub async fn write_temp_file(
     if bytes.len() > MAX_PASTE_BYTES {
         return Err(CommandError::Validation("pasted image too large".into()));
     }
-    // Sanitize the extension to a short alphanumeric suffix (never trust it for a path).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let basename = temp_file_basename(&ext, name.as_deref(), ts);
+    // A unique per-write subdir, so keeping a REAL filename can't collide with (or overwrite)
+    // another in-flight send of a same-named file — the displayed name is the basename.
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?
+        .join("pasted")
+        .join(ts.to_string());
+    std::fs::create_dir_all(&dir).map_err(|e| CommandError::Validation(e.to_string()))?;
+    let path = dir.join(basename);
+    std::fs::write(&path, &bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Choose the on-disk name for a written temp file. With a real `original` filename (the
+/// "send image/video" picker has one) we KEEP it — but only its basename, never a path
+/// component — so the user's real name + extension survive to the chat list and the media
+/// preview (a `.mov` stays `.mov`, not a MIME-derived `pasted-….quicktim`). For nameless
+/// clipboard/screenshot bytes we synthesize `pasted-<ts>.<ext>`, sanitizing `ext` to a short
+/// alphanumeric suffix (never trusted for a path).
+fn temp_file_basename(ext: &str, original: Option<&str>, ts: u128) -> String {
+    if let Some(base) = original
+        .and_then(|o| std::path::Path::new(o).file_name())
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|b| !b.is_empty() && *b != "." && *b != "..")
+    {
+        return base.to_string();
+    }
     let ext: String = ext
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .take(8)
         .collect();
-    let ext = if ext.is_empty() {
-        "png".to_string()
-    } else {
-        ext
-    };
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?
-        .join("pasted");
-    std::fs::create_dir_all(&dir).map_err(|e| CommandError::Validation(e.to_string()))?;
-    let name = format!(
-        "pasted-{}.{ext}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    let path = dir.join(name);
-    std::fs::write(&path, &bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
-    Ok(path.to_string_lossy().into_owned())
+    let ext = if ext.is_empty() { "png" } else { &ext };
+    format!("pasted-{ts}.{ext}")
 }
 
 /// Capture a screenshot and return it as PNG bytes, for sending as an inline image.
@@ -1302,6 +1314,32 @@ pub async fn get_presence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temp_file_keeps_real_filename_and_extension() {
+        // The "send image/video" picker passes the real name: it must survive verbatim, so
+        // a .mov stays a previewable .mov — NOT a MIME-derived `pasted-….quicktim`.
+        let mov = "Screen Recording 2026-03-16 at 17.41.43.mov";
+        assert_eq!(
+            temp_file_basename("quicktime", Some(mov), 1782196051325),
+            mov
+        );
+        // A path component is never trusted — only the basename is kept (no traversal).
+        assert_eq!(
+            temp_file_basename("png", Some("../../etc/passwd"), 1),
+            "passwd"
+        );
+    }
+
+    #[test]
+    fn temp_file_synthesizes_name_for_nameless_clipboard_bytes() {
+        // No real name (a pasted screenshot) → synthesize, sanitizing the ext.
+        assert_eq!(temp_file_basename("png", None, 42), "pasted-42.png");
+        assert_eq!(temp_file_basename("", None, 42), "pasted-42.png");
+        // Degenerate names fall back to the synthetic form, not an empty/dotfile path.
+        assert_eq!(temp_file_basename("png", Some(".."), 42), "pasted-42.png");
+        assert_eq!(temp_file_basename("png", Some("   "), 42), "pasted-42.png");
+    }
 
     #[test]
     fn parse_channel_id_accepts_64_hex_chars() {

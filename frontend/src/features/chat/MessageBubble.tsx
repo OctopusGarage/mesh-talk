@@ -258,7 +258,7 @@ export function MessageBubble({
                 {isFile ? (
                   <FileBubble file={m.file!} mine={mine} />
                 ) : (
-                  <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">
+                  <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
                     {renderWithMentions(m.text)}
                   </span>
                 )}

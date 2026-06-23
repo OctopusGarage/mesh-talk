@@ -18,6 +18,7 @@ pub(crate) mod files;
 pub(crate) mod linking;
 pub(crate) mod media_store;
 pub(crate) mod message;
+pub(crate) mod name_directory;
 pub(crate) mod node;
 pub(crate) mod pairing;
 pub(crate) mod postbox;
