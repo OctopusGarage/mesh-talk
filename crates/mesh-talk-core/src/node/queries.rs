@@ -45,6 +45,7 @@ impl Node {
                         name: manifest.name().to_string(),
                         size: manifest.size(),
                         mime: manifest.mime().to_string(),
+                        media: crate::node::media_store::manifest_is_media(&manifest),
                     }),
                 })
             })

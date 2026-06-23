@@ -16,7 +16,7 @@ import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { useChat } from "@/store/chat";
 import { TransferBar } from "./TransferBar";
-import { fileGlyph, isImage, isVideo } from "./mediaFile";
+import { fileGlyph } from "./mediaFile";
 
 /** localStorage key for the persisted file_conv → saved-path map (where downloads landed). */
 const DOWNLOADS_KEY = "mesh-talk-downloads";
@@ -30,10 +30,11 @@ function loadSavedPaths(): Record<string, string> {
 
 export function FilesTray() {
   const { t } = useTranslation();
-  // "Received files" is for ATTACHMENTS only. Images/videos are auto-saved to the media
-  // store and shown inline in the conversation, so they don't belong in this list.
+  // "Received files" is ATTACHMENTS only. A file sent via the media button is shown inline +
+  // auto-saved, so it never appears here — decided by the sender's INTENT (manifest kind),
+  // not the file extension (a .mov sent via the attach button DOES belong here).
   const incoming = useChat((s) => s.incomingFiles);
-  const files = incoming.filter((f) => !isImage(f.name) && !isVideo(f.name));
+  const files = incoming.filter((f) => !f.media);
   const dismissFile = useChat((s) => s.dismissFile);
   const setError = useChat((s) => s.setError);
 

@@ -410,7 +410,7 @@ describe("send/action failures", () => {
       return Promise.resolve([]);
     });
     useChat.setState({ active: acct, error: null });
-    await useChat.getState().sendFile("/tmp/x");
+    await useChat.getState().sendFile("/tmp/x", false);
     expect(useChat.getState().error).toContain("disk full");
   });
 

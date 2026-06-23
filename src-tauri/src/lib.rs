@@ -124,6 +124,15 @@ pub fn run_tauri() {
             );
             crate::tray::create_system_tray(&app.handle().clone())?;
 
+            // Frameless chrome off macOS: macOS uses the native overlay title bar (traffic
+            // lights float over our content via `titleBarStyle: Overlay`), but Windows/Linux
+            // would otherwise show the traditional title bar. Drop their native decorations
+            // so the app provides its own (custom window controls live in the frontend).
+            #[cfg(not(target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_decorations(false);
+            }
+
             // A login-time autostart launch should come up hidden to the tray.
             if std::env::args().any(|a| a == "--hidden") {
                 if let Some(window) = app.get_webview_window("main") {

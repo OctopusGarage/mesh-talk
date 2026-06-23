@@ -9,6 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Logo } from "@/components/Logo";
 import { fadeSlideUp, useMotionOK } from "@/lib/motion";
 import { settings as settingsApi } from "@/lib/api";
+import { needsCustomWindowControls } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
 
 /**
@@ -68,6 +69,14 @@ export function LoginScreen() {
 
   return (
     <div className="relative flex h-full items-center justify-center overflow-hidden bg-background p-6">
+      {/* Frameless window (Windows/Linux) has no native bar to grab — a thin top strip drags
+          it. Rendered only there, so it never intercepts clicks on macOS or in the browser. */}
+      {needsCustomWindowControls() && (
+        <div
+          data-tauri-drag-region
+          className="absolute inset-x-0 top-0 z-10 h-8"
+        />
+      )}
       {/* Living "signal" ambient — very restrained: two slow teal blooms over deep ink,
           plus a faint mesh grid. Halts under reduced motion (the global CSS neutralizes
           the keyframe; the framer drift is gated on useMotionOK). */}

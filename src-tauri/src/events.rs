@@ -168,6 +168,7 @@ pub struct FileReceivedEvent {
     pub size: u64,
     pub mime: String,      // so the UI can decide image/video/other
     pub file_conv: String, // hex — pass to save
+    pub media: bool,       // inline media (media button) vs attachment (attach button), by intent
 }
 
 /// Emit a received DM to the frontend (text decoded lossily for display).
@@ -223,6 +224,7 @@ pub fn emit_file_received<R: Runtime>(
     size: u64,
     mime: String,
     file_conv: String,
+    media: bool,
 ) {
     let event = FileReceivedEvent {
         conv,
@@ -231,6 +233,7 @@ pub fn emit_file_received<R: Runtime>(
         size,
         mime,
         file_conv,
+        media,
     };
     notify_if_unfocused(app_handle, &event.from, "sent a file");
     if let Err(e) = app_handle.emit(EVENT_FILE_RECEIVED, event) {

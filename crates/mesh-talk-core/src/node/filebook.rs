@@ -19,6 +19,9 @@ pub struct ReceivedFile {
     pub mime: String,
     /// The per-file conversation holding the chunk events (pass to `save_file`).
     pub file_conv: ConversationId,
+    /// Whether this is inline MEDIA (media button) vs a generic attachment (attach button).
+    /// Decided by the sender's intent (manifest kind), not the file extension.
+    pub media: bool,
 }
 
 #[derive(Default)]

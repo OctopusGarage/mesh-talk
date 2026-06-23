@@ -577,7 +577,15 @@ fn handle_sendfile(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
         Ok(uid) => {
             let node = Arc::clone(node);
             tokio::spawn(async move {
-                match node.send_file_dm(&uid, std::path::Path::new(&path)).await {
+                // The CLI has no media UI — a sent file is always a generic attachment.
+                match node
+                    .send_file_dm(
+                        &uid,
+                        std::path::Path::new(&path),
+                        mesh_talk_core::file::FileKind::File,
+                    )
+                    .await
+                {
                     Ok(_) => emit(&format!("file sent to {uid}")),
                     Err(e) => emit(&format!("file send failed: {e}")),
                 }

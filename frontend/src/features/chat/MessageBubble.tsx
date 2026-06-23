@@ -30,7 +30,7 @@ import { EMOJIS, mentionsName, renderWithMentions } from "@/lib/mentions";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, type ChatMessage } from "@/store/chat";
 import { MediaPreview } from "./MediaPreview";
-import { fileGlyph, isImage, isVideo } from "./mediaFile";
+import { fileGlyph } from "./mediaFile";
 
 /** A file/media message body: inline media for images/small videos, else a file card with
  * a Save action. Reuses the shared MediaPreview (lazy bytes + revoked blob URLs). */
@@ -43,7 +43,9 @@ function FileBubble({
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
-  const media = isImage(file.name) || isVideo(file.name);
+  // Inline preview ONLY for files sent via the media button (sender intent), not by file
+  // extension — so a .mov sent as an attachment renders as a file card, not an inline player.
+  const media = file.media;
 
   const saveAs = async () => {
     try {
@@ -61,6 +63,7 @@ function FileBubble({
           fileConv={file.fileConv}
           name={file.name}
           size={file.size}
+          mime={file.mime}
         />
       )}
       <div className="flex items-center gap-2">

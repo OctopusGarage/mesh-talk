@@ -35,6 +35,18 @@ pub fn is_media_name(name: &str) -> bool {
     ext_of(name).is_some_and(|e| MEDIA_EXT.contains(&e.as_str()))
 }
 
+/// Whether a file is inline MEDIA. Authoritative source is the sender's intent (the
+/// manifest `kind`, set by which button sent it); only when that's absent — legacy v1/v2
+/// manifests from older peers — do we fall back to the filename heuristic. This is what
+/// makes a `.mov` sent via the ATTACH button a downloadable attachment, not inline media.
+pub fn manifest_is_media(m: &crate::file::AnyManifest) -> bool {
+    match m.kind() {
+        Some(crate::file::FileKind::Media) => true,
+        Some(crate::file::FileKind::File) => false,
+        None => is_media_name(m.name()),
+    }
+}
+
 /// The lowercased extension of `name`, if any (no leading dot).
 fn ext_of(name: &str) -> Option<String> {
     Path::new(name)

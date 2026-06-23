@@ -117,18 +117,73 @@ impl FileManifestV2 {
     }
 }
 
-/// A decoded manifest of either version. The node layer matches on this so v1 history
-/// still opens while new files use v2.
+/// Magic + version tag for the v3 manifest framing.
+const MFM3_MAGIC: &[u8; 4] = b"MFM3";
+
+/// The SENDER'S INTENT for a file, set by which button sent it — so media-vs-attachment
+/// follows the interaction, not the file extension (a `.mov` sent via the attach button is
+/// a `File`, not `Media`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileKind {
+    /// Sent via the photo/video button: inline preview + persisted to the chat-media store.
+    Media,
+    /// Sent via the attach button: a generic attachment that lands in the "received files"
+    /// tray (whatever its format).
+    File,
+}
+
+/// The v3 file announcement: v2 PLUS the sender's `kind`. Embeds [`FileManifestV2`] so all
+/// its fields + integrity guarantees carry over unchanged; only the intent is added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileManifestV3 {
+    pub v2: FileManifestV2,
+    pub kind: FileKind,
+}
+
+impl FileManifestV3 {
+    /// Serialize with the `MFM3` magic+version frame.
+    pub fn encode(&self) -> Vec<u8> {
+        let body = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize(self)
+            .expect("file manifest v3 serializes");
+        let mut out = Vec::with_capacity(MFM3_MAGIC.len() + body.len());
+        out.extend_from_slice(MFM3_MAGIC);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Parse an `MFM3`-framed manifest, fail-closed (reject trailing bytes / wrong magic).
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let body = bytes.strip_prefix(MFM3_MAGIC.as_slice())?;
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .deserialize(body)
+            .ok()
+    }
+
+    pub fn key(&self) -> FileKey {
+        self.v2.key()
+    }
+}
+
+/// A decoded manifest of any version. The node layer matches on this so v1/v2 history
+/// still opens while new files use v3 (which carries the sender's intent).
 #[derive(Debug, Clone)]
 pub enum AnyManifest {
     V1(FileManifest),
     V2(FileManifestV2),
+    V3(FileManifestV3),
 }
 
 /// Decode a manifest of either version, sniffing the `MFM2` magic. Fails gracefully
 /// (returns `None`) on garbage rather than panicking — old single-blob formats that
 /// don't parse simply don't interoperate.
 pub fn decode_manifest(bytes: &[u8]) -> Option<AnyManifest> {
+    if let Some(v3) = FileManifestV3::decode(bytes) {
+        return Some(AnyManifest::V3(v3));
+    }
     if let Some(v2) = FileManifestV2::decode(bytes) {
         return Some(AnyManifest::V2(v2));
     }
@@ -140,30 +195,50 @@ impl AnyManifest {
         match self {
             AnyManifest::V1(m) => &m.name,
             AnyManifest::V2(m) => &m.name,
+            AnyManifest::V3(m) => &m.v2.name,
         }
     }
     pub fn size(&self) -> u64 {
         match self {
             AnyManifest::V1(m) => m.size,
             AnyManifest::V2(m) => m.size,
+            AnyManifest::V3(m) => m.v2.size,
         }
     }
     pub fn mime(&self) -> &str {
         match self {
             AnyManifest::V1(m) => &m.mime,
             AnyManifest::V2(m) => &m.mime,
+            AnyManifest::V3(m) => &m.v2.mime,
         }
     }
     pub fn file_conv(&self) -> ConversationId {
         match self {
             AnyManifest::V1(m) => m.file_conv,
             AnyManifest::V2(m) => m.file_conv,
+            AnyManifest::V3(m) => m.v2.file_conv,
         }
     }
     pub fn chunk_count(&self) -> u32 {
         match self {
             AnyManifest::V1(m) => m.chunk_count,
             AnyManifest::V2(m) => m.chunk_count,
+            AnyManifest::V3(m) => m.v2.chunk_count,
+        }
+    }
+    pub fn checksum(&self) -> [u8; 32] {
+        match self {
+            AnyManifest::V1(m) => m.checksum,
+            AnyManifest::V2(m) => m.checksum,
+            AnyManifest::V3(m) => m.v2.checksum,
+        }
+    }
+    /// The sender's intent, if the manifest carries it (v3+). `None` for legacy v1/v2
+    /// manifests — callers fall back to a filename heuristic for those.
+    pub fn kind(&self) -> Option<FileKind> {
+        match self {
+            AnyManifest::V1(_) | AnyManifest::V2(_) => None,
+            AnyManifest::V3(m) => Some(m.kind),
         }
     }
 }
@@ -178,18 +253,22 @@ pub fn open_chunk_for(
 ) -> Result<Vec<u8>, FileError> {
     match manifest {
         AnyManifest::V1(m) => open_chunk(&m.key(), ciphertext),
-        AnyManifest::V2(m) => {
-            let plaintext = open_chunk_indexed(&m.key(), &m.file_nonce, index, ciphertext)?;
-            let expected = m
-                .chunk_hashes
-                .get(index as usize)
-                .ok_or(FileError::ChunkHashMismatch(index))?;
-            if &chunk_hash(&plaintext) != expected {
-                return Err(FileError::ChunkHashMismatch(index));
-            }
-            Ok(plaintext)
-        }
+        AnyManifest::V2(m) => open_chunk_v2(m, index, ciphertext),
+        AnyManifest::V3(m) => open_chunk_v2(&m.v2, index, ciphertext),
     }
+}
+
+/// Open + verify a v2-style chunk (shared by the v2 and v3 manifest paths).
+fn open_chunk_v2(m: &FileManifestV2, index: u32, ciphertext: &[u8]) -> Result<Vec<u8>, FileError> {
+    let plaintext = open_chunk_indexed(&m.key(), &m.file_nonce, index, ciphertext)?;
+    let expected = m
+        .chunk_hashes
+        .get(index as usize)
+        .ok_or(FileError::ChunkHashMismatch(index))?;
+    if &chunk_hash(&plaintext) != expected {
+        return Err(FileError::ChunkHashMismatch(index));
+    }
+    Ok(plaintext)
 }
 
 /// Decrypt `chunks` (the per-file conversation's chunk ciphertexts, in order),
@@ -322,6 +401,41 @@ mod tests {
         // Garbage fails gracefully (no panic).
         assert!(decode_manifest(b"not a manifest at all").is_none());
         assert!(decode_manifest(&[]).is_none());
+    }
+
+    #[test]
+    fn v3_manifest_round_trips_and_carries_kind() {
+        let (v2, _) = seal_file_v2(b"clip");
+        let media = FileManifestV3 {
+            v2: v2.clone(),
+            kind: FileKind::Media,
+        };
+        let bytes = media.encode();
+        assert_eq!(&bytes[..4], MFM3_MAGIC);
+        assert_eq!(FileManifestV3::decode(&bytes), Some(media.clone()));
+        // decode_manifest sniffs V3 (not mistaken for V2) and exposes the intent.
+        let any = decode_manifest(&bytes).unwrap();
+        assert!(matches!(any, AnyManifest::V3(_)));
+        assert_eq!(any.kind(), Some(FileKind::Media));
+        // The File variant survives too; legacy v1/v2 report no kind.
+        let attach = FileManifestV3 {
+            v2,
+            kind: FileKind::File,
+        };
+        assert_eq!(
+            decode_manifest(&attach.encode()).unwrap().kind(),
+            Some(FileKind::File)
+        );
+        assert_eq!(
+            decode_manifest(&seal_file_v2(b"x").0.encode())
+                .unwrap()
+                .kind(),
+            None
+        );
+        // Trailing junk is rejected.
+        let mut junk = bytes;
+        junk.push(0x00);
+        assert_eq!(FileManifestV3::decode(&junk), None);
     }
 
     #[test]

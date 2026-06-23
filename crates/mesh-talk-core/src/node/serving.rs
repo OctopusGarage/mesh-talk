@@ -207,6 +207,7 @@ impl Node {
                 size: manifest.size(),
                 mime: manifest.mime().to_string(),
                 file_conv: manifest.file_conv(),
+                media: crate::node::media_store::manifest_is_media(&manifest),
             };
             // The conversation to FILE this manifest under for history. A channel manifest
             // stays in the channel conv (which is the UI's conversation id). A DM manifest

@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LoginScreen } from "@/features/auth/LoginScreen";
 import { ChatApp } from "@/features/chat/ChatApp";
+import { WindowControls } from "@/components/WindowControls";
 import { useAuth } from "@/store/auth";
 import { useAvatars } from "@/store/avatars";
 
@@ -22,9 +23,19 @@ export default function App() {
     void loadAvatars();
   }, [tryAutoLogin, loadAvatars]);
 
-  if (user) return <ChatApp />;
-  if (booting) return <Unlocking label={t("login.resuming")} />;
-  return <LoginScreen />;
+  return (
+    <>
+      {/* Custom min/max/close for the frameless window (Windows/Linux); null on macOS/web. */}
+      <WindowControls />
+      {user ? (
+        <ChatApp />
+      ) : booting ? (
+        <Unlocking label={t("login.resuming")} />
+      ) : (
+        <LoginScreen />
+      )}
+    </>
+  );
 }
 
 /** A minimal centered splash shown while the auto-login attempt resolves. */

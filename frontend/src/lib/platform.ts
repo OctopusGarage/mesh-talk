@@ -28,10 +28,21 @@ export function isMacOverlay(): boolean {
   return isTauri() && looksLikeMac();
 }
 
-/** Set `data-os` on <html> so CSS can apply the traffic-light inset only on macOS overlay. */
+/**
+ * True when we run frameless WITHOUT a native title bar and must draw our own window
+ * controls: inside Tauri, off macOS (Windows/Linux get `set_decorations(false)` at startup).
+ * macOS keeps the native overlay traffic-lights; a plain browser (e2e/dev tab) isn't Tauri.
+ */
+export function needsCustomWindowControls(): boolean {
+  return isTauri() && !looksLikeMac();
+}
+
+/** Set `data-os` on <html> so CSS can key chrome adjustments off the platform. */
 export function applyPlatformClass(): void {
   if (typeof document === "undefined") return;
   if (isMacOverlay()) {
     document.documentElement.setAttribute("data-os", "macos");
+  } else if (needsCustomWindowControls()) {
+    document.documentElement.setAttribute("data-os", "frameless");
   }
 }

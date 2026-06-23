@@ -498,6 +498,7 @@ pub(crate) fn spawn_node_runtime(
                     f.size,
                     f.mime,
                     hex::encode(f.file_conv.as_bytes()),
+                    f.media,
                 );
             },
             move |p: mesh_talk_core::node::ReceivedProfile| {

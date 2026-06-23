@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { isVideo, useFileObjectUrl, withinInlineCap } from "./mediaFile";
+import {
+  isVideo,
+  mimeFromName,
+  useFileObjectUrl,
+  withinInlineCap,
+} from "./mediaFile";
 
 /** Inline preview for a received image or small video. Images are clickable to open a
  * full-size lightbox; videos get a playable `<video controls>`. Renders nothing while the
@@ -10,15 +15,18 @@ export function MediaPreview({
   fileConv,
   name,
   size,
+  mime,
 }: {
   fileConv: string;
   name: string;
   size: number;
+  /** The manifest MIME; needed so the inline <video> blob is typed (else macOS won't play). */
+  mime?: string;
 }) {
   const { t } = useTranslation();
   const video = isVideo(name);
   const withinCap = withinInlineCap(name, size);
-  const url = useFileObjectUrl(fileConv, withinCap);
+  const url = useFileObjectUrl(fileConv, withinCap, mime || mimeFromName(name));
   const [lightbox, setLightbox] = useState(false);
 
   // A large video stays a file card; surface a hint so the user knows to open it externally.

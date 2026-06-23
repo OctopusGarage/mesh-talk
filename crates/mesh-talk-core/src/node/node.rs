@@ -109,6 +109,8 @@ pub struct FileHistoryInfo {
     pub name: String,
     pub size: u64,
     pub mime: String,
+    /// Inline MEDIA (media button) vs generic attachment (attach button) — by sender intent.
+    pub media: bool,
 }
 
 /// Errors from node operations.

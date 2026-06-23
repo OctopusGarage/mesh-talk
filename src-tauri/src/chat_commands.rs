@@ -46,6 +46,7 @@ pub struct HistoryFileInfo {
     pub name: String,
     pub size: u64,
     pub mime: String,
+    pub media: bool, // inline media (media button) vs attachment (attach button), by intent
 }
 
 /// One merged history line (sent or received) for display.
@@ -82,6 +83,7 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
                 name: f.name,
                 size: f.size,
                 mime: f.mime,
+                media: f.media,
             }),
         }
     }
@@ -498,12 +500,23 @@ pub async fn send_channel_message(
         .map_err(CommandError::from)
 }
 
+/// Map the UI's "sent via the media button?" flag to a manifest file kind, so the receiver
+/// categorizes media-vs-attachment by INTENT rather than the file extension.
+fn file_kind(media: bool) -> mesh_talk_core::file::FileKind {
+    if media {
+        mesh_talk_core::file::FileKind::Media
+    } else {
+        mesh_talk_core::file::FileKind::File
+    }
+}
+
 #[tauri::command]
 pub async fn send_file_dm(
     app: tauri::AppHandle,
     state: tauri::State<'_, NodeState>,
     recipient: String,
     path: String,
+    media: bool,
 ) -> Result<String, CommandError> {
     let node = {
         let guard = state.0.lock().await;
@@ -515,9 +528,12 @@ pub async fn send_file_dm(
     // (it relabels on the resolved promise). Use the path-derived label up front.
     let mut prog = crate::events::ProgressThrottle::new(app, recipient.clone(), "send");
     let id = node
-        .send_file_dm_progress(&recipient, std::path::Path::new(&path), move |p| {
-            prog.emit(p.done, p.total)
-        })
+        .send_file_dm_progress(
+            &recipient,
+            std::path::Path::new(&path),
+            file_kind(media),
+            move |p| prog.emit(p.done, p.total),
+        )
         .await
         .map_err(CommandError::from)?;
     Ok(hex::encode(id.as_bytes()))
@@ -529,6 +545,7 @@ pub async fn send_file_to_account(
     state: tauri::State<'_, NodeState>,
     account: String,
     path: String,
+    media: bool,
 ) -> Result<String, CommandError> {
     let node = {
         let guard = state.0.lock().await;
@@ -537,9 +554,12 @@ pub async fn send_file_to_account(
     };
     let mut prog = crate::events::ProgressThrottle::new(app, account.clone(), "send");
     let id = node
-        .send_file_to_account_progress(&account, std::path::Path::new(&path), move |p| {
-            prog.emit(p.done, p.total)
-        })
+        .send_file_to_account_progress(
+            &account,
+            std::path::Path::new(&path),
+            file_kind(media),
+            move |p| prog.emit(p.done, p.total),
+        )
         .await
         .map_err(CommandError::from)?;
     Ok(hex::encode(id.as_bytes()))
@@ -551,6 +571,7 @@ pub async fn send_file_channel(
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     path: String,
+    media: bool,
 ) -> Result<String, CommandError> {
     let id = parse_channel_id(&channel_id)?;
     let node = {
@@ -560,9 +581,12 @@ pub async fn send_file_channel(
     };
     let mut prog = crate::events::ProgressThrottle::new(app, channel_id.clone(), "send");
     let file_conv = node
-        .send_file_channel_progress(id, std::path::Path::new(&path), move |p| {
-            prog.emit(p.done, p.total)
-        })
+        .send_file_channel_progress(
+            id,
+            std::path::Path::new(&path),
+            file_kind(media),
+            move |p| prog.emit(p.done, p.total),
+        )
         .await
         .map_err(CommandError::from)?;
     Ok(hex::encode(file_conv.as_bytes()))

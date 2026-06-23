@@ -16,7 +16,7 @@ function msg(over: Partial<ChatMessage>): ChatMessage {
 }
 
 function file(name: string): NonNullable<ChatMessage["file"]> {
-  return { name, size: 1, mime: "", fileConv: "abc" };
+  return { name, size: 1, mime: "", fileConv: "abc", media: false };
 }
 
 describe("hasLink", () => {

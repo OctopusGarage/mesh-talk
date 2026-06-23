@@ -80,7 +80,13 @@ export interface ChatMessage {
   failed?: boolean; // a send that errored — kept visible (not silently dropped)
   failReason?: SendFailReason; // coarse, frontend-derived cause (drives the label + help)
   clientId?: string; // stable id for an optimistic bubble (survives a concurrent reload)
-  file?: { name: string; size: number; mime: string; fileConv: string } | null;
+  file?: {
+    name: string;
+    size: number;
+    mime: string;
+    fileConv: string;
+    media: boolean;
+  } | null;
 }
 
 export interface IncomingFile {
@@ -88,6 +94,8 @@ export interface IncomingFile {
   name: string;
   size: number;
   fileConv: string;
+  /** Inline media (media button) vs generic attachment (attach button), by sender intent. */
+  media: boolean;
 }
 
 export const convKey = (c: Conversation) => `${c.kind}:${c.id}`;
@@ -161,6 +169,7 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
           size: h.file.size,
           mime: h.file.mime,
           fileConv: h.file.file_conv,
+          media: h.file.media,
         }
       : null,
   };
@@ -193,10 +202,10 @@ function reactFor(
     ? chat.reactAccount(c.id, target, emoji, remove)
     : chat.reactChannel(c.id, target, emoji, remove);
 }
-function sendFileFor(c: Conversation, path: string) {
+function sendFileFor(c: Conversation, path: string, media: boolean) {
   return c.kind === "account"
-    ? chat.sendFileToAccount(c.id, path)
-    : chat.sendFileChannel(c.id, path);
+    ? chat.sendFileToAccount(c.id, path, media)
+    : chat.sendFileChannel(c.id, path, media);
 }
 
 interface ChatState {
@@ -237,7 +246,7 @@ interface ChatState {
   reload: () => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
   retry: (clientId: string) => Promise<void>;
-  sendFile: (path: string) => Promise<void>;
+  sendFile: (path: string, media: boolean) => Promise<void>;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
   toggleReaction: (target: string, emoji: string) => Promise<void>;
   createChannel: (name: string, memberIds: string[]) => Promise<void>;
@@ -511,11 +520,11 @@ export const useChat = create<ChatState>((set, get) => ({
     await dispatchSend(set, get, c, key, pending);
   },
 
-  sendFile: async (path) => {
+  sendFile: async (path, media) => {
     const c = get().active;
     if (!c) return;
     try {
-      await sendFileFor(c, path);
+      await sendFileFor(c, path, media);
     } catch (e) {
       set({ error: `Couldn't send file: ${errorMessage(e)}` });
       return;
@@ -684,7 +693,13 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
       ? {}
       : {
           incomingFiles: [
-            { fromName, name: e.name, size: e.size, fileConv: e.file_conv },
+            {
+              fromName,
+              name: e.name,
+              size: e.size,
+              fileConv: e.file_conv,
+              media: e.media,
+            },
             ...s.incomingFiles,
           ],
         },

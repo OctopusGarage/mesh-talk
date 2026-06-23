@@ -150,6 +150,15 @@
     padding-left: 4.75rem;
   }
 
+  /* Frameless chrome (Windows/Linux: native title bar dropped, custom controls top-right —
+     see lib/platform.ts + WindowControls). Reserve room on the right of the top header bar
+     (the conversation header, which spans to the window's right edge) so its actions don't
+     sit under the min/max/close buttons. The sidebar header is top-LEFT, so it's untouched. */
+  html[data-os="frameless"]
+    [data-titlebar-inset]:not([data-titlebar-inset="left"]) {
+    padding-right: 9rem;
+  }
+
   /* Respect the OS "reduce motion" preference: neutralize animations & transitions
      globally (covers Radix/shadcn dialog/popover enter-exit animations, spinners,
      hover transitions, smooth scrolling, and the presence breathing pulse). JS-driven

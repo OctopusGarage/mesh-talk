@@ -1146,13 +1146,16 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
     let bob_node = Node::open(bob, bob_roster, b_dm, b_ch, b_f, &b_log, &b_sent, "pw").unwrap();
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
 
-    // A multi-chunk IMAGE payload (the .png extension marks it as media).
+    // A multi-chunk IMAGE payload sent via the MEDIA button (kind drives media-store).
     let payload = vec![0x89u8; crate::file::CHUNK_SIZE + 4242];
     let src = dir.path().join("shot.png");
     std::fs::write(&src, &payload).unwrap();
 
     let bob_uid = bob_node.user_id();
-    let file_conv = alice_node.send_file_dm(&bob_uid, &src).await.unwrap();
+    let file_conv = alice_node
+        .send_file_dm(&bob_uid, &src, crate::file::FileKind::Media)
+        .await
+        .unwrap();
 
     // SENDER: the image was copied into Alice's media store on send, readable from there.
     assert!(
@@ -1205,7 +1208,10 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
     // A NON-MEDIA attachment must NOT create a media-store entry (storage-side separation).
     let doc = dir.path().join("notes.bin");
     std::fs::write(&doc, vec![0x11u8; 100]).unwrap();
-    let doc_conv = alice_node.send_file_dm(&bob_uid, &doc).await.unwrap();
+    let doc_conv = alice_node
+        .send_file_dm(&bob_uid, &doc, crate::file::FileKind::File)
+        .await
+        .unwrap();
     assert!(
         !alice_node.has_media(doc_conv),
         "a generic attachment is NOT written to the media store"
@@ -1292,7 +1298,10 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
     std::fs::write(&src, &payload).unwrap();
 
     let bob_uid = bob_node.user_id();
-    let file_conv = alice_node.send_file_dm(&bob_uid, &src).await.unwrap();
+    let file_conv = alice_node
+        .send_file_dm(&bob_uid, &src, crate::file::FileKind::File)
+        .await
+        .unwrap();
 
     // The sender sees her own sent file as a first-class history message immediately:
     // a `from_me` file entry carrying the manifest metadata (name/size/file_conv).
@@ -1398,7 +1407,10 @@ async fn recipient_pulls_file_chunks_directly_when_push_missed() {
     std::fs::write(&src, &payload).unwrap();
     let bob_uid = bob_node.user_id();
     // Alice sends; her push to Bob (dead port) misses, but the file is now in Alice's log.
-    let file_conv = alice_node.send_file_dm(&bob_uid, &src).await.unwrap();
+    let file_conv = alice_node
+        .send_file_dm(&bob_uid, &src, crate::file::FileKind::File)
+        .await
+        .unwrap();
 
     // Bob gets the MANIFEST by syncing the DM conversation from Alice (the reliable path:
     // the DM conv is one Bob pulls), then surfaces it — which queues a pending file pull.
@@ -1486,7 +1498,10 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
     std::fs::write(&src, &payload).unwrap();
 
     let bob_uid = bob_node.user_id();
-    let file_conv = alice_node.send_file_dm(&bob_uid, &src).await.unwrap();
+    let file_conv = alice_node
+        .send_file_dm(&bob_uid, &src, crate::file::FileKind::File)
+        .await
+        .unwrap();
 
     let rf = tokio::time::timeout(std::time::Duration::from_secs(10), b_f_r.recv())
         .await
@@ -1713,7 +1728,10 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     let payload = vec![0xABu8; crate::file::CHUNK_SIZE + 1234];
     let src = dir.path().join("photo.bin");
     std::fs::write(&src, &payload).unwrap();
-    let file_conv = alice_node.send_file_channel(channel, &src).await.unwrap();
+    let file_conv = alice_node
+        .send_file_channel(channel, &src, crate::file::FileKind::File)
+        .await
+        .unwrap();
 
     let rf = tokio::time::timeout(Duration::from_secs(5), b_f_r.recv())
         .await
@@ -1761,7 +1779,10 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     let payload2 = vec![0xCDu8; crate::file::CHUNK_SIZE * 2 + 77];
     let src2 = dir.path().join("from-bob.bin");
     std::fs::write(&src2, &payload2).unwrap();
-    let file_conv2 = bob_node.send_file_channel(channel, &src2).await.unwrap();
+    let file_conv2 = bob_node
+        .send_file_channel(channel, &src2, crate::file::FileKind::File)
+        .await
+        .unwrap();
 
     let rf2 = tokio::time::timeout(Duration::from_secs(5), a_f_r.recv())
         .await
@@ -2407,7 +2428,11 @@ async fn send_file_to_account_shows_in_sender_account_history() {
     let file_path = dir.path().join("hello.txt");
     std::fs::write(&file_path, b"hello file contents").unwrap();
     alice_node
-        .send_file_to_account(&bob_acct.account_id(), &file_path)
+        .send_file_to_account(
+            &bob_acct.account_id(),
+            &file_path,
+            crate::file::FileKind::File,
+        )
         .await
         .unwrap();
 
@@ -2774,7 +2799,7 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
     let file = dir.path().join("hello.txt");
     std::fs::write(&file, b"account file payload").unwrap();
     alice_node
-        .send_file_to_account(&bob_acct.account_id(), &file)
+        .send_file_to_account(&bob_acct.account_id(), &file, crate::file::FileKind::File)
         .await
         .unwrap();
 

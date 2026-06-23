@@ -18,6 +18,29 @@ const VIDEO_EXT = /\.(mp4|mov|webm|m4v|ogv)$/i;
 export const isImage = (name: string) => IMAGE_EXT.test(name);
 export const isVideo = (name: string) => VIDEO_EXT.test(name);
 
+/** Best-effort MIME from a file name. The inline <video>/<img> blob URL MUST carry a type,
+ * or macOS WKWebView can't pick a decoder and the video silently won't play. Used as a
+ * fallback when the manifest's mime is missing/empty. */
+export function mimeFromName(name: string): string | undefined {
+  const ext = name.toLowerCase().split(".").pop() ?? "";
+  const map: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    avif: "image/avif",
+    svg: "image/svg+xml",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm",
+    m4v: "video/x-m4v",
+    ogv: "video/ogg",
+  };
+  return map[ext];
+}
+
 // Only fetch the whole file into memory for inline rendering when it's small enough.
 // `read_file` decrypts and returns the entire file (bounded only by the 4 GiB hard cap),
 // so we gate on the manifest-reported size before pulling bytes through IPC.
@@ -52,6 +75,7 @@ export function fileGlyph(name: string) {
 export function useFileObjectUrl(
   fileConv: string,
   enabled: boolean,
+  mime?: string,
 ): string | null {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -60,7 +84,10 @@ export function useFileObjectUrl(
     let objectUrl: string | null = null;
     const show = (buf: ArrayBuffer) => {
       if (!alive) return;
-      objectUrl = URL.createObjectURL(new Blob([buf]));
+      // The blob MUST carry a MIME type or macOS WKWebView won't play an inline <video>.
+      objectUrl = URL.createObjectURL(
+        new Blob([buf], mime ? { type: mime } : {}),
+      );
       setUrl(objectUrl);
     };
     // Load from the DURABLE chat-media store first (survives chunk prune + restart); fall
@@ -79,6 +106,6 @@ export function useFileObjectUrl(
       alive = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileConv, enabled]);
+  }, [fileConv, enabled, mime]);
   return url;
 }

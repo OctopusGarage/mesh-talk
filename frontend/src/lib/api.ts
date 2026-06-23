@@ -67,8 +67,8 @@ export const chat = {
     emoji: string,
     remove: boolean,
   ) => invoke<void>("react_dm", { recipient, target, emoji, remove }),
-  sendFileDm: (recipient: string, path: string) =>
-    invoke<string>("send_file_dm", { recipient, path }),
+  sendFileDm: (recipient: string, path: string, media: boolean) =>
+    invoke<string>("send_file_dm", { recipient, path, media }),
 
   // Account-addressed (multi-device) messages
   sendToAccount: (
@@ -86,8 +86,8 @@ export const chat = {
     emoji: string,
     remove: boolean,
   ) => invoke<void>("react_account", { account, target, emoji, remove }),
-  sendFileToAccount: (account: string, path: string) =>
-    invoke<string>("send_file_to_account", { account, path }),
+  sendFileToAccount: (account: string, path: string, media: boolean) =>
+    invoke<string>("send_file_to_account", { account, path, media }),
 
   // Channels
   createChannel: (name: string, memberIds: string[]) =>
@@ -113,8 +113,8 @@ export const chat = {
     emoji: string,
     remove: boolean,
   ) => invoke<void>("react_channel", { channelId, target, emoji, remove }),
-  sendFileChannel: (channelId: string, path: string) =>
-    invoke<string>("send_file_channel", { channelId, path }),
+  sendFileChannel: (channelId: string, path: string, media: boolean) =>
+    invoke<string>("send_file_channel", { channelId, path, media }),
 
   // Contact trust / safety numbers
   getTrust: (accountId: string, currentFingerprint: string) =>

@@ -241,7 +241,8 @@ export function ConversationView() {
         void (async () => {
           for (const path of p.paths) {
             try {
-              await sendFileRef.current(path);
+              // Drag-dropped files are attachments (tray), not inline media.
+              await sendFileRef.current(path, false);
             } catch (e) {
               setErrorRef.current(
                 t("composer.couldntOpenFile", { error: errorMessage(e) }),
@@ -320,7 +321,8 @@ export function ConversationView() {
   const sendImageBytes = async (bytes: Uint8Array, ext: string) => {
     try {
       const path = await chatApi.writeTempFile(Array.from(bytes), ext);
-      await sendFile(path);
+      // Image button / paste / screenshot → media intent (inline preview).
+      await sendFile(path, true);
     } catch (e) {
       setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
     }
@@ -490,7 +492,8 @@ export function ConversationView() {
         onAttach={async () => {
           try {
             const path = await openFileDialog({ multiple: false });
-            if (typeof path === "string") await sendFile(path);
+            // Attach button → generic attachment (lands in the received-files tray).
+            if (typeof path === "string") await sendFile(path, false);
           } catch (e) {
             setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
           }

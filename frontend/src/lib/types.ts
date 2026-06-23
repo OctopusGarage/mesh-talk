@@ -34,6 +34,7 @@ export interface HistoryFileInfo {
   name: string;
   size: number;
   mime: string;
+  media: boolean; // inline media (media button) vs attachment (attach button), by intent
 }
 
 export interface HistoryItem {
@@ -201,6 +202,7 @@ export interface FileReceivedEvent {
   size: number;
   mime: string;
   file_conv: string;
+  media: boolean; // inline media (media button) vs attachment (attach button), by intent
 }
 
 export interface FileProgressEvent {

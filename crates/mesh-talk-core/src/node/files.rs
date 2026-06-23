@@ -9,7 +9,8 @@ use super::*;
 use crate::eventlog::event::{Author, ConversationId, EventKind};
 use crate::file::{
     chunk_count_for, chunk_hash, file_checksum, generate_file_nonce, open_chunk_for,
-    reassemble_and_verify, seal_chunk_indexed, AnyManifest, FileKey, FileManifestV2, CHUNK_SIZE,
+    reassemble_and_verify, seal_chunk_indexed, AnyManifest, FileKey, FileKind, FileManifestV2,
+    FileManifestV3, CHUNK_SIZE,
 };
 use crate::node::conversation::dm_conversation_id;
 use sha2::{Digest, Sha256};
@@ -34,8 +35,10 @@ impl Node {
         self: &Arc<Self>,
         recipient: &str,
         path: &Path,
+        kind: FileKind,
     ) -> Result<ConversationId, NodeError> {
-        self.send_file_dm_progress(recipient, path, |_| {}).await
+        self.send_file_dm_progress(recipient, path, kind, |_| {})
+            .await
     }
 
     /// [`Node::send_file_dm`] with a progress callback invoked as chunks are sealed.
@@ -43,6 +46,7 @@ impl Node {
         self: &Arc<Self>,
         recipient: &str,
         path: &Path,
+        kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
         let peer = self
@@ -53,7 +57,7 @@ impl Node {
             .cloned()
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
 
-        let (manifest, file_conv) = self.stage_file_blocking(path, on_progress).await?;
+        let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         let sealed = crate::dm::seal(&self.identity, &peer.public.x25519_pub, &manifest.encode())
             .map_err(NodeError::Seal)?;
         let dm_conv = dm_conversation_id(&self.identity.public(), &peer.public);
@@ -74,8 +78,9 @@ impl Node {
         self: &Arc<Self>,
         target_account_id: &str,
         path: &Path,
+        kind: FileKind,
     ) -> Result<ConversationId, NodeError> {
-        self.send_file_to_account_progress(target_account_id, path, |_| {})
+        self.send_file_to_account_progress(target_account_id, path, kind, |_| {})
             .await
     }
 
@@ -84,6 +89,7 @@ impl Node {
         self: &Arc<Self>,
         target_account_id: &str,
         path: &Path,
+        kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
         let dests = self.account_fanout_targets(target_account_id);
@@ -94,7 +100,7 @@ impl Node {
             return Err(NodeError::UnknownPeer(target_account_id.to_string()));
         }
 
-        let (manifest, file_conv) = self.stage_file_blocking(path, on_progress).await?;
+        let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         let manifest_bytes = manifest.encode();
         // Record the outgoing file ONCE under the account conversation (the UI's host
         // conversation for this contact), so it shows as our own message in account
@@ -134,8 +140,10 @@ impl Node {
         self: &Arc<Self>,
         channel: ConversationId,
         path: &Path,
+        kind: FileKind,
     ) -> Result<ConversationId, NodeError> {
-        self.send_file_channel_progress(channel, path, |_| {}).await
+        self.send_file_channel_progress(channel, path, kind, |_| {})
+            .await
     }
 
     /// [`Node::send_file_channel`] with a progress callback.
@@ -143,9 +151,10 @@ impl Node {
         self: &Arc<Self>,
         channel: ConversationId,
         path: &Path,
+        kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
-        let (manifest, file_conv) = self.stage_file_blocking(path, on_progress).await?;
+        let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         // Publish our sender-key distribution before the first seal (see
         // `send_channel_message_reply`).
         let (members, already_distributed) = {
@@ -184,11 +193,12 @@ impl Node {
     async fn stage_file_blocking(
         self: &Arc<Self>,
         path: &Path,
+        kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
-    ) -> Result<(FileManifestV2, ConversationId), NodeError> {
+    ) -> Result<(FileManifestV3, ConversationId), NodeError> {
         let node = Arc::clone(self);
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || node.stage_file(&path, on_progress))
+        tokio::task::spawn_blocking(move || node.stage_file(&path, kind, on_progress))
             .await
             .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
     }
@@ -200,8 +210,9 @@ impl Node {
     pub(in crate::node) fn stage_file(
         &self,
         path: &Path,
+        kind: FileKind,
         mut on_progress: impl FnMut(FileProgress),
-    ) -> Result<(FileManifestV2, ConversationId), NodeError> {
+    ) -> Result<(FileManifestV3, ConversationId), NodeError> {
         let size = std::fs::metadata(path)
             .map_err(|e| NodeError::File(format!("stat file: {e}")))?
             .len();
@@ -241,27 +252,30 @@ impl Node {
             });
         }
 
-        // MEDIA vs ATTACHMENT split (storage side): an image/screenshot/video is ALSO copied
-        // into the durable chat-media store keyed by its file_conv, so the inline preview
-        // loads from there (surviving chunk prune + restart) instead of the transient chunks.
-        // A generic attachment is NOT written here — it keeps the chunks + manual-save flow.
-        if crate::node::media_store::is_media_name(&name) {
+        // MEDIA vs ATTACHMENT split (storage side) — now driven by the sender's INTENT, not
+        // the file extension: only a file sent via the media button is copied into the
+        // durable chat-media store (for the inline preview, surviving chunk prune + restart).
+        // An attachment keeps the chunks + manual-save flow even if it's an image/video.
+        if kind == FileKind::Media {
             // Best-effort: a media-store write failure must not fail the send (the chunked
             // transfer is the source of truth on the wire); we just lose the durable preview.
             let _ = self.media.store_from_path(file_conv, &name, path);
         }
 
-        let manifest = FileManifestV2 {
-            name,
-            size,
-            mime: "application/octet-stream".to_string(),
-            checksum: whole.finalize().into(),
-            file_key: *key.as_bytes(),
-            file_nonce,
-            file_conv,
-            chunk_size: CHUNK_SIZE as u32,
-            chunk_count,
-            chunk_hashes,
+        let manifest = FileManifestV3 {
+            v2: FileManifestV2 {
+                name,
+                size,
+                mime: "application/octet-stream".to_string(),
+                checksum: whole.finalize().into(),
+                file_key: *key.as_bytes(),
+                file_nonce,
+                file_conv,
+                chunk_size: CHUNK_SIZE as u32,
+                chunk_count,
+                chunk_hashes,
+            },
+            kind,
         };
         Ok((manifest, file_conv))
     }
@@ -283,7 +297,7 @@ impl Node {
         record_conv: ConversationId,
         event_conv: ConversationId,
         seq: u64,
-        manifest: &FileManifestV2,
+        manifest: &FileManifestV3,
     ) {
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         // Resolve the just-appended manifest event's content-addressed id + wall-clock.
@@ -313,7 +327,7 @@ impl Node {
             );
         let mut files = self.files.lock().expect("files mutex not poisoned");
         files.mark_emitted(event_id);
-        files.record(AnyManifest::V2(manifest.clone()));
+        files.record(AnyManifest::V3(manifest.clone()));
     }
 
     /// Read durable chat-media bytes for `file_conv` from the media store, for inline
@@ -338,16 +352,21 @@ impl Node {
     /// Returns true iff it newly persisted media. Best-effort — failures are swallowed and
     /// retried on the next sync tick.
     pub(in crate::node) fn persist_media_if_complete(&self, file_conv: ConversationId) -> bool {
-        // Resolve the (manifest) name to decide media-vs-attachment + skip if already stored.
-        let name = {
+        // Decide media-vs-attachment by the sender's INTENT (manifest kind); for legacy
+        // manifests with no kind, fall back to the filename heuristic. Only media is copied
+        // to the durable store; an attachment keeps the chunks + manual-save flow.
+        let (name, media) = {
             let files = self.files.lock().expect("files mutex not poisoned");
-            match files.manifest(&file_conv) {
-                Some(m) => m.name().to_string(),
-                None => return false,
-            }
+            let Some(m) = files.manifest(&file_conv) else {
+                return false;
+            };
+            (
+                m.name().to_string(),
+                crate::node::media_store::manifest_is_media(m),
+            )
         };
-        if !crate::node::media_store::is_media_name(&name) {
-            return false; // generic attachment — never written to the media store
+        if !media {
+            return false; // attachment — never written to the media store
         }
         if self.media.contains(file_conv) {
             return false; // already durable
@@ -418,7 +437,7 @@ impl Node {
         match &manifest {
             AnyManifest::V1(m) => reassemble_and_verify(m, &chunks)
                 .map_err(|e| NodeError::File(format!("reassemble: {e}"))),
-            AnyManifest::V2(m) => {
+            AnyManifest::V2(_) | AnyManifest::V3(_) => {
                 let mut out = Vec::new();
                 for (i, ct) in chunks.iter().enumerate() {
                     out.extend_from_slice(
@@ -426,7 +445,7 @@ impl Node {
                             .map_err(|e| NodeError::File(format!("open chunk {i}: {e}")))?,
                     );
                 }
-                if file_checksum(&out) != m.checksum {
+                if file_checksum(&out) != manifest.checksum() {
                     return Err(NodeError::File("checksum mismatch".into()));
                 }
                 Ok(out)
@@ -532,10 +551,7 @@ impl Node {
                 .flush()
                 .map_err(|e| NodeError::File(format!("flush: {e}")))?;
         }
-        let expected = match &manifest {
-            AnyManifest::V2(m) => m.checksum,
-            _ => unreachable!(),
-        };
+        let expected = manifest.checksum();
         let actual: [u8; 32] = whole.finalize().into();
         if actual != expected {
             return Err(NodeError::File("whole-file checksum mismatch".into()));
