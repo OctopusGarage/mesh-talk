@@ -12,7 +12,8 @@
     "copy": "複製",
     "copied": "已複製",
     "clear": "清除",
-    "close": "關閉"
+    "close": "關閉",
+    "dismiss": "忽略"
   },
   "avatar": {
     "set": "設定頭像…",
@@ -74,7 +75,9 @@
     "darkMode": "深色模式",
     "toggleTheme": "切換佈景主題",
     "moreActions": "更多",
-    "resize": "調整側邊欄寬度"
+    "resize": "調整側邊欄寬度",
+    "strandedAlone": "找不到人？試試無網直連",
+    "strandedNoNetwork": "未連接任何網路 · 設定直連"
   },
   "conversation": {
     "noneSelectedTitle": "未選擇對話",
@@ -304,5 +307,19 @@
     "version": "版本 {{version}}",
     "sourceRepo": "原始碼儲存庫",
     "license": "授權條款（MIT）"
+  },
+  "offlineConnect": {
+    "trigger": "無網直連引導",
+    "title": "沒有 Wi-Fi 也能連",
+    "intro": "不需要路由器或網際網路。一台裝置開熱點，另一台連上去，Mesh-Talk 會自動找到對方，訊息依然端對端加密。",
+    "introNoNetwork": "這台裝置還沒連任何網路。不需要路由器或網際網路——一台開熱點，另一台連上，Mesh-Talk 會自動把雙方連起來，訊息依然端對端加密。",
+    "hostTitle": "一台裝置開熱點",
+    "hostMac": "macOS：系統設定 → 一般 → 共享 → 網際網路共享（或開啟個人熱點）。",
+    "hostWin": "Windows：設定 → 網路和網際網路 → 行動熱點。",
+    "hostLinux": "Linux：網路選單 → 開啟 Wi-Fi 熱點。",
+    "joinTitle": "另一台連上這個熱點",
+    "joinBody": "把第二台裝置連到這個熱點，然後重新開啟 Mesh-Talk。幾秒內雙方就會出現在彼此的清單裡——也可以開啟網路診斷點「重新掃描」。",
+    "wiredNote": "完全沒有 Wi-Fi？兩台裝置之間用網路線或 USB 網路共享，效果一樣。",
+    "gotIt": "知道了"
   }
 }

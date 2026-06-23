@@ -12,7 +12,8 @@
     "copy": "Copiar",
     "copied": "copiado",
     "clear": "Borrar",
-    "close": "Cerrar"
+    "close": "Cerrar",
+    "dismiss": "Descartar"
   },
   "avatar": {
     "set": "Establecer foto…",
@@ -74,7 +75,9 @@
     "darkMode": "Modo oscuro",
     "toggleTheme": "Cambiar tema",
     "moreActions": "Más",
-    "resize": "Redimensionar barra lateral"
+    "resize": "Redimensionar barra lateral",
+    "strandedAlone": "¿No ves a nadie? Conecta sin Wi-Fi",
+    "strandedNoNetwork": "Sin red — crea un enlace directo"
   },
   "conversation": {
     "noneSelectedTitle": "Ninguna conversación seleccionada",
@@ -304,5 +307,19 @@
     "version": "Versión {{version}}",
     "sourceRepo": "Repositorio de código",
     "license": "Licencia (MIT)"
+  },
+  "offlineConnect": {
+    "trigger": "Conectar sin Wi-Fi",
+    "title": "Conecta sin Wi-Fi",
+    "intro": "No hace falta router ni internet. Un dispositivo comparte una zona Wi-Fi, el otro se conecta, y Mesh-Talk los encuentra automáticamente. Los mensajes siguen cifrados de extremo a extremo.",
+    "introNoNetwork": "Este dispositivo aún no está en ninguna red. No hace falta router ni internet: uno comparte una zona Wi-Fi, el otro se conecta y Mesh-Talk los enlaza automáticamente, con los mensajes cifrados de extremo a extremo.",
+    "hostTitle": "Un dispositivo comparte una zona Wi-Fi",
+    "hostMac": "macOS: Ajustes del sistema → General → Compartir → Compartir Internet (o activa la zona personal).",
+    "hostWin": "Windows: Configuración → Red e Internet → Zona con cobertura inalámbrica móvil.",
+    "hostLinux": "Linux: menú de red → Activar zona Wi-Fi.",
+    "joinTitle": "El otro dispositivo se conecta",
+    "joinBody": "Conecta el segundo dispositivo a esa zona Wi-Fi y vuelve a abrir Mesh-Talk. Apareceréis en la lista del otro en segundos, o abre el diagnóstico de red y pulsa Reescanear.",
+    "wiredNote": "¿Sin Wi-Fi? Un cable Ethernet o el anclaje por USB entre los dos dispositivos funciona igual.",
+    "gotIt": "Entendido"
   }
 }

@@ -12,7 +12,8 @@
     "copy": "複製",
     "copied": "複製咗",
     "clear": "清走",
-    "close": "閂"
+    "close": "閂",
+    "dismiss": "唔理佢"
   },
   "avatar": {
     "set": "設定頭像…",
@@ -74,7 +75,9 @@
     "darkMode": "深色模式",
     "toggleTheme": "切換主題",
     "moreActions": "更多",
-    "resize": "調整側邊欄闊度"
+    "resize": "調整側邊欄闊度",
+    "strandedAlone": "搵唔到人？試吓無網直連",
+    "strandedNoNetwork": "未連到任何網路 · 設定直連"
   },
   "conversation": {
     "noneSelectedTitle": "仲未揀對話",
@@ -304,5 +307,19 @@
     "version": "版本 {{version}}",
     "sourceRepo": "原始碼儲存庫",
     "license": "授權（MIT）"
+  },
+  "offlineConnect": {
+    "trigger": "無網直連教學",
+    "title": "冇 Wi-Fi 都連到",
+    "intro": "唔使路由器或者上網。一部機開熱點，另一部連上去，Mesh-Talk 會自動搵到對方，訊息一樣係端到端加密。",
+    "introNoNetwork": "呢部機仲未連到任何網路。唔使路由器或者上網——一部開熱點，另一部連上，Mesh-Talk 會自動將雙方連埋一齊，訊息一樣係端到端加密。",
+    "hostTitle": "一部機開熱點",
+    "hostMac": "macOS：系統設定 → 一般 → 共享 → 互聯網共享（或者開個人熱點）。",
+    "hostWin": "Windows：設定 → 網路同互聯網 → 流動熱點。",
+    "hostLinux": "Linux：網路選單 → 開 Wi-Fi 熱點。",
+    "joinTitle": "另一部連上呢個熱點",
+    "joinBody": "將第二部機連去呢個熱點，跟住重新開 Mesh-Talk。幾秒內雙方就會喺對方個列表度出現——又或者開網路診斷㩒「重新掃描」。",
+    "wiredNote": "完全冇 Wi-Fi？兩部機之間用網線或者 USB 網路共享，一樣得。",
+    "gotIt": "明白"
   }
 }

@@ -12,6 +12,7 @@ import {
   ShieldAlert,
   Trash2,
   Wifi,
+  WifiOff,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -27,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IdentityGlyph, PresenceDot } from "@/components/identity";
+import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { diag, obs } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { formatAgo, formatTime, shortId } from "@/lib/format";
@@ -546,8 +548,10 @@ function CommandLine({ cmd }: { cmd: string }) {
  * port is the per-session TCP port. */
 function Troubleshoot({ info }: { info: DiagNetworkInfo | null }) {
   const { t } = useTranslation();
+  const [offlineOpen, setOfflineOpen] = useState(false);
   const udp = info?.discovery_port ?? 47474;
   const tcp = info?.listen_tcp_port ?? 0;
+  const noNetwork = info?.interfaces.length === 0;
   const app = "mesh-talk";
   return (
     <Panel
@@ -557,6 +561,20 @@ function Troubleshoot({ info }: { info: DiagNetworkInfo | null }) {
       <p className="text-xs leading-relaxed text-muted-foreground">
         {t("diagnostics.troubleshootHint", { udp, tcp })}
       </p>
+      <Button
+        variant="secondary"
+        size="sm"
+        data-testid="diagnostics-offline-connect"
+        onClick={() => setOfflineOpen(true)}
+      >
+        <WifiOff className="h-3.5 w-3.5" />
+        {t("offlineConnect.trigger")}
+      </Button>
+      <OfflineConnectDialog
+        open={offlineOpen}
+        onOpenChange={setOfflineOpen}
+        noNetwork={noNetwork}
+      />
       <div className="space-y-3">
         <div className="space-y-1">
           <p className="font-mono text-[11px] font-medium uppercase tracking-wider text-muted-foreground">

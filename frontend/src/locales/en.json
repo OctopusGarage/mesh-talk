@@ -12,7 +12,8 @@
     "copy": "Copy",
     "copied": "copied",
     "clear": "Clear",
-    "close": "Close"
+    "close": "Close",
+    "dismiss": "Dismiss"
   },
   "avatar": {
     "set": "Set photo…",
@@ -74,7 +75,9 @@
     "darkMode": "Dark mode",
     "toggleTheme": "Toggle theme",
     "moreActions": "More",
-    "resize": "Resize sidebar"
+    "resize": "Resize sidebar",
+    "strandedAlone": "Can't see anyone? Connect without Wi-Fi",
+    "strandedNoNetwork": "Not on any network — set up a direct link"
   },
   "conversation": {
     "noneSelectedTitle": "No conversation selected",
@@ -304,5 +307,19 @@
     "version": "Version {{version}}",
     "sourceRepo": "Source repository",
     "license": "License (MIT)"
+  },
+  "offlineConnect": {
+    "trigger": "Connect without Wi-Fi",
+    "title": "Connect without Wi-Fi",
+    "intro": "No router or internet needed. One device shares a hotspot, the other joins — Mesh-Talk finds it automatically, and messages stay end-to-end encrypted.",
+    "introNoNetwork": "This device isn't on any network yet. No router or internet needed — one device shares a hotspot, the other joins, and Mesh-Talk links them automatically with messages still end-to-end encrypted.",
+    "hostTitle": "One device shares a hotspot",
+    "hostMac": "macOS: System Settings → General → Sharing → Internet Sharing (or turn on Personal Hotspot).",
+    "hostWin": "Windows: Settings → Network & Internet → Mobile hotspot.",
+    "hostLinux": "Linux: network menu → Turn On Wi-Fi Hotspot.",
+    "joinTitle": "The other device joins it",
+    "joinBody": "Connect the second device to that hotspot, then reopen Mesh-Talk. You'll appear in each other's list within seconds — or open Network diagnostics and tap Rescan.",
+    "wiredNote": "No Wi-Fi at all? An Ethernet cable or USB tethering between the two devices works the same way.",
+    "gotIt": "Got it"
   }
 }

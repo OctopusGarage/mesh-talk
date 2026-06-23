@@ -12,7 +12,8 @@
     "copy": "复制",
     "copied": "已复制",
     "clear": "清空",
-    "close": "关闭"
+    "close": "关闭",
+    "dismiss": "忽略"
   },
   "avatar": {
     "set": "设置头像…",
@@ -74,7 +75,9 @@
     "darkMode": "深色模式",
     "toggleTheme": "切换主题",
     "moreActions": "更多",
-    "resize": "调整侧边栏宽度"
+    "resize": "调整侧边栏宽度",
+    "strandedAlone": "找不到人？试试无网直连",
+    "strandedNoNetwork": "未连接任何网络 · 设置直连"
   },
   "conversation": {
     "noneSelectedTitle": "未选择会话",
@@ -304,5 +307,19 @@
     "version": "版本 {{version}}",
     "sourceRepo": "源代码仓库",
     "license": "许可证（MIT）"
+  },
+  "offlineConnect": {
+    "trigger": "无网直连引导",
+    "title": "没有 Wi-Fi 也能连",
+    "intro": "不需要路由器或互联网。一台设备开热点，另一台连上去，Mesh-Talk 会自动找到对方，消息依然端到端加密。",
+    "introNoNetwork": "这台设备还没连任何网络。不需要路由器或互联网——一台开热点，另一台连上，Mesh-Talk 会自动把双方连起来，消息依然端到端加密。",
+    "hostTitle": "一台设备开热点",
+    "hostMac": "macOS：系统设置 → 通用 → 共享 → 互联网共享（或打开个人热点）。",
+    "hostWin": "Windows：设置 → 网络和 Internet → 移动热点。",
+    "hostLinux": "Linux：网络菜单 → 开启 Wi-Fi 热点。",
+    "joinTitle": "另一台连上这个热点",
+    "joinBody": "把第二台设备连到这个热点，然后重新打开 Mesh-Talk。几秒内双方就会出现在彼此的列表里——也可以打开网络诊断点「重新扫描」。",
+    "wiredNote": "完全没有 Wi-Fi？两台设备之间用网线或 USB 网络共享，效果一样。",
+    "gotIt": "知道了"
   }
 }

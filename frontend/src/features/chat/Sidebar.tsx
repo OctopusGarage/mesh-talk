@@ -5,10 +5,12 @@ import {
   Moon,
   Network,
   Wifi,
+  WifiOff,
   Pencil,
   Pin,
   PinOff,
   Sun,
+  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
@@ -40,10 +42,11 @@ import { SearchDialog } from "./SearchDialog";
 import { FilesTray } from "./FilesTray";
 import { LinkDeviceDialog } from "./LinkDeviceDialog";
 import { DiagnosticsDialog } from "./DiagnosticsDialog";
+import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
 import { useAuth } from "@/store/auth";
-import { chat } from "@/lib/api";
+import { chat, diag } from "@/lib/api";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { convKey, useChat, type Conversation } from "@/store/chat";
 import {
@@ -374,13 +377,21 @@ export function Sidebar() {
   // peers around us share. Polled (it can change when you switch networks); null when wired
   // or the OS withholds it.
   const [ssid, setSsid] = useState<string | null>(null);
+  // Whether this device has no usable (non-loopback) network interface at all — the strongest
+  // "you're stranded" signal, which sharpens the offline-connect prompt's wording.
+  const [noNetwork, setNoNetwork] = useState(false);
   useEffect(() => {
     let alive = true;
-    const refresh = () =>
+    const refresh = () => {
       chat
         .networkName()
         .then((n) => alive && setSsid(n))
         .catch(() => {});
+      diag
+        .networkInfo()
+        .then((i) => alive && setNoNetwork(i.interfaces.length === 0))
+        .catch(() => {});
+    };
     refresh();
     const id = setInterval(refresh, 60_000);
     return () => {
@@ -388,6 +399,20 @@ export function Sidebar() {
       clearInterval(id);
     };
   }, []);
+
+  // "Offline direct connect" prompt — surfaces only when stranded: the node is up but, after a
+  // grace period (discovery's startup burst gets a fair chance), still nobody is online around
+  // us. Dismissible per session; also always reachable from the diagnostics Troubleshoot tab.
+  const [offlineOpen, setOfflineOpen] = useState(false);
+  const [strandedDismissed, setStrandedDismissed] = useState(false);
+  const [graceElapsed, setGraceElapsed] = useState(false);
+  useEffect(() => {
+    if (!ready) return;
+    const id = setTimeout(() => setGraceElapsed(true), 20_000);
+    return () => clearTimeout(id);
+  }, [ready]);
+  const stranded =
+    ready && graceElapsed && onlinePeople === 0 && !strandedDismissed;
 
   // Roving keyboard navigation across the conversation rows. Arrow Up/Down moves focus
   // between the option buttons within the list (Enter/Space already open via the native
@@ -612,6 +637,41 @@ export function Sidebar() {
           />
         ))}
       </nav>
+
+      {/* Stranded prompt: nobody's online and the grace window has passed — offer the
+          offline direct-connect guide. Quiet, dismissible, and only here when it's earned. */}
+      {stranded && (
+        <div
+          data-testid="stranded-prompt"
+          className="flex items-center gap-2 border-t border-signal/20 bg-signal/[0.06] px-2.5 py-1.5 text-xs"
+        >
+          <WifiOff className="h-3.5 w-3.5 shrink-0 text-signal" />
+          <button
+            type="button"
+            data-testid="stranded-open"
+            onClick={() => setOfflineOpen(true)}
+            className="flex-1 truncate text-left font-medium text-foreground/90 hover:text-foreground hover:underline"
+          >
+            {noNetwork
+              ? t("sidebar.strandedNoNetwork")
+              : t("sidebar.strandedAlone")}
+          </button>
+          <button
+            type="button"
+            data-testid="stranded-dismiss"
+            onClick={() => setStrandedDismissed(true)}
+            title={t("common.dismiss")}
+            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+      <OfflineConnectDialog
+        open={offlineOpen}
+        onOpenChange={setOfflineOpen}
+        noNetwork={noNetwork}
+      />
 
       {/* Bottom-left footer: the utility overflow menu (settings/diagnostics/etc.) sits
           first so the top stays clean, then the LAN status + brand mark. */}
