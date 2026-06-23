@@ -47,6 +47,9 @@ argon2 = { workspace = true }
 socket2 = { workspace = true }
 if-addrs = { workspace = true }
 clap = { workspace = true }
+# Logging facade only (no logger backend in the SDK); the host app's `log` logger captures
+# these. Used for sync-cost telemetry so we can evaluate reconciliation scaling on real data.
+log = { workspace = true }
 
 # Unix-only: a `kill(pid, 0)` liveness probe so the CLI's data-dir lockfile can detect a
 # lock left by a crashed/killed node and reclaim it. Already in the build graph transitively

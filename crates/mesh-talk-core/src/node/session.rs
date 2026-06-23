@@ -10,8 +10,9 @@
 
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::sync::{
-    build_request, handle_followup, handle_request_bounded, handle_response_bounded, ApplyReport,
-    SyncFollowup, SyncRequest, SyncResponse, SyncStore, MAX_REJECTED_DETAIL,
+    build_request, fingerprint, handle_followup, handle_request_bounded, handle_response_bounded,
+    ApplyReport, FpRequest, FpResponse, SyncFollowup, SyncRequest, SyncResponse, SyncStore,
+    MAX_REJECTED_DETAIL,
 };
 use crate::transport::{SecureChannel, TransportError, MAX_PLAINTEXT};
 use bincode::Options;
@@ -23,6 +24,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// non-applying events forever can't spin us indefinitely). Generous: a round
 /// transfers up to ~one frame, so this bounds a single conversation's transfer.
 const MAX_SYNC_ROUNDS: usize = 10_000;
+
+/// Bytes per event id (a 32-byte hash) — used to estimate the `have`-set bandwidth in the
+/// sync-cost telemetry below.
+const EVENT_ID_BYTES: usize = 32;
 
 /// Event-ids per `have` chunk frame. 32 B/id; this keeps a chunk well under
 /// `MAX_PLAINTEXT` (65519) with room for the wrappers.
@@ -50,6 +55,9 @@ enum SyncWire {
     Followup(SyncFollowup),
     ReqHave(HaveChunk),
     RespHave(HaveChunk),
+    // Appended (stable discriminants) for the whole-conversation fingerprint short-circuit.
+    FpRequest(FpRequest),
+    FpResponse(FpResponse),
 }
 
 /// One chunk of a streamed `have` id-set.
@@ -182,12 +190,56 @@ where
     S: SyncStore,
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
+    // id-set; if the responder's matches, the logs are identical and we skip the O(N)
+    // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
+    // the full reconciliation below. (Correctness: a digest match means equal sets; a
+    // false match is cryptographically negligible and, since ingest re-validates, could
+    // only skip a diff — never corrupt — so this is safe.)
+    {
+        let fp = {
+            let store = store.lock().expect("store mutex not poisoned");
+            fingerprint(store.event_ids(&conversation))
+        };
+        channel
+            .send(&encode(&SyncWire::FpRequest(FpRequest {
+                conversation,
+                fingerprint: fp,
+            }))?)
+            .await?;
+        match decode(&channel.recv().await?)? {
+            SyncWire::FpResponse(FpResponse { matched: true }) => {
+                log::debug!(
+                    target: "mesh_talk::sync",
+                    "sync conv={} fp_match skipped",
+                    hex::encode(&conversation.as_bytes()[..4]),
+                );
+                return Ok(ApplyReport::default());
+            }
+            SyncWire::FpResponse(FpResponse { matched: false }) => {
+                // Diverged — run the full id-set reconciliation below.
+            }
+            _ => return Err(SessionError::UnexpectedMessage),
+        }
+    }
+
     let mut total = ApplyReport::default();
-    for _ in 0..MAX_SYNC_ROUNDS {
+    // Sync-cost telemetry (see node/session.rs sync docs): we re-stream the FULL id-set
+    // (`have`) every round in both directions regardless of how small the diff is, so the
+    // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
+    // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
+    let mut rounds = 0u32;
+    let mut first_have = 0usize;
+    let mut pushed_total = 0usize;
+    for round in 0..MAX_SYNC_ROUNDS {
         let have = {
             let store = store.lock().expect("store mutex not poisoned");
             build_request(&*store, conversation).have
         };
+        if round == 0 {
+            first_have = have.len();
+        }
+        rounds += 1;
         // Opening Request carries an empty inline have; the real set is streamed.
         channel
             .send(&encode(&SyncWire::Request(SyncRequest {
@@ -210,6 +262,7 @@ where
         };
         let made_progress = report.applied > 0;
         let more_to_push = !followup.events.is_empty();
+        pushed_total += followup.events.len();
 
         channel
             .send(&encode(&SyncWire::Followup(followup))?)
@@ -227,6 +280,23 @@ where
             break;
         }
     }
+    // One line per conversation sync. `have` is the id-set size N we streamed (≈32·N bytes
+    // each way, per round); applied/pushed are the actual diff. When `have` ≫ applied+pushed
+    // across many syncs, the O(N) id-set is the dominant waste — the signal that range-based
+    // reconciliation is worth it. Greppable target so the diagnostics log can filter it.
+    let diff = total.applied + pushed_total;
+    log::debug!(
+        target: "mesh_talk::sync",
+        "sync conv={} have={} have_kib={} applied={} dup={} pushed={} diff={} rounds={}",
+        hex::encode(&conversation.as_bytes()[..4]),
+        first_have,
+        first_have * EVENT_ID_BYTES / 1024,
+        total.applied,
+        total.duplicates,
+        pushed_total,
+        diff,
+        rounds,
+    );
     Ok(total)
 }
 
@@ -300,10 +370,24 @@ where
             }
             Ok(Served::Handled(conversation))
         }
-        // A Response, or a stray have-chunk outside its stream, is out of protocol order.
-        SyncWire::Response(_) | SyncWire::ReqHave(_) | SyncWire::RespHave(_) => {
-            Err(SessionError::UnexpectedMessage)
+        SyncWire::FpRequest(req) => {
+            // Compare the requester's whole-set digest to ours. On match the requester
+            // skips the full exchange; on mismatch it follows up with a normal Request.
+            let conversation = req.conversation;
+            let matched = {
+                let store = store.lock().expect("store mutex not poisoned");
+                fingerprint(store.event_ids(&conversation)) == req.fingerprint
+            };
+            channel
+                .send(&encode(&SyncWire::FpResponse(FpResponse { matched }))?)
+                .await?;
+            Ok(Served::Handled(conversation))
         }
+        // A Response/FpResponse, or a stray have-chunk outside its stream, is out of order.
+        SyncWire::Response(_)
+        | SyncWire::ReqHave(_)
+        | SyncWire::RespHave(_)
+        | SyncWire::FpResponse(_) => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -367,6 +451,137 @@ mod tests {
             "B received A's event via the sync round"
         );
         assert!(a_store.lock().unwrap().has(&event_id));
+    }
+
+    #[tokio::test]
+    async fn fingerprint_match_short_circuits_the_exchange() {
+        // A and B hold the IDENTICAL event set: the fingerprint probe must match and the
+        // O(N) have-set exchange must be skipped entirely (server serves only the probe).
+        let a_id = DeviceIdentity::generate();
+        let b_id = DeviceIdentity::generate();
+        let (a_io, b_io) = tokio::io::duplex(64 * 1024);
+
+        let event = Event::new(
+            &a_id,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"x".to_vec(),
+        );
+        let event_id = event.id;
+        let a_store = Mutex::new({
+            let mut log = EventLog::default();
+            log.append(event.clone()).unwrap();
+            log
+        });
+        let event_for_b = event.clone();
+
+        let server = tokio::spawn(async move {
+            let mut b_ch = SecureChannel::accept(b_io, &b_id).await.unwrap();
+            let b_store = Mutex::new({
+                let mut log = EventLog::default();
+                log.append(event_for_b).unwrap();
+                log
+            });
+            let mut handled = 0u32;
+            loop {
+                match serve_one(&mut b_ch, &b_store).await.unwrap() {
+                    Served::Closed => break,
+                    Served::Handled(_) => handled += 1,
+                }
+            }
+            handled
+        });
+
+        let mut a_ch = SecureChannel::connect(a_io, &a_id, None).await.unwrap();
+        let report = request_round(&mut a_ch, &a_store, conv()).await.unwrap();
+        drop(a_ch);
+        let handled = server.await.unwrap();
+
+        assert_eq!(report.applied, 0, "identical sets transfer no events");
+        assert_eq!(
+            handled, 1,
+            "only the fingerprint probe is served — the O(N) id-set exchange is skipped"
+        );
+        assert!(a_store.lock().unwrap().has(&event_id));
+    }
+
+    #[tokio::test]
+    async fn fingerprint_mismatch_merges_the_union_over_the_channel() {
+        // A and B SHARE one event but each also holds a unique one: the fingerprint probe
+        // must mismatch and the full reconciliation must merge to the UNION (both directions).
+        let a_id = DeviceIdentity::generate();
+        let b_id = DeviceIdentity::generate();
+        let (a_io, b_io) = tokio::io::duplex(64 * 1024);
+
+        let shared = Event::new(
+            &a_id,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"shared".to_vec(),
+        );
+        let only_a = Event::new(
+            &a_id,
+            conv(),
+            2,
+            vec![shared.id],
+            2,
+            0,
+            EventKind::Message,
+            b"a".to_vec(),
+        );
+        let only_b = Event::new(
+            &b_id,
+            conv(),
+            1,
+            vec![shared.id],
+            2,
+            0,
+            EventKind::Message,
+            b"b".to_vec(),
+        );
+        let (sid, aid, bid) = (shared.id, only_a.id, only_b.id);
+
+        let a_store = Mutex::new({
+            let mut log = EventLog::default();
+            log.append(shared.clone()).unwrap();
+            log.append(only_a).unwrap();
+            log
+        });
+        let shared_for_b = shared.clone();
+        let server = tokio::spawn(async move {
+            let mut b_ch = SecureChannel::accept(b_io, &b_id).await.unwrap();
+            let b_store = Mutex::new({
+                let mut log = EventLog::default();
+                log.append(shared_for_b).unwrap();
+                log.append(only_b).unwrap();
+                log
+            });
+            loop {
+                match serve_one(&mut b_ch, &b_store).await.unwrap() {
+                    Served::Closed => break,
+                    Served::Handled(_) => {}
+                }
+            }
+            b_store.into_inner().unwrap()
+        });
+
+        let mut a_ch = SecureChannel::connect(a_io, &a_id, None).await.unwrap();
+        request_round(&mut a_ch, &a_store, conv()).await.unwrap();
+        drop(a_ch);
+        let b_log = server.await.unwrap();
+
+        for id in [sid, aid, bid] {
+            assert!(a_store.lock().unwrap().has(&id), "A converged to the union");
+            assert!(b_log.has(&id), "B converged to the union");
+        }
     }
 
     #[tokio::test]

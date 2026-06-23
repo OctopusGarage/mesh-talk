@@ -20,6 +20,7 @@ use crate::eventlog::store::{AppendOutcome, EventLog};
 use crate::eventlog::LogError;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 /// Bytes reserved per sync frame for the message's non-event framing (enum tag,
@@ -69,6 +70,39 @@ pub struct SyncResponse {
 pub struct SyncFollowup {
     pub conversation: ConversationId,
     pub events: Vec<Event>,
+}
+
+/// A whole-conversation fingerprint probe sent before the id-set exchange: "here is a
+/// digest of my ENTIRE event-id set for this conversation." If the responder's digest
+/// matches, the two logs are identical and the O(N) have-set streaming is skipped — the
+/// common case on an idle drain tick (nothing changed since last sync).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FpRequest {
+    pub conversation: ConversationId,
+    pub fingerprint: [u8; 32],
+}
+
+/// The responder's verdict on an [`FpRequest`]: `true` ⇒ our id-sets are identical, skip
+/// reconciliation; `false` ⇒ fall through to the full id-set exchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FpResponse {
+    pub matched: bool,
+}
+
+/// A collision-resistant digest of a conversation's entire event-id SET. Order-independent
+/// (ids are sorted first) so two peers holding the same set always compute the same value,
+/// regardless of internal storage order. A match means the sets are equal → reconciliation
+/// can be skipped; because every event is signed and re-validated on ingest, a
+/// (cryptographically negligible) false match could at worst skip a real difference —
+/// recovered on a later sync — and can NEVER inject or corrupt history.
+pub fn fingerprint(mut ids: Vec<EventId>) -> [u8; 32] {
+    ids.sort_unstable();
+    let mut hasher = Sha256::new();
+    hasher.update((ids.len() as u64).to_le_bytes());
+    for id in &ids {
+        hasher.update(id.as_bytes());
+    }
+    hasher.finalize().into()
 }
 
 /// Outcome of ingesting a batch of received events.
@@ -276,6 +310,20 @@ mod tests {
 
     fn conv() -> ConversationId {
         ConversationId::new([1u8; 32])
+    }
+
+    #[test]
+    fn fingerprint_is_order_independent_and_set_sensitive() {
+        let a = EventId::new([1u8; 32]);
+        let b = EventId::new([2u8; 32]);
+        let c = EventId::new([3u8; 32]);
+        // Same SET in any order ⇒ identical fingerprint (so two peers always agree).
+        assert_eq!(fingerprint(vec![a, b, c]), fingerprint(vec![c, a, b]));
+        // A different set ⇒ different fingerprint (membership AND count are covered).
+        assert_ne!(fingerprint(vec![a, b]), fingerprint(vec![a, b, c]));
+        assert_ne!(fingerprint(vec![a, b]), fingerprint(vec![a, c]));
+        // Empty sets agree (an empty conversation also short-circuits).
+        assert_eq!(fingerprint(vec![]), fingerprint(vec![]));
     }
 
     /// Build a signed event in `conv()`.

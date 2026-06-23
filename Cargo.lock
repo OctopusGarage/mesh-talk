@@ -2564,6 +2564,7 @@ dependencies = [
  "hkdf",
  "if-addrs",
  "libc",
+ "log",
  "mesh-talk-core",
  "pbkdf2",
  "rand_chacha 0.3.1",
