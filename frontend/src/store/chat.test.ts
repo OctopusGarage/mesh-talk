@@ -243,6 +243,29 @@ describe("incoming events", () => {
     return stop;
   }
 
+  it("re-publishes our persisted own avatar on boot (so peers pull it after restart)", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "my_id":
+          return Promise.resolve("me");
+        case "account_id":
+          return Promise.resolve("myacct");
+        case "get_avatars":
+          // a previously-set own avatar, persisted across the restart
+          return Promise.resolve({ myacct: "data:image/png;base64,AAAA" });
+        default:
+          return Promise.resolve([]);
+      }
+    });
+    const stop = useChat.getState().start();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("publish_avatar", {
+        avatar: "data:image/png;base64,AAAA",
+      }),
+    );
+    stop();
+  });
+
   it("routes a DM to the sender's ACCOUNT conversation and bumps unread", async () => {
     const stop = await boot();
     captured.current!.onDm({

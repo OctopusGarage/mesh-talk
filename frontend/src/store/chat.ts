@@ -135,6 +135,9 @@ async function pollUntilReady(
       // pull avatars peers already propagated to us (durable across restart).
       useAvatars.getState().setOwnId(acct);
       void useAvatars.getState().loadPeers();
+      // Re-publish our own avatar so the node re-holds it and propagates to peers after a
+      // restart (otherwise contacts can't pull it until we manually re-set the photo).
+      void useAvatars.getState().reassertOwn();
       await get().refreshRoster();
       return true;
     } catch {

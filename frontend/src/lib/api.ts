@@ -48,6 +48,9 @@ export const chat = {
   /** Set the OS app-icon unread badge (dock/taskbar); 0 clears it. */
   setBadge: (count: number) => invoke<void>("set_badge", { count }),
 
+  /** The current Wi-Fi network name (SSID), or null if unknown (wired / no Wi-Fi / OS withholds it). */
+  networkName: () => invoke<string | null>("network_name"),
+
   listPeers: () => invoke<PeerInfo[]>("list_peers"),
   listAccounts: () => invoke<AccountInfo[]>("list_accounts"),
   listChannels: () => invoke<ChannelInfo[]>("list_channels"),

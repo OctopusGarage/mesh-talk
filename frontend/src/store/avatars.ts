@@ -36,6 +36,13 @@ interface AvatarsState {
    * the id is our own account id, also publish the change to peers as a signed profile.
    */
   setAvatar: (id: string, dataUrl: string | null) => Promise<void>;
+  /**
+   * Re-publish our persisted own avatar to peers on login. The node only re-broadcasts a
+   * profile to freshly-discovered peers if it's holding our current one in memory, and that
+   * cache is empty after a restart — so without this, a contact discovered after we relaunch
+   * never gets our photo until we manually re-set it. Re-asserting on boot fixes that.
+   */
+  reassertOwn: () => Promise<void>;
 }
 
 /** Stable empty map so a "no avatars yet" load keeps a constant ref. */
@@ -87,6 +94,22 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     } catch {
       // On failure, reconcile the local mirror from disk so it matches what was stored.
       await get().load();
+    }
+  },
+
+  reassertOwn: async () => {
+    // Ensure the persisted local table is loaded, then re-publish our own avatar (if any)
+    // so the node holds it again and propagates it to peers (including ones we discover
+    // later this session).
+    await get().load();
+    const { ownId, local } = get();
+    const mine = ownId ? local[ownId] : undefined;
+    if (mine) {
+      try {
+        await avatarsApi.publish(mine);
+      } catch {
+        // best-effort: a peer will still get it next time we change the avatar.
+      }
     }
   },
 }));

@@ -690,11 +690,102 @@ pub async fn write_temp_file(
 /// clears the badge. Best-effort — a platform without badge support just no-ops.
 #[tauri::command]
 pub async fn set_badge(app: tauri::AppHandle, count: u32) -> Result<(), CommandError> {
-    if let Some(window) = app.get_webview_window("main") {
-        let n = if count == 0 { None } else { Some(count as i64) };
-        let _ = window.set_badge_count(n);
-    }
+    let n = if count == 0 { None } else { Some(count as i64) };
+    // The macOS dock badge is set via NSApp.dockTile (AppKit), which MUST run on the main
+    // thread — but this async command runs on the Tauri runtime thread pool, so calling
+    // set_badge_count directly here silently no-ops (the dock number never appears).
+    // Hop onto the main thread to actually update the dock/taskbar badge.
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.set_badge_count(n);
+        }
+    })
+    .map_err(|e| CommandError::Internal(format!("set_badge: {e}")))?;
     Ok(())
+}
+
+/// The name (SSID) of the Wi-Fi network this machine is on, or `None` if it can't be
+/// determined (wired, no Wi-Fi, or the OS withholds it). Mesh-Talk is LAN-scoped, so the UI
+/// shows this to make "which network am I reachable on" obvious. Best-effort + platform-
+/// specific; never errors on a missing tool.
+#[tauri::command]
+pub async fn network_name() -> Result<Option<String>, CommandError> {
+    tokio::task::spawn_blocking(current_ssid)
+        .await
+        .map_err(|e| CommandError::Internal(format!("network_name: {e}")))
+}
+
+#[cfg(target_os = "macos")]
+fn current_ssid() -> Option<String> {
+    // `networksetup -getairportnetwork` is blocked without Location on recent macOS, but
+    // `system_profiler SPAirPortDataType` still reports the joined network: under a
+    // "Current Network Information:" line, the next line is "<SSID>:".
+    let out = std::process::Command::new("system_profiler")
+        .arg("SPAirPortDataType")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == "Current Network Information:" {
+            let ssid = lines.next()?.trim().trim_end_matches(':').trim();
+            return (!ssid.is_empty()).then(|| ssid.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn current_ssid() -> Option<String> {
+    let out = std::process::Command::new("netsh")
+        .args(["wlan", "show", "interfaces"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let l = line.trim();
+        // Match "SSID                   : Name" but not "BSSID".
+        if l.starts_with("SSID") && !l.starts_with("BSSID") {
+            if let Some((_, v)) = l.split_once(':') {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn current_ssid() -> Option<String> {
+    if let Ok(out) = std::process::Command::new("nmcli")
+        .args(["-t", "-f", "active,ssid", "dev", "wifi"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("yes:") {
+                let s = rest.trim();
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(out) = std::process::Command::new("iwgetid").arg("-r").output() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn current_ssid() -> Option<String> {
+    None
 }
 
 #[tauri::command]

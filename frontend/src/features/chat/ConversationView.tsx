@@ -197,6 +197,14 @@ export function ConversationView() {
     for (const p of peers) if (p.account_id) map.set(p.user_id, p.account_id);
     return map;
   }, [peers]);
+  // Resolve a channel author's device user_id → display name, so bubbles show names, not raw
+  // ids. Channel members win over the general roster (channel-specific naming).
+  const nameByDevice = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of peers) if (p.name) map.set(p.user_id, p.name);
+    for (const m of members) if (m.name) map.set(m.user_id, m.name);
+    return map;
+  }, [peers, members]);
   const key = active ? convKey(active) : "";
   const messages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
@@ -435,6 +443,7 @@ export function ConversationView() {
                     showAuthor={showAuthor}
                     isChannel={isChannel}
                     authorAvatarId={accountByDevice.get(m.who) ?? m.who}
+                    authorName={nameByDevice.get(m.who)}
                     fresh={motionOK && isFresh(m, i)}
                     reactions={m.id ? (reactionsByTarget.get(m.id) ?? []) : []}
                     selfReactionId={selfReactionId}

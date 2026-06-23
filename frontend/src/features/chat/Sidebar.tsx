@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LogOut,
   MoreHorizontal,
   Moon,
   Network,
+  Wifi,
   Pencil,
   Pin,
   PinOff,
@@ -41,6 +42,7 @@ import { DiagnosticsDialog } from "./DiagnosticsDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { AboutDialog } from "./AboutDialog";
 import { useAuth } from "@/store/auth";
+import { chat } from "@/lib/api";
 import { convKey, useChat, type Conversation } from "@/store/chat";
 import {
   presenceLabel,
@@ -358,6 +360,24 @@ export function Sidebar() {
   // Inline rename dialog state (a contact id + a draft alias). Kept local/primitive.
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // The Wi-Fi network (SSID) we're on — Mesh-Talk is LAN-scoped, so show which network the
+  // peers around us share. Polled (it can change when you switch networks); null when wired
+  // or the OS withholds it.
+  const [ssid, setSsid] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const refresh = () =>
+      chat
+        .networkName()
+        .then((n) => alive && setSsid(n))
+        .catch(() => {});
+    refresh();
+    const id = setInterval(refresh, 60_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   // Roving keyboard navigation across the conversation rows. Arrow Up/Down moves focus
   // between the option buttons within the list (Enter/Space already open via the native
@@ -586,9 +606,20 @@ export function Sidebar() {
           first so the top stays clean, then the LAN status + brand mark. */}
       <div className="flex items-center gap-1.5 border-t px-2 py-2 text-xs text-muted-foreground">
         <UtilityMenu />
-        <Network className="h-3.5 w-3.5 shrink-0 text-signal" />
-        <span className="flex-1 truncate">
-          {t("sidebar.contactsOnLan", { count: accounts.length })}
+        {ssid ? (
+          <Wifi className="h-3.5 w-3.5 shrink-0 text-signal" />
+        ) : (
+          <Network className="h-3.5 w-3.5 shrink-0 text-signal" />
+        )}
+        <span
+          className="flex-1 truncate"
+          title={
+            ssid
+              ? `${ssid} · ${t("sidebar.contactsOnLan", { count: accounts.length })}`
+              : undefined
+          }
+        >
+          {ssid ?? t("sidebar.contactsOnLan", { count: accounts.length })}
         </span>
         {/* App brand mark — quiet, in the status footer (distinct from the user's
             IdentityGlyph in the header above). */}

@@ -4,8 +4,9 @@ import { test, expect } from "./tauri-mock";
 // (not just the tiny preview). It once rendered <img src={img.src}> where loadImage had
 // already revoked that object URL → the viewport was blank (naturalWidth 0). The dialog
 // now holds its own live object URL for the viewport.
-const IMG =
-  "/Users/kingsonwu/programming/rust-src/mesh-talk/src-tauri/icons/icon.png";
+// A repo image, referenced RELATIVE to the Playwright cwd (frontend/) so it resolves on
+// every CI runner — an absolute path would only exist on the author's machine.
+const IMG = "../src-tauri/icons/icon.png";
 test.use({ viewport: { width: 1100, height: 800 } });
 
 test("avatar crop viewport displays the picked image", async ({ page }) => {

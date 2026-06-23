@@ -476,6 +476,7 @@ export const test = base.extend({
           diag_network_info: () => networkInfo,
           rescan_peers: ok,
           set_badge: ok,
+          network_name: () => "TestNet-5G",
           env_info: () => envInfo,
           get_logs_dir: () => envInfo.logs_dir,
           get_log_file: () => `${envInfo.logs_dir}/mesh-talk.log`,

@@ -96,6 +96,7 @@ export function MessageBubble({
   showAuthor,
   isChannel,
   authorAvatarId,
+  authorName,
   fresh,
   reactions,
   selfReactionId,
@@ -112,6 +113,9 @@ export function MessageBubble({
   /** The author's ACCOUNT id (resolved from the roster) for avatar lookup; defaults to
    *  the device id (m.who) when unknown. Only used for the channel author glyph. */
   authorAvatarId?: string;
+  /** The author's display NAME (resolved from the roster/members); falls back to the raw
+   *  user-id when unknown. Only used for the channel author label. */
+  authorName?: string;
   /** True only for a genuinely newly-arriving/sent message → plays an entrance. */
   fresh?: boolean;
   reactions: ReactionInfo[];
@@ -138,9 +142,10 @@ export function MessageBubble({
     }
   };
   const mentioned = !mine && mentionsName(m.text, myName);
-  // A long `who` is a raw user id — render it mono (it's an identifier).
-  const isIdName = m.who.length > 20;
-  const authorLabel = isIdName ? shortId(m.who, 10) : m.who;
+  // Prefer the author's display name (resolved from the roster/members); fall back to the
+  // raw `who` user-id (rendered mono when it's a long identifier) only if no name is known.
+  const isIdName = !authorName && m.who.length > 20;
+  const authorLabel = authorName || (isIdName ? shortId(m.who, 10) : m.who);
 
   // Accessible summary of the bubble: who, the text, and the time — folding the transient
   // pending/failed state so a screen reader announces the message's status too.
