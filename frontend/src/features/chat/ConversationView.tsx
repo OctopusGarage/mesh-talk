@@ -10,6 +10,8 @@ import {
   AvatarEditMenu,
 } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
+import { useTheme } from "@/lib/theme";
+import { THEME_CREST } from "@/lib/themeCrest";
 import { Composer } from "./Composer";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
@@ -31,6 +33,8 @@ import type { ReactionInfo } from "@/lib/types";
 
 function EmptyState() {
   const { t } = useTranslation();
+  // On a brand theme, greet with that crest/emblem instead of the generic chat glyph.
+  const crest = THEME_CREST[useTheme((s) => s.theme)];
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
       <div className="relative">
@@ -38,9 +42,18 @@ function EmptyState() {
           aria-hidden
           className="absolute inset-0 -z-10 rounded-2xl bg-signal/15 blur-2xl"
         />
-        <div className="flex h-16 w-16 items-center justify-center rounded-2xl border bg-card text-signal shadow-elevation">
-          <MessagesSquare className="h-8 w-8" />
-        </div>
+        {crest ? (
+          <img
+            src={crest}
+            alt=""
+            data-testid="empty-crest"
+            className="h-20 w-20 object-contain drop-shadow-lg"
+          />
+        ) : (
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl border bg-card text-signal shadow-elevation">
+            <MessagesSquare className="h-8 w-8" />
+          </div>
+        )}
       </div>
       <div>
         <p className="font-display text-lg font-semibold tracking-tight">

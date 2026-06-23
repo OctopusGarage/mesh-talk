@@ -28,9 +28,7 @@ import {
   SUPPORTED_LANGUAGES,
   type Language,
 } from "@/lib/i18n";
-import { useTheme, type Theme } from "@/lib/theme";
-
-const THEMES: Theme[] = ["light", "dark", "oled"];
+import { ThemePicker } from "./ThemePicker";
 
 /** A section group: a small display-font label over a stack of rows. */
 function Section({
@@ -98,8 +96,6 @@ export function SettingsDialog() {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   // Selectors return primitives only (stable refs) — a fresh object once black-screened the app.
-  const theme = useTheme((s) => s.theme);
-  const setTheme = useTheme((s) => s.set);
   // Primitive state only (memory: zustand selectors returning fresh objects each
   // render once black-screened the app — kept as local primitives here regardless).
   const [minimizeToTray, setMinimizeToTray] = useState(true);
@@ -210,28 +206,16 @@ export function SettingsDialog() {
 
         <div className="grid max-h-[70vh] gap-5 overflow-y-auto pr-0.5">
           <Section title={t("settings.sectionAppearance")}>
-            <Row
-              id="setting-theme"
-              icon={<Palette className="h-4 w-4" />}
-              title={t("settings.theme")}
-              desc={t("settings.themeDesc")}
-              control={
-                <select
-                  id="setting-theme"
-                  data-testid="settings-theme-select"
-                  value={theme}
-                  onChange={(e) => setTheme(e.target.value as Theme)}
-                  className={SELECT_CLASS}
-                  aria-label={t("settings.theme")}
-                >
-                  {THEMES.map((th) => (
-                    <option key={th} value={th}>
-                      {t(`settings.theme_${th}`)}
-                    </option>
-                  ))}
-                </select>
-              }
-            />
+            <div>
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Palette className="h-4 w-4 text-muted-foreground" />
+                {t("settings.theme")}
+              </div>
+              <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
+                {t("settings.themeDesc")}
+              </p>
+              <ThemePicker />
+            </div>
             <Row
               id="setting-language"
               icon={<Languages className="h-4 w-4" />}

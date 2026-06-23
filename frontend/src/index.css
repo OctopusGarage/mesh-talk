@@ -91,6 +91,208 @@
     --border: 220 14% 15%;
     --input: 220 14% 17%;
   }
+
+  /*
+    Football-brand palettes — complete, cohesive looks selected via `data-palette` on <html>
+    (layered over the dark base). Each spends its boldness on ONE crest accent (--signal)
+    with the brand's surfaces tinted to match; the attribute selector outranks the base
+    classes so it always wins. Disciplined: only the accent + surface hue change.
+  */
+
+  /* Argentina — Albiceleste, the LIGHT way: sky-blue + white, the way the kit reads. A
+     celeste crest accent on a bright sky-paper field, navy text, sun-gold @mentions. */
+  html[data-palette="argentina"] {
+    --background: 205 55% 95%;
+    --foreground: 215 50% 15%;
+    --card: 202 52% 99%;
+    --card-foreground: 215 50% 15%;
+    --popover: 202 52% 99%;
+    --popover-foreground: 215 50% 15%;
+    --primary: 202 80% 44%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 205 40% 90%;
+    --secondary-foreground: 215 44% 18%;
+    --muted: 205 36% 92%;
+    --muted-foreground: 212 24% 38%;
+    --accent: 205 46% 87%;
+    --accent-foreground: 215 44% 18%;
+    --destructive: 0 70% 46%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 205 36% 82%;
+    --input: 205 36% 80%;
+    --ring: 202 80% 44%;
+    --signal: 202 84% 46%;
+    --verified: 150 56% 34%;
+    --mention: 38 90% 42%;
+    --bubble-own: 202 74% 48%;
+  }
+
+  /* Barcelona — Blaugrana: a garnet crest over deep blue surfaces, with a regal gold
+     @mention accent and warm-paper text. */
+  html[data-palette="barcelona"] {
+    --background: 224 46% 9%;
+    --foreground: 40 28% 92%;
+    --card: 226 40% 12%;
+    --card-foreground: 40 28% 92%;
+    --popover: 226 42% 11%;
+    --popover-foreground: 40 28% 92%;
+    --primary: 344 70% 48%;
+    --primary-foreground: 40 40% 96%;
+    --secondary: 232 32% 17%;
+    --secondary-foreground: 40 24% 90%;
+    --muted: 230 30% 15%;
+    --muted-foreground: 33 16% 68%;
+    --accent: 280 32% 22%;
+    --accent-foreground: 40 28% 95%;
+    --destructive: 0 74% 55%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 268 28% 24%;
+    --input: 268 26% 26%;
+    --ring: 344 70% 50%;
+    --signal: 344 72% 52%;
+    --verified: 150 52% 52%;
+    --mention: 45 88% 58%;
+    --bubble-own: 344 58% 47%;
+  }
+
+  /* Messi — an airy, LIGHT BLUE theme bridging both his homes: Barça blaugrana blue + the
+     Argentina celeste, on a bright sky-paper field. Deep-navy text (his shirt number), a
+     vivid blue crest accent, a touch of GOAT gold for @mentions. The one light brand theme. */
+  html[data-palette="messi"] {
+    --background: 208 46% 95%;
+    --foreground: 222 47% 15%;
+    --card: 206 50% 99%;
+    --card-foreground: 222 47% 15%;
+    --popover: 206 50% 99%;
+    --popover-foreground: 222 47% 15%;
+    --primary: 214 82% 46%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 208 38% 89%;
+    --secondary-foreground: 222 40% 18%;
+    --muted: 208 34% 91%;
+    --muted-foreground: 220 20% 38%;
+    --accent: 208 44% 86%;
+    --accent-foreground: 222 40% 18%;
+    --destructive: 0 70% 46%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 208 32% 82%;
+    --input: 208 32% 80%;
+    --ring: 214 82% 46%;
+    --signal: 214 84% 48%;
+    --verified: 150 56% 34%;
+    --mention: 38 88% 42%;
+    --bubble-own: 214 76% 50%;
+  }
+
+  /* ── Brand-theme ambient wallpaper ────────────────────────────────────────────
+     A fixed, dimmed photo behind everything (body::before) plus a faint crest watermark
+     (body::after); the brand-tinted gradient keeps text readable. The app's panels are
+     already translucent (sidebar/composer bg-card/40, the message canvas transparent), so
+     the wallpaper glows through for a frosted, premium feel. */
+  html[data-palette] body {
+    background-color: transparent;
+  }
+  html[data-palette] body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+  html[data-palette] body::after {
+    content: "";
+    position: fixed;
+    z-index: -1;
+    pointer-events: none;
+    width: 46vmin;
+    height: 46vmin;
+    right: -6vmin;
+    bottom: -7vmin;
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: contain;
+    opacity: 0.06;
+  }
+  /* Each wallpaper is layered: a vignette (cinematic depth) over a directional scrim
+     (readable text) over the photo. The dark themes dim to ink; the LIGHT themes
+     (Argentina, Messi) lift the photo into a bright, airy field instead. */
+  /* Argentina (light) — a light sky scrim so the celebration glows pale-blue, not dimmed. */
+  html[data-palette="argentina"] body::before {
+    background-image:
+      radial-gradient(
+        125% 92% at 50% 34%,
+        transparent 26%,
+        hsl(205 55% 96% / 0.55) 100%
+      ),
+      linear-gradient(165deg, hsl(205 55% 95% / 0.64), hsl(202 55% 97% / 0.82)),
+      url("./assets/themes/argentina-bg.webp");
+  }
+  html[data-palette="argentina"] body::after {
+    background-image: url("./assets/themes/argentina-crest.png");
+    opacity: 0.08;
+  }
+  html[data-palette="barcelona"] body::before {
+    background-image:
+      radial-gradient(
+        125% 90% at 50% 32%,
+        transparent 30%,
+        hsl(226 48% 5% / 0.62) 100%
+      ),
+      linear-gradient(165deg, hsl(224 46% 9% / 0.74), hsl(226 44% 11% / 0.9)),
+      url("./assets/themes/barcelona-bg.jpg");
+  }
+  html[data-palette="barcelona"] body::after {
+    background-image: url("./assets/themes/barcelona-crest.svg");
+    opacity: 0.07;
+  }
+  /* Light theme → a LIGHT scrim: the blue scenes lift into a bright, airy field (edges fade
+     to paper via the vignette) instead of being dimmed to black. */
+  html[data-palette="messi"] body::before {
+    background-image:
+      radial-gradient(
+        125% 92% at 50% 34%,
+        transparent 26%,
+        hsl(208 50% 96% / 0.55) 100%
+      ),
+      linear-gradient(165deg, hsl(208 46% 95% / 0.66), hsl(206 50% 97% / 0.82)),
+      url("./assets/themes/messi-bg.jpg");
+  }
+  /* Messi: the montage already brands it — no crest watermark. */
+  html[data-palette="messi"] body::after {
+    display: none;
+  }
+
+  /* Base themes (Ink / Daylight / OLED): a faint LIVING-MESH ambient — the peer dot-grid
+     that is the app's own signature (it echoes the IdentityGlyph), lit by a soft signal glow.
+     Painted between the body fill and the content, so the translucent panels diffuse it and
+     the big chat canvas gains quiet depth without any photo. */
+  html:not([data-palette]) body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      radial-gradient(
+        62% 52% at 50% 26%,
+        hsl(var(--signal) / 0.07),
+        transparent 70%
+      ),
+      radial-gradient(hsl(var(--signal) / 0.05) 1px, transparent 1.6px);
+    background-size:
+      100% 100%,
+      26px 26px;
+    background-position: center, center;
+  }
+
+  /* Frost the translucent panels so the wallpaper diffuses behind them (glassy depth). */
+  html[data-palette] [data-testid="sidebar"],
+  html[data-palette] [data-testid="conversation-header"],
+  html[data-palette] [data-testid="composer"] {
+    backdrop-filter: blur(18px) saturate(1.15);
+  }
 }
 
 @layer base {

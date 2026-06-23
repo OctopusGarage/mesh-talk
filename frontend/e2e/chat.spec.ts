@@ -275,22 +275,36 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("verify-verified-banner")).toBeVisible();
   });
 
-  test("Settings: toggle theme (dark → light → oled)", async ({ page }) => {
+  test("Settings: pick themes (light, oled, brand palette)", async ({
+    page,
+  }) => {
     await enterChat(page);
     // App boots dark.
     await expect(page.locator("html")).toHaveClass(/dark/);
 
     await page.getByTestId("sidebar-overflow").click();
     await page.getByTestId("sidebar-action-settings").click();
-    await expect(page.getByTestId("settings-dialog")).toBeVisible();
-    const theme = page.getByTestId("settings-theme-select");
+    await expect(page.getByTestId("theme-picker")).toBeVisible();
 
-    await theme.selectOption("light");
+    await page.getByTestId("theme-light").click();
     await expect(page.locator("html")).not.toHaveClass(/dark/);
 
-    await theme.selectOption("oled");
+    await page.getByTestId("theme-oled").click();
     await expect(page.locator("html")).toHaveClass(/oled/);
     await expect(page.locator("html")).toHaveClass(/dark/);
+
+    // A dark brand palette sets data-palette over the dark base.
+    await page.getByTestId("theme-barcelona").click();
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-palette",
+      "barcelona",
+    );
+    await expect(page.locator("html")).toHaveClass(/dark/);
+
+    // Messi is the light brand palette — data-palette set, but on the LIGHT base.
+    await page.getByTestId("theme-messi").click();
+    await expect(page.locator("html")).toHaveAttribute("data-palette", "messi");
+    await expect(page.locator("html")).not.toHaveClass(/dark/);
   });
 
   test("Settings: switch language EN ↔ 中文", async ({ page }) => {

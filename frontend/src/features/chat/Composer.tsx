@@ -192,7 +192,7 @@ export function Composer({
   };
 
   return (
-    <div className="border-t bg-card/40 p-3">
+    <div data-testid="composer" className="border-t bg-card/40 p-3">
       {replyTo && (
         <div
           data-testid="composer-reply-banner"

@@ -34,6 +34,7 @@ import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
 import { shortId } from "@/lib/format";
 import { useTheme } from "@/lib/theme";
+import { THEME_CREST } from "@/lib/themeCrest";
 import { CreateChannelDialog } from "./CreateChannelDialog";
 import { SearchDialog } from "./SearchDialog";
 import { FilesTray } from "./FilesTray";
@@ -48,6 +49,7 @@ import { convKey, useChat, type Conversation } from "@/store/chat";
 import {
   presenceLabel,
   presenceStatus,
+  usePresence,
   usePresenceFor,
 } from "@/store/presence";
 import type { AccountInfo, ChannelInfo } from "@/lib/types";
@@ -336,17 +338,30 @@ export function Sidebar() {
   const channels = useChat((s) => s.channels);
   const peers = useChat((s) => s.peers);
   const favorites = useChat((s) => s.favorites);
-  // People currently discovered on the LAN (distinct by account, falling back to device for
-  // an unpaired peer) — discovery expires gone peers, so this is the live "who's around" count.
-  const onlinePeople = useMemo(
-    () => new Set(peers.map((p) => p.account_id ?? p.user_id)).size,
-    [peers],
-  );
+  // The active theme's crest (a brand theme) replaces the app mark in the footer, so the
+  // chosen club/national/Messi identity is always present without shouting.
+  const themeCrest = THEME_CREST[useTheme((s) => s.theme)];
   const togglePinned = useChat((s) => s.togglePinned);
   const setAlias = useChat((s) => s.setAlias);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const ready = useChat((s) => s.ready);
+  // Online people on the LAN — distinct OTHER accounts that are presence-ONLINE (the same
+  // signal the conversation-row dots use, so the count always matches the visible green dots).
+  // Excludes post-office relays (infrastructure, not people) and our own other devices, and
+  // ignores roster entries that are merely lingering (seen, but past the online window) so the
+  // number doesn't drift from what's actually online.
+  const presenceMap = usePresence((s) => s.map);
+  const onlinePeople = useMemo(() => {
+    const online = new Set<string>();
+    for (const p of peers) {
+      if (p.post_office) continue;
+      const account = p.account_id ?? p.user_id;
+      if (account === myAccountId) continue;
+      if (presenceMap[account]?.online) online.add(account);
+    }
+    return online.size;
+  }, [peers, presenceMap, myAccountId]);
   const bootFailed = useChat((s) => s.bootFailed);
   const retryBoot = useChat((s) => s.retryBoot);
   const username = useAuth((s) => s.user?.username ?? "");
@@ -602,6 +617,17 @@ export function Sidebar() {
           first so the top stays clean, then the LAN status + brand mark. */}
       <div className="flex items-center gap-1.5 border-t px-2 py-2 text-xs text-muted-foreground">
         <UtilityMenu />
+        {/* Active theme's crest/logo — ADDED in the bottom-left corner (the app's own mark
+            stays at the far right; this is an addition, not a replacement). */}
+        {themeCrest && (
+          <img
+            src={themeCrest}
+            alt=""
+            data-testid="theme-crest"
+            title={t("settings.theme")}
+            className="h-[18px] w-[18px] shrink-0 object-contain"
+          />
+        )}
         {ssid ? (
           <Wifi className="h-3.5 w-3.5 shrink-0 text-signal" />
         ) : (
@@ -627,8 +653,7 @@ export function Sidebar() {
           />
           {onlinePeople}
         </span>
-        {/* App brand mark — quiet, in the status footer (distinct from the user's
-            IdentityGlyph in the header above). */}
+        {/* App's own brand mark — always present (kept distinct from the theme crest above). */}
         <Logo
           size={16}
           className="ml-1.5 shrink-0 opacity-80"
