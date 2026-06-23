@@ -173,5 +173,13 @@ impl Node {
                 });
             }
         }
+        // Bound on-disk growth: drop superseded, unreferenced profile events for this
+        // conversation (safe — they're never referenced as parents). Best-effort; runs
+        // opportunistically on each profile sync, amortized by COMPACT_PROFILE_MIN.
+        let _ = self
+            .log
+            .lock()
+            .expect("log mutex not poisoned")
+            .compact_superseded_profiles(&conv);
     }
 }

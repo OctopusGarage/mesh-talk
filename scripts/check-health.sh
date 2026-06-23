@@ -175,7 +175,7 @@ fi
 # Shellcheck scripts — mirrors CI.
 print_status "success" "Linting shell scripts (shellcheck)..."
 if command_exists shellcheck; then
-    if ! shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh 2>/dev/null; then
+    if ! shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh hooks/* 2>/dev/null; then
         print_status "error" "shellcheck found warnings."
         exit 1
     fi

@@ -211,6 +211,19 @@ impl Node {
                 .cloned()
                 .collect()
         };
+        // Cache by React-event count (add-only per conversation, so a sound version stamp):
+        // on a hit we skip re-decrypting every React event.
+        let version = react_events.len();
+        if let Some((v, cached)) = self
+            .reaction_cache
+            .lock()
+            .expect("reaction_cache mutex not poisoned")
+            .get(&conv)
+        {
+            if *v == version {
+                return cached.clone();
+            }
+        }
         let is_channel = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.state(&conv).is_some()
@@ -258,7 +271,12 @@ impl Node {
                 }
             }
         }
-        aggregate(&decoded)
+        let result = aggregate(&decoded);
+        self.reaction_cache
+            .lock()
+            .expect("reaction_cache mutex not poisoned")
+            .insert(conv, (version, result.clone()));
+        result
     }
 
     /// Record one of OUR OWN reactions (sealed to the peer, so un-openable from our log)

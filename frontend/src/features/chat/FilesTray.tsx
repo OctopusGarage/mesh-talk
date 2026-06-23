@@ -20,6 +20,8 @@ import { fileGlyph } from "./mediaFile";
 
 /** localStorage key for the persisted file_conv → saved-path map (where downloads landed). */
 const DOWNLOADS_KEY = "mesh-talk-downloads";
+/** Cap on remembered download locations, so the persisted map stays bounded. */
+const SAVED_PATHS_CAP = 500;
 function loadSavedPaths(): Record<string, string> {
   try {
     return JSON.parse(localStorage.getItem(DOWNLOADS_KEY) || "{}");
@@ -72,10 +74,17 @@ export function FilesTray() {
   // the tray until the user dismisses it.
   const [savedPaths, setSavedPaths] =
     useState<Record<string, string>>(loadSavedPaths);
-  // Remember (and persist) where a file was saved.
+  // Remember (and persist) where a file was saved. Bounded to the most recent
+  // SAVED_PATHS_CAP entries so the persisted map can't grow without limit over the app's
+  // lifetime (it's only a convenience hint for the Reveal action).
   const remember = (fileConv: string, path: string) =>
     setSavedPaths((m) => {
-      const next = { ...m, [fileConv]: path };
+      const next: Record<string, string> = { ...m, [fileConv]: path };
+      const keys = Object.keys(next);
+      if (keys.length > SAVED_PATHS_CAP) {
+        for (const k of keys.slice(0, keys.length - SAVED_PATHS_CAP))
+          delete next[k];
+      }
       try {
         localStorage.setItem(DOWNLOADS_KEY, JSON.stringify(next));
       } catch {

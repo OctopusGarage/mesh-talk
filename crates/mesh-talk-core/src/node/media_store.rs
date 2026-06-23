@@ -145,11 +145,23 @@ impl MediaStore {
     }
 
     /// Read the stored media bytes for `file_conv` (used by the `read_media` IPC accessor).
+    /// Refuses to load a file larger than [`MAX_INLINE_MEDIA_BYTES`] fully into memory — an
+    /// oversized media file (up to the 4 GiB file cap) would OOM the process; the UI gates
+    /// previews well under this, so a `None` here just means "no inline preview".
     pub fn read(&self, file_conv: ConversationId) -> Option<Vec<u8>> {
         let path = self.path(file_conv)?;
+        let meta = std::fs::metadata(&path).ok()?;
+        if meta.len() > MAX_INLINE_MEDIA_BYTES {
+            return None;
+        }
         std::fs::read(path).ok()
     }
 }
+
+/// Upper bound on a whole-file in-memory read for inline preview (OOM guard). Comfortably
+/// above the frontend's inline caps (16 MB image / 50 MB video); larger media uses the
+/// streaming save path instead.
+const MAX_INLINE_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `dest` + `.part`: the temp a store writes into before its atomic rename.
 fn part_path(dest: &Path) -> PathBuf {

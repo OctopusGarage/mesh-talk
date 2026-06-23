@@ -2,9 +2,9 @@
 //! (integrity, signature, canonical form, causal completeness, equivocation)
 //! and answers ordering/heads/version queries. Pure data structure — no I/O.
 
-use crate::eventlog::event::{Author, ConversationId, Event, EventId};
+use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::LogError;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Result of an append: a genuinely new event, or an already-present duplicate.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -13,13 +13,20 @@ pub enum AppendOutcome {
     Duplicate,
 }
 
+/// Warn each time a single conversation's event count crosses a multiple of this — an
+/// observability backstop for unbounded log growth (see `index_trusted`).
+const CONVERSATION_WARN_EVERY: usize = 50_000;
+
 /// The in-memory event log across all conversations.
 #[derive(Default)]
 pub struct EventLog {
     /// Every known event, by id.
     events: HashMap<EventId, Event>,
-    /// Event ids grouped by conversation.
-    by_conversation: HashMap<ConversationId, HashSet<EventId>>,
+    /// Event ids grouped by conversation, kept in `(lamport, id)` order — the same total
+    /// order `events()` returns — so reads are O(N) with no per-call sort (a `BTreeSet`
+    /// orders incrementally as events are indexed). `(lamport, id)` is stable per event
+    /// (both are content-addressed), so no duplicate/aliasing.
+    by_conversation: HashMap<ConversationId, BTreeSet<(u64, EventId)>>,
     /// Per-conversation frontier: events not (yet) referenced as a parent.
     heads: HashMap<ConversationId, HashSet<EventId>>,
     /// Per-conversation version vector: author → highest seq seen.
@@ -86,11 +93,19 @@ impl EventLog {
         let conv = event.conversation_id;
         let id = event.id;
 
-        let heads = self.heads.entry(conv).or_default();
-        for p in &event.parents {
-            heads.remove(p);
+        // Profile events are kept OUT of the head frontier: they reference the current heads
+        // (so they're causally anchored + ingestable) but are never themselves referenced as
+        // a parent by future events. That makes a superseded profile an UNREFERENCED leaf,
+        // which `compact_superseded_profiles` can safely drop (dropping an unreferenced event
+        // can never dangle a parent) — the only safe way to bound profile-event growth in an
+        // append-only DAG. Messages/reactions/files still chain normally.
+        if event.kind != EventKind::Profile {
+            let heads = self.heads.entry(conv).or_default();
+            for p in &event.parents {
+                heads.remove(p);
+            }
+            heads.insert(id);
         }
-        heads.insert(id);
 
         let vv = self.version.entry(conv).or_default();
         let slot = vv.entry(event.author).or_insert(0);
@@ -104,7 +119,22 @@ impl EventLog {
         }
 
         self.author_seq.insert((conv, event.author, event.seq), id);
-        self.by_conversation.entry(conv).or_default().insert(id);
+        let set = self.by_conversation.entry(conv).or_default();
+        set.insert((event.lamport, id));
+        // Observability for unbounded log growth: an append-only DAG can't drop interior
+        // events (they're referenced as parents — pruning would dangle them), so a
+        // conversation that grows pathologically (e.g. a peer flooding profile/reaction
+        // events) is a known concern pending DAG-aware checkpoint compaction. Warn at each
+        // threshold crossing so runaway growth is visible rather than silent.
+        let count = set.len();
+        if count.is_multiple_of(CONVERSATION_WARN_EVERY) {
+            log::warn!(
+                target: "mesh_talk::eventlog",
+                "conversation {} holds {} events",
+                hex::encode(&conv.as_bytes()[..4]),
+                count,
+            );
+        }
         self.events.insert(id, event);
     }
 
@@ -144,12 +174,15 @@ impl EventLog {
     /// validate Lamport monotonicity. Callers needing strict causal order for
     /// untrusted input must enforce it themselves.
     pub fn events(&self, conversation: &ConversationId) -> Vec<&Event> {
-        let mut events: Vec<&Event> = match self.by_conversation.get(conversation) {
-            Some(ids) => ids.iter().filter_map(|id| self.events.get(id)).collect(),
+        // `by_conversation` is already in `(lamport, id)` order, so no sort here — this is a
+        // hot path (every sync round + every history/reaction read).
+        match self.by_conversation.get(conversation) {
+            Some(ids) => ids
+                .iter()
+                .filter_map(|(_, id)| self.events.get(id))
+                .collect(),
             None => Vec::new(),
-        };
-        events.sort_by(|a, b| a.lamport.cmp(&b.lamport).then_with(|| a.id.cmp(&b.id)));
-        events
+        }
     }
 
     /// The current frontier of a conversation: events not referenced as a

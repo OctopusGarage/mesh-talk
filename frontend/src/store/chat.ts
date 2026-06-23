@@ -26,6 +26,8 @@ const HISTORY_LIMIT = 200;
 // many are evicted; `unread` (tiny, drives sidebar badges) is never touched, and a reopen
 // repopulates from the log via reload(). Active conversation is always retained.
 const CONV_CACHE_LIMIT = 50;
+/** Cap on the received-files tray list, so it stays bounded over a long session. */
+const INCOMING_FILES_CAP = 300;
 
 /**
  * Evict message/reaction caches for the least-recently-opened conversations, keeping at
@@ -692,6 +694,8 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
     s.incomingFiles.some((f) => f.fileConv === e.file_conv)
       ? {}
       : {
+          // Cap the tray list so a long session in a busy channel can't grow it without
+          // bound (entries otherwise leave only on explicit save/dismiss).
           incomingFiles: [
             {
               fromName,
@@ -701,7 +705,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
               media: e.media,
             },
             ...s.incomingFiles,
-          ],
+          ].slice(0, INCOMING_FILES_CAP),
         },
   );
 

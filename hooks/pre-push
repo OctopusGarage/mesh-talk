@@ -1,17 +1,26 @@
 #!/bin/bash
+# Reject pushing an unsigned commit. git feeds pre-push the pushed refs on STDIN, one line
+# per ref: "<local_ref> <local_oid> <remote_ref> <remote_oid>". (The remote name/URL are in
+# $1/$2 — NOT the refs.) Belt-and-suspenders on top of commit.gpgsign.
+ZERO="0000000000000000000000000000000000000000"
 
-REMOTE=$1
-REMOTE_REF=$2
-LOCAL_REF=$3
-
-COMMITS=$(git rev-list $REMOTE_REF..$LOCAL_REF)
-
-for c in $COMMITS; do
-  if ! git cat-file commit $c | grep -q "gpgsig"; then
-    echo "ERROR: Commit $c is not GPG signed. Push aborted."
-    echo "Sign commits with: git commit -S -m 'message'"
-    exit 1
+while read -r _local_ref local_oid _remote_ref remote_oid; do
+  # Branch deletion (local side all-zero): nothing to verify.
+  [ "$local_oid" = "$ZERO" ] && continue
+  # New ref on the remote: check commits not yet on any remote (bounds a fresh branch).
+  if [ "$remote_oid" = "$ZERO" ]; then
+    COMMITS=$(git rev-list "$local_oid" --not --remotes)
+  else
+    COMMITS=$(git rev-list "$remote_oid..$local_oid")
   fi
+
+  for c in $COMMITS; do
+    if ! git cat-file commit "$c" | grep -q "gpgsig"; then
+      echo "ERROR: Commit $c is not GPG signed. Push aborted."
+      echo "Sign commits with: git commit -S -m 'message'"
+      exit 1
+    fi
+  done
 done
 
 exit 0

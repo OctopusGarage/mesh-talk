@@ -110,7 +110,7 @@ jobs:
 
       - name: Shellcheck scripts
         if: matrix.os == 'ubuntu-latest'
-        run: shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh
+        run: shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh hooks/*
 
       - name: Install supply-chain tools
         if: matrix.os == 'ubuntu-latest'

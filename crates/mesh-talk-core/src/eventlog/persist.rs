@@ -19,7 +19,7 @@
 //! any altered event is rejected, and the sync engine re-fetches missing events
 //! from peers. A dropped or reordered local record is therefore self-healing.
 
-use crate::eventlog::event::{Author, ConversationId, Event, EventId};
+use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::store::{AppendOutcome, EventLog};
 use crate::eventlog::sync::SyncStore;
 use crate::eventlog::LogError;
@@ -162,7 +162,72 @@ impl PersistentEventLog {
         self.log = log;
         Ok(dropped)
     }
+
+    /// Compact superseded profile events to bound on-disk growth. A conversation accrues one
+    /// Profile event per avatar change per author, but only the NEWEST per account is ever
+    /// needed. A profile event is safe to drop iff it is BOTH (a) superseded by a
+    /// higher-`(lamport, id)` profile from the same author and (b) UNREFERENCED as a parent
+    /// by any event — dropping an unreferenced event can never dangle a child, so this is
+    /// safe regardless of history or peer version. New profile events are kept out of the
+    /// head frontier (see [`EventLog::index_trusted`]) so they're unreferenced; any profile
+    /// a message DID reference (legacy / an older peer's) stays. Deterministic (highest
+    /// `(lamport, id)` wins per author) so peers converge. Rewrites only when at least
+    /// `COMPACT_PROFILE_MIN` are droppable, to amortize the rebuild. Returns the count dropped.
+    pub fn compact_superseded_profiles(
+        &mut self,
+        conversation: &ConversationId,
+    ) -> Result<usize, LogError> {
+        let drop: HashSet<EventId> = {
+            let events = self.log.events(conversation);
+            let referenced: HashSet<EventId> = events
+                .iter()
+                .flat_map(|e| e.parents.iter().copied())
+                .collect();
+            let mut newest: HashMap<Author, EventId> = HashMap::new();
+            for e in &events {
+                if e.kind == EventKind::Profile && !referenced.contains(&e.id) {
+                    newest.insert(e.author, e.id); // (lamport, id) order ⇒ last is newest
+                }
+            }
+            events
+                .iter()
+                .filter(|e| {
+                    e.kind == EventKind::Profile
+                        && !referenced.contains(&e.id)
+                        && newest.get(&e.author) != Some(&e.id)
+                })
+                .map(|e| e.id)
+                .collect()
+        };
+        if drop.len() < COMPACT_PROFILE_MIN {
+            return Ok(0);
+        }
+        let kept: Vec<Event> = self
+            .log
+            .conversations()
+            .into_iter()
+            .flat_map(|c| {
+                self.log
+                    .events(&c)
+                    .into_iter()
+                    .filter(|e| !drop.contains(&e.id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        self.file.rewrite(&kept)?;
+        let mut log = EventLog::default();
+        for event in kept {
+            log.index_trusted(event);
+        }
+        self.log = log;
+        Ok(drop.len())
+    }
 }
+
+/// Minimum droppable superseded profiles before [`PersistentEventLog::compact_superseded_profiles`]
+/// rewrites the log — bounds stale profiles per author while amortizing the rebuild cost.
+const COMPACT_PROFILE_MIN: usize = 8;
 
 // NOTE: this impl is structurally identical to `impl SyncStore for EventLog`
 // in sync.rs — keep the two in sync.
@@ -204,6 +269,89 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn compacts_superseded_unreferenced_profiles_keeping_newest_and_referenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let conv = ConversationId::new([1u8; 32]);
+
+        // A real message stays in the head frontier and is referenced by the profiles.
+        let msg = mk(&id, 1, 1, b"hi");
+        let msg_id = msg.id;
+        log.append(msg).unwrap();
+
+        // 10 profile events from the same author, each anchored to the message (so the
+        // message is referenced/kept) but never referenced themselves (non-head leaves).
+        let mut newest_id = msg_id;
+        for i in 0..10u64 {
+            let p = Event::new(
+                &id,
+                conv,
+                2 + i,
+                vec![msg_id],
+                2 + i,
+                0,
+                EventKind::Profile,
+                format!("avatar{i}").into_bytes(),
+            );
+            newest_id = p.id;
+            log.append(p).unwrap();
+        }
+        assert_eq!(log.events(&conv).len(), 11); // 1 message + 10 profiles
+
+        let dropped = log.compact_superseded_profiles(&conv).unwrap();
+        assert_eq!(dropped, 9); // 10 profiles − the newest = 9 (≥ COMPACT_PROFILE_MIN)
+
+        let remaining = log.events(&conv);
+        assert_eq!(
+            remaining.len(),
+            2,
+            "only the message + newest profile remain"
+        );
+        assert!(
+            remaining.iter().any(|e| e.id == msg_id),
+            "the referenced message is never dropped"
+        );
+        assert!(
+            remaining.iter().any(|e| e.id == newest_id),
+            "the newest profile is kept (deterministic: highest lamport)"
+        );
+
+        // The on-disk log was rewritten too — survives a reopen.
+        drop(log);
+        let log2 = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(log2.events(&conv).len(), 2);
+    }
+
+    #[test]
+    fn below_threshold_profiles_are_not_compacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let conv = ConversationId::new([1u8; 32]);
+        let msg = mk(&id, 1, 1, b"hi");
+        let msg_id = msg.id;
+        log.append(msg).unwrap();
+        // Only 3 profiles → 2 droppable < COMPACT_PROFILE_MIN → left as-is (amortization).
+        for i in 0..3u64 {
+            let p = Event::new(
+                &id,
+                conv,
+                2 + i,
+                vec![msg_id],
+                2 + i,
+                0,
+                EventKind::Profile,
+                format!("a{i}").into_bytes(),
+            );
+            log.append(p).unwrap();
+        }
+        assert_eq!(log.compact_superseded_profiles(&conv).unwrap(), 0);
+        assert_eq!(log.events(&conv).len(), 4);
     }
 
     #[test]

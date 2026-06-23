@@ -212,6 +212,11 @@ pub struct Node {
     /// Profile events we've already surfaced this session (dedup), so re-syncing a peer's
     /// device-pair conversation doesn't re-emit a profile we already applied.
     pub(in crate::node) profiles_emitted: Mutex<HashSet<EventId>>,
+    /// Read-side cache for `reactions()`: conversation → (React-event count, aggregated
+    /// view). React events are add-only per conversation, so the count is a sound version
+    /// stamp — a cache hit skips re-decrypting every React event on each reaction read.
+    pub(in crate::node) reaction_cache:
+        Mutex<HashMap<ConversationId, (usize, Vec<crate::node::reaction::ReactionView>)>>,
     /// Our OWN current profile (the avatar we last set), held so we can re-publish it to a
     /// peer the moment it's freshly discovered. `None` until the user sets/clears one this
     /// session (or it's reloaded on open). Behind a mutex; cheap to clone for a send.
@@ -379,6 +384,7 @@ impl Node {
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
             profiles_emitted: Mutex::new(HashSet::new()),
+            reaction_cache: Mutex::new(HashMap::new()),
             my_profile: Mutex::new(None),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),

@@ -60,3 +60,10 @@ pub fn clear(username: &str) {
         Err(e) => log::warn!("failed to clear stay-signed-in secret: {e}"),
     }
 }
+
+// NOTE (test seam): there is no clean unit test for the save→load→clear round trip. Each
+// function opens a FRESH `keyring::Entry`, and keyring's `mock` backend is per-Entry and
+// explicitly non-persistent ("no persistence between sessions"), so a mocked round trip
+// can't share state across calls; a real-keychain test is flaky/unavailable in CI (locked
+// or absent on headless runners). The logic here is a thin, error-swallowing wrapper; its
+// behavior is exercised end-to-end by the app's auto-login flow.
