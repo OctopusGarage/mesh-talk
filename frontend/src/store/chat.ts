@@ -84,6 +84,7 @@ export interface ChatMessage {
   clientId?: string; // stable id for an optimistic bubble (survives a concurrent reload)
   recalled?: boolean; // true when recalled → render a placeholder, no content
   recalledText?: string | null; // our own recalled text, for "re-edit"
+  sticker?: string | null; // animated-sticker id when this message is a sticker
   file?: {
     name: string;
     size: number;
@@ -169,6 +170,7 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
     replyTo: h.reply_to,
     recalled: h.recalled,
     recalledText: h.recalled_text,
+    sticker: h.sticker,
     file: h.file
       ? {
           name: h.file.name,
@@ -216,6 +218,9 @@ function sendFileFor(c: Conversation, path: string, media: boolean) {
 /** Whether this conversation is a channel (drives the `is_channel` flag on the lifecycle
  * commands; 1:1 chats are account-addressed). */
 const isChannelConv = (c: Conversation) => c.kind === "channel";
+function sendStickerFor(c: Conversation, stickerId: string, fallback: string) {
+  return chat.sendSticker(c.id, stickerId, fallback, isChannelConv(c));
+}
 
 interface ChatState {
   ready: boolean;
@@ -266,6 +271,8 @@ interface ChatState {
   recallMessage: (target: string) => Promise<void>;
   /** Clear all local history for the active conversation. */
   clearConversation: () => Promise<void>;
+  /** Send an animated sticker (by id) as its own message; `fallback` is its emoji char. */
+  sendSticker: (stickerId: string, fallback: string) => Promise<void>;
   createChannel: (name: string, memberIds: string[]) => Promise<void>;
   addMember: (memberId: string) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
@@ -620,6 +627,18 @@ export const useChat = create<ChatState>((set, get) => ({
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't clear history: ${errorMessage(e)}` });
+    }
+  },
+
+  sendSticker: async (stickerId, fallback) => {
+    const c = get().active;
+    if (!c) return;
+    const key = convKey(c);
+    try {
+      await sendStickerFor(c, stickerId, fallback);
+      if (get().active && convKey(get().active!) === key) await get().reload();
+    } catch (e) {
+      set({ error: `Couldn't send sticker: ${errorMessage(e)}` });
     }
   },
 

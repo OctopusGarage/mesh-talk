@@ -29,6 +29,7 @@ import { errorMessage } from "@/lib/error";
 import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp } from "@/lib/motion";
 import { EMOJIS, mentionsName, renderWithMentions } from "@/lib/mentions";
+import { stickerById } from "@/lib/stickerPacks";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, type ChatMessage } from "@/store/chat";
 import { MediaPreview } from "./MediaPreview";
@@ -142,6 +143,10 @@ export function MessageBubble({
   const setError = useChat((s) => s.setError);
   const mine = m.fromMe;
   const isFile = !!m.file;
+  // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
+  // the big emoji char when this build doesn't bundle that sticker (version skew).
+  const sticker = m.sticker ? stickerById(m.sticker) : undefined;
+  const isSticker = !!m.sticker;
   const [pickerOpen, setPickerOpen] = useState(false);
   // Copy the message text to the clipboard. File messages have no text → no-op.
   const copyText = async () => {
@@ -300,10 +305,16 @@ export function MessageBubble({
                 // custom menu open here (see main.tsx).
                 data-context-menu=""
                 className={cn(
-                  "min-w-0 rounded-2xl px-3.5 py-2 text-sm transition-shadow",
-                  mine
-                    ? "rounded-br-md bg-bubble-own text-primary-foreground shadow-sm"
-                    : "rounded-bl-md border border-border bg-muted text-foreground shadow-elevation",
+                  "min-w-0 text-sm transition-shadow",
+                  // Stickers float without a bubble; everything else gets the chat bubble.
+                  isSticker
+                    ? ""
+                    : cn(
+                        "rounded-2xl px-3.5 py-2",
+                        mine
+                          ? "rounded-br-md bg-bubble-own text-primary-foreground shadow-sm"
+                          : "rounded-bl-md border border-border bg-muted text-foreground shadow-elevation",
+                      ),
                   mentioned && "ring-2 ring-mention/70",
                   m.pending && "opacity-60",
                 )}
@@ -324,7 +335,26 @@ export function MessageBubble({
                     </span>
                   </div>
                 )}
-                {isFile ? (
+                {isSticker ? (
+                  sticker ? (
+                    <img
+                      src={sticker.url}
+                      alt={sticker.emoji}
+                      data-testid="message-sticker"
+                      draggable={false}
+                      className="h-32 w-32 select-none"
+                    />
+                  ) : (
+                    // Version skew: peer sent a sticker this build doesn't bundle → show
+                    // the fallback emoji char big.
+                    <span
+                      data-testid="message-sticker-fallback"
+                      className="text-6xl"
+                    >
+                      {m.text}
+                    </span>
+                  )
+                ) : isFile ? (
                   <FileBubble file={m.file!} mine={mine} />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">

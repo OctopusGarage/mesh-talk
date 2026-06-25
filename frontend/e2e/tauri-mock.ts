@@ -103,6 +103,7 @@ export const test = base.extend({
         reply_to: string | null;
         recalled?: boolean;
         recalled_text?: string | null;
+        sticker?: string | null;
       };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
@@ -194,6 +195,22 @@ export const test = base.extend({
       };
       const clearConversation = (conv: string): null => {
         msgs[conv] = [];
+        return null;
+      };
+      const recordSticker = (
+        conv: string,
+        stickerId: string,
+        fallback: string,
+      ): null => {
+        (msgs[conv] ||= []).push(
+          msg({
+            from_me: true,
+            who: SELF.device,
+            text: fallback,
+            wall_clock: Date.now(),
+            sticker: stickerId,
+          }),
+        );
         return null;
       };
 
@@ -362,6 +379,12 @@ export const test = base.extend({
             ),
           clear_conversation: (a) =>
             clearConversation(a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`),
+          send_sticker: (a) =>
+            recordSticker(
+              a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`,
+              String(a.stickerId),
+              String(a.fallback),
+            ),
 
           // sending
           send_dm: (a) =>

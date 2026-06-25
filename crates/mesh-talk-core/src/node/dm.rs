@@ -129,8 +129,37 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
     ) -> Result<(), NodeError> {
+        self.send_account_inner(
+            target_account_id,
+            MessageBody::new(text.to_vec(), reply_to).encode(),
+        )
+        .await
+    }
+
+    /// Send an animated sticker to an account: `sticker_id` is the bundled sticker's
+    /// codepoint id, `fallback` the emoji char shown if the peer lacks it. Same fan-out /
+    /// self-sync / history-record path as a text message.
+    pub async fn send_sticker_to_account(
+        &self,
+        target_account_id: &str,
+        sticker_id: &str,
+        fallback: &[u8],
+    ) -> Result<(), NodeError> {
+        self.send_account_inner(
+            target_account_id,
+            MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
+        )
+        .await
+    }
+
+    /// Fan an already-encoded message body out to every device of `target_account_id` (and
+    /// our own other devices), recording one local copy under the account conversation.
+    async fn send_account_inner(
+        &self,
+        target_account_id: &str,
+        inner: Vec<u8>,
+    ) -> Result<(), NodeError> {
         let my_account = self.account.account_id();
-        let inner = MessageBody::new(text.to_vec(), reply_to).encode();
         // A stable logical id shared by every per-device copy, so reactions/replies
         // can target this message account-wide.
         let msg_id = random_msg_id();

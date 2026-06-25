@@ -50,6 +50,7 @@ export interface HistoryItem {
   file: HistoryFileInfo | null; // present when this line is a file/media message
   recalled: boolean; // true when recalled → render a placeholder, no content
   recalled_text: string | null; // our own recalled text, for "re-edit" (null otherwise)
+  sticker: string | null; // animated-sticker id when this message is a sticker
 }
 
 export interface ReactionInfo {

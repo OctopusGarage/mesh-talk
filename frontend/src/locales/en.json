@@ -136,7 +136,9 @@
     "image": "Send a picture",
     "emoji": "Emoji",
     "insertEmoji": "Insert {{emoji}}",
-    "couldntOpenFile": "Couldn't open file: {{error}}"
+    "couldntOpenFile": "Couldn't open file: {{error}}",
+    "stickers": "Stickers",
+    "sendSticker": "Send {{emoji}} sticker"
   },
   "screenshot": {
     "trigger": "Screenshot",
@@ -318,7 +320,8 @@
     "tagline": "Encrypted, peer-to-peer messaging over your local network.",
     "version": "Version {{version}}",
     "sourceRepo": "Source repository",
-    "license": "License (MIT)"
+    "license": "License (MIT)",
+    "credits": "Animated stickers from Google's Noto Emoji, used under their open-source license."
   },
   "offlineConnect": {
     "trigger": "Connect without Wi-Fi",

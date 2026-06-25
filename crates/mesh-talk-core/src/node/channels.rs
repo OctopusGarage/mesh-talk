@@ -222,7 +222,32 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
     ) -> Result<(), NodeError> {
-        let wrapped = MessageBody::new(text.to_vec(), reply_to).encode();
+        self.send_channel_body(channel, MessageBody::new(text.to_vec(), reply_to).encode())
+            .await
+    }
+
+    /// Send an animated sticker to a channel: `sticker_id` is the bundled sticker's
+    /// codepoint id, `fallback` the emoji char shown if a member lacks it.
+    pub async fn send_sticker_channel(
+        &self,
+        channel: ConversationId,
+        sticker_id: &str,
+        fallback: &[u8],
+    ) -> Result<(), NodeError> {
+        self.send_channel_body(
+            channel,
+            MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
+        )
+        .await
+    }
+
+    /// Seal an already-encoded message body with this node's sender key, append it, record
+    /// a local plaintext copy, and distribute to channel members.
+    async fn send_channel_body(
+        &self,
+        channel: ConversationId,
+        wrapped: Vec<u8>,
+    ) -> Result<(), NodeError> {
         // Ensure this node's sender-key distribution for the current epoch is published
         // BEFORE the first seal (which generates+ratchets our chain to n=1). Without
         // this, a non-creator member's messages are undecryptable by everyone.

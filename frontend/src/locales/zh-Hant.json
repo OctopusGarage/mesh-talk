@@ -136,7 +136,9 @@
     "image": "傳送圖片",
     "emoji": "表情符號",
     "insertEmoji": "插入 {{emoji}}",
-    "couldntOpenFile": "無法開啟檔案：{{error}}"
+    "couldntOpenFile": "無法開啟檔案：{{error}}",
+    "stickers": "貼紙",
+    "sendSticker": "傳送 {{emoji}} 貼紙"
   },
   "screenshot": {
     "trigger": "截圖",
@@ -318,7 +320,8 @@
     "tagline": "在區域網路內進行端對端加密的點對點通訊。",
     "version": "版本 {{version}}",
     "sourceRepo": "原始碼儲存庫",
-    "license": "授權條款（MIT）"
+    "license": "授權條款（MIT）",
+    "credits": "動畫貼紙來自 Google Noto Emoji,依其開源授權使用。"
   },
   "offlineConnect": {
     "trigger": "無網直連引導",

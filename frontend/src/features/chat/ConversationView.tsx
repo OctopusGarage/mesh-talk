@@ -206,6 +206,7 @@ export function ConversationView() {
   const toggleReaction = useChat((s) => s.toggleReaction);
   const deleteMessage = useChat((s) => s.deleteMessage);
   const recallMessage = useChat((s) => s.recallMessage);
+  const sendSticker = useChat((s) => s.sendSticker);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const members = useChat((s) => s.members);
@@ -523,6 +524,7 @@ export function ConversationView() {
         mentionNames={mentionNames}
         replyTo={replyTo}
         prefill={prefill}
+        onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
         onCancelReply={() => setReplyTo(null)}
         onAttach={async () => {
           try {

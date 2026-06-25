@@ -11,71 +11,127 @@ use serde::{Deserialize, Serialize};
 /// `MTB1` is the v1 framing (magic only, no version byte): `MTB1 ‖ bincode(body)`.
 const MSG_MAGIC: &[u8] = b"MTB1";
 
-/// Reserved magic for the FUTURE versioned framing: `MTB2 ‖ version(u8) ‖ body`.
-/// Not emitted yet (so v0.1.0 peers keep parsing our `MTB1` output verbatim); the
-/// decoder already recognizes it so the next body change is purely additive — see
-/// the module/`decode` docs for the migration path.
+/// Magic for the versioned framing: `MTB2 ‖ version(u8) ‖ bincode(body)`. Emitted only
+/// when a field beyond the `MTB1` layout is set (today: an animated-sticker reference), so
+/// plain text/replies keep shipping as `MTB1` and old peers keep parsing those verbatim.
 const MSG_MAGIC_V2: &[u8] = b"MTB2";
+/// `MTB2` body version that carries the optional `sticker` field (text + reply_to + sticker).
+const MTB2_V_STICKER: u8 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The chat-message body. `text` is the message (or, for a sticker, the fallback emoji
+/// char); `reply_to` is the parent for a threaded reply; `sticker` is an animated-sticker
+/// id (an emoji codepoint string like `1f602`) sent by reference — both peers bundle the
+/// same set, and `text` carries the emoji char so a peer without that sticker still shows
+/// something.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageBody {
     pub text: Vec<u8>,
     pub reply_to: Option<EventId>,
+    pub sticker: Option<String>,
+}
+
+/// `MTB1` wire body — the original 2-field layout. Kept BYTE-IDENTICAL (its own struct, in
+/// declaration order) so plain text/reply messages encode exactly as deployed v0.1.0 expects.
+#[derive(Serialize, Deserialize)]
+struct WireV1 {
+    text: Vec<u8>,
+    reply_to: Option<EventId>,
+}
+
+/// `MTB2` v1 wire body — adds `sticker`. Positional bincode: never reorder these fields.
+#[derive(Serialize, Deserialize)]
+struct WireV2 {
+    text: Vec<u8>,
+    reply_to: Option<EventId>,
+    sticker: Option<String>,
+}
+
+fn opts() -> impl Options {
+    bincode::DefaultOptions::new().with_fixint_encoding()
 }
 
 impl MessageBody {
     pub fn new(text: Vec<u8>, reply_to: Option<EventId>) -> Self {
-        MessageBody { text, reply_to }
+        MessageBody {
+            text,
+            reply_to,
+            sticker: None,
+        }
     }
 
-    /// `MSG_MAGIC ‖ bincode(self)` — the plaintext that gets sealed.
+    /// A sticker message: `sticker_id` is the emoji codepoint id; `fallback` is the emoji
+    /// char bytes shown if the recipient lacks that bundled sticker.
+    pub fn sticker(sticker_id: String, fallback: Vec<u8>) -> Self {
+        MessageBody {
+            text: fallback,
+            reply_to: None,
+            sticker: Some(sticker_id),
+        }
+    }
+
+    /// Encode the sealed plaintext. A sticker message ships as `MTB2 ‖ 1 ‖ bincode(WireV2)`;
+    /// everything else ships as `MTB1 ‖ bincode(WireV1)` (unchanged on the wire).
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(MSG_MAGIC.len() + 64);
-        out.extend_from_slice(MSG_MAGIC);
-        out.extend_from_slice(
-            &bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .serialize(self)
-                .expect("message body serializes"),
-        );
-        out
+        if self.sticker.is_some() {
+            let body = opts()
+                .serialize(&WireV2 {
+                    text: self.text.clone(),
+                    reply_to: self.reply_to,
+                    sticker: self.sticker.clone(),
+                })
+                .expect("message body serializes");
+            let mut out = Vec::with_capacity(MSG_MAGIC_V2.len() + 1 + body.len());
+            out.extend_from_slice(MSG_MAGIC_V2);
+            out.push(MTB2_V_STICKER);
+            out.extend_from_slice(&body);
+            out
+        } else {
+            let body = opts()
+                .serialize(&WireV1 {
+                    text: self.text.clone(),
+                    reply_to: self.reply_to,
+                })
+                .expect("message body serializes");
+            let mut out = Vec::with_capacity(MSG_MAGIC.len() + body.len());
+            out.extend_from_slice(MSG_MAGIC);
+            out.extend_from_slice(&body);
+            out
+        }
     }
 
     /// Recover a body from sealed-then-opened plaintext.
     ///
-    /// Accepts three framings, in order:
-    /// 1. `MTB1 ‖ bincode(body)` — the CURRENT framing this build emits.
-    /// 2. `MTB2 ‖ version(u8) ‖ <version-specific body>` — the FUTURE versioned
-    ///    framing. Recognized now (forward-readiness) but never emitted yet, so
-    ///    today's known versions are empty and any `MTB2` payload falls through.
-    /// 3. Anything else — a legacy raw-text message (`reply_to = None`).
-    ///
-    /// ## Migration path (why no version byte is added in place today)
-    /// `MessageBody` is bincode (positional), and `MTB1` has no version field, so a
-    /// version byte cannot be inserted without shifting every following byte and
-    /// breaking already-deployed v0.1.0 peers. We therefore keep EMITTING `MTB1`
-    /// verbatim and only add decoder-side readiness for an `MTB2` frame. When a body
-    /// change is needed, emit `MTB2 ‖ 1 ‖ bincode(new_body)` and add a `decode_v2(1, …)`
-    /// arm here; `MTB1` decoding stays for backward compatibility with old peers.
+    /// Accepts, in order:
+    /// 1. `MTB1 ‖ bincode(WireV1)` — plain text / reply (the common case).
+    /// 2. `MTB2 ‖ version(u8) ‖ bincode(body)` — versioned; v1 carries `sticker`. An
+    ///    unknown version or an undecodable body falls through to raw text.
+    /// 3. Anything else — a legacy raw-text message.
     pub fn decode(bytes: &[u8]) -> MessageBody {
         if let Some(rest) = bytes.strip_prefix(MSG_MAGIC) {
-            if let Ok(body) = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .reject_trailing_bytes()
-                .deserialize::<MessageBody>(rest)
-            {
-                return body;
+            if let Ok(b) = opts().reject_trailing_bytes().deserialize::<WireV1>(rest) {
+                return MessageBody {
+                    text: b.text,
+                    reply_to: b.reply_to,
+                    sticker: None,
+                };
             }
         } else if let Some(rest) = bytes.strip_prefix(MSG_MAGIC_V2) {
-            // `MTB2 ‖ version(u8) ‖ body`. No versions are defined yet, so this never
-            // matches a real frame today; it exists so the next change is additive.
-            if let Some((&_version, _body)) = rest.split_first() {
-                // Future: `match version { 1 => decode_v2_body(body), _ => {} }`.
+            if let Some((&version, body)) = rest.split_first() {
+                if version == MTB2_V_STICKER {
+                    if let Ok(b) = opts().reject_trailing_bytes().deserialize::<WireV2>(body) {
+                        return MessageBody {
+                            text: b.text,
+                            reply_to: b.reply_to,
+                            sticker: b.sticker,
+                        };
+                    }
+                }
             }
         }
         MessageBody {
             text: bytes.to_vec(),
             reply_to: None,
+            sticker: None,
         }
     }
 }
@@ -122,15 +178,35 @@ mod tests {
     }
 
     #[test]
-    fn future_mtb2_frame_is_tolerated_as_raw_for_now() {
-        // No MTB2 version is defined yet, so an MTB2-framed payload must not panic
-        // and must fall back to raw text — proving the readiness path is inert today.
-        let mut bytes = b"MTB2".to_vec();
-        bytes.push(1u8); // a hypothetical future version
-        bytes.extend_from_slice(b"future body");
-        let body = MessageBody::decode(&bytes);
-        assert_eq!(body.text, bytes);
-        assert_eq!(body.reply_to, None);
+    fn sticker_round_trips_via_mtb2() {
+        // A sticker ships as MTB2 v1 with the codepoint id + an emoji-char fallback.
+        let s = MessageBody::sticker("1f602".to_string(), "😂".as_bytes().to_vec());
+        let decoded = MessageBody::decode(&s.encode());
+        assert_eq!(decoded, s);
+        assert_eq!(decoded.sticker.as_deref(), Some("1f602"));
+        assert_eq!(decoded.text, "😂".as_bytes());
+        // A plain text message stays MTB1 (no sticker, byte-compatible with v0.1.0).
+        assert!(s.encode().starts_with(b"MTB2"));
+        assert!(MessageBody::new(b"hi".to_vec(), None)
+            .encode()
+            .starts_with(b"MTB1"));
+    }
+
+    #[test]
+    fn unknown_or_garbage_mtb2_falls_back_to_raw() {
+        // An unknown MTB2 version, or a v1 frame whose body doesn't decode, must not panic
+        // and must fall back to raw text rather than dropping the message.
+        let mut unknown_version = b"MTB2".to_vec();
+        unknown_version.push(99u8);
+        unknown_version.extend_from_slice(b"whatever");
+        assert_eq!(MessageBody::decode(&unknown_version).text, unknown_version);
+
+        let mut bad_v1_body = b"MTB2".to_vec();
+        bad_v1_body.push(1u8); // version 1, but not a valid WireV2 bincode
+        bad_v1_body.extend_from_slice(b"\xff\xff");
+        let body = MessageBody::decode(&bad_v1_body);
+        assert_eq!(body.text, bad_v1_body);
+        assert_eq!(body.sticker, None);
     }
 
     #[test]

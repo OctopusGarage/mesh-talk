@@ -104,6 +104,9 @@ pub struct HistoryEntry {
     /// into the composer (WeChat behaviour). `None` for peers' recalls (never expose their
     /// content) and for non-text (file) messages. Only ever set when `recalled` is true.
     pub recalled_text: Option<Vec<u8>>,
+    /// An animated-sticker id (emoji codepoint) when this message is a sticker. The UI
+    /// renders the bundled animation; `text` holds the fallback emoji char.
+    pub sticker: Option<String>,
 }
 
 /// File metadata for a [`HistoryEntry`] that represents a file/media message. Lets the

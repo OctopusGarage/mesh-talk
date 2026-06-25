@@ -557,6 +557,30 @@ impl NodeRuntime {
         self.node.recall_channel(channel, target).await
     }
 
+    /// Send an animated sticker to an account (fan-out + self-sync, like a DM).
+    pub async fn send_sticker_to_account(
+        &self,
+        target_account_id: &str,
+        sticker_id: &str,
+        fallback: &[u8],
+    ) -> Result<(), NodeError> {
+        self.node
+            .send_sticker_to_account(target_account_id, sticker_id, fallback)
+            .await
+    }
+
+    /// Send an animated sticker to a channel.
+    pub async fn send_sticker_channel(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+        sticker_id: &str,
+        fallback: &[u8],
+    ) -> Result<(), NodeError> {
+        self.node
+            .send_sticker_channel(channel, sticker_id, fallback)
+            .await
+    }
+
     /// Aggregated reactions in the DM with `peer`.
     pub fn reactions_dm(&self, peer: &PublicIdentity) -> Vec<crate::node::reaction::ReactionView> {
         self.node.reactions_dm(peer)

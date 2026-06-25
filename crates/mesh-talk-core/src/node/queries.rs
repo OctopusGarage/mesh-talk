@@ -49,6 +49,7 @@ impl Node {
                     }),
                     recalled: false,
                     recalled_text: None,
+                    sticker: None,
                 })
             })
             .collect()
@@ -108,6 +109,7 @@ impl Node {
                 file: None,
                 recalled: false,
                 recalled_text: None,
+                sticker: body.sticker,
             });
         }
 
@@ -129,6 +131,7 @@ impl Node {
                 file: None,
                 recalled: false,
                 recalled_text: None,
+                sticker: body.sticker,
             });
         }
 
@@ -195,6 +198,7 @@ impl Node {
                 file: None,
                 recalled: false,
                 recalled_text: None,
+                sticker: body.sticker,
             });
         }
         for rcv in self
@@ -214,6 +218,7 @@ impl Node {
                 file: None,
                 recalled: false,
                 recalled_text: None,
+                sticker: body.sticker,
             });
         }
         // Merge file/media messages (FileManifest events) so they're ordered inline with
@@ -409,13 +414,15 @@ fn tombstone_recalled(entries: &mut [HistoryEntry], recalled: &std::collections:
         if recalled.contains(&e.id) {
             e.recalled = true;
             // For OUR OWN recalled text messages, keep the original text re-editable
-            // (WeChat's "re-edit"). Never expose a peer's recalled content, or a file.
-            if e.from_me && e.file.is_none() && !e.text.is_empty() {
+            // (WeChat's "re-edit"). Never expose a peer's recalled content, a file, or a
+            // sticker (re-editing a sticker into the text box makes no sense).
+            if e.from_me && e.file.is_none() && e.sticker.is_none() && !e.text.is_empty() {
                 e.recalled_text = Some(std::mem::take(&mut e.text));
             }
             e.text = Vec::new();
             e.file = None;
             e.reply_to = None;
+            e.sticker = None;
         }
     }
 }

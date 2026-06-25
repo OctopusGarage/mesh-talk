@@ -5,6 +5,7 @@ import {
   CornerUpLeft,
   Paperclip,
   Smile,
+  Sticker as StickerIcon,
   Camera,
   Image as ImageIcon,
 } from "lucide-react";
@@ -12,6 +13,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { pickImageFile } from "@/lib/avatarImage";
+import { STICKERS } from "@/lib/stickerPacks";
 import type { ChatMessage } from "@/store/chat";
 
 // A small curated palette — enough for everyday chat without pulling in a heavy emoji library.
@@ -68,6 +70,7 @@ export function Composer({
   onCancelReply,
   mentionNames,
   prefill,
+  onSendSticker,
 }: {
   onSend: (text: string) => void;
   onAttach?: () => void;
@@ -82,10 +85,13 @@ export function Composer({
   /** Drop text into the composer from outside (WeChat-style "re-edit" of a recalled
    * message). `n` is a bump counter so the same text can be re-applied. */
   prefill?: { text: string; n: number } | null;
+  /** Send an animated sticker (by id, with its emoji-char fallback) as its own message. */
+  onSendSticker?: (stickerId: string, fallback: string) => void;
 }) {
   const { t } = useTranslation();
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const [showStickers, setShowStickers] = useState(false);
 
   // Apply an external prefill (re-edit): replace the draft and focus, caret at the end.
   // Keyed on the bump counter so re-editing the same text twice still re-applies.
@@ -275,6 +281,38 @@ export function Composer({
           </div>
         )}
 
+        {showStickers && onSendSticker && (
+          <div
+            data-testid="sticker-panel"
+            className="absolute bottom-full left-0 mb-2 max-h-72 w-80 overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
+          >
+            <div className="grid grid-cols-5 gap-1">
+              {STICKERS.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  data-testid={`sticker-option-${s.id}`}
+                  onClick={() => {
+                    onSendSticker(s.id, s.emoji);
+                    setShowStickers(false);
+                  }}
+                  className="rounded-lg p-1 hover:bg-accent"
+                  title={s.emoji}
+                  aria-label={t("composer.sendSticker", { emoji: s.emoji })}
+                >
+                  <img
+                    src={s.url}
+                    alt={s.emoji}
+                    loading="lazy"
+                    className="h-12 w-12"
+                    draggable={false}
+                  />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {showShot && onScreenshot && (
           <div
             data-testid="screenshot-menu"
@@ -318,6 +356,7 @@ export function Composer({
               aria-label={t("screenshot.trigger")}
               onClick={() => {
                 setShowEmoji(false);
+                setShowStickers(false);
                 setShowShot((v) => !v);
               }}
             >
@@ -359,11 +398,29 @@ export function Composer({
             aria-label={t("composer.emoji")}
             onClick={() => {
               setShowShot(false);
+              setShowStickers(false);
               setShowEmoji((v) => !v);
             }}
           >
             <Smile className="h-4 w-4" />
           </Button>
+          {onSendSticker && (
+            <Button
+              variant="ghost"
+              size="icon"
+              data-testid="composer-stickers"
+              className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
+              title={t("composer.stickers")}
+              aria-label={t("composer.stickers")}
+              onClick={() => {
+                setShowEmoji(false);
+                setShowShot(false);
+                setShowStickers((v) => !v);
+              }}
+            >
+              <StickerIcon className="h-4 w-4" />
+            </Button>
+          )}
         </div>
 
         <div className="flex items-end gap-2 rounded-2xl border bg-background p-2 transition-colors focus-within:border-signal focus-within:ring-2 focus-within:ring-signal/30">

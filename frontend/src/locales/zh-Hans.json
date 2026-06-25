@@ -136,7 +136,9 @@
     "image": "发送图片",
     "emoji": "表情",
     "insertEmoji": "插入 {{emoji}}",
-    "couldntOpenFile": "无法打开文件：{{error}}"
+    "couldntOpenFile": "无法打开文件：{{error}}",
+    "stickers": "贴纸",
+    "sendSticker": "发送 {{emoji}} 贴纸"
   },
   "screenshot": {
     "trigger": "截图",
@@ -318,7 +320,8 @@
     "tagline": "在局域网内进行端到端加密的点对点通信。",
     "version": "版本 {{version}}",
     "sourceRepo": "源代码仓库",
-    "license": "许可证（MIT）"
+    "license": "许可证（MIT）",
+    "credits": "动画贴纸来自 Google Noto Emoji,依据其开源许可使用。"
   },
   "offlineConnect": {
     "trigger": "无网直连引导",

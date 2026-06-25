@@ -136,7 +136,9 @@
     "image": "画像を送信",
     "emoji": "絵文字",
     "insertEmoji": "{{emoji}} を挿入",
-    "couldntOpenFile": "ファイルを開けませんでした：{{error}}"
+    "couldntOpenFile": "ファイルを開けませんでした：{{error}}",
+    "stickers": "ステッカー",
+    "sendSticker": "{{emoji}} ステッカーを送信"
   },
   "screenshot": {
     "trigger": "スクリーンショット",
@@ -318,7 +320,8 @@
     "tagline": "ローカルネットワーク上の暗号化されたピアツーピアメッセージング。",
     "version": "バージョン {{version}}",
     "sourceRepo": "ソースリポジトリ",
-    "license": "ライセンス（MIT）"
+    "license": "ライセンス（MIT）",
+    "credits": "アニメーションステッカーは Google の Noto Emoji を、そのオープンソースライセンスのもとで使用しています。"
   },
   "offlineConnect": {
     "trigger": "Wi-Fiなしで接続",

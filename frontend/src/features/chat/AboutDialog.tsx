@@ -94,6 +94,11 @@ export function AboutDialog() {
               <ExternalLink className="ml-auto h-3.5 w-3.5 opacity-60" />
             </Button>
           </div>
+
+          {/* Attribution for bundled third-party assets (Noto Animated Emoji stickers). */}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("about.credits")}
+          </p>
         </div>
       </DialogContent>
     </Dialog>

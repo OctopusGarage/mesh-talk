@@ -248,6 +248,7 @@ pub fn run_tauri() {
             crate::chat_commands::delete_message,
             crate::chat_commands::recall_message,
             crate::chat_commands::clear_conversation,
+            crate::chat_commands::send_sticker,
             crate::chat_commands::diag_get_peers,
             crate::chat_commands::diag_network_info,
             crate::chat_commands::get_presence,

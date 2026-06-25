@@ -66,6 +66,14 @@ export const chat = {
     invoke<void>("recall_message", { convId, target, isChannel }),
   clearConversation: (convId: string, isChannel: boolean) =>
     invoke<void>("clear_conversation", { convId, isChannel }),
+  // Send an animated sticker as its own message. `fallback` is the emoji char shown if the
+  // recipient lacks that bundled sticker.
+  sendSticker: (
+    convId: string,
+    stickerId: string,
+    fallback: string,
+    isChannel: boolean,
+  ) => invoke<void>("send_sticker", { convId, stickerId, fallback, isChannel }),
 
   // Direct messages (device-addressed)
   sendDm: (recipient: string, text: string, replyTo: string | null = null) =>

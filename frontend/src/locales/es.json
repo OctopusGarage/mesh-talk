@@ -136,7 +136,9 @@
     "image": "Enviar una imagen",
     "emoji": "Emoji",
     "insertEmoji": "Insertar {{emoji}}",
-    "couldntOpenFile": "No se pudo abrir el archivo: {{error}}"
+    "couldntOpenFile": "No se pudo abrir el archivo: {{error}}",
+    "stickers": "Stickers",
+    "sendSticker": "Enviar sticker {{emoji}}"
   },
   "screenshot": {
     "trigger": "Captura de pantalla",
@@ -318,7 +320,8 @@
     "tagline": "Mensajería cifrada de igual a igual en tu red local.",
     "version": "Versión {{version}}",
     "sourceRepo": "Repositorio de código",
-    "license": "Licencia (MIT)"
+    "license": "Licencia (MIT)",
+    "credits": "Stickers animados de Noto Emoji de Google, usados bajo su licencia de código abierto."
   },
   "offlineConnect": {
     "trigger": "Conectar sin Wi-Fi",

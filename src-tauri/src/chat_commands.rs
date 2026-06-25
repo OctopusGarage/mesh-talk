@@ -61,6 +61,7 @@ pub struct HistoryItem {
     pub file: Option<HistoryFileInfo>, // present when this line is a file/media message
     pub recalled: bool,           // true when the message was recalled → render a placeholder
     pub recalled_text: Option<String>, // our own recalled text, for "re-edit" (None otherwise)
+    pub sticker: Option<String>,  // animated-sticker id when this message is a sticker
 }
 
 impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
@@ -91,6 +92,7 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
             recalled_text: h
                 .recalled_text
                 .map(|t| String::from_utf8_lossy(&t).into_owned()),
+            sticker: h.sticker,
         }
     }
 }
@@ -248,6 +250,39 @@ pub async fn send_to_account(
     node.send_to_account(&account, text.as_bytes(), reply)
         .await
         .map_err(CommandError::from)
+}
+
+/// Send an animated sticker as its own message. `convId` is the channel id (hex) when
+/// `isChannel`, else the peer account id. `stickerId` is the bundled sticker's codepoint id;
+/// `fallback` is the emoji char shown if the recipient lacks that sticker.
+#[tauri::command]
+pub async fn send_sticker(
+    state: tauri::State<'_, NodeState>,
+    conv_id: String,
+    sticker_id: String,
+    fallback: String,
+    is_channel: bool,
+) -> Result<(), CommandError> {
+    let channel = if is_channel {
+        Some(parse_channel_id(&conv_id)?)
+    } else {
+        None
+    };
+    let node = {
+        let guard = state.0.lock().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        rt.handle()
+    };
+    match channel {
+        Some(channel) => node
+            .send_sticker_channel(channel, &sticker_id, fallback.as_bytes())
+            .await
+            .map_err(CommandError::from),
+        None => node
+            .send_sticker_to_account(&conv_id, &sticker_id, fallback.as_bytes())
+            .await
+            .map_err(CommandError::from),
+    }
 }
 
 #[tauri::command]
