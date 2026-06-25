@@ -95,7 +95,9 @@
     "dismissError": "關閉錯誤提示",
     "messageLog": "與 {{name}} 的訊息",
     "list": "對話清單",
-    "dropToSend": "拖放以傳送給 {{name}}"
+    "dropToSend": "拖放以傳送給 {{name}}",
+    "clearHistory": "清空聊天記錄",
+    "clearHistoryConfirm": "這會永久刪除本機上這個對話的訊息,無法復原,且不影響對方的記錄。"
   },
   "presence": {
     "online": "上線",
@@ -115,7 +117,12 @@
       "relay-unreachable": "傳送失敗——網路無法連線",
       "crypto": "傳送失敗——加密錯誤",
       "unknown": "傳送失敗"
-    }
+    },
+    "delete": "刪除",
+    "recall": "收回",
+    "recalledByYou": "你收回了一則訊息",
+    "recalledBy": "{{name}} 收回了一則訊息",
+    "reEdit": "重新編輯"
   },
   "transfer": {
     "sending": "正在傳送檔案…",
@@ -166,7 +173,12 @@
     "downloadFolderDesc": "接收檔案的儲存位置。留空則每次詢問。",
     "downloadFolderSet": "接收的檔案會自動儲存到此處。",
     "chooseFolder": "選擇資料夾",
-    "changeFolder": "變更"
+    "changeFolder": "變更",
+    "sectionChat": "聊天記錄",
+    "retention": "保留時長",
+    "retentionDesc": "自動刪除本機上早於此時長的訊息。",
+    "retentionForever": "永久",
+    "retentionDays": "{{count}} 天"
   },
   "search": {
     "title": "搜尋訊息",
@@ -321,5 +333,15 @@
     "joinBody": "把第二台裝置連到這個熱點，然後重新開啟 Mesh-Talk。幾秒內雙方就會出現在彼此的清單裡——也可以開啟網路診斷點「重新掃描」。",
     "wiredNote": "完全沒有 Wi-Fi？兩台裝置之間用網路線或 USB 網路共享，效果一樣。",
     "gotIt": "知道了"
+  },
+  "profile": {
+    "title": "個人資料",
+    "description": "別人看到的你的頭像和名字。",
+    "open": "開啟個人資料",
+    "displayName": "暱稱",
+    "editName": "修改名字",
+    "username": "登入使用者名稱",
+    "accountId": "帳號 ID",
+    "usernameHint": "用這個使用者名稱登入,不可更改。上方的暱稱只是顯示名,可隨時修改。"
   }
 }

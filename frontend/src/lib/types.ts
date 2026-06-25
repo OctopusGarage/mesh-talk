@@ -3,7 +3,10 @@
 
 export interface UserInfo {
   id: string;
+  /** The immutable login handle. */
   username: string;
+  /** The editable, peer-facing display name (nickname). Equals `username` until changed. */
+  display_name: string;
 }
 
 export interface LoginResult {
@@ -45,6 +48,8 @@ export interface HistoryItem {
   wall_clock: number;
   reply_to: string | null;
   file: HistoryFileInfo | null; // present when this line is a file/media message
+  recalled: boolean; // true when recalled → render a placeholder, no content
+  recalled_text: string | null; // our own recalled text, for "re-edit" (null otherwise)
 }
 
 export interface ReactionInfo {
@@ -135,6 +140,8 @@ export interface AppSettings {
   stay_signed_in: boolean;
   /** The username to auto-login next launch (backend-managed; not set from the UI). */
   last_user: string | null;
+  /** Keep chat history for at most this many days (0 = forever); older messages are erased. */
+  retention_days: number;
 }
 
 // --- Environment / About (src-tauri/src/diagnostics.rs) ---

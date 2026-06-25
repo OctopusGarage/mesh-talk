@@ -312,6 +312,166 @@ async fn history_merges_sent_and_received_in_time_order() {
 }
 
 #[tokio::test]
+async fn delete_clear_and_prune_erase_local_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let me_pub = me.public();
+    let bob_uid = bob.public().user_id();
+    let conv = crate::node::conversation::dm_conversation_id(&me_pub, &bob.public());
+
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    roster.lock().unwrap().update(
+        &Announce::new(&bob, "Bob", 4000),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &me_pub.user_id(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        roster,
+        tx,
+        ch_tx,
+        file_tx,
+        &dir.path().join("me.log"),
+        &dir.path().join("me-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    let bob_msg_id = EventId::new([7u8; 32]);
+    let seed = |node: &Node| {
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conv,
+                bob_uid.clone(),
+                1000,
+                &MessageBody::new(b"old from bob".to_vec(), None).encode(),
+                bob_msg_id,
+            )
+            .unwrap();
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(
+                conv,
+                1,
+                3000,
+                &MessageBody::new(b"new from me".to_vec(), None).encode(),
+            )
+            .unwrap();
+    };
+    seed(&node);
+    assert_eq!(node.dm_history(&bob.public(), 10).len(), 2);
+
+    // 1. Delete Bob's message for me (matched by event id; not an account conversation).
+    assert_eq!(node.delete_message(conv, bob_msg_id, false).unwrap(), 1);
+    let hist = node.dm_history(&bob.public(), 10);
+    assert_eq!(hist.len(), 1);
+    assert!(hist[0].from_me, "only my message remains");
+
+    // 2. Retention prune: re-add only Bob's old (t=1000) message, then drop everything
+    //    older than t=1500 (leaves my t=3000 send).
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conv,
+            bob_uid.clone(),
+            1000,
+            &MessageBody::new(b"old from bob".to_vec(), None).encode(),
+            bob_msg_id,
+        )
+        .unwrap();
+    assert_eq!(node.prune_older_than(1500).unwrap(), 1); // only the t=1000 one
+    let hist = node.dm_history(&bob.public(), 10);
+    assert_eq!(hist.len(), 1);
+    assert!(hist[0].from_me && hist[0].wall_clock == 3000);
+
+    // 3. Clear the whole conversation.
+    let removed = node.clear_conversation(conv).unwrap();
+    assert!(removed >= 1);
+    assert!(node.dm_history(&bob.public(), 10).is_empty());
+}
+
+#[tokio::test]
+async fn recall_account_tombstones_own_message_and_enforces_window() {
+    use crate::node::DmEnvelope;
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        roster,
+        tx,
+        ch_tx,
+        file_tx,
+        &dir.path().join("me.log"),
+        &dir.path().join("me-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    let my_account = node.account_id();
+    let peer_account = "f".repeat(32);
+    let acct_conv = crate::node::conversation::account_conversation_id(&my_account, &peer_account);
+
+    // Helper: record one of MY account sends with a given logical id + wall_clock.
+    let seed_send = |id: [u8; 32], wall: u64, text: &[u8]| {
+        let env = DmEnvelope::new(
+            my_account.clone(),
+            peer_account.clone(),
+            id,
+            MessageBody::new(text.to_vec(), None).encode(),
+        )
+        .encode();
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(acct_conv, wall, wall, &env)
+            .unwrap();
+    };
+
+    let now = crate::node::node::now_millis();
+    let fresh = EventId::new([1u8; 32]);
+    let old = EventId::new([2u8; 32]);
+    seed_send(*fresh.as_bytes(), now, b"recall me");
+    seed_send(*old.as_bytes(), now - 5 * 60 * 1000, b"too old"); // 5 min ago
+
+    // A fresh message can be recalled (no peers → just records our own recall + tombstones).
+    node.recall_account(&peer_account, fresh).await.unwrap();
+    // The window has passed for the old one.
+    assert!(node.recall_account(&peer_account, old).await.is_err());
+
+    let hist = node.account_history(&peer_account, 10);
+    let recalled = hist
+        .iter()
+        .find(|e| e.id == fresh)
+        .expect("fresh entry present");
+    assert!(recalled.recalled, "recalled message is tombstoned");
+    assert!(recalled.text.is_empty(), "recalled content is dropped");
+    // Our own recalled text stays available for "re-edit".
+    assert_eq!(
+        recalled.recalled_text.as_deref(),
+        Some(b"recall me".as_ref()),
+        "sender keeps the original text for re-edit"
+    );
+    let kept = hist
+        .iter()
+        .find(|e| e.id == old)
+        .expect("old entry present");
+    assert!(!kept.recalled, "the un-recalled message is untouched");
+    assert_eq!(kept.text, b"too old");
+}
+
+#[tokio::test]
 async fn reopen_suppresses_recorded_history_but_retries_unrecorded() {
     let dir = tempfile::tempdir().unwrap();
     let me = DeviceIdentity::generate();

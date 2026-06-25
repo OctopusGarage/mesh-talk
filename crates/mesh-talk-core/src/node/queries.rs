@@ -47,6 +47,8 @@ impl Node {
                         mime: manifest.mime().to_string(),
                         media: crate::node::media_store::manifest_is_media(&manifest),
                     }),
+                    recalled: false,
+                    recalled_text: None,
                 })
             })
             .collect()
@@ -104,6 +106,8 @@ impl Node {
                 wall_clock: sent.wall_clock,
                 reply_to: body.reply_to,
                 file: None,
+                recalled: false,
+                recalled_text: None,
             });
         }
 
@@ -123,12 +127,20 @@ impl Node {
                 wall_clock: rcv.wall_clock,
                 reply_to: body.reply_to,
                 file: None,
+                recalled: false,
+                recalled_text: None,
             });
         }
 
         // Merge file/media messages (FileManifest events) so they're ordered inline with
         // text by wall-clock.
         entries.extend(self.conversation_files(conv));
+
+        // Tombstone recalled messages: keep the slot (sender + position) but drop the content.
+        tombstone_recalled(
+            &mut entries,
+            &self.recalled_targets_account(peer_account_id),
+        );
 
         // Tie-break equal wall-clocks by the (global, content-addressed) event id so
         // both participants render the same order on a same-millisecond collision.
@@ -181,6 +193,8 @@ impl Node {
                 wall_clock: sent.wall_clock,
                 reply_to: body.reply_to,
                 file: None,
+                recalled: false,
+                recalled_text: None,
             });
         }
         for rcv in self
@@ -198,11 +212,23 @@ impl Node {
                 wall_clock: rcv.wall_clock,
                 reply_to: body.reply_to,
                 file: None,
+                recalled: false,
+                recalled_text: None,
             });
         }
         // Merge file/media messages (FileManifest events) so they're ordered inline with
         // text by wall-clock.
         entries.extend(self.conversation_files(conversation));
+        // Tombstone recalled messages. Recall is only wired for channels (1:1 chats go
+        // through `account_history`); a device-pair DM has no Delete events, so this is an
+        // empty set there.
+        let is_channel = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            book.state(&conversation).is_some()
+        };
+        if is_channel {
+            tombstone_recalled(&mut entries, &self.recalled_targets_channel(conversation));
+        }
         // Tie-break equal wall-clocks by the (global, content-addressed) event id so
         // both participants render the same order on a same-millisecond collision.
         entries.sort_by(|a, b| {
@@ -375,7 +401,26 @@ struct ScanMatch {
 /// Decode an account-history store entry (a full `DmEnvelope`) into its logical id
 /// and inner body. A malformed or legacy entry falls back to a bare `MessageBody`
 /// with a zero id, so it still renders rather than breaking history.
-fn decode_account_entry(plaintext: &[u8]) -> (EventId, MessageBody) {
+/// Blank the content of any entry whose id was recalled, keeping its slot (sender +
+/// position) so the UI can render an "X recalled a message" placeholder. The plaintext /
+/// file metadata of a recalled message is never returned.
+fn tombstone_recalled(entries: &mut [HistoryEntry], recalled: &std::collections::HashSet<EventId>) {
+    for e in entries.iter_mut() {
+        if recalled.contains(&e.id) {
+            e.recalled = true;
+            // For OUR OWN recalled text messages, keep the original text re-editable
+            // (WeChat's "re-edit"). Never expose a peer's recalled content, or a file.
+            if e.from_me && e.file.is_none() && !e.text.is_empty() {
+                e.recalled_text = Some(std::mem::take(&mut e.text));
+            }
+            e.text = Vec::new();
+            e.file = None;
+            e.reply_to = None;
+        }
+    }
+}
+
+pub(in crate::node) fn decode_account_entry(plaintext: &[u8]) -> (EventId, MessageBody) {
     match DmEnvelope::decode(plaintext) {
         Some(env) => (EventId::new(env.msg_id), MessageBody::decode(&env.body)),
         None => (EventId::new([0u8; 32]), MessageBody::decode(plaintext)),

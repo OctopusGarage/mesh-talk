@@ -15,6 +15,8 @@ interface AuthState {
   tryAutoLogin: () => Promise<void>;
   login: (username: string, password: string) => Promise<boolean>;
   register: (username: string, password: string) => Promise<boolean>;
+  /** Change the editable display name (nickname). Returns true on success. */
+  rename: (newDisplayName: string) => Promise<boolean>;
   logout: () => Promise<void>;
 }
 
@@ -55,6 +57,18 @@ export const useAuth = create<AuthState>((set) => ({
       const res = await auth.register(username, password);
       if (!res.success) throw new Error("Registration failed");
       set({ loading: false });
+      return true;
+    } catch (e) {
+      set({ error: errMsg(e), loading: false });
+      return false;
+    }
+  },
+
+  rename: async (newDisplayName) => {
+    set({ loading: true, error: null });
+    try {
+      const user = await auth.renameAccount(newDisplayName);
+      set({ user, loading: false });
       return true;
     } catch (e) {
       set({ error: errMsg(e), loading: false });

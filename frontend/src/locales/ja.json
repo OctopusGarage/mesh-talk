@@ -95,7 +95,9 @@
     "dismissError": "エラーを閉じる",
     "messageLog": "{{name}} とのメッセージ",
     "list": "会話",
-    "dropToSend": "ドロップして {{name}} に送信"
+    "dropToSend": "ドロップして {{name}} に送信",
+    "clearHistory": "履歴を消去",
+    "clearHistoryConfirm": "この端末のこの会話のメッセージを完全に消去します。元に戻せません。相手の端末には影響しません。"
   },
   "presence": {
     "online": "オンライン",
@@ -115,7 +117,12 @@
       "relay-unreachable": "送信できませんでした — ネットワークに到達できません",
       "crypto": "送信できませんでした — 暗号化エラー",
       "unknown": "送信に失敗しました"
-    }
+    },
+    "delete": "削除",
+    "recall": "送信取消",
+    "recalledByYou": "メッセージを取り消しました",
+    "recalledBy": "{{name}} がメッセージを取り消しました",
+    "reEdit": "再編集"
   },
   "transfer": {
     "sending": "ファイルを送信中…",
@@ -166,7 +173,12 @@
     "downloadFolderDesc": "受信したファイルの保存先。未設定の場合は毎回確認します。",
     "downloadFolderSet": "受信したファイルはここに自動保存されます。",
     "chooseFolder": "フォルダを選択",
-    "changeFolder": "変更"
+    "changeFolder": "変更",
+    "sectionChat": "チャット履歴",
+    "retention": "保存期間",
+    "retentionDesc": "この期間より古いメッセージをこの端末から自動的に消去します。",
+    "retentionForever": "無期限",
+    "retentionDays": "{{count}}日"
   },
   "search": {
     "title": "メッセージを検索",
@@ -321,5 +333,15 @@
     "joinBody": "2台目をそのホットスポットに接続し、Mesh-Talk を開き直します。数秒でお互いの一覧に表示されます——またはネットワーク診断を開いて「再スキャン」をタップしてください。",
     "wiredNote": "Wi-Fiが全くない場合は、2台をLANケーブルやUSBテザリングでつないでも同じように動作します。",
     "gotIt": "OK"
+  },
+  "profile": {
+    "title": "プロフィール",
+    "description": "相手に表示されるあなたの写真と名前。",
+    "open": "プロフィールを開く",
+    "displayName": "表示名",
+    "editName": "名前を編集",
+    "username": "ログインユーザー名",
+    "accountId": "アカウントID",
+    "usernameHint": "このユーザー名でログインします(変更不可)。上の表示名はニックネームで、いつでも変更できます。"
   }
 }

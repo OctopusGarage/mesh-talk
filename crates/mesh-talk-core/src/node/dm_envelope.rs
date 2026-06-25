@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 const DM_ENV_MAGIC: &[u8] = b"MTDE1";
 /// Frames an account-addressed reaction (sealed plaintext of a `React` event).
 const REACT_ENV_MAGIC: &[u8] = b"MTRE1";
+/// Frames an account-addressed recall (sealed plaintext of a `Delete` event).
+const RECALL_ENV_MAGIC: &[u8] = b"MTRC1";
 
 /// Logical routing for an account-addressed DM: which account sent it and which
 /// account it is addressed to. Both are 32-hex `account_id`s.
@@ -123,6 +125,49 @@ impl ReactionEnvelope {
             .with_fixint_encoding()
             .reject_trailing_bytes()
             .deserialize::<ReactionEnvelope>(rest)
+            .ok()
+    }
+}
+
+/// The sealed plaintext of an account-addressed `Delete` (recall) event: the route
+/// (sender/recipient accounts) and the logical `msg_id` being recalled. Like
+/// [`ReactionEnvelope`], it is fanned out to every device of both accounts and bound to
+/// the authenticating peer on receipt, so only the message's own author can recall it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallEnvelope {
+    pub route: DmRoute,
+    pub target: [u8; 32],
+}
+
+impl RecallEnvelope {
+    pub fn new(sender_account: String, recipient_account: String, target: [u8; 32]) -> Self {
+        RecallEnvelope {
+            route: DmRoute {
+                sender_account,
+                recipient_account,
+            },
+            target,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(RECALL_ENV_MAGIC.len() + 64);
+        out.extend_from_slice(RECALL_ENV_MAGIC);
+        out.extend_from_slice(
+            &bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .serialize(self)
+                .expect("recall envelope serializes"),
+        );
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<RecallEnvelope> {
+        let rest = bytes.strip_prefix(RECALL_ENV_MAGIC)?;
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .deserialize::<RecallEnvelope>(rest)
             .ok()
     }
 }

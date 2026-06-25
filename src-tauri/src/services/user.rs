@@ -11,8 +11,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct User {
     /// Unique identifier for the user.
     pub user_id: String,
-    /// User's display name.
+    /// The login username — the immutable handle the on-disk store is namespaced by and
+    /// the key the keychain / auto-login use. Not shown to peers; see `display_name`.
     pub name: String,
+    /// The editable, peer-facing display name (nickname). Defaults to `name` until the
+    /// user changes it. This is what the node advertises in its announce.
+    pub display_name: String,
     /// User's unique identifier/address.
     pub address: String,
     /// Timestamp when the user was created.

@@ -86,6 +86,43 @@ impl ReceivedLog {
         Ok(())
     }
 
+    /// Remove every entry matching `should_remove`, atomically rewriting the file and
+    /// rebuilding BOTH the per-conversation index and the `seen` dedup set. Returns how many
+    /// were removed; a no-op (no rewrite) when nothing matches. The local-erase primitive
+    /// behind delete-a-message / clear-history / retention.
+    ///
+    /// Rebuilding `seen` from the kept records is deliberate: a removed message's event stays
+    /// in the synced (ciphertext) event log, deduped by id, so it is NOT re-ingested here on a
+    /// later sync — the erased plaintext stays gone on this device.
+    pub fn remove_where(
+        &mut self,
+        should_remove: impl Fn(&ReceivedEntry) -> bool,
+    ) -> Result<usize, LogError> {
+        let total: usize = self.by_conversation.values().map(Vec::len).sum();
+        let kept: Vec<ReceivedEntry> = self
+            .by_conversation
+            .values()
+            .flatten()
+            .filter(|e| !should_remove(e))
+            .cloned()
+            .collect();
+        let removed = total - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        self.file.rewrite(&kept)?;
+        self.by_conversation.clear();
+        self.seen.clear();
+        for entry in kept {
+            self.seen.insert(entry.event_id);
+            self.by_conversation
+                .entry(entry.conversation)
+                .or_default()
+                .push(entry);
+        }
+        Ok(removed)
+    }
+
     /// All received entries for `conversation`, sorted by `wall_clock`.
     pub fn entries(&self, conversation: &ConversationId) -> Vec<ReceivedEntry> {
         let mut v = self
@@ -162,6 +199,32 @@ mod tests {
         assert_eq!(c1[1].plaintext, b"second");
         assert_eq!(r.entries(&conv(2)).len(), 1);
         assert!(r.entries(&conv(9)).is_empty());
+    }
+
+    #[test]
+    fn remove_where_erases_entries_and_rebuilds_seen_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recv.log");
+        let drop_id = EventId::new([2; 32]);
+        {
+            let mut r = ReceivedLog::open(&path, "pw").unwrap();
+            r.record(conv(1), "a".into(), 1000, b"keep", EventId::new([1; 32]))
+                .unwrap();
+            r.record(conv(1), "a".into(), 2000, b"drop", drop_id)
+                .unwrap();
+            let removed = r.remove_where(|e| e.event_id == drop_id).unwrap();
+            assert_eq!(removed, 1);
+            assert_eq!(r.entries(&conv(1)).len(), 1);
+            // `seen` was rebuilt: the removed id is no longer considered seen, so the SAME
+            // event arriving again (a re-sync) WOULD record — but in the node the event-log
+            // dedup prevents re-ingest, so this is the intended building block, not a bug.
+            r.record(conv(1), "a".into(), 2000, b"drop", drop_id)
+                .unwrap();
+            assert_eq!(r.entries(&conv(1)).len(), 2);
+        }
+        // The kept entry survives reopen.
+        let r = ReceivedLog::open(&path, "pw").unwrap();
+        assert!(r.entries(&conv(1)).iter().any(|e| e.plaintext == b"keep"));
     }
 
     #[test]

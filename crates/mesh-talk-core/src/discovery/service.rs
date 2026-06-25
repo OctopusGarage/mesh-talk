@@ -12,6 +12,28 @@ use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+/// A shared, swappable encoded announce. The discovery loops read the current bytes
+/// on every send, so swapping in a freshly re-signed announce (e.g. on a display-name
+/// change) propagates live without restarting discovery. Cheap to read: each send
+/// clones the inner `Arc`, never the bytes.
+pub type SharedAnnounce = Arc<Mutex<Arc<Vec<u8>>>>;
+
+/// Encode `announce` once and wrap it as a [`SharedAnnounce`].
+pub fn shared_announce(announce: &Announce) -> SharedAnnounce {
+    Arc::new(Mutex::new(Arc::new(encode(announce))))
+}
+
+/// Re-encode `announce` and swap it into `shared` so the discovery loops advertise it
+/// from their next send onward — the live-rename path (no discovery restart needed).
+pub fn swap_announce(shared: &SharedAnnounce, announce: &Announce) {
+    *shared.lock().expect("announce mutex not poisoned") = Arc::new(encode(announce));
+}
+
+/// Snapshot the current encoded announce (an `Arc` clone — no byte copy).
+fn current_announce(shared: &SharedAnnounce) -> Arc<Vec<u8>> {
+    Arc::clone(&shared.lock().expect("announce mutex not poisoned"))
+}
+
 /// Decode + verify + record one received datagram. Returns the [`UpdateOutcome`]
 /// (`New` on first sight of a peer — used by the listener to fire a unicast reply
 /// exactly once). Pure (apart from locking the roster) — no I/O.
@@ -52,7 +74,7 @@ pub async fn run_listen(
     socket: Arc<UdpSocket>,
     roster: Arc<Mutex<Roster>>,
     self_user_id: String,
-    self_announce_bytes: Arc<Vec<u8>>,
+    self_announce: SharedAnnounce,
     discovery_port: u16,
 ) {
     let mut buf = vec![0u8; 2048];
@@ -61,10 +83,11 @@ pub async fn run_listen(
             Ok(Ok((n, source))) => {
                 if handle_datagram(&roster, &buf[..n], source, &self_user_id) == UpdateOutcome::New
                 {
-                    // First sight → unicast our announce back to the peer's
+                    // First sight → unicast our (current) announce back to the peer's
                     // discovery port so the link is recorded symmetrically.
                     let reply_target = SocketAddr::new(source.ip(), discovery_port);
-                    let _ = socket.send_to(&self_announce_bytes, reply_target).await;
+                    let bytes = current_announce(&self_announce);
+                    let _ = socket.send_to(&bytes, reply_target).await;
                 }
             }
             Ok(Err(_)) => break, // socket error — end the loop (shutdown)
@@ -98,15 +121,15 @@ const BROADCAST_STARTUP_BURST_MS: [u64; 3] = [100, 500, 2000];
 /// so discovery self-heals when the network returns rather than dying silently.
 pub async fn run_broadcast(
     socket: Arc<UdpSocket>,
-    announce: Announce,
+    announce: SharedAnnounce,
     target: SocketAddr,
     interval: Duration,
     trigger: Option<Arc<Notify>>,
 ) {
-    let bytes = encode(&announce);
     // Startup burst: a few staggered announces to beat early UDP loss.
     for offset_ms in BROADCAST_STARTUP_BURST_MS {
         tokio::time::sleep(Duration::from_millis(offset_ms)).await;
+        let bytes = current_announce(&announce);
         let _ = socket.send_to(&bytes, target).await;
     }
     let mut tick = tokio::time::interval(interval);
@@ -122,7 +145,9 @@ pub async fn run_broadcast(
                 tick.tick().await;
             }
         }
+        // Read the current announce each send so a runtime rename takes effect here.
         // Ignore send errors: the network may be transiently down. Retry next tick.
+        let bytes = current_announce(&announce);
         let _ = socket.send_to(&bytes, target).await;
     }
 }
@@ -142,13 +167,13 @@ const SCAN_STEADY_INTERVAL: Duration = Duration::from_secs(20);
 /// even when multicast/broadcast is dropped. Send errors are ignored per-target.
 pub async fn run_scan(
     socket: Arc<UdpSocket>,
-    announce: Announce,
+    announce: SharedAnnounce,
     discovery_port: u16,
     trigger: Option<Arc<Notify>>,
 ) {
-    let bytes = encode(&announce);
     for delay in SCAN_STARTUP_DELAYS_SECS {
         tokio::time::sleep(Duration::from_secs(delay)).await;
+        let bytes = current_announce(&announce);
         scan_once(&socket, &bytes, discovery_port).await;
     }
     let mut tick = tokio::time::interval(SCAN_STEADY_INTERVAL);
@@ -164,6 +189,8 @@ pub async fn run_scan(
                 tick.tick().await;
             }
         }
+        // Re-read the current announce each sweep so a runtime rename takes effect.
+        let bytes = current_announce(&announce);
         scan_once(&socket, &bytes, discovery_port).await;
     }
 }
@@ -218,7 +245,14 @@ pub fn spawn_discovery(
     self_user_id: String,
     discovery_port: u16,
 ) -> Vec<JoinHandle<()>> {
-    spawn_discovery_with_trigger(socket, roster, announce, self_user_id, discovery_port, None)
+    spawn_discovery_with_trigger(
+        socket,
+        roster,
+        shared_announce(&announce),
+        self_user_id,
+        discovery_port,
+        None,
+    )
 }
 
 /// As [`spawn_discovery`], but the broadcast and scan loops also watch `trigger`:
@@ -230,12 +264,11 @@ pub fn spawn_discovery(
 pub fn spawn_discovery_with_trigger(
     socket: Arc<UdpSocket>,
     roster: Arc<Mutex<Roster>>,
-    announce: Announce,
+    announce: SharedAnnounce,
     self_user_id: String,
     discovery_port: u16,
     trigger: Option<Arc<Notify>>,
 ) -> Vec<JoinHandle<()>> {
-    let self_announce_bytes = Arc::new(encode(&announce));
     let target: SocketAddr = (
         crate::transport::net::DISCOVERY_MULTICAST_GROUP,
         discovery_port,
@@ -246,12 +279,12 @@ pub fn spawn_discovery_with_trigger(
             Arc::clone(&socket),
             roster,
             self_user_id,
-            self_announce_bytes,
+            Arc::clone(&announce),
             discovery_port,
         )),
         tokio::spawn(run_broadcast(
             Arc::clone(&socket),
-            announce.clone(),
+            Arc::clone(&announce),
             target,
             Duration::from_secs(2),
             trigger.clone(),
@@ -366,7 +399,7 @@ mod tests {
         let listen_addr = listener.local_addr().unwrap();
         let roster = Arc::new(Mutex::new(Roster::default()));
         let self_id = DeviceIdentity::generate();
-        let self_announce = Arc::new(encode(&Announce::new(&self_id, "Self", 1)));
+        let self_announce = shared_announce(&Announce::new(&self_id, "Self", 1));
         tokio::spawn(run_listen(
             listener.clone(),
             roster.clone(),
@@ -410,7 +443,7 @@ mod tests {
 
         tokio::spawn(run_broadcast(
             sender,
-            announce.clone(),
+            shared_announce(&announce),
             recv_addr,
             Duration::from_millis(10),
             None,
@@ -427,6 +460,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broadcast_picks_up_a_swapped_announce_live() {
+        // The broadcast loop reads the shared announce on each send, so swapping in a
+        // freshly-built announce (the runtime-rename path) changes what peers receive
+        // without restarting discovery.
+        let alice = DeviceIdentity::generate();
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let recv_addr = receiver.local_addr().unwrap();
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let shared = shared_announce(&Announce::new(&alice, "Alice", 4000));
+
+        tokio::spawn(run_broadcast(
+            sender,
+            Arc::clone(&shared),
+            recv_addr,
+            Duration::from_millis(10),
+            None,
+        ));
+
+        // Swap in a new name; subsequent sends must carry it (and still verify).
+        swap_announce(&shared, &Announce::new(&alice, "Alice Renamed", 4000));
+
+        let mut buf = vec![0u8; 2048];
+        let mut saw_renamed = false;
+        for _ in 0..50 {
+            let (n, _src) =
+                tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut buf))
+                    .await
+                    .expect("an announce within 2s")
+                    .unwrap();
+            let decoded = decode(&buf[..n]).expect("decodes");
+            assert!(decoded.verify());
+            if decoded.name == "Alice Renamed" {
+                saw_renamed = true;
+                break;
+            }
+        }
+        assert!(saw_renamed, "swapped announce never reached the receiver");
+    }
+
+    #[tokio::test]
     async fn broadcast_burst_fires_several_announces_before_the_steady_loop() {
         // The startup burst sends multiple announces within the first ~2s, all
         // decodable and BEFORE the long steady interval would have ticked. Use a
@@ -439,7 +512,7 @@ mod tests {
 
         tokio::spawn(run_broadcast(
             sender,
-            announce.clone(),
+            shared_announce(&announce),
             recv_addr,
             Duration::from_secs(3600), // steady loop won't tick during the test
             None,
@@ -470,7 +543,7 @@ mod tests {
 
         tokio::spawn(run_broadcast(
             sender,
-            announce.clone(),
+            shared_announce(&announce),
             recv_addr,
             Duration::from_secs(3600),
             Some(Arc::clone(&trigger)),
@@ -513,7 +586,7 @@ mod tests {
         let listen_addr = listener.local_addr().unwrap();
         let roster = Arc::new(Mutex::new(Roster::default()));
         let self_id = DeviceIdentity::generate();
-        let self_announce = Arc::new(encode(&Announce::new(&self_id, "Self", 1)));
+        let self_announce = shared_announce(&Announce::new(&self_id, "Self", 1));
         tokio::spawn(run_listen(
             listener,
             roster,

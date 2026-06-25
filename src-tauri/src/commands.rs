@@ -144,7 +144,10 @@ pub type CommandResult<T> = Result<T, CommandError>;
 #[derive(serde::Serialize)]
 pub struct UserInfo {
     pub id: String,
+    /// The immutable login handle.
     pub username: String,
+    /// The editable, peer-facing display name (nickname). Equals `username` until changed.
+    pub display_name: String,
 }
 
 impl From<User> for UserInfo {
@@ -152,6 +155,7 @@ impl From<User> for UserInfo {
         Self {
             id: user.user_id,
             username: user.name,
+            display_name: user.display_name,
         }
     }
 }
@@ -219,7 +223,7 @@ pub async fn login(
             spawn_node_runtime(
                 app_handle.clone(),
                 session.user.user_id.clone(),
-                session.user.name.clone(),
+                session.user.display_name.clone(),
                 password,
                 node_state.inner().clone(),
             );
@@ -260,7 +264,7 @@ pub async fn auto_login(
                 spawn_node_runtime(
                     app_handle.clone(),
                     session.user.user_id.clone(),
-                    session.user.name.clone(),
+                    session.user.display_name.clone(),
                     password,
                     node_state.inner().clone(),
                 );
@@ -433,6 +437,56 @@ async fn register_impl(
     })
 }
 
+/// Change the current user's editable display name (nickname). Persists it (verifying the
+/// session password), updates the in-memory session, and — if the node is running —
+/// re-signs and hot-swaps its announce so peers see the new name within ~2s (an immediate
+/// re-announce is fired too). The login `username` is unchanged; only the peer-facing name
+/// moves. Returns the updated user.
+#[tauri::command]
+pub async fn rename_account(
+    new_display_name: String,
+    app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, crate::chat_commands::NodeState>,
+) -> Result<UserInfo, CommandError> {
+    let session = require_session(app_state.inner())?;
+
+    // Persist to the identity store. The Argon2 password verify inside is CPU-bound, so
+    // run it on the blocking pool (AuthService is Arc-cloneable).
+    let auth_service = app_state.auth_service().clone();
+    let password = session.password.clone();
+    let name_for_store = new_display_name.clone();
+    let updated = tokio::task::spawn_blocking(move || {
+        auth_service.set_display_name(&password, &name_for_store)
+    })
+    .await
+    .map_err(|e| CommandError::Service(format!("join error: {e}")))?
+    .map_err(|e| match e {
+        AuthError::InvalidInput(msg) => CommandError::Validation(msg),
+        AuthError::InvalidCredentials => CommandError::Authentication("Invalid password".into()),
+        AuthError::NotLoggedIn => {
+            CommandError::Authentication("User session not found. Please login.".into())
+        }
+        AuthError::StorageError(msg) | AuthError::InternalError(msg) => CommandError::Service(msg),
+        other => CommandError::Service(format!("Failed to rename: {other:?}")),
+    })?;
+
+    // Mirror onto the in-memory session so later reads (UserInfo) reflect the new name.
+    app_state
+        .session()
+        .set_display_name(updated.display_name.clone());
+
+    // Hot-swap the live node's announce if it's running. A no-op before the node starts —
+    // the new name is persisted and gets advertised on next login regardless.
+    {
+        let mut guard = node_state.0.lock().await;
+        if let Some(rt) = guard.as_mut() {
+            rt.set_display_name(&updated.display_name);
+        }
+    }
+
+    Ok(UserInfo::from(updated))
+}
+
 fn require_session(state: &AppState) -> CommandResult<crate::state::SessionInfo> {
     state
         .session()
@@ -542,7 +596,7 @@ pub async fn adopt_linked_account(
         .get()
         .ok_or_else(|| CommandError::Authentication("not logged in".into()))?;
     let account_id = session.user.user_id.clone();
-    let display_name = session.user.name.clone();
+    let display_name = session.user.display_name.clone();
     node_state.0.lock().await.take();
     spawn_node_runtime(
         app_handle,

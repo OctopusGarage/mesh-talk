@@ -29,7 +29,7 @@ export function MembersDialog() {
   const peers = useChat((s) => s.peers);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
-  const myName = useAuth((s) => s.user?.username ?? "");
+  const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
   const addMember = useChat((s) => s.addMember);
   const removeMember = useChat((s) => s.removeMember);
   const openConversation = useChat((s) => s.open);

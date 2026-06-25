@@ -15,6 +15,7 @@ async function login(page: import("@playwright/test").Page) {
 
 test("personal avatar gallery offers the player pack", async ({ page }) => {
   await login(page);
+  await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();

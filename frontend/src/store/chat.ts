@@ -82,6 +82,8 @@ export interface ChatMessage {
   failed?: boolean; // a send that errored — kept visible (not silently dropped)
   failReason?: SendFailReason; // coarse, frontend-derived cause (drives the label + help)
   clientId?: string; // stable id for an optimistic bubble (survives a concurrent reload)
+  recalled?: boolean; // true when recalled → render a placeholder, no content
+  recalledText?: string | null; // our own recalled text, for "re-edit"
   file?: {
     name: string;
     size: number;
@@ -165,6 +167,8 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
     text: h.text,
     wallClock: h.wall_clock,
     replyTo: h.reply_to,
+    recalled: h.recalled,
+    recalledText: h.recalled_text,
     file: h.file
       ? {
           name: h.file.name,
@@ -209,6 +213,9 @@ function sendFileFor(c: Conversation, path: string, media: boolean) {
     ? chat.sendFileToAccount(c.id, path, media)
     : chat.sendFileChannel(c.id, path, media);
 }
+/** Whether this conversation is a channel (drives the `is_channel` flag on the lifecycle
+ * commands; 1:1 chats are account-addressed). */
+const isChannelConv = (c: Conversation) => c.kind === "channel";
 
 interface ChatState {
   ready: boolean;
@@ -253,6 +260,12 @@ interface ChatState {
   sendFile: (path: string, media: boolean) => Promise<void>;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
   toggleReaction: (target: string, emoji: string) => Promise<void>;
+  /** Delete one message from this device only (local). */
+  deleteMessage: (target: string) => Promise<void>;
+  /** Recall (unsend) one of my own messages within the 2-minute window. */
+  recallMessage: (target: string) => Promise<void>;
+  /** Clear all local history for the active conversation. */
+  clearConversation: () => Promise<void>;
   createChannel: (name: string, memberIds: string[]) => Promise<void>;
   addMember: (memberId: string) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
@@ -571,6 +584,42 @@ export const useChat = create<ChatState>((set, get) => ({
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't update reaction: ${errorMessage(e)}` });
+    }
+  },
+
+  deleteMessage: async (target) => {
+    const c = get().active;
+    if (!c) return;
+    const key = convKey(c);
+    try {
+      await chat.deleteMessage(c.id, target, isChannelConv(c));
+      if (get().active && convKey(get().active!) === key) await get().reload();
+    } catch (e) {
+      set({ error: `Couldn't delete message: ${errorMessage(e)}` });
+    }
+  },
+
+  recallMessage: async (target) => {
+    const c = get().active;
+    if (!c) return;
+    const key = convKey(c);
+    try {
+      await chat.recallMessage(c.id, target, isChannelConv(c));
+      if (get().active && convKey(get().active!) === key) await get().reload();
+    } catch (e) {
+      set({ error: `Couldn't recall message: ${errorMessage(e)}` });
+    }
+  },
+
+  clearConversation: async () => {
+    const c = get().active;
+    if (!c) return;
+    const key = convKey(c);
+    try {
+      await chat.clearConversation(c.id, isChannelConv(c));
+      if (get().active && convKey(get().active!) === key) await get().reload();
+    } catch (e) {
+      set({ error: `Couldn't clear history: ${errorMessage(e)}` });
     }
   },
 

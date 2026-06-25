@@ -3,7 +3,9 @@
 //! holds the handles. Tauri-agnostic — inbound DMs are delivered via an injected
 //! `on_dm` callback, so this is unit-testable without a GUI.
 
-use crate::discovery::service::spawn_discovery_with_trigger;
+use crate::discovery::service::{
+    shared_announce, spawn_discovery_with_trigger, swap_announce, SharedAnnounce,
+};
 use crate::discovery::{Announce, PeerRecord, Roster};
 use crate::eventlog::LogError;
 use crate::identity::account_keystore;
@@ -74,7 +76,11 @@ pub struct NodeRuntime {
     account_id: String,
     /// The display name this node advertises (for the diagnostics page).
     display_name: String,
-    /// The OS-assigned TCP port the accept loop listens on (for the diagnostics page).
+    /// The encoded announce the discovery loops broadcast, shared so a display-name
+    /// change can re-sign and swap it in live (no discovery restart).
+    announce: SharedAnnounce,
+    /// The OS-assigned TCP port the accept loop listens on (also needed to re-sign the
+    /// announce on a rename).
     tcp_port: u16,
     /// Where the account keystore lives, so a successful device link can persist the
     /// adopted account secret (effective on next login).
@@ -136,9 +142,11 @@ impl NodeRuntime {
         let listener = crate::transport::net::bind_dual_stack_listener(0u16).await?;
         let tcp_port = listener.local_addr()?.port();
 
-        // Build the announce BEFORE the identity is moved into the node.
+        // Build the announce BEFORE the identity is moved into the node, and wrap it in a
+        // shared cell so a runtime rename can swap in a freshly re-signed announce.
         let announce =
             Announce::new_with_account(&identity, &account, display_name.to_string(), tcp_port);
+        let announce = shared_announce(&announce);
 
         let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
         let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
@@ -189,7 +197,7 @@ impl NodeRuntime {
         tasks.extend(spawn_discovery_with_trigger(
             Arc::clone(&socket),
             Arc::clone(&roster),
-            announce,
+            Arc::clone(&announce),
             self_uid.clone(),
             discovery_port,
             Some(Arc::clone(&discovery_trigger)),
@@ -279,6 +287,7 @@ impl NodeRuntime {
             user_id: self_uid,
             account_id,
             display_name: display_name.to_string(),
+            announce,
             tcp_port,
             account_path: dir.join("account.keystore"),
             password: password.to_string(),
@@ -295,6 +304,25 @@ impl NodeRuntime {
     /// The display name this node advertises to peers.
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    /// Change the display name this node advertises, live: re-sign the announce with the
+    /// node's device key (keys never leave the node), swap it into the shared cell so the
+    /// discovery loops broadcast it from their next send, and record our own name durably
+    /// so it resolves consistently. Fires an immediate re-announce so peers converge fast.
+    /// `account_id`/`user_id` are unchanged — only the human-readable name moves.
+    pub fn set_display_name(&mut self, display_name: &str) {
+        let announce = self.node.signed_announce(display_name, self.tcp_port);
+        swap_announce(&self.announce, &announce);
+        self.display_name = display_name.to_string();
+        // Keep our own name in the durable directory too (it otherwise only tracks peers),
+        // so `display_name_for(own_id)` stays consistent. A no-op when unchanged.
+        let _ = self
+            .names
+            .lock()
+            .expect("names mutex not poisoned")
+            .record(&self.user_id, display_name);
+        self.discovery_trigger.notify_waiters();
     }
 
     /// The local TCP port the node's accept loop is listening on.
@@ -487,6 +515,48 @@ impl NodeRuntime {
         self.node.search(query)
     }
 
+    /// Delete one message from THIS device only (local, not propagated). `account` selects
+    /// the id space of `target` (account msg id vs event id).
+    pub fn delete_message(
+        &self,
+        conv: crate::eventlog::event::ConversationId,
+        target: crate::eventlog::event::EventId,
+        account: bool,
+    ) -> Result<usize, NodeError> {
+        self.node.delete_message(conv, target, account)
+    }
+
+    /// Clear all locally-stored history for a conversation (text + files, both directions).
+    pub fn clear_conversation(
+        &self,
+        conv: crate::eventlog::event::ConversationId,
+    ) -> Result<usize, NodeError> {
+        self.node.clear_conversation(conv)
+    }
+
+    /// Retention prune: erase every locally-stored message older than `cutoff_ms`.
+    pub fn prune_older_than(&self, cutoff_ms: u64) -> Result<usize, NodeError> {
+        self.node.prune_older_than(cutoff_ms)
+    }
+
+    /// Recall (unsend) one of our own account messages within the recall window.
+    pub async fn recall_account(
+        &self,
+        target_account_id: &str,
+        target: crate::eventlog::event::EventId,
+    ) -> Result<(), NodeError> {
+        self.node.recall_account(target_account_id, target).await
+    }
+
+    /// Recall (unsend) one of our own channel messages within the recall window.
+    pub async fn recall_channel(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+        target: crate::eventlog::event::EventId,
+    ) -> Result<(), NodeError> {
+        self.node.recall_channel(channel, target).await
+    }
+
     /// Aggregated reactions in the DM with `peer`.
     pub fn reactions_dm(&self, peer: &PublicIdentity) -> Vec<crate::node::reaction::ReactionView> {
         self.node.reactions_dm(peer)
@@ -577,5 +647,38 @@ mod tests {
         assert_eq!(runtime.account_id().len(), 32); // account_id is 32 hex chars
         assert!(node_dir.join("account.keystore").exists());
         assert_eq!(runtime.account_id(), runtime2.account_id());
+    }
+
+    #[tokio::test]
+    async fn set_display_name_updates_advertised_name_and_own_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = NodeRuntime::start(
+            dir.path(),
+            "alice-user-id",
+            "Alice",
+            "pw",
+            47991,
+            |_dm| {},
+            |_ch| {},
+            |_f| {},
+            |_p| {},
+        )
+        .await
+        .expect("runtime starts");
+
+        assert_eq!(runtime.display_name(), "Alice");
+        let uid = runtime.user_id().to_string();
+
+        // Rename to a permissive (spaces + emoji) display name.
+        runtime.set_display_name("Alice Renamed 🐻");
+
+        // The advertised name and our own durable record both reflect the change; the
+        // identity (user_id/account_id) is untouched.
+        assert_eq!(runtime.display_name(), "Alice Renamed 🐻");
+        assert_eq!(
+            runtime.display_name_for(&uid).as_deref(),
+            Some("Alice Renamed 🐻")
+        );
+        assert_eq!(runtime.user_id(), uid);
     }
 }

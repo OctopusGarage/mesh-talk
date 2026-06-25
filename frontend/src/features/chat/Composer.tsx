@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   SendHorizontal,
   X,
@@ -67,6 +67,7 @@ export function Composer({
   replyTo,
   onCancelReply,
   mentionNames,
+  prefill,
 }: {
   onSend: (text: string) => void;
   onAttach?: () => void;
@@ -78,10 +79,28 @@ export function Composer({
   replyTo?: ChatMessage | null;
   onCancelReply?: () => void;
   mentionNames: string[];
+  /** Drop text into the composer from outside (WeChat-style "re-edit" of a recalled
+   * message). `n` is a bump counter so the same text can be re-applied. */
+  prefill?: { text: string; n: number } | null;
 }) {
   const { t } = useTranslation();
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+
+  // Apply an external prefill (re-edit): replace the draft and focus, caret at the end.
+  // Keyed on the bump counter so re-editing the same text twice still re-applies.
+  useEffect(() => {
+    if (!prefill) return;
+    setText(prefill.text);
+    queueMicrotask(() => {
+      const el = ref.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(prefill.text.length, prefill.text.length);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill?.n]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [showEmoji, setShowEmoji] = useState(false);
   const [showShot, setShowShot] = useState(false);

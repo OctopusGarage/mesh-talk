@@ -59,6 +59,8 @@ pub struct HistoryItem {
     pub wall_clock: u64,
     pub reply_to: Option<String>, // hex EventId of the parent message, if any
     pub file: Option<HistoryFileInfo>, // present when this line is a file/media message
+    pub recalled: bool,           // true when the message was recalled → render a placeholder
+    pub recalled_text: Option<String>, // our own recalled text, for "re-edit" (None otherwise)
 }
 
 impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
@@ -85,6 +87,10 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
                 mime: f.mime,
                 media: f.media,
             }),
+            recalled: h.recalled,
+            recalled_text: h
+                .recalled_text
+                .map(|t| String::from_utf8_lossy(&t).into_owned()),
         }
     }
 }
@@ -1107,6 +1113,90 @@ pub async fn account_reactions(
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(to_reaction_infos(rt.account_reactions(&account)))
+}
+
+/// Delete one message from THIS device only (local; not propagated). `conv_id` is the
+/// channel id (hex) when `is_channel`, else the peer account id. `target` is the message id
+/// the UI holds. The file rewrite runs on the blocking pool.
+#[tauri::command]
+pub async fn delete_message(
+    state: tauri::State<'_, NodeState>,
+    conv_id: String,
+    target: String,
+    is_channel: bool,
+) -> Result<(), CommandError> {
+    let id = parse_event_id(&target)?;
+    let channel = if is_channel {
+        Some(parse_channel_id(&conv_id)?)
+    } else {
+        None
+    };
+    let node = {
+        let guard = state.0.lock().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        rt.handle()
+    };
+    tokio::task::spawn_blocking(move || match channel {
+        Some(channel) => node.delete_message(channel, id, false),
+        None => node.delete_account_message(&conv_id, id),
+    })
+    .await
+    .map_err(|e| CommandError::Service(format!("join error: {e}")))?
+    .map(|_| ())
+    .map_err(CommandError::from)
+}
+
+/// Recall (unsend) one of OUR OWN messages within the 2-minute window — propagates to peers.
+#[tauri::command]
+pub async fn recall_message(
+    state: tauri::State<'_, NodeState>,
+    conv_id: String,
+    target: String,
+    is_channel: bool,
+) -> Result<(), CommandError> {
+    let id = parse_event_id(&target)?;
+    let node = {
+        let guard = state.0.lock().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        rt.handle()
+    };
+    if is_channel {
+        let channel = parse_channel_id(&conv_id)?;
+        node.recall_channel(channel, id)
+            .await
+            .map_err(CommandError::from)
+    } else {
+        node.recall_account(&conv_id, id)
+            .await
+            .map_err(CommandError::from)
+    }
+}
+
+/// Clear all locally-stored history for a conversation (text + files). Local only.
+#[tauri::command]
+pub async fn clear_conversation(
+    state: tauri::State<'_, NodeState>,
+    conv_id: String,
+    is_channel: bool,
+) -> Result<(), CommandError> {
+    let channel = if is_channel {
+        Some(parse_channel_id(&conv_id)?)
+    } else {
+        None
+    };
+    let node = {
+        let guard = state.0.lock().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        rt.handle()
+    };
+    tokio::task::spawn_blocking(move || match channel {
+        Some(channel) => node.clear_conversation(channel),
+        None => node.clear_account_conversation(&conv_id),
+    })
+    .await
+    .map_err(|e| CommandError::Service(format!("join error: {e}")))?
+    .map(|_| ())
+    .map_err(CommandError::from)
 }
 
 /// A search result hit for display in the UI.

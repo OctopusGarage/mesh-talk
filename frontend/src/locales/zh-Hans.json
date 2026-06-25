@@ -95,7 +95,9 @@
     "dismissError": "关闭错误提示",
     "messageLog": "与 {{name}} 的消息",
     "list": "会话列表",
-    "dropToSend": "拖放以发送给 {{name}}"
+    "dropToSend": "拖放以发送给 {{name}}",
+    "clearHistory": "清空聊天记录",
+    "clearHistoryConfirm": "这会永久删除本机上这个会话的消息,无法恢复,且不影响对方的记录。"
   },
   "presence": {
     "online": "在线",
@@ -115,7 +117,12 @@
       "relay-unreachable": "发送失败——网络不可达",
       "crypto": "发送失败——加密错误",
       "unknown": "发送失败"
-    }
+    },
+    "delete": "删除",
+    "recall": "撤回",
+    "recalledByYou": "你撤回了一条消息",
+    "recalledBy": "{{name}} 撤回了一条消息",
+    "reEdit": "重新编辑"
   },
   "transfer": {
     "sending": "正在发送文件…",
@@ -166,7 +173,12 @@
     "downloadFolderDesc": "接收文件的保存位置。留空则每次询问。",
     "downloadFolderSet": "接收的文件将自动保存到此处。",
     "chooseFolder": "选择文件夹",
-    "changeFolder": "更改"
+    "changeFolder": "更改",
+    "sectionChat": "聊天记录",
+    "retention": "保留时长",
+    "retentionDesc": "自动删除本机上早于此时长的消息。",
+    "retentionForever": "永久",
+    "retentionDays": "{{count}} 天"
   },
   "search": {
     "title": "搜索消息",
@@ -321,5 +333,15 @@
     "joinBody": "把第二台设备连到这个热点，然后重新打开 Mesh-Talk。几秒内双方就会出现在彼此的列表里——也可以打开网络诊断点「重新扫描」。",
     "wiredNote": "完全没有 Wi-Fi？两台设备之间用网线或 USB 网络共享，效果一样。",
     "gotIt": "知道了"
+  },
+  "profile": {
+    "title": "个人资料",
+    "description": "别人看到的你的头像和名字。",
+    "open": "打开个人资料",
+    "displayName": "昵称",
+    "editName": "修改名字",
+    "username": "登录用户名",
+    "accountId": "账号 ID",
+    "usernameHint": "用这个用户名登录,不可更改。上方的昵称只是显示名,可以随时修改。"
   }
 }

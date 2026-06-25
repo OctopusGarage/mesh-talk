@@ -33,6 +33,9 @@ export const auth = {
     invoke<LoginResult>("login", { username, password }),
   register: (username: string, password: string) =>
     invoke<RegisterResult>("register", { username, password }),
+  /** Change the editable display name (nickname); returns the updated user. */
+  renameAccount: (newDisplayName: string) =>
+    invoke<UserInfo>("rename_account", { newDisplayName }),
   logout: () => invoke<LogoutResult>("logout"),
   adoptLinkedAccount: () => invoke<void>("adopt_linked_account"),
   /** "Stay signed in": resume a saved session from the OS keychain (null = none). */
@@ -54,6 +57,15 @@ export const chat = {
   listPeers: () => invoke<PeerInfo[]>("list_peers"),
   listAccounts: () => invoke<AccountInfo[]>("list_accounts"),
   listChannels: () => invoke<ChannelInfo[]>("list_channels"),
+
+  // Message lifecycle (delete is local; recall propagates within the recall window; clear
+  // wipes local history). `convId` is the channel id when `isChannel`, else the peer account id.
+  deleteMessage: (convId: string, target: string, isChannel: boolean) =>
+    invoke<void>("delete_message", { convId, target, isChannel }),
+  recallMessage: (convId: string, target: string, isChannel: boolean) =>
+    invoke<void>("recall_message", { convId, target, isChannel }),
+  clearConversation: (convId: string, isChannel: boolean) =>
+    invoke<void>("clear_conversation", { convId, isChannel }),
 
   // Direct messages (device-addressed)
   sendDm: (recipient: string, text: string, replyTo: string | null = null) =>

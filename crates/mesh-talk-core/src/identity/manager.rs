@@ -115,10 +115,26 @@ impl IdentityManager {
         }
 
         // Read user metadata
-        let user: User = self
+        let mut user: User = self
             .file_manager
             .read_encrypted_file(username, "meta/user.json", password)
             .map_err(|e| IdentityError::StorageError(e.to_string()))?;
+
+        // Load the editable display name from its side file, if one was ever set. Absent
+        // for accounts that never set a nickname (and for all accounts created before the
+        // feature) — those fall back to the username via `effective_display_name`.
+        if self
+            .file_manager
+            .file_exists(username, "meta/display_name.enc")
+        {
+            if let Ok(display_name) = self.file_manager.read_encrypted_file::<String>(
+                username,
+                "meta/display_name.enc",
+                password,
+            ) {
+                user.display_name = display_name;
+            }
+        }
 
         Ok(user)
     }
@@ -194,7 +210,53 @@ impl IdentityManager {
             .write_encrypted_file(username, "meta/user.json", &user, new_password)
             .map_err(|e| IdentityError::StorageError(e.to_string()))?;
 
+        // Re-encrypt the nickname side file too, if present, so it stays readable under the
+        // new password (it's encrypted with the account password like every other file).
+        if self
+            .file_manager
+            .file_exists(username, "meta/display_name.enc")
+        {
+            let display_name: String = self
+                .file_manager
+                .read_encrypted_file(username, "meta/display_name.enc", old_password)
+                .map_err(|e| IdentityError::StorageError(e.to_string()))?;
+            self.file_manager
+                .write_encrypted_file(
+                    username,
+                    "meta/display_name.enc",
+                    &display_name,
+                    new_password,
+                )
+                .map_err(|e| IdentityError::StorageError(e.to_string()))?;
+        }
+
         Ok(())
+    }
+
+    /// Update the editable display name (nickname) for `username`, verifying `password`
+    /// and persisting it to its own side file (`meta/display_name.enc`). `username` — the
+    /// login key and on-disk namespace — is unchanged, and `user.json` is left untouched so
+    /// its on-disk layout never changes. Returns the updated user.
+    pub fn set_display_name(
+        &self,
+        username: &str,
+        password: &str,
+        display_name: &str,
+    ) -> Result<User, IdentityError> {
+        let validated =
+            User::validate_display_name(display_name).ok_or(IdentityError::InvalidDisplayName)?;
+
+        // Authenticate (verifies password + existence) and load current metadata.
+        let mut user = self.authenticate_user(username, password)?;
+
+        // The nickname lives in its own side file (see `User::display_name`); `user.json`
+        // is left untouched so its bincode layout never changes.
+        self.file_manager
+            .write_encrypted_file(username, "meta/display_name.enc", &validated, password)
+            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
+
+        user.display_name = validated;
+        Ok(user)
     }
 
     fn initialize_user_data(&self, username: &str, password: &str) -> Result<(), IdentityError> {
@@ -221,5 +283,52 @@ impl IdentityManager {
             .map_err(|e| IdentityError::StorageError(e.to_string()))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager() -> (IdentityManager, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let fm = FileManager::new(dir.path().to_path_buf());
+        (IdentityManager::new(fm), dir)
+    }
+
+    #[test]
+    fn set_display_name_persists_and_leaves_username_intact() {
+        let (mgr, _dir) = manager();
+        mgr.register_user("alice", "supersafepass").unwrap();
+        // Default: no display name set yet → effective name falls back to the username.
+        let before = mgr.authenticate_user("alice", "supersafepass").unwrap();
+        assert_eq!(before.display_name, "");
+        assert_eq!(before.effective_display_name(), "alice");
+
+        let updated = mgr
+            .set_display_name("alice", "supersafepass", "  老王 🐻 ")
+            .unwrap();
+        assert_eq!(updated.display_name, "老王 🐻"); // trimmed, unicode/emoji kept
+        assert_eq!(updated.username, "alice"); // login key unchanged
+
+        // Persisted: a fresh authenticate reads the new display name back.
+        let reloaded = mgr.authenticate_user("alice", "supersafepass").unwrap();
+        assert_eq!(reloaded.display_name, "老王 🐻");
+        // And login still works under the unchanged username.
+        assert!(mgr.authenticate_user("alice", "supersafepass").is_ok());
+    }
+
+    #[test]
+    fn set_display_name_rejects_invalid_and_wrong_password() {
+        let (mgr, _dir) = manager();
+        mgr.register_user("bob", "supersafepass").unwrap();
+        assert!(matches!(
+            mgr.set_display_name("bob", "supersafepass", "  "),
+            Err(IdentityError::InvalidDisplayName)
+        ));
+        assert!(matches!(
+            mgr.set_display_name("bob", "wrongpass", "Bob"),
+            Err(IdentityError::InvalidPassword)
+        ));
     }
 }

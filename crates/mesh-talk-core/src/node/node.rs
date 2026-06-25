@@ -97,6 +97,13 @@ pub struct HistoryEntry {
     /// than a text message. Carries the metadata the UI needs to render an inline media
     /// bubble or a file card; `text` is empty for a file entry.
     pub file: Option<FileHistoryInfo>,
+    /// True when this message was recalled (by its author). The UI renders a placeholder
+    /// ("X recalled a message"); `text`/`file` are blanked and never returned.
+    pub recalled: bool,
+    /// For a message WE recalled, the original text — so the sender can "re-edit" it back
+    /// into the composer (WeChat behaviour). `None` for peers' recalls (never expose their
+    /// content) and for non-text (file) messages. Only ever set when `recalled` is true.
+    pub recalled_text: Option<Vec<u8>>,
 }
 
 /// File metadata for a [`HistoryEntry`] that represents a file/media message. Lets the
@@ -199,6 +206,10 @@ pub struct Node {
     /// so the file book's emitted set + manifests survive restart without marking
     /// never-opened manifests as emitted (which would lose the file). See `Node::open`.
     pub(in crate::node) received_files: Mutex<ReceivedLog>,
+    /// Durable record of OUR OWN recalls (sealed to peers, so un-openable from our own log).
+    /// `history`/`account_history` read this to tombstone our recalled messages; it survives
+    /// restart (unlike own reactions).
+    pub(in crate::node) recalls: Mutex<crate::node::recall::RecallLog>,
     /// Avatars peers PROPAGATED to us via signed profiles, keyed by account id (one per
     /// account, newest-wins, durable). Read by `peer_avatar`/`peer_avatars` and surfaced
     /// live on `profile_incoming`.
@@ -291,6 +302,7 @@ impl Node {
             csenders_res,
             recv_files_res,
             profiles_res,
+            recalls_res,
         ) = std::thread::scope(|s| {
             let h_log = s.spawn(|| PersistentEventLog::open(log_path, password));
             let h_sent = s.spawn(|| SentLog::open(sent_path, password));
@@ -306,6 +318,11 @@ impl Node {
             let h_profiles = s.spawn(|| {
                 crate::node::profile_store::ProfileStore::open(&dir.join("profiles.log"), password)
             });
+            // Durable record of OUR OWN recalls: our recall payloads are sealed to peers (we
+            // can't open them from our own log), so this is how `history` knows which of our
+            // messages we recalled — and it must survive restart (unlike own reactions).
+            let h_recalls = s
+                .spawn(|| crate::node::recall::RecallLog::open(&dir.join("recalls.log"), password));
             (
                 h_log.join(),
                 h_sent.join(),
@@ -314,6 +331,7 @@ impl Node {
                 h_csnd.join(),
                 h_files.join(),
                 h_profiles.join(),
+                h_recalls.join(),
             )
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
@@ -325,6 +343,7 @@ impl Node {
         let channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let dm_ratchet = DmRatchet::new(sessions);
         // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
         // every id in the log. An event that was ingested durably but never recorded (it
@@ -402,6 +421,7 @@ impl Node {
             dm_ratchet: Mutex::new(dm_ratchet),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
+            recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(HashMap::new()),
         }))
     }
@@ -414,6 +434,23 @@ impl Node {
     /// This node's cryptographic account id (cross-device handle).
     pub fn account_id(&self) -> String {
         self.account.account_id()
+    }
+
+    /// Build a freshly-signed account-bound announce advertising `display_name` and
+    /// `tcp_port`. The device key (and account cert) are held by the node, so this is
+    /// how the runtime re-signs the announce when the display name changes — the keys
+    /// never leave the node.
+    pub fn signed_announce(
+        &self,
+        display_name: impl Into<String>,
+        tcp_port: u16,
+    ) -> crate::discovery::Announce {
+        crate::discovery::Announce::new_with_account(
+            &self.identity,
+            &self.account,
+            display_name,
+            tcp_port,
+        )
     }
 
     /// Claim the receiver for live peer-profile (avatar) updates. Returns it once; later

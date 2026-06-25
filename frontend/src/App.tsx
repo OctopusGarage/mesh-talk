@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { LoginScreen } from "@/features/auth/LoginScreen";
 import { ChatApp } from "@/features/chat/ChatApp";
 import { WindowControls } from "@/components/WindowControls";
+import { isMacOverlay } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
 import { useAvatars } from "@/store/avatars";
 
@@ -25,6 +26,18 @@ export default function App() {
 
   return (
     <>
+      {/* macOS overlay title bar is transparent and covered by the webview, so the top
+          title-bar band isn't draggable unless we mark it. One full-width strip (the
+          ~28px traffic-light zone, where no controls sit — the headers are inset below it)
+          makes every screen draggable. Frameless (Win/Linux) drags via WindowControls +
+          the per-screen strips. */}
+      {isMacOverlay() && (
+        <div
+          aria-hidden
+          data-tauri-drag-region
+          className="fixed inset-x-0 top-0 z-40 h-7"
+        />
+      )}
       {/* Custom min/max/close for the frameless window (Windows/Linux); null on macOS/web. */}
       <WindowControls />
       {user ? (

@@ -95,7 +95,9 @@
     "dismissError": "Descartar error",
     "messageLog": "Mensajes con {{name}}",
     "list": "Conversaciones",
-    "dropToSend": "Suelta para enviar a {{name}}"
+    "dropToSend": "Suelta para enviar a {{name}}",
+    "clearHistory": "Borrar historial",
+    "clearHistoryConfirm": "Esto borra permanentemente los mensajes de esta conversación en este dispositivo. No se puede deshacer y no afecta la copia de la otra persona."
   },
   "presence": {
     "online": "En línea",
@@ -115,7 +117,12 @@
       "relay-unreachable": "No se pudo enviar: red inaccesible",
       "crypto": "No se pudo enviar: error de cifrado",
       "unknown": "Error al enviar"
-    }
+    },
+    "delete": "Eliminar",
+    "recall": "Retirar",
+    "recalledByYou": "Retiraste un mensaje",
+    "recalledBy": "{{name}} retiró un mensaje",
+    "reEdit": "Reeditar"
   },
   "transfer": {
     "sending": "Enviando archivo…",
@@ -166,7 +173,12 @@
     "downloadFolderDesc": "Dónde se guardan los archivos recibidos. Déjalo sin definir para preguntar cada vez.",
     "downloadFolderSet": "Los archivos recibidos se guardan aquí automáticamente.",
     "chooseFolder": "Elegir carpeta",
-    "changeFolder": "Cambiar"
+    "changeFolder": "Cambiar",
+    "sectionChat": "Historial de chat",
+    "retention": "Conservar historial",
+    "retentionDesc": "Borra automáticamente de este dispositivo los mensajes más antiguos que esto.",
+    "retentionForever": "Para siempre",
+    "retentionDays": "{{count}} días"
   },
   "search": {
     "title": "Buscar mensajes",
@@ -321,5 +333,15 @@
     "joinBody": "Conecta el segundo dispositivo a esa zona Wi-Fi y vuelve a abrir Mesh-Talk. Apareceréis en la lista del otro en segundos, o abre el diagnóstico de red y pulsa Reescanear.",
     "wiredNote": "¿Sin Wi-Fi? Un cable Ethernet o el anclaje por USB entre los dos dispositivos funciona igual.",
     "gotIt": "Entendido"
+  },
+  "profile": {
+    "title": "Perfil",
+    "description": "Tu foto y nombre tal como los ven los demás.",
+    "open": "Abrir tu perfil",
+    "displayName": "Nombre visible",
+    "editName": "Editar nombre",
+    "username": "Usuario de acceso",
+    "accountId": "ID de cuenta",
+    "usernameHint": "Inicias sesión con este usuario y no se puede cambiar. El nombre visible de arriba es solo un apodo y puedes cambiarlo cuando quieras."
   }
 }

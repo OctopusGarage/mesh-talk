@@ -101,6 +101,8 @@ export const test = base.extend({
         text: string;
         wall_clock: number;
         reply_to: string | null;
+        recalled?: boolean;
+        recalled_text?: string | null;
       };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
@@ -145,6 +147,9 @@ export const test = base.extend({
             from_me: true,
             who: SELF.device,
             text,
+            // A real send is "now", so it's inside the recall window (the seeded history
+            // uses an old BASE so it isn't recall-eligible).
+            wall_clock: Date.now(),
             reply_to: (replyTo as string) ?? null,
           }),
         );
@@ -171,6 +176,27 @@ export const test = base.extend({
         return null;
       };
 
+      // Message lifecycle: delete removes the line; recall tombstones it (keeps the slot,
+      // sets `recalled`); clear empties the conversation.
+      const deleteMessage = (conv: string, target: string): null => {
+        if (msgs[conv]) msgs[conv] = msgs[conv].filter((m) => m.id !== target);
+        return null;
+      };
+      const recallMessage = (conv: string, target: string): null => {
+        const m = msgs[conv]?.find((x) => x.id === target);
+        if (m) {
+          // Keep the original text re-editable for our own messages (WeChat "re-edit").
+          if (m.from_me) m.recalled_text = m.text;
+          m.recalled = true;
+          m.text = "";
+        }
+        return null;
+      };
+      const clearConversation = (conv: string): null => {
+        msgs[conv] = [];
+        return null;
+      };
+
       // --- Favorites (pin + alias), persisted in-memory ---------------------
       const favorites: Record<
         string,
@@ -194,6 +220,7 @@ export const test = base.extend({
         download_dir: "/home/tester/Downloads",
         stay_signed_in: true,
         last_user: null as string | null,
+        retention_days: 0,
       };
 
       // --- Presence (account DM + channel) ----------------------------------
@@ -255,11 +282,20 @@ export const test = base.extend({
           // auth
           register: () => ({
             success: true,
-            user: { id: "u_self", username: "tester" },
+            user: { id: "u_self", username: "tester", display_name: "tester" },
           }),
           login: (a) => ({
             success: true,
-            user: { id: "u_self", username: String(a.username ?? "tester") },
+            user: {
+              id: "u_self",
+              username: String(a.username ?? "tester"),
+              display_name: String(a.username ?? "tester"),
+            },
+          }),
+          rename_account: (a) => ({
+            id: "u_self",
+            username: "tester",
+            display_name: String(a.newDisplayName ?? "tester"),
           }),
           logout: () => ({ success: true }),
           adopt_linked_account: ok,
@@ -312,6 +348,20 @@ export const test = base.extend({
               Boolean(a.remove),
               SELF.device,
             ),
+
+          // message lifecycle
+          delete_message: (a) =>
+            deleteMessage(
+              a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`,
+              String(a.target),
+            ),
+          recall_message: (a) =>
+            recallMessage(
+              a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`,
+              String(a.target),
+            ),
+          clear_conversation: (a) =>
+            clearConversation(a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`),
 
           // sending
           send_dm: (a) =>

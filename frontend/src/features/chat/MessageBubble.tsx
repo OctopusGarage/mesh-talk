@@ -6,6 +6,8 @@ import {
   Download,
   RotateCw,
   SmilePlus,
+  Trash2,
+  Undo2,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -107,6 +109,9 @@ export function MessageBubble({
   onReply,
   onReact,
   onRetry,
+  onDelete,
+  onRecall,
+  onReEdit,
 }: {
   m: ChatMessage;
   parent: ChatMessage | null;
@@ -129,6 +134,9 @@ export function MessageBubble({
   onReply: (m: ChatMessage) => void;
   onReact: (target: string, emoji: string) => void;
   onRetry: (clientId: string) => void;
+  onDelete: (m: ChatMessage) => void;
+  onRecall: (m: ChatMessage) => void;
+  onReEdit: (text: string) => void;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
@@ -162,6 +170,67 @@ export function MessageBubble({
   const ariaLabel = `${speaker}: ${body} · ${formatTime(m.wallClock)}${
     status ? ` · ${status}` : ""
   }`;
+
+  // Recall is only offered for my own, still-sendable messages within the 2-minute window
+  // (matches the core's check; the command re-validates authoritatively).
+  const RECALL_WINDOW_MS = 2 * 60 * 1000;
+  const canRecall =
+    mine && !!m.id && !m.pending && Date.now() - m.wallClock < RECALL_WINDOW_MS;
+
+  // A recalled message is a centered system line ("X recalled a message") — no bubble,
+  // actions or reactions. Deleting it locally is still offered via the context menu.
+  if (m.recalled) {
+    return (
+      <motion.div
+        role="article"
+        data-testid="message-recalled"
+        aria-label={
+          mine
+            ? t("message.recalledByYou")
+            : t("message.recalledBy", { name: authorLabel })
+        }
+        initial={fresh ? "hidden" : false}
+        animate="visible"
+        variants={fadeSlideUp}
+        className="flex items-center justify-center gap-2 px-4 py-1"
+      >
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <span
+              data-context-menu=""
+              className="rounded-full bg-muted/60 px-3 py-1 text-xs italic text-muted-foreground"
+            >
+              {mine
+                ? t("message.recalledByYou")
+                : t("message.recalledBy", { name: authorLabel })}
+            </span>
+          </ContextMenuTrigger>
+          <ContextMenuContent data-testid="message-context-menu">
+            <ContextMenuItem
+              data-testid="msg-delete"
+              disabled={!m.id}
+              onSelect={() => onDelete(m)}
+            >
+              <Trash2 className="h-3.5 w-3.5 opacity-70" />
+              {t("message.delete")}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+        {/* Re-edit: only for our own recalled TEXT messages (WeChat). Drops the original
+            text back into the composer. */}
+        {mine && m.recalledText && (
+          <button
+            type="button"
+            data-testid="msg-reedit"
+            onClick={() => onReEdit(m.recalledText!)}
+            className="text-xs font-medium text-signal underline-offset-2 hover:underline"
+          >
+            {t("message.reEdit")}
+          </button>
+        )}
+      </motion.div>
+    );
+  }
 
   return (
     <motion.div
@@ -290,6 +359,24 @@ export function MessageBubble({
               >
                 <SmilePlus className="h-3.5 w-3.5 opacity-70" />
                 {t("message.react")}
+              </ContextMenuItem>
+              {canRecall && (
+                <ContextMenuItem
+                  data-testid="msg-recall"
+                  onSelect={() => onRecall(m)}
+                >
+                  <Undo2 className="h-3.5 w-3.5 opacity-70" />
+                  {t("message.recall")}
+                </ContextMenuItem>
+              )}
+              <ContextMenuItem
+                data-testid="msg-delete"
+                className="text-destructive focus:text-destructive"
+                disabled={!m.id}
+                onSelect={() => onDelete(m)}
+              >
+                <Trash2 className="h-3.5 w-3.5 opacity-70" />
+                {t("message.delete")}
               </ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>

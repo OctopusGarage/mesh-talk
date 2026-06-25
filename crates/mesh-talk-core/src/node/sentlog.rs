@@ -71,6 +71,39 @@ impl SentLog {
         Ok(())
     }
 
+    /// Remove every entry matching `should_remove`, atomically rewriting the file and
+    /// rebuilding the in-memory index. Returns how many were removed. A no-op (no rewrite,
+    /// no fsync) when nothing matches. This is the local-erase primitive behind
+    /// delete-a-message / clear-history / retention — it touches ONLY this private sidecar,
+    /// never the synced event log, so erased plaintext is gone on this device and cannot be
+    /// resurrected by a later sync (the synced log keeps only ciphertext, deduped by id).
+    pub fn remove_where(
+        &mut self,
+        should_remove: impl Fn(&SentEntry) -> bool,
+    ) -> Result<usize, LogError> {
+        let total: usize = self.by_conversation.values().map(Vec::len).sum();
+        let kept: Vec<SentEntry> = self
+            .by_conversation
+            .values()
+            .flatten()
+            .filter(|e| !should_remove(e))
+            .cloned()
+            .collect();
+        let removed = total - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        self.file.rewrite(&kept)?;
+        self.by_conversation.clear();
+        for entry in kept {
+            self.by_conversation
+                .entry(entry.conversation)
+                .or_default()
+                .push(entry);
+        }
+        Ok(removed)
+    }
+
     /// All sent entries for `conversation`, sorted by `(wall_clock, seq)`.
     pub fn entries(&self, conversation: &ConversationId) -> Vec<SentEntry> {
         let mut v = self
@@ -124,6 +157,48 @@ mod tests {
         assert_eq!(c1[1].plaintext, b"second");
         assert_eq!(s.entries(&conv(2)).len(), 1);
         assert!(s.entries(&conv(9)).is_empty());
+    }
+
+    #[test]
+    fn remove_where_erases_matching_entries_durably_and_allows_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sent.log");
+        let removed = {
+            let mut s = SentLog::open(&path, "pw").unwrap();
+            s.record(conv(1), 0, 1000, b"keep").unwrap();
+            s.record(conv(1), 1, 2000, b"drop").unwrap();
+            s.record(conv(2), 0, 1500, b"keep-other").unwrap();
+            // Remove just the one (conv 1, seq 1) entry.
+            let removed = s
+                .remove_where(|e| e.conversation == conv(1) && e.seq == 1)
+                .unwrap();
+            // In-memory reflects the removal immediately.
+            assert_eq!(s.entries(&conv(1)).len(), 1);
+            assert_eq!(s.entries(&conv(1))[0].plaintext, b"keep");
+            // Appends still work after a rewrite (the file handle was reopened).
+            s.record(conv(1), 2, 3000, b"after").unwrap();
+            removed
+        };
+        assert_eq!(removed, 1);
+        // Reopen: the dropped entry stays gone (durable), the others survive.
+        let s = SentLog::open(&path, "pw").unwrap();
+        let texts: Vec<_> = s
+            .entries(&conv(1))
+            .into_iter()
+            .map(|e| e.plaintext)
+            .collect();
+        assert_eq!(texts, vec![b"keep".to_vec(), b"after".to_vec()]);
+        assert_eq!(s.entries(&conv(2)).len(), 1);
+    }
+
+    #[test]
+    fn remove_where_no_match_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sent.log");
+        let mut s = SentLog::open(&path, "pw").unwrap();
+        s.record(conv(1), 0, 1000, b"x").unwrap();
+        assert_eq!(s.remove_where(|_| false).unwrap(), 0);
+        assert_eq!(s.entries(&conv(1)).len(), 1);
     }
 
     #[test]

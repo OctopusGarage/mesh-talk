@@ -15,6 +15,7 @@ pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
 pub(crate) mod filebook;
 pub(crate) mod files;
+pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;
 pub(crate) mod message;
@@ -29,6 +30,7 @@ pub(crate) mod queries;
 pub(crate) mod ratchet_sessions;
 pub(crate) mod reaction;
 pub(crate) mod reactions;
+pub(crate) mod recall;
 pub(crate) mod received_log;
 pub(crate) mod runtime;
 pub(crate) mod sentlog;
@@ -42,7 +44,7 @@ pub use crate::transport::net::{
     DISCOVERY_MULTICAST_GROUP,
 };
 pub use channel::ReceivedChannelMessage;
-pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope};
+pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
 pub use files::FileProgress;

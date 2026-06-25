@@ -19,6 +19,8 @@ test("avatar crop viewport displays the picked image", async ({ page }) => {
   }
   await expect(page.getByTestId("chat-shell")).toBeVisible();
 
+  // Avatar editing now lives in the profile dialog (opened from the identity header).
+  await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser"),

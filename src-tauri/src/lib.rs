@@ -124,6 +124,36 @@ pub fn run_tauri() {
             );
             crate::tray::create_system_tray(&app.handle().clone())?;
 
+            // Chat-history retention: one app-lifetime task that periodically erases messages
+            // older than the configured window. Spawned once here (not per-login) so tasks
+            // don't accumulate across login/logout; it's a no-op while logged out (no node) or
+            // when retention is off. An immediate prune on a tightened window is handled in
+            // `set_app_settings`.
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri::Manager;
+                    loop {
+                        let days = app_handle.state::<SettingsState>().get().retention_days;
+                        if let Some(cutoff) = crate::settings::retention_cutoff_ms(days) {
+                            let node = {
+                                let node_state =
+                                    app_handle.state::<crate::chat_commands::NodeState>();
+                                let guard = node_state.0.lock().await;
+                                guard.as_ref().map(|rt| rt.handle())
+                            };
+                            if let Some(node) = node {
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    node.prune_older_than(cutoff)
+                                })
+                                .await;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    }
+                });
+            }
+
             // Frameless chrome off macOS: macOS uses the native overlay title bar (traffic
             // lights float over our content via `titleBarStyle: Overlay`), but Windows/Linux
             // would otherwise show the traditional title bar. Drop their native decorations
@@ -175,6 +205,7 @@ pub fn run_tauri() {
             commands::login,
             commands::logout,
             commands::register,
+            commands::rename_account,
             commands::auto_login,
             commands::clear_saved_session,
             commands::adopt_linked_account,
@@ -214,6 +245,9 @@ pub fn run_tauri() {
             crate::chat_commands::reactions,
             crate::chat_commands::channel_reactions,
             crate::chat_commands::search,
+            crate::chat_commands::delete_message,
+            crate::chat_commands::recall_message,
+            crate::chat_commands::clear_conversation,
             crate::chat_commands::diag_get_peers,
             crate::chat_commands::diag_network_info,
             crate::chat_commands::get_presence,

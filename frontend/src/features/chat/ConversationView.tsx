@@ -204,6 +204,8 @@ export function ConversationView() {
   const sendFile = useChat((s) => s.sendFile);
   const setError = useChat((s) => s.setError);
   const toggleReaction = useChat((s) => s.toggleReaction);
+  const deleteMessage = useChat((s) => s.deleteMessage);
+  const recallMessage = useChat((s) => s.recallMessage);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const members = useChat((s) => s.members);
@@ -232,7 +234,7 @@ export function ConversationView() {
   );
   const loading = useChat((s) => s.loading);
   const ready = useChat((s) => s.ready);
-  const myName = useAuth((s) => s.user?.username ?? "");
+  const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
@@ -276,6 +278,10 @@ export function ConversationView() {
   }, [t]);
 
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  // "Re-edit" a recalled message: a (text, bump-counter) pushed into the composer.
+  const [prefill, setPrefill] = useState<{ text: string; n: number } | null>(
+    null,
+  );
   // `showJump` reveals the jump-to-bottom button whenever the user has scrolled up.
   // Virtuoso's `followOutput` only sticks to the newest message while already at the
   // bottom, so reading history is never interrupted by an inbound message.
@@ -476,6 +482,11 @@ export function ConversationView() {
                     onReply={setReplyTo}
                     onReact={toggleReaction}
                     onRetry={retry}
+                    onDelete={(msg) => msg.id && void deleteMessage(msg.id)}
+                    onRecall={(msg) => msg.id && void recallMessage(msg.id)}
+                    onReEdit={(text) =>
+                      setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }))
+                    }
                   />
                 </div>
               );
@@ -511,6 +522,7 @@ export function ConversationView() {
         }
         mentionNames={mentionNames}
         replyTo={replyTo}
+        prefill={prefill}
         onCancelReply={() => setReplyTo(null)}
         onAttach={async () => {
           try {

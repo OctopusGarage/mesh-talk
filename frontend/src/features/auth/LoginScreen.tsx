@@ -70,7 +70,8 @@ export function LoginScreen() {
   return (
     <div className="relative flex h-full items-center justify-center overflow-hidden bg-background p-6">
       {/* Frameless window (Windows/Linux) has no native bar to grab — a thin top strip drags
-          it. Rendered only there, so it never intercepts clicks on macOS or in the browser. */}
+          it. (macOS is covered by the app-level top drag strip in App.tsx.) Skipped in a
+          plain browser (e2e/dev tab) where there's no window to move. */}
       {needsCustomWindowControls() && (
         <div
           data-tauri-drag-region

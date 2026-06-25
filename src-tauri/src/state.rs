@@ -35,6 +35,15 @@ impl SessionState {
         *guard = None;
     }
 
+    /// Update the live session's display name in place (after a rename). No-op if there
+    /// is no active session.
+    pub fn set_display_name(&self, display_name: String) {
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(info) = guard.as_mut() {
+            info.user.display_name = display_name;
+        }
+    }
+
     pub fn get(&self) -> Option<SessionInfo> {
         self.inner.lock().unwrap().clone()
     }

@@ -42,6 +42,11 @@ pub struct AppSettings {
     /// while `stay_signed_in` and a successful login has happened; cleared on sign-out.
     #[serde(default)]
     pub last_user: Option<String>,
+    /// Chat-history retention: keep messages for at most this many days; older ones are
+    /// erased from this device (a background prune + an immediate prune on change). `0`
+    /// means keep forever. New field → `#[serde(default)]` for forward-compat.
+    #[serde(default)]
+    pub retention_days: u32,
 }
 
 /// Default for both toggles (a messenger should run in the background and notify).
@@ -57,8 +62,22 @@ impl Default for AppSettings {
             download_dir: String::new(),
             stay_signed_in: true,
             last_user: None,
+            retention_days: 0,
         }
     }
+}
+
+/// The cutoff timestamp (ms since epoch) for a retention window of `days`, or `None` when
+/// `days == 0` (keep forever). Messages with `wall_clock < cutoff` are eligible for prune.
+pub fn retention_cutoff_ms(days: u32) -> Option<u64> {
+    if days == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some(now.saturating_sub(days as u64 * 24 * 60 * 60 * 1000))
 }
 
 /// Managed Tauri state wrapping [`AppSettings`] so the close-handler and the
@@ -114,9 +133,10 @@ pub fn get_app_settings(state: tauri::State<'_, SettingsState>) -> AppSettings {
 /// immediately forget the saved keychain secret + `last_user` so the next launch
 /// shows the login screen (the toggle is the user's control over the stored secret).
 #[tauri::command]
-pub fn set_app_settings(
+pub async fn set_app_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, SettingsState>,
+    node_state: tauri::State<'_, crate::chat_commands::NodeState>,
     mut settings: AppSettings,
 ) -> Result<(), CommandError> {
     let prev = state.get();
@@ -131,7 +151,20 @@ pub fn set_app_settings(
         // Likewise keep `last_user` under backend control, not the frontend payload.
         settings.last_user = prev.last_user;
     }
+    let retention_days = settings.retention_days;
     save(&app, &settings);
     state.set(settings);
+
+    // Apply a tightened retention window immediately (the periodic prune would otherwise
+    // only catch it on its next tick). Best-effort; a no-op if the node isn't running yet.
+    if let Some(cutoff) = retention_cutoff_ms(retention_days) {
+        let node = {
+            let guard = node_state.0.lock().await;
+            guard.as_ref().map(|rt| rt.handle())
+        };
+        if let Some(node) = node {
+            let _ = tokio::task::spawn_blocking(move || node.prune_older_than(cutoff)).await;
+        }
+    }
     Ok(())
 }

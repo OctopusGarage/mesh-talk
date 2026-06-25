@@ -95,7 +95,9 @@
     "dismissError": "Dismiss error",
     "messageLog": "Messages with {{name}}",
     "list": "Conversations",
-    "dropToSend": "Drop to send to {{name}}"
+    "dropToSend": "Drop to send to {{name}}",
+    "clearHistory": "Clear chat history",
+    "clearHistoryConfirm": "This permanently erases this conversation's messages on this device. It can't be undone and doesn't affect the other person's copy."
   },
   "presence": {
     "online": "Online",
@@ -115,7 +117,12 @@
       "relay-unreachable": "Couldn't send — network unreachable",
       "crypto": "Couldn't send — encryption error",
       "unknown": "Failed to send"
-    }
+    },
+    "delete": "Delete",
+    "recall": "Recall",
+    "recalledByYou": "You recalled a message",
+    "recalledBy": "{{name}} recalled a message",
+    "reEdit": "Re-edit"
   },
   "transfer": {
     "sending": "Sending file…",
@@ -166,7 +173,12 @@
     "downloadFolderDesc": "Where received files are saved. Leave unset to be asked each time.",
     "downloadFolderSet": "Received files are saved here automatically.",
     "chooseFolder": "Choose folder",
-    "changeFolder": "Change"
+    "changeFolder": "Change",
+    "sectionChat": "Chat history",
+    "retention": "Keep history for",
+    "retentionDesc": "Automatically erase messages older than this from this device.",
+    "retentionForever": "Forever",
+    "retentionDays": "{{count}} days"
   },
   "search": {
     "title": "Search messages",
@@ -321,5 +333,15 @@
     "joinBody": "Connect the second device to that hotspot, then reopen Mesh-Talk. You'll appear in each other's list within seconds — or open Network diagnostics and tap Rescan.",
     "wiredNote": "No Wi-Fi at all? An Ethernet cable or USB tethering between the two devices works the same way.",
     "gotIt": "Got it"
+  },
+  "profile": {
+    "title": "Profile",
+    "description": "Your photo and name as others see them.",
+    "open": "Open your profile",
+    "displayName": "Display name",
+    "editName": "Edit name",
+    "username": "Login username",
+    "accountId": "Account ID",
+    "usernameHint": "You sign in with this username — it can't be changed. The display name above is just a nickname and can be changed anytime."
   }
 }

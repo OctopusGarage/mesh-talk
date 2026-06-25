@@ -14,6 +14,7 @@ test("a chosen preset avatar has a light background (not black)", async ({
     await page.getByTestId("login-submit").click();
   }
   await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();

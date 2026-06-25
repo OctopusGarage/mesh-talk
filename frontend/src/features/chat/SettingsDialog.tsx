@@ -3,6 +3,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bell,
   FolderOpen,
+  History,
   KeyRound,
   Languages,
   MinusSquare,
@@ -104,6 +105,7 @@ export function SettingsDialog() {
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [downloadDir, setDownloadDir] = useState("");
   const [staySignedIn, setStaySignedIn] = useState(true);
+  const [retentionDays, setRetentionDays] = useState(0);
 
   // Load current state whenever the dialog opens.
   useEffect(() => {
@@ -114,6 +116,7 @@ export function SettingsDialog() {
         setNotifications(s.notifications);
         setDownloadDir(s.download_dir);
         setStaySignedIn(s.stay_signed_in);
+        setRetentionDays(s.retention_days);
       },
       () => {},
     );
@@ -150,6 +153,15 @@ export function SettingsDialog() {
     void settingsApi
       .get()
       .then((cur) => settingsApi.set({ ...cur, stay_signed_in: v }))
+      .catch(() => {});
+  };
+  // Persisting retention triggers an immediate backend prune of older messages (see
+  // set_app_settings), so a tightened window takes effect at once.
+  const onRetention = (days: number) => {
+    setRetentionDays(days);
+    void settingsApi
+      .get()
+      .then((cur) => settingsApi.set({ ...cur, retention_days: days }))
       .catch(() => {});
   };
   const onLaunch = async (v: boolean) => {
@@ -329,6 +341,36 @@ export function SettingsDialog() {
                       : t("settings.chooseFolder")}
                   </Button>
                 </div>
+              }
+            />
+          </Section>
+
+          <Section title={t("settings.sectionChat")}>
+            <Row
+              id="setting-retention"
+              icon={<History className="h-4 w-4" />}
+              title={t("settings.retention")}
+              desc={t("settings.retentionDesc")}
+              control={
+                <select
+                  id="setting-retention"
+                  data-testid="settings-retention-select"
+                  value={retentionDays}
+                  onChange={(e) => onRetention(Number(e.target.value))}
+                  className={SELECT_CLASS}
+                  aria-label={t("settings.retention")}
+                >
+                  <option value={0}>{t("settings.retentionForever")}</option>
+                  <option value={7}>
+                    {t("settings.retentionDays", { count: 7 })}
+                  </option>
+                  <option value={30}>
+                    {t("settings.retentionDays", { count: 30 })}
+                  </option>
+                  <option value={90}>
+                    {t("settings.retentionDays", { count: 90 })}
+                  </option>
+                </select>
               }
             />
           </Section>

@@ -168,6 +168,7 @@ impl AuthService {
 
         let user = User {
             user_id: identity_user.user_id.clone(),
+            display_name: identity_user.effective_display_name().to_string(),
             name: identity_user.username,
             address: normalized_address.to_string(),
             created_at: identity_user.created_at,
@@ -205,6 +206,7 @@ impl AuthService {
 
         let mut user = User {
             user_id: identity_user.user_id.clone(),
+            display_name: identity_user.effective_display_name().to_string(),
             name: identity_user.username,
             address: identity_user.public_key, // Using public key as address for now
             created_at: identity_user.created_at,
@@ -236,6 +238,37 @@ impl AuthService {
         sessions.insert(token.clone(), session);
 
         Ok((user, token))
+    }
+
+    /// Change the current user's editable display name (nickname). Persists it to the
+    /// identity store (verifying `password`) and updates the in-memory current user.
+    /// The login `username` is unchanged. Returns the updated session user.
+    pub fn set_display_name(&self, password: &str, new_display_name: &str) -> AuthResult<User> {
+        let username = {
+            let guard = self.current_user.lock().unwrap();
+            guard.as_ref().ok_or(AuthError::NotLoggedIn)?.name.clone()
+        };
+
+        let identity_user = self
+            .identity_manager
+            .set_display_name(&username, password, new_display_name)
+            .map_err(|e| match e {
+                mesh_talk_core::identity::errors::IdentityError::InvalidDisplayName => {
+                    AuthError::InvalidInput("Invalid display name".to_string())
+                }
+                mesh_talk_core::identity::errors::IdentityError::InvalidPassword => {
+                    AuthError::InvalidCredentials
+                }
+                mesh_talk_core::identity::errors::IdentityError::UserNotFound(_) => {
+                    AuthError::UserNotFound
+                }
+                other => AuthError::StorageError(format!("Failed to set display name: {}", other)),
+            })?;
+
+        let mut guard = self.current_user.lock().unwrap();
+        let user = guard.as_mut().ok_or(AuthError::NotLoggedIn)?;
+        user.display_name = identity_user.effective_display_name().to_string();
+        Ok(user.clone())
     }
 
     /// Logout the current user
@@ -421,6 +454,40 @@ mod tests {
     fn test_user_logout_not_logged_in() {
         let (auth_service, _) = setup_test_context();
         let result = auth_service.logout("nonexistent_token".to_string());
+        assert!(matches!(result, Err(AuthError::NotLoggedIn)));
+    }
+
+    #[test]
+    fn test_set_display_name_updates_current_user_and_keeps_username() {
+        let (auth_service, _) = setup_test_context();
+        auth_service
+            .register(
+                "testuser".to_string(),
+                "supersafepass".to_string(),
+                "127.0.0.1:7000".to_string(),
+            )
+            .unwrap();
+        auth_service
+            .login("testuser".to_string(), "supersafepass".to_string())
+            .unwrap();
+
+        let updated = auth_service
+            .set_display_name("supersafepass", "  Test User 🎉 ")
+            .unwrap();
+        assert_eq!(updated.display_name, "Test User 🎉"); // trimmed, emoji kept
+        assert_eq!(updated.name, "testuser"); // login username unchanged
+
+        // A fresh login reads the persisted display name back.
+        let (relogged, _) = auth_service
+            .login("testuser".to_string(), "supersafepass".to_string())
+            .unwrap();
+        assert_eq!(relogged.display_name, "Test User 🎉");
+    }
+
+    #[test]
+    fn test_set_display_name_requires_a_session() {
+        let (auth_service, _) = setup_test_context();
+        let result = auth_service.set_display_name("pw", "Whoever");
         assert!(matches!(result, Err(AuthError::NotLoggedIn)));
     }
 }

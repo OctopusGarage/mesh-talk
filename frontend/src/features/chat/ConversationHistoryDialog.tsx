@@ -36,6 +36,7 @@ import {
 } from "@/store/chat";
 import { MediaPreview } from "./MediaPreview";
 import { fileGlyph } from "./mediaFile";
+import { ClearHistoryButton } from "./ClearHistoryButton";
 
 // Per-conversation history pulls the full backlog (the conversation stream itself caps at
 // 200 for live scrolling). The backend history commands clamp to 500, which is the most a
@@ -201,10 +202,16 @@ export function ConversationHistoryDialog({
         data-testid="conversation-history-dialog"
       >
         <DialogHeader>
-          <DialogTitle>{t("history.title")}</DialogTitle>
-          <DialogDescription>
-            {t("history.description", { name: conversation.name })}
-          </DialogDescription>
+          <div className="flex items-start justify-between gap-3 pr-6">
+            <div className="min-w-0">
+              <DialogTitle>{t("history.title")}</DialogTitle>
+              <DialogDescription>
+                {t("history.description", { name: conversation.name })}
+              </DialogDescription>
+            </div>
+            {/* Clearing wipes this conversation's local history; close this dialog after. */}
+            <ClearHistoryButton withLabel onCleared={() => setOpen(false)} />
+          </div>
         </DialogHeader>
 
         {error && <p className="text-xs text-destructive">{error}</p>}

@@ -11,6 +11,7 @@ pub enum IdentityError {
     SerializationError(String),
     StorageError(String),
     InvalidUsername,
+    InvalidDisplayName,
     InvalidUserId,
 }
 
@@ -28,6 +29,7 @@ impl fmt::Display for IdentityError {
             IdentityError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
             IdentityError::StorageError(msg) => write!(f, "Storage error: {}", msg),
             IdentityError::InvalidUsername => write!(f, "Invalid username"),
+            IdentityError::InvalidDisplayName => write!(f, "Invalid display name"),
             IdentityError::InvalidUserId => write!(f, "Invalid user ID"),
         }
     }

@@ -27,11 +27,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import {
-  AvatarEditMenu,
-  IdentityGlyph,
-  PresenceDot,
-} from "@/components/identity";
+import { IdentityGlyph, PresenceDot } from "@/components/identity";
 import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
 import { shortId } from "@/lib/format";
@@ -44,6 +40,7 @@ import { LinkDeviceDialog } from "./LinkDeviceDialog";
 import { DiagnosticsDialog } from "./DiagnosticsDialog";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { SettingsDialog } from "./SettingsDialog";
+import { ProfileDialog } from "./ProfileDialog";
 import { AboutDialog } from "./AboutDialog";
 import { useAuth } from "@/store/auth";
 import { chat, diag } from "@/lib/api";
@@ -368,11 +365,18 @@ export function Sidebar() {
   const bootFailed = useChat((s) => s.bootFailed);
   const retryBoot = useChat((s) => s.retryBoot);
   const username = useAuth((s) => s.user?.username ?? "");
+  // The peer-facing display name (nickname) shown in the identity header; falls back to
+  // the login username. `username` is kept as the stable last-resort id/avatar seed.
+  const displayName = useAuth(
+    (s) => s.user?.display_name || s.user?.username || "",
+  );
   const { width, onPointerDown, reset, onKeyDown } = useSidebarWidth();
 
   // Inline rename dialog state (a contact id + a draft alias). Kept local/primitive.
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // The own-profile dialog (avatar + display name editing), opened from the identity header.
+  const [profileOpen, setProfileOpen] = useState(false);
   // The Wi-Fi network (SSID) we're on — Mesh-Talk is LAN-scoped, so show which network the
   // peers around us share. Polled (it can change when you switch networks); null when wired
   // or the OS withholds it.
@@ -516,29 +520,42 @@ export function Sidebar() {
         data-titlebar-inset="left"
       >
         <div className="flex items-center gap-3">
-          <div className="relative shrink-0">
-            <AvatarEditMenu
-              id={myAccountId || myId || username}
-              ariaLabel={t("avatar.editOwn")}
-              pack="players"
-            >
-              <IdentityGlyph
-                seed={myAccountId || myId || username}
-                size={38}
-                title={username}
-              />
-            </AvatarEditMenu>
+          {/* Avatar opens the profile (where the photo + name are edited) — like tapping
+              your avatar in WeChat/Telegram. */}
+          <button
+            type="button"
+            data-testid="open-profile"
+            onClick={() => setProfileOpen(true)}
+            aria-label={t("profile.open")}
+            className="relative shrink-0 rounded-[28%] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <IdentityGlyph
+              seed={myAccountId || myId || username}
+              size={38}
+              title={displayName}
+            />
             <PresenceDot
               status={ready ? "online" : "offline"}
               size="md"
               label={ready ? t("presence.online") : t("common.starting")}
               className="pointer-events-none absolute -bottom-0.5 -right-0.5"
             />
-          </div>
+          </button>
           <div className="min-w-0 flex-1">
-            <div className="truncate font-display text-sm font-semibold tracking-tight">
-              {username}
-            </div>
+            {/* The name also opens the profile. Kept separate from the status line below so
+                the boot-retry button never nests inside another button. */}
+            <button
+              type="button"
+              onClick={() => setProfileOpen(true)}
+              className="block max-w-full rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span
+                data-testid="sidebar-own-name"
+                className="block truncate text-left font-display text-sm font-semibold tracking-tight"
+              >
+                {displayName}
+              </span>
+            </button>
             <div className="truncate font-mono text-xs text-muted-foreground">
               {ready ? (
                 t("sidebar.you", { id: shortId(myId) })
@@ -562,6 +579,7 @@ export function Sidebar() {
           <SearchDialog />
           <FilesTray />
         </div>
+        <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
       </div>
 
       <nav

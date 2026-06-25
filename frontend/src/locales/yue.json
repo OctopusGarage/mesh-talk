@@ -95,7 +95,9 @@
     "dismissError": "閂咗個錯誤提示",
     "messageLog": "同 {{name}} 嘅訊息",
     "list": "對話",
-    "dropToSend": "拋落嚟就 send 畀 {{name}}"
+    "dropToSend": "拋落嚟就 send 畀 {{name}}",
+    "clearHistory": "清空聊天記錄",
+    "clearHistoryConfirm": "呢個會永久刪除本機上呢個對話嘅訊息,冇得復原,亦唔影響對方嘅記錄。"
   },
   "presence": {
     "online": "喺線",
@@ -115,7 +117,12 @@
       "relay-unreachable": "send 唔到——個網絡連唔到",
       "crypto": "send 唔到——加密出咗錯",
       "unknown": "send 唔到"
-    }
+    },
+    "delete": "刪除",
+    "recall": "收回",
+    "recalledByYou": "你收回咗一條訊息",
+    "recalledBy": "{{name}} 收回咗一條訊息",
+    "reEdit": "重新編輯"
   },
   "transfer": {
     "sending": "send 緊個檔案…",
@@ -166,7 +173,12 @@
     "downloadFolderDesc": "收到嘅檔案擺喺邊。唔填就每次問你。",
     "downloadFolderSet": "收到嘅檔案會自動擺呢度。",
     "chooseFolder": "揀資料夾",
-    "changeFolder": "改"
+    "changeFolder": "改",
+    "sectionChat": "聊天記錄",
+    "retention": "保留時長",
+    "retentionDesc": "自動刪除本機上早過呢個時長嘅訊息。",
+    "retentionForever": "永久",
+    "retentionDays": "{{count}} 日"
   },
   "search": {
     "title": "搵訊息",
@@ -321,5 +333,15 @@
     "joinBody": "將第二部機連去呢個熱點，跟住重新開 Mesh-Talk。幾秒內雙方就會喺對方個列表度出現——又或者開網路診斷㩒「重新掃描」。",
     "wiredNote": "完全冇 Wi-Fi？兩部機之間用網線或者 USB 網路共享，一樣得。",
     "gotIt": "明白"
+  },
+  "profile": {
+    "title": "個人資料",
+    "description": "人哋睇到嘅你頭像同名。",
+    "open": "打開個人資料",
+    "displayName": "暱稱",
+    "editName": "改名",
+    "username": "登入用戶名",
+    "accountId": "帳號 ID",
+    "usernameHint": "用呢個用戶名登入,唔可以改。上面個暱稱淨係顯示名,隨時可以改。"
   }
 }
