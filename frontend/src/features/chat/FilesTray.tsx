@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/popover";
 import { IdentityGlyph } from "@/components/identity";
 import { chat, settings as settingsApi } from "@/lib/api";
+import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { useChat } from "@/store/chat";
@@ -40,7 +41,7 @@ export function FilesTray() {
   const dismissFile = useChat((s) => s.dismissFile);
   const setError = useChat((s) => s.setError);
 
-  // Remembered default download folder ("" = always prompt). Loaded once on mount, kept as
+  // Remembered default download folder ("" = use the OS Downloads folder). Loaded on mount, kept as
   // a primitive (memory: zustand selectors returning fresh objects can black-screen).
   const [downloadDir, setDownloadDir] = useState("");
   useEffect(() => {
@@ -93,12 +94,14 @@ export function FilesTray() {
       return next;
     });
 
-  // Save into the remembered folder (no prompt); falls back to a Save-as dialog when no
-  // default is set.
+  // Save into the effective download folder with no prompt: the folder the user chose, else
+  // the OS Downloads folder (the common default). Only falls back to a Save-as dialog if no
+  // folder is resolvable at all.
   const saveToDefault = async (fileConv: string, name: string) => {
     try {
-      if (downloadDir) {
-        const path = await chat.saveFileToDir(fileConv, downloadDir);
+      const dir = await effectiveDownloadDir();
+      if (dir) {
+        const path = await chat.saveFileToDir(fileConv, dir);
         remember(fileConv, path);
         return;
       }
@@ -112,10 +115,10 @@ export function FilesTray() {
     }
   };
 
-  // Always-prompt "Save as…" override (ignores the remembered default).
+  // Always-prompt "Save as…" override; the dialog opens at the Downloads folder.
   const saveAs = async (fileConv: string, name: string) => {
     try {
-      const dest = await save({ defaultPath: name });
+      const dest = await save({ defaultPath: await defaultSavePath(name) });
       if (typeof dest === "string") {
         await chat.saveFile(fileConv, dest);
         remember(fileConv, dest);

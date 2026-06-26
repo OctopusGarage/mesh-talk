@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { chat } from "@/lib/api";
+import { defaultSavePath } from "@/lib/download";
 import { errorMessage } from "@/lib/error";
 import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp } from "@/lib/motion";
@@ -49,7 +50,9 @@ function FileBubble({
 
   const saveAs = async () => {
     try {
-      const dest = await save({ defaultPath: file.name });
+      const dest = await save({
+        defaultPath: await defaultSavePath(file.name),
+      });
       if (typeof dest === "string") await chat.saveFile(file.fileConv, dest);
     } catch (e) {
       setError(t("files.couldntSave", { error: errorMessage(e) }));

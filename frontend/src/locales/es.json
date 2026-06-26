@@ -212,7 +212,7 @@
     "alreadyDownloaded": "Ya descargado — usa Mostrar para encontrarlo.",
     "couldntOpen": "No se pudo abrir: {{error}}",
     "chooseFolder": "Elegir carpeta de descargas predeterminada",
-    "noDefaultFolder": "Sin carpeta predeterminada",
+    "noDefaultFolder": "Guardando en la carpeta Descargas del sistema",
     "reveal": "Mostrar en carpeta",
     "saveAs": "Guardar como…",
     "viewFullSize": "Ver a tamaño completo",

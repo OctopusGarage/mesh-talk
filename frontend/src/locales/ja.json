@@ -212,7 +212,7 @@
     "alreadyDownloaded": "ダウンロード済みです —「表示」で見つけられます。",
     "couldntOpen": "開けませんでした：{{error}}",
     "chooseFolder": "既定のダウンロードフォルダを選択",
-    "noDefaultFolder": "既定のフォルダなし",
+    "noDefaultFolder": "システムのダウンロードフォルダーに保存します",
     "reveal": "フォルダで表示",
     "saveAs": "名前を付けて保存…",
     "viewFullSize": "原寸で表示",

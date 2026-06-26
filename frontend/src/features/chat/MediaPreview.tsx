@@ -3,6 +3,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { Download, Play, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { chat } from "@/lib/api";
+import { defaultSavePath } from "@/lib/download";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { useChat } from "@/store/chat";
@@ -44,7 +45,7 @@ export function MediaPreview({
   // under every bubble) — the chat shows just the media.
   const saveAs = async () => {
     try {
-      const dest = await save({ defaultPath: name });
+      const dest = await save({ defaultPath: await defaultSavePath(name) });
       if (typeof dest === "string") await chat.saveFile(fileConv, dest);
     } catch (e) {
       setError(t("files.couldntSave", { error: errorMessage(e) }));

@@ -237,6 +237,7 @@ pub fn run_tauri() {
             crate::chat_commands::send_file_channel,
             crate::chat_commands::save_file,
             crate::chat_commands::save_file_to_dir,
+            crate::chat_commands::default_download_dir,
             crate::chat_commands::safety_number,
             crate::chat_commands::read_file,
             crate::chat_commands::read_media,

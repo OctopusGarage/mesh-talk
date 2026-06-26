@@ -212,7 +212,7 @@
     "alreadyDownloaded": "已經載咗喇 — 撳「顯示」搵返佢。",
     "couldntOpen": "開唔到：{{error}}",
     "chooseFolder": "揀預設嘅下載資料夾",
-    "noDefaultFolder": "冇預設資料夾",
+    "noDefaultFolder": "預設儲存到系統下載資料夾",
     "reveal": "喺資料夾度顯示",
     "saveAs": "另存做…",
     "viewFullSize": "睇原本大細",

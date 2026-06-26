@@ -212,7 +212,7 @@
     "alreadyDownloaded": "Already downloaded — use Reveal to find it.",
     "couldntOpen": "Couldn't open: {{error}}",
     "chooseFolder": "Choose default download folder",
-    "noDefaultFolder": "No default folder",
+    "noDefaultFolder": "Saving to your system Downloads folder",
     "reveal": "Reveal",
     "saveAs": "Save as…",
     "viewFullSize": "View full size",

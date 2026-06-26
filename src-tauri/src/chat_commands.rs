@@ -661,6 +661,20 @@ pub async fn save_file(
 /// components, rejects traversal/absolute/drive prefixes, legalizes illegal chars, and
 /// keeps the result inside `dir`, de-duplicating with a `name (N).ext` counter.
 /// Returns the actual path written, so the UI can show where it landed.
+/// The platform's standard Downloads folder — macOS `~/Downloads`, Windows the Downloads
+/// known folder, Linux `XDG_DOWNLOAD_DIR` (from `~/.config/user-dirs.dirs`) falling back to
+/// `~/Downloads` — resolved by Tauri's path API. This is the default save location when the
+/// user hasn't chosen one. `None` only if no usable directory is resolvable at all.
+#[tauri::command]
+pub fn default_download_dir(app: tauri::AppHandle) -> Option<String> {
+    use tauri::Manager;
+    app.path()
+        .download_dir()
+        .ok()
+        .or_else(|| crate::user_home_dir().map(|h| h.join("Downloads")))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn save_file_to_dir(
     state: tauri::State<'_, NodeState>,

@@ -212,7 +212,7 @@
     "alreadyDownloaded": "已经下载过了 — 点“显示”查看位置。",
     "couldntOpen": "无法打开：{{error}}",
     "chooseFolder": "选择默认下载文件夹",
-    "noDefaultFolder": "未设置默认文件夹",
+    "noDefaultFolder": "默认保存到系统下载文件夹",
     "reveal": "在文件夹中显示",
     "saveAs": "另存为…",
     "viewFullSize": "查看大图",
