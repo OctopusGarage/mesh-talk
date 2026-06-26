@@ -68,6 +68,7 @@ export function Composer({
   replyTo,
   onCancelReply,
   mentionNames,
+  myName,
   prefill,
   onSendSticker,
   onImage,
@@ -82,6 +83,8 @@ export function Composer({
   replyTo?: ChatMessage | null;
   onCancelReply?: () => void;
   mentionNames: string[];
+  /** The current user's display name — excluded from mention suggestions (can't @ yourself). */
+  myName?: string;
   /** Drop text into the composer from outside (WeChat-style "re-edit" of a recalled
    * message). `n` is a bump counter so the same text can be re-applied. */
   prefill?: { text: string; n: number } | null;
@@ -157,9 +160,9 @@ export function Composer({
     if (mentionQuery === null) return [];
     const q = mentionQuery.toLowerCase();
     return mentionNames
-      .filter((n) => n && n.toLowerCase().startsWith(q))
+      .filter((n) => n && n.toLowerCase().startsWith(q) && n !== myName)
       .slice(0, 6);
-  }, [mentionQuery, mentionNames]);
+  }, [mentionQuery, mentionNames, myName]);
 
   const detectMention = (value: string, caret: number) => {
     const before = value.slice(0, caret);

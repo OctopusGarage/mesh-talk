@@ -38,7 +38,7 @@
     /* Signature accents — the only place we spend boldness. */
     --signal: 174 72% 33%; /* = primary teal */
     --verified: 154 64% 34%;
-    --mention: 32 90% 42%;
+    --mention: 174 72% 33%; /* teal, same hue as --signal — adapts per theme */
 
     /* Own chat bubble: a softer, lighter teal than the deep --signal so a large filled
        bubble reads comfortable (not heavy) against the paper background. */
@@ -71,7 +71,7 @@
 
     --signal: 172 66% 50%; /* = primary teal */
     --verified: 154 60% 52%;
-    --mention: 38 92% 55%;
+    --mention: 172 66% 50%; /* teal, same hue as --signal */
 
     /* Own chat bubble: slightly softer/less neon than the raw signal accent so the filled
        bubble is calm rather than loud against the ink surfaces. */
@@ -123,7 +123,7 @@
     --ring: 202 80% 44%;
     --signal: 202 84% 46%;
     --verified: 150 56% 34%;
-    --mention: 38 90% 42%;
+    --mention: 202 84% 46%;
     --bubble-own: 202 74% 48%;
   }
 
@@ -151,7 +151,7 @@
     --ring: 344 70% 50%;
     --signal: 344 72% 52%;
     --verified: 150 52% 52%;
-    --mention: 45 88% 58%;
+    --mention: 344 72% 52%;
     --bubble-own: 344 58% 47%;
   }
 
@@ -180,7 +180,7 @@
     --ring: 214 82% 46%;
     --signal: 214 84% 48%;
     --verified: 150 56% 34%;
-    --mention: 38 88% 42%;
+    --mention: 214 84% 48%;
     --bubble-own: 214 76% 50%;
   }
 

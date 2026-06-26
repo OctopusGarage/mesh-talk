@@ -29,7 +29,7 @@ import { defaultSavePath } from "@/lib/download";
 import { errorMessage } from "@/lib/error";
 import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp } from "@/lib/motion";
-import { EMOJIS, mentionsName, renderWithMentions } from "@/lib/mentions";
+import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, type ChatMessage } from "@/store/chat";
@@ -115,9 +115,10 @@ export function MessageBubble({
   authorAvatarId,
   authorName,
   fresh,
+  mentioned,
   reactions,
   selfReactionId,
-  myName,
+  myName: _myName,
   onReply,
   onReact,
   onRetry,
@@ -138,6 +139,8 @@ export function MessageBubble({
   authorName?: string;
   /** True only for a genuinely newly-arriving/sent message → plays an entrance. */
   fresh?: boolean;
+  /** True when this channel message mentions the current user. */
+  mentioned?: boolean;
   reactions: ReactionInfo[];
   // The id that represents "me" in a reaction's `who`: the ACCOUNT id for account
   // conversations (who is account-keyed there), the device user-id for channels.
@@ -168,7 +171,6 @@ export function MessageBubble({
       setError(errorMessage(e));
     }
   };
-  const mentioned = !mine && mentionsName(m.text, myName);
   // Prefer the author's display name (resolved from the roster/members); fall back to the
   // raw `who` user-id (rendered mono when it's a long identifier) only if no name is known.
   const isIdName = !authorName && m.who.length > 20;
@@ -300,6 +302,12 @@ export function MessageBubble({
           </span>
         )}
 
+        {mentioned && !mine && (
+          <span className="mb-1 rounded-full bg-signal/10 px-2 py-0.5 text-[10px] font-medium text-signal">
+            提及了你
+          </span>
+        )}
+
         <div className="flex min-w-0 items-center gap-1">
           {/* hover actions (left of bubble for own messages) */}
           {mine && (
@@ -333,7 +341,7 @@ export function MessageBubble({
                           ? "rounded-br-md bg-bubble-own text-primary-foreground shadow-sm"
                           : "rounded-bl-md border border-border bg-muted text-foreground shadow-elevation",
                       ),
-                  mentioned && "ring-2 ring-mention/70",
+                  mentioned && "border-l-2 border-signal",
                   m.pending && "opacity-60",
                 )}
               >

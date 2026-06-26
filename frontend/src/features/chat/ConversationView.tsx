@@ -26,6 +26,7 @@ import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { TransferBar } from "./TransferBar";
 import { chat as chatApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
+import { mentionsName } from "@/lib/mentions";
 import { formatDay } from "@/lib/format";
 import { useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
@@ -475,6 +476,8 @@ export function ConversationView() {
               const showDay =
                 !prev || formatDay(prev.wallClock) !== formatDay(m.wallClock);
               const parent = m.replyTo ? (byId.get(m.replyTo) ?? null) : null;
+              const mentioned =
+                isChannel && !m.fromMe && mentionsName(m.text, myName);
               return (
                 <div className="px-0 pb-0.5">
                   {showDay && <DaySeparator label={formatDay(m.wallClock)} />}
@@ -489,6 +492,7 @@ export function ConversationView() {
                     reactions={m.id ? (reactionsByTarget.get(m.id) ?? []) : []}
                     selfReactionId={selfReactionId}
                     myName={myName}
+                    mentioned={mentioned}
                     onReply={setReplyTo}
                     onReact={toggleReaction}
                     onRetry={retry}
@@ -531,6 +535,7 @@ export function ConversationView() {
             : t("conversation.messageContact", { name: headerName })
         }
         mentionNames={mentionNames}
+        myName={myName}
         replyTo={replyTo}
         prefill={prefill}
         onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
