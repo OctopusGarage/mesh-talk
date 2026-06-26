@@ -217,7 +217,10 @@
     "saveAs": "Save as…",
     "viewFullSize": "View full size",
     "largeVideo": "Large video — save it, then open externally.",
-    "sentFile": "Sent a file: {{name}}"
+    "sentFile": "Sent a file: {{name}}",
+    "videoUnsupported": "This video can't be previewed here — use Save to open it in your player.",
+    "playVideo": "Play video",
+    "imageUnsupported": "This image can't be previewed here — use Save to open it."
   },
   "linkDevice": {
     "trigger": "Link a device",

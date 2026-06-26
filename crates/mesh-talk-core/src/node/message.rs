@@ -71,6 +71,13 @@ impl MessageBody {
 
     /// Encode the sealed plaintext. A sticker message ships as `MTB2 ‖ 1 ‖ bincode(WireV2)`;
     /// everything else ships as `MTB1 ‖ bincode(WireV1)` (unchanged on the wire).
+    // CROSS-VERSION NOTE: a sticker is framed as MTB2, which only sticker-aware peers (this
+    // version onward) decode; a pre-sticker peer falls through to raw text and shows the
+    // framing bytes rather than the `text` emoji fallback. MTB1 uses reject_trailing_bytes,
+    // so the id can't be smuggled into an MTB1 frame old peers tolerate, and shipped old
+    // decoders can't be changed. A graceful downgrade (send the emoji as plain MTB1 text to
+    // peers that don't advertise sticker support) needs capability negotiation in the
+    // announce — deferred; the steady state on this LAN app is all peers updated together.
     pub fn encode(&self) -> Vec<u8> {
         if self.sticker.is_some() {
             let body = opts()

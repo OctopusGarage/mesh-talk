@@ -217,7 +217,10 @@
     "saveAs": "另存新檔…",
     "viewFullSize": "檢視原尺寸",
     "largeVideo": "大型影片 — 請先儲存，再用外部程式開啟。",
-    "sentFile": "傳送了檔案：{{name}}"
+    "sentFile": "傳送了檔案：{{name}}",
+    "videoUnsupported": "此影片無法在此預覽,請用「儲存」在你的播放器中開啟。",
+    "playVideo": "播放影片",
+    "imageUnsupported": "此圖片無法在此預覽,請用「儲存」開啟。"
   },
   "linkDevice": {
     "trigger": "連結裝置",

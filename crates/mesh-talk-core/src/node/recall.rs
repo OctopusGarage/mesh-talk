@@ -254,19 +254,34 @@ impl Node {
         };
         for event in &delete_events {
             let author_uid = event.author.user_id();
-            let plaintext = {
+            // The recaller's x25519 key (to open their sealed Delete): prefer the channel's
+            // current member set, then fall back to the discovery roster. The roster fallback
+            // covers a recaller who was removed from the channel within the 2-min recall
+            // window but is still a known peer — without it their recall would be dropped and
+            // the message would un-tombstone. (The two locks are taken sequentially, never
+            // nested, to keep a consistent lock order.) The author's x25519 isn't derivable
+            // from the event Author, which carries only the ed25519 key.
+            let author_x = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
-                crate::node::channel::SealedPayload::decode(&event.ciphertext).and_then(|sealed| {
-                    book.state(&conv)
-                        .and_then(|s| {
-                            s.members()
-                                .iter()
-                                .find(|m| m.user_id() == author_uid)
-                                .map(|m| m.x25519_pub)
-                        })
-                        .and_then(|author_x| sealed.open(&self.identity, &author_x))
+                book.state(&conv).and_then(|s| {
+                    s.members()
+                        .iter()
+                        .find(|m| m.user_id() == author_uid)
+                        .map(|m| m.x25519_pub)
                 })
-            };
+            }
+            .or_else(|| {
+                let roster = self.roster.lock().expect("roster mutex not poisoned");
+                roster
+                    .peers()
+                    .into_iter()
+                    .find(|p| p.public.user_id() == author_uid)
+                    .map(|p| p.public.x25519_pub)
+            });
+            let plaintext = author_x.and_then(|ax| {
+                crate::node::channel::SealedPayload::decode(&event.ciphertext)
+                    .and_then(|sealed| sealed.open(&self.identity, &ax))
+            });
             let Some(p) = plaintext.and_then(|b| DeletePayload::decode(&b)) else {
                 continue;
             };
@@ -303,26 +318,6 @@ impl Node {
             .into_iter()
             .collect();
 
-        // Who authored each logical message in this account conversation (to authorise
-        // peer recalls): our sends are ours, received entries carry the sender account.
-        let mut author_of: HashMap<EventId, String> = HashMap::new();
-        for e in self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .entries(&acct_conv)
-        {
-            author_of.insert(decode_account_entry(&e.plaintext).0, my_account.clone());
-        }
-        for e in self
-            .received
-            .lock()
-            .expect("received mutex not poisoned")
-            .entries(&acct_conv)
-        {
-            author_of.insert(decode_account_entry(&e.plaintext).0, e.from.clone());
-        }
-
         // The device-pair conversations whose Delete events can carry this account's recalls
         // (mirrors `account_reactions`): ours-with-each-target-device and ours-with-each-own-
         // other-device.
@@ -345,6 +340,10 @@ impl Node {
                 })
                 .collect()
         };
+        // Collect the peer recall claims (target, claimed-sender-account) from Delete events,
+        // already bound to the authenticating peer key. Decrypting these is the only required
+        // work; if there are none we skip the expensive author_of rebuild below.
+        let mut claims: Vec<(EventId, String)> = Vec::new();
         for (conv, author_x, peer_account) in convs {
             let delete_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
@@ -365,14 +364,36 @@ impl Node {
                 if peer_account.as_deref() != Some(env.route.sender_account.as_str()) {
                     continue;
                 }
-                let target = EventId::new(env.target);
-                // Only the message's own author account may recall it.
-                if author_of
-                    .get(&target)
-                    .is_some_and(|a| a == &env.route.sender_account)
-                {
-                    out.insert(target);
-                }
+                claims.push((EventId::new(env.target), env.route.sender_account));
+            }
+        }
+        if claims.is_empty() {
+            return out;
+        }
+
+        // Who authored each logical message in this account conversation (to authorise
+        // peer recalls): our sends are ours, received entries carry the sender account.
+        let mut author_of: HashMap<EventId, String> = HashMap::new();
+        for e in self
+            .sentlog
+            .lock()
+            .expect("sentlog mutex not poisoned")
+            .entries(&acct_conv)
+        {
+            author_of.insert(decode_account_entry(&e.plaintext).0, my_account.clone());
+        }
+        for e in self
+            .received
+            .lock()
+            .expect("received mutex not poisoned")
+            .entries(&acct_conv)
+        {
+            author_of.insert(decode_account_entry(&e.plaintext).0, e.from.clone());
+        }
+        // Only the message's own author account may recall it.
+        for (target, sender_account) in claims {
+            if author_of.get(&target).is_some_and(|a| a == &sender_account) {
+                out.insert(target);
             }
         }
         out

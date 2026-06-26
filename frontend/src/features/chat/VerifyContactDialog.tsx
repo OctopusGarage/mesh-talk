@@ -56,28 +56,40 @@ export function VerifyContactDialog({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Load the trust state as soon as the contact's device fingerprint is known (and refresh
+  // when the dialog opens), so the header shield reflects an already-verified contact
+  // WITHOUT having to open the dialog first. (`open` is a dep only to refresh on open.)
+  useEffect(() => {
+    if (!fingerprint) return;
+    let active = true;
+    void chat
+      .getTrust(accountId, fingerprint)
+      .then((tr) => {
+        if (active) setTrust(tr);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [accountId, fingerprint, open]);
+
+  // The safety number is only shown inside the open dialog, so fetch it lazily.
   useEffect(() => {
     if (!open || !fingerprint) return;
     let active = true;
     setErr(null);
-    void (async () => {
-      try {
-        const [tr, s] = await Promise.all([
-          chat.getTrust(accountId, fingerprint),
-          chat.safetyNumber(fingerprint),
-        ]);
-        if (active) {
-          setTrust(tr);
-          setSn(s);
-        }
-      } catch (e) {
+    void chat
+      .safetyNumber(fingerprint)
+      .then((s) => {
+        if (active) setSn(s);
+      })
+      .catch((e) => {
         if (active) setErr(errorMessage(e));
-      }
-    })();
+      });
     return () => {
       active = false;
     };
-  }, [open, accountId, fingerprint]);
+  }, [open, fingerprint]);
 
   const verify = async () => {
     if (!fingerprint) return;
@@ -104,6 +116,9 @@ export function VerifyContactDialog({
           variant="ghost"
           size="icon"
           data-testid="verify-trigger"
+          data-trust={
+            changed ? "changed" : verified ? "verified" : "unverified"
+          }
           title={t("verify.trigger")}
           aria-label={t("verify.trigger")}
         >

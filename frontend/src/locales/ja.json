@@ -217,7 +217,10 @@
     "saveAs": "名前を付けて保存…",
     "viewFullSize": "原寸で表示",
     "largeVideo": "大きな動画 — 保存してから外部アプリで開いてください。",
-    "sentFile": "ファイルを送信しました：{{name}}"
+    "sentFile": "ファイルを送信しました：{{name}}",
+    "videoUnsupported": "この動画はここではプレビューできません。「保存」してプレイヤーで開いてください。",
+    "playVideo": "動画を再生",
+    "imageUnsupported": "この画像はここではプレビューできません。「保存」して開いてください。"
   },
   "linkDevice": {
     "trigger": "端末をリンク",

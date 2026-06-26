@@ -217,7 +217,10 @@
     "saveAs": "另存做…",
     "viewFullSize": "睇原本大細",
     "largeVideo": "個影片好大 — 不如儲存咗佢，再用外面嘅程式開。",
-    "sentFile": "send 咗個檔案：{{name}}"
+    "sentFile": "send 咗個檔案：{{name}}",
+    "videoUnsupported": "呢個片喺度睇唔到,請用「儲存」喺你嘅播放器度開。",
+    "playVideo": "播放片",
+    "imageUnsupported": "呢張相喺度睇唔到,請用「儲存」開。"
   },
   "linkDevice": {
     "trigger": "連結部機",

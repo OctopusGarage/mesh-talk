@@ -34,6 +34,11 @@ messages and files never leave the network, and they stay encrypted the whole wa
   <a href="https://github.com/OctopusGarage/mesh-talk/issues/new?template=feature_request.yml">Request Feature</a>
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/hero-channel.webp" width="860"
+       alt="Mesh-Talk — a group channel with a selectable brand theme, inline media, reactions, and animated stickers">
+</p>
+
 ---
 
 ## Overview
@@ -71,6 +76,41 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 - Multi-device accounts with QR/code device linking
 - Live presence (online / last-seen), pinned contacts, and an in-app diagnostics panel
 - Tray icon, launch-at-login, native notifications, light / dark / OLED themes, and English / 中文
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/stickers.webp" alt="The animated-sticker panel open in a direct message">
+      <br><sub><b>Built-in animated stickers</b></sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/themes.webp" alt="The theme picker with dark, light, OLED, and football-brand themes">
+      <br><sub><b>Selectable themes</b></sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/verify.webp" alt="The verify-contact dialog showing a safety number">
+      <br><sub><b>End-to-end verification (safety number)</b></sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/settings.webp" alt="The settings dialog: background behavior and privacy toggles">
+      <br><sub><b>Background &amp; privacy settings</b></sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/avatars-players.webp" alt="The avatar picker gallery">
+      <br><sub><b>Pick an avatar</b></sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/avatars-clubs.webp" alt="Group avatar crest gallery">
+      <br><sub><b>Group avatars</b></sub>
+    </td>
+  </tr>
+</table>
 
 ## How it works
 

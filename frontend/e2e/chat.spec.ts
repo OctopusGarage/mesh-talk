@@ -273,6 +273,17 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("safety-number")).toBeVisible();
     await page.getByTestId("verify-mark-button").click();
     await expect(page.getByTestId("verify-verified-banner")).toBeVisible();
+
+    // Regression: the header shield must reflect "verified" WITHOUT re-opening the dialog.
+    // Close it, switch away and back so the dialog re-mounts fresh, and check the trigger.
+    await page.keyboard.press("Escape");
+    await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+    await expect(page.getByTestId("conversation-header")).toBeVisible();
+    await openBobDm(page);
+    await expect(page.getByTestId("verify-trigger")).toHaveAttribute(
+      "data-trust",
+      "verified",
+    );
   });
 
   test("Settings: pick themes (light, oled, brand palette)", async ({

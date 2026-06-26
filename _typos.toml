@@ -9,6 +9,9 @@ ba = "ba"
 pn = "pn"
 # "abd" is a test byte-string literal (file_checksum(b"abc") vs b"abd")).
 abd = "abd"
+# "seeked" is the HTMLMediaElement DOM event name (video poster capture in mediaFile.tsx);
+# typos wants "sought", but it's a Web API identifier, not prose.
+seeked = "seeked"
 
 [default.extend-identifiers]
 # "UPnP" (Universal Plug and Play) trips the Pn->On heuristic.

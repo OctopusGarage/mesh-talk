@@ -472,6 +472,64 @@ async fn recall_account_tombstones_own_message_and_enforces_window() {
 }
 
 #[tokio::test]
+async fn channel_sticker_send_recall_and_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_pub = bob.public();
+
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        roster,
+        tx,
+        ch_tx,
+        file_tx,
+        &dir.path().join("me.log"),
+        &dir.path().join("me-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    let channel = node.create_channel("general", vec![bob_pub]).await.unwrap();
+    node.send_channel_message(channel, b"plain text")
+        .await
+        .unwrap();
+    node.send_sticker_channel(channel, "1f602", "😂".as_bytes())
+        .await
+        .unwrap();
+
+    // The sticker surfaces with its id + emoji fallback; the text message is normal.
+    let hist = node.channel_history(channel, 10);
+    assert_eq!(hist.len(), 2);
+    let sticker = hist
+        .iter()
+        .find(|e| e.sticker.as_deref() == Some("1f602"))
+        .expect("sticker message present");
+    assert_eq!(sticker.text, "😂".as_bytes());
+    let text_msg = hist
+        .iter()
+        .find(|e| e.text == b"plain text")
+        .expect("text message present");
+    let text_id = text_msg.id;
+    let sticker_id_ev = sticker.id;
+
+    // Recall the sticker (our own, fresh) → tombstoned, sticker cleared.
+    node.recall_channel(channel, sticker_id_ev).await.unwrap();
+    let hist = node.channel_history(channel, 10);
+    let recalled = hist.iter().find(|e| e.id == sticker_id_ev).unwrap();
+    assert!(recalled.recalled && recalled.sticker.is_none());
+
+    // Delete the text message locally (sent seq->id path) → gone from history.
+    assert_eq!(node.delete_message(channel, text_id, false).unwrap(), 1);
+    let hist = node.channel_history(channel, 10);
+    assert!(!hist.iter().any(|e| e.id == text_id));
+}
+
+#[tokio::test]
 async fn reopen_suppresses_recorded_history_but_retries_unrecorded() {
     let dir = tempfile::tempdir().unwrap();
     let me = DeviceIdentity::generate();
@@ -2096,6 +2154,133 @@ async fn channel_reactions_are_visible_to_members() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(gone, "alice no longer sees bob's reaction after toggle-off");
+}
+
+/// Two-node channel recall over the wire:
+///  1. A member who recalls their OWN message is tombstoned for every other member — the
+///     read path that opens the recaller's sealed `Delete` using their x25519 (from the
+///     member set) and authorises it against the target's author.
+///  2. A member CANNOT recall someone else's message (send-side author-only guard).
+///  3. After the recaller is removed from the channel, the tombstone STILL holds — exercising
+///     the roster fallback for the recaller's key (the member set no longer has them).
+#[tokio::test]
+async fn channel_recall_by_member_is_visible_and_survives_removal() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_pub = bob.public();
+    let alice_uid = alice.public().user_id();
+    let bob_uid = bob.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+
+    let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_addr = alice_listener.local_addr().unwrap();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = bob_listener.local_addr().unwrap();
+
+    let alice_roster = seed_roster(&bob, "Bob", bob_addr.port(), &alice_uid);
+    let bob_roster = seed_roster(&alice, "Alice", alice_addr.port(), &bob_uid);
+
+    let (a_dm, _a_dm_r) = mpsc::unbounded_channel();
+    let (a_ch, mut a_ch_r) = mpsc::unbounded_channel();
+    let (a_f, _a_f_r) = mpsc::unbounded_channel();
+    let (b_dm, _b_dm_r) = mpsc::unbounded_channel();
+    let (b_ch, mut b_ch_r) = mpsc::unbounded_channel();
+    let (b_f, _b_f_r) = mpsc::unbounded_channel();
+
+    let alice_node = Node::open(
+        alice,
+        alice_roster,
+        a_dm,
+        a_ch,
+        a_f,
+        &dir.path().join("a.log"),
+        &dir.path().join("a-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let bob_node = Node::open(
+        bob,
+        bob_roster,
+        b_dm,
+        b_ch,
+        b_f,
+        &dir.path().join("b.log"),
+        &dir.path().join("b-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+
+    let channel = alice_node
+        .create_channel("general", vec![bob_pub])
+        .await
+        .unwrap();
+
+    // Alice sends so Bob syncs into the channel; Bob learns Alice's message id.
+    alice_node
+        .send_channel_message(channel, b"hi bob")
+        .await
+        .unwrap();
+    let alice_msg = tokio::time::timeout(Duration::from_secs(5), b_ch_r.recv())
+        .await
+        .expect("bob received Alice's channel message within 5s")
+        .expect("channel stream open");
+    assert_eq!(alice_msg.text, b"hi bob");
+    let alice_msg_id = alice_msg.event_id;
+
+    // (2) A member cannot recall a message they did not author.
+    assert!(
+        bob_node
+            .recall_channel(channel, alice_msg_id)
+            .await
+            .is_err(),
+        "bob must not be able to recall Alice's message"
+    );
+
+    // Bob sends his own message; Alice receives it and learns its id.
+    bob_node
+        .send_channel_message(channel, b"from bob")
+        .await
+        .unwrap();
+    let bob_msg = tokio::time::timeout(Duration::from_secs(5), a_ch_r.recv())
+        .await
+        .expect("alice received Bob's channel message within 5s")
+        .expect("channel stream open");
+    assert_eq!(bob_msg.text, b"from bob");
+    let bob_msg_id = bob_msg.event_id;
+
+    // Bob recalls his own message; it distributes to Alice.
+    bob_node.recall_channel(channel, bob_msg_id).await.unwrap();
+
+    let tombstoned = |node: &Arc<Node>| {
+        node.channel_history(channel, 20)
+            .into_iter()
+            .any(|e| e.id == bob_msg_id && e.recalled)
+    };
+
+    // (1) Alice sees Bob's recall while Bob is still a member.
+    let mut ok = false;
+    for _ in 0..50 {
+        if tombstoned(&alice_node) {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ok, "alice sees Bob's recall while Bob is a member");
+
+    // (3) Remove Bob from the channel; his recall must STILL apply — the key now comes from
+    // the discovery roster, not the reduced member set.
+    alice_node
+        .remove_channel_member(channel, &bob_uid)
+        .await
+        .unwrap();
+    assert!(
+        tombstoned(&alice_node),
+        "Bob's recall survives his removal from the channel (roster fallback for his key)"
+    );
 }
 
 #[tokio::test]

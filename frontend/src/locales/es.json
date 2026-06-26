@@ -217,7 +217,10 @@
     "saveAs": "Guardar como…",
     "viewFullSize": "Ver a tamaño completo",
     "largeVideo": "Vídeo grande: guárdalo y luego ábrelo externamente.",
-    "sentFile": "Envió un archivo: {{name}}"
+    "sentFile": "Envió un archivo: {{name}}",
+    "videoUnsupported": "Este vídeo no se puede previsualizar aquí; usa Guardar para abrirlo en tu reproductor.",
+    "playVideo": "Reproducir vídeo",
+    "imageUnsupported": "Esta imagen no se puede previsualizar aquí; usa Guardar para abrirla."
   },
   "linkDevice": {
     "trigger": "Vincular un dispositivo",

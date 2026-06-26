@@ -12,7 +12,6 @@ import {
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { pickImageFile } from "@/lib/avatarImage";
 import { STICKERS } from "@/lib/stickerPacks";
 import type { ChatMessage } from "@/store/chat";
 
@@ -71,6 +70,7 @@ export function Composer({
   mentionNames,
   prefill,
   onSendSticker,
+  onImage,
 }: {
   onSend: (text: string) => void;
   onAttach?: () => void;
@@ -87,6 +87,9 @@ export function Composer({
   prefill?: { text: string; n: number } | null;
   /** Send an animated sticker (by id, with its emoji-char fallback) as its own message. */
   onSendSticker?: (stickerId: string, fallback: string) => void;
+  /** Pick + send an image/video via the NATIVE file dialog (reliable in the webview;
+   * a JS `<input type=file>` is flaky in WKWebView). Paste/screenshot still use bytes. */
+  onImage?: () => void;
 }) {
   const { t } = useTranslation();
   const [text, setText] = useState("");
@@ -110,6 +113,32 @@ export function Composer({
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [showEmoji, setShowEmoji] = useState(false);
   const [showShot, setShowShot] = useState(false);
+
+  // Dismiss the emoji / sticker / screenshot panels on an outside click or Escape — they're
+  // plain popovers, so without this they'd only close by clicking their button again. Panels
+  // AND their toggle buttons carry `data-composer-popover`, so a click on a toggle is ignored
+  // here and left to the button's own handler (no close-then-reopen fight).
+  useEffect(() => {
+    if (!showEmoji && !showStickers && !showShot) return;
+    const close = () => {
+      setShowEmoji(false);
+      setShowStickers(false);
+      setShowShot(false);
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      if (!(e.target as Element | null)?.closest("[data-composer-popover]"))
+        close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [showEmoji, showStickers, showShot]);
 
   const insertEmoji = (emoji: string) => {
     const el = ref.current;
@@ -190,24 +219,6 @@ export function Composer({
       .catch(() => {});
   };
 
-  // Dedicated "send image/video" button: pick a media file and send it through the same path
-  // as a pasted/screenshot image (renders inline). Separate from the generic attach (any file).
-  // Accepts video too (a .mov etc. previews inline); the REAL filename is passed through, so
-  // the chat shows "clip.mov" — not a MIME-derived "pasted-….quicktim" — and it previews.
-  const pickImage = async () => {
-    if (!onPasteImage) return;
-    const file = await pickImageFile("image/*,video/*");
-    if (!file) return;
-    // Prefer the file's own extension (a real .mov stays .mov); fall back to the MIME subtype.
-    const ext = (
-      file.name.split(".").pop() ||
-      file.type.split("/")[1] ||
-      "png"
-    ).toLowerCase();
-    const buf = await file.arrayBuffer();
-    onPasteImage(new Uint8Array(buf), ext, file.name);
-  };
-
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
     setText(el.value);
@@ -262,6 +273,7 @@ export function Composer({
         {showEmoji && (
           <div
             data-testid="emoji-picker"
+            data-composer-popover=""
             className="absolute bottom-full left-0 mb-2 w-72 rounded-xl border bg-popover p-2 shadow-elevation"
           >
             <div className="grid grid-cols-10 gap-0.5">
@@ -284,6 +296,7 @@ export function Composer({
         {showStickers && onSendSticker && (
           <div
             data-testid="sticker-panel"
+            data-composer-popover=""
             className="absolute bottom-full left-0 mb-2 max-h-72 w-80 overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
           >
             <div className="grid grid-cols-5 gap-1">
@@ -316,6 +329,7 @@ export function Composer({
         {showShot && onScreenshot && (
           <div
             data-testid="screenshot-menu"
+            data-composer-popover=""
             className="absolute bottom-full left-0 mb-2 w-56 overflow-hidden rounded-xl border bg-popover p-1 shadow-elevation"
           >
             <button
@@ -351,6 +365,7 @@ export function Composer({
               variant="ghost"
               size="icon"
               data-testid="composer-screenshot"
+              data-composer-popover=""
               className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
               title={t("screenshot.trigger")}
               aria-label={t("screenshot.trigger")}
@@ -376,7 +391,7 @@ export function Composer({
               <Paperclip className="h-4 w-4" />
             </Button>
           )}
-          {onPasteImage && (
+          {onImage && (
             <Button
               variant="ghost"
               size="icon"
@@ -384,7 +399,7 @@ export function Composer({
               className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
               title={t("composer.image")}
               aria-label={t("composer.image")}
-              onClick={() => void pickImage()}
+              onClick={onImage}
             >
               <ImageIcon className="h-4 w-4" />
             </Button>
@@ -393,6 +408,7 @@ export function Composer({
             variant="ghost"
             size="icon"
             data-testid="composer-emoji"
+            data-composer-popover=""
             className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
             title={t("composer.emoji")}
             aria-label={t("composer.emoji")}
@@ -409,6 +425,7 @@ export function Composer({
               variant="ghost"
               size="icon"
               data-testid="composer-stickers"
+              data-composer-popover=""
               className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
               title={t("composer.stickers")}
               aria-label={t("composer.stickers")}

@@ -217,7 +217,10 @@
     "saveAs": "另存为…",
     "viewFullSize": "查看大图",
     "largeVideo": "大视频 — 请先保存，再用外部程序打开。",
-    "sentFile": "发送了文件：{{name}}"
+    "sentFile": "发送了文件：{{name}}",
+    "videoUnsupported": "这个视频无法在此预览,请用「保存」在你的播放器中打开。",
+    "playVideo": "播放视频",
+    "imageUnsupported": "这张图片无法在此预览,请用「保存」打开。"
   },
   "linkDevice": {
     "trigger": "关联设备",

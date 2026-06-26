@@ -18,7 +18,9 @@ async function enterBobDm(page: Page) {
 
 test.use({ viewport: { width: 1100, height: 800 } });
 
-test("open the sticker panel and send an animated sticker", async ({ page }) => {
+test("open the sticker panel and send an animated sticker", async ({
+  page,
+}) => {
   await enterBobDm(page);
 
   await page.getByTestId("composer-stickers").click();
@@ -32,4 +34,22 @@ test("open the sticker panel and send an animated sticker", async ({ page }) => 
   // Panel closes and the sticker lands as its own bubble-less message.
   await expect(panel).toBeHidden();
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
+});
+
+test("composer popovers dismiss on an outside click (no second button press)", async ({
+  page,
+}) => {
+  await enterBobDm(page);
+
+  // Emoji picker: open, then click elsewhere (the message log) → it closes by itself.
+  await page.getByTestId("composer-emoji").click();
+  await expect(page.getByTestId("emoji-picker")).toBeVisible();
+  await page.getByTestId("conversation-header").click();
+  await expect(page.getByTestId("emoji-picker")).toBeHidden();
+
+  // Sticker panel: open, then dismiss with Escape.
+  await page.getByTestId("composer-stickers").click();
+  await expect(page.getByTestId("sticker-panel")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("sticker-panel")).toBeHidden();
 });

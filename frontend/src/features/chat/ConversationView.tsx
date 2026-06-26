@@ -13,6 +13,12 @@ import { GroupAvatar } from "@/components/GroupAvatar";
 import { useTheme } from "@/lib/theme";
 import { THEME_CREST } from "@/lib/themeCrest";
 import { Composer } from "./Composer";
+import {
+  IMAGE_EXTENSIONS,
+  VIDEO_EXTENSIONS,
+  isImage,
+  isVideo,
+} from "./mediaFile";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
 import { VerifyContactDialog } from "./VerifyContactDialog";
@@ -262,8 +268,11 @@ export function ConversationView() {
         void (async () => {
           for (const path of p.paths) {
             try {
-              // Drag-dropped files are attachments (tray), not inline media.
-              await sendFileRef.current(path, false);
+              // An image/video dropped here is sent as MEDIA (inline preview) — same as the
+              // image button; any other file is a generic attachment. (`isImage`/`isVideo`
+              // match the path's extension.)
+              const media = isImage(path) || isVideo(path);
+              await sendFileRef.current(path, media);
             } catch (e) {
               setErrorRef.current(
                 t("composer.couldntOpenFile", { error: errorMessage(e) }),
@@ -531,6 +540,25 @@ export function ConversationView() {
             const path = await openFileDialog({ multiple: false });
             // Attach button → generic attachment (lands in the received-files tray).
             if (typeof path === "string") await sendFile(path, false);
+          } catch (e) {
+            setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
+          }
+        }}
+        onImage={async () => {
+          // Image button → the NATIVE file dialog (a JS `<input type=file>` is flaky in
+          // WKWebView and silently no-ops), filtered to media, sent with `media: true` so it
+          // previews inline. Path-based, so no multi-MB bytes round-trip over IPC.
+          try {
+            const path = await openFileDialog({
+              multiple: false,
+              filters: [
+                {
+                  name: "Images & Video",
+                  extensions: [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS],
+                },
+              ],
+            });
+            if (typeof path === "string") await sendFile(path, true);
           } catch (e) {
             setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
           }

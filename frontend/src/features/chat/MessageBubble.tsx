@@ -33,7 +33,7 @@ import { stickerById } from "@/lib/stickerPacks";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, type ChatMessage } from "@/store/chat";
 import { MediaPreview } from "./MediaPreview";
-import { fileGlyph } from "./mediaFile";
+import { fileGlyph, withinInlineCap } from "./mediaFile";
 
 /** A file/media message body: inline media for images/small videos, else a file card with
  * a Save action. Reuses the shared MediaPreview (lazy bytes + revoked blob URLs). */
@@ -46,9 +46,6 @@ function FileBubble({
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
-  // Inline preview ONLY for files sent via the media button (sender intent), not by file
-  // extension — so a .mov sent as an attachment renders as a file card, not an inline player.
-  const media = file.media;
 
   const saveAs = async () => {
     try {
@@ -59,16 +56,27 @@ function FileBubble({
     }
   };
 
-  return (
-    <div className="min-w-[12rem] max-w-xs">
-      {media && (
+  // Media (image/video, sent via the media button) that is small enough to render inline:
+  // show ONLY the preview. Its filename, size, and download live in the detail view that
+  // opens on click (MediaPreview's lightbox) — the chat doesn't need that clutter under
+  // every photo. Media that is too large to preview inline falls through to the file card
+  // below, so it stays visible and savable instead of rendering an empty bubble.
+  if (file.media && withinInlineCap(file.name, file.size)) {
+    return (
+      <div className="max-w-xs">
         <MediaPreview
           fileConv={file.fileConv}
           name={file.name}
           size={file.size}
           mime={file.mime}
         />
-      )}
+      </div>
+    );
+  }
+
+  // Attachment (or over-cap media): the file card IS the content — name + size + download.
+  return (
+    <div className="min-w-[12rem] max-w-xs">
       <div className="flex items-center gap-2">
         {fileGlyph(file.name)}
         <div className="min-w-0 flex-1">
@@ -177,10 +185,13 @@ export function MessageBubble({
   }`;
 
   // Recall is only offered for my own, still-sendable messages within the 2-minute window
-  // (matches the core's check; the command re-validates authoritatively).
+  // (matches the core's check; the command re-validates authoritatively). `menuNow` is
+  // refreshed when the context menu opens, so the item disappears once the window has
+  // elapsed instead of lingering from a stale render-time snapshot and erroring on click.
   const RECALL_WINDOW_MS = 2 * 60 * 1000;
+  const [menuNow, setMenuNow] = useState(() => Date.now());
   const canRecall =
-    mine && !!m.id && !m.pending && Date.now() - m.wallClock < RECALL_WINDOW_MS;
+    mine && !!m.id && !m.pending && menuNow - m.wallClock < RECALL_WINDOW_MS;
 
   // A recalled message is a centered system line ("X recalled a message") — no bubble,
   // actions or reactions. Deleting it locally is still offered via the context menu.
@@ -298,7 +309,11 @@ export function MessageBubble({
             />
           )}
 
-          <ContextMenu>
+          <ContextMenu
+            onOpenChange={(open) => {
+              if (open) setMenuNow(Date.now());
+            }}
+          >
             <ContextMenuTrigger asChild>
               <div
                 // Marks this region so the prod global contextmenu-disable lets our

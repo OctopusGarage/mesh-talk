@@ -262,11 +262,12 @@ impl Node {
             let _ = self.media.store_from_path(file_conv, &name, path);
         }
 
+        let mime = mime_from_name(&name);
         let manifest = FileManifestV3 {
             v2: FileManifestV2 {
                 name,
                 size,
-                mime: "application/octet-stream".to_string(),
+                mime,
                 checksum: whole.finalize().into(),
                 file_key: *key.as_bytes(),
                 file_nonce,
@@ -634,6 +635,47 @@ impl Drop for PartFileGuard {
         if self.armed {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+}
+
+/// Best-effort MIME from a file name's extension, for the manifest. The UI also has its own
+/// fallback, but a correct manifest MIME lets a typed blob (and any future consumer) pick a
+/// decoder. Unknown extensions stay `application/octet-stream`.
+pub(in crate::node) fn mime_from_name(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "m4v" => "video/x-m4v",
+        "ogv" => "video/ogg",
+        _ => "application/octet-stream",
+    };
+    mime.to_string()
+}
+
+#[cfg(test)]
+mod mime_tests {
+    use super::mime_from_name;
+
+    #[test]
+    fn maps_known_extensions_and_falls_back() {
+        assert_eq!(mime_from_name("clip.mp4"), "video/mp4");
+        assert_eq!(mime_from_name("IMG_0001.MOV"), "video/quicktime"); // case-insensitive
+        assert_eq!(mime_from_name("a.b.webm"), "video/webm");
+        assert_eq!(mime_from_name("photo.png"), "image/png");
+        assert_eq!(mime_from_name("IMG_0001.HEIC"), "image/heic");
+        assert_eq!(mime_from_name("report.pdf"), "application/octet-stream");
+        assert_eq!(mime_from_name("noext"), "application/octet-stream");
     }
 }
 
