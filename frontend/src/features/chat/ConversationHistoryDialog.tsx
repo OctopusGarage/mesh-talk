@@ -284,7 +284,18 @@ export function ConversationHistoryDialog({
                     >
                       <RowMeta m={m} />
                       <div className="break-words text-sm text-foreground/90">
-                        {m.file ? (
+                        {m.file && categorize(m) === "media" ? (
+                          // Images/videos render like the chat (no filename), but read-only.
+                          <div className="mt-1 max-w-[16rem]">
+                            <MediaPreview
+                              readOnly
+                              fileConv={m.file.fileConv}
+                              name={m.file.name}
+                              size={m.file.size}
+                              mime={m.file.mime}
+                            />
+                          </div>
+                        ) : m.file ? (
                           <span className="inline-flex items-center gap-1.5">
                             {fileGlyph(m.file.name)}
                             <Highlighted text={m.file.name} term={query} />
@@ -317,9 +328,11 @@ export function ConversationHistoryDialog({
                             title={m.file.name}
                           >
                             <MediaPreview
+                              readOnly
                               fileConv={m.file.fileConv}
                               name={m.file.name}
                               size={m.file.size}
+                              mime={m.file.mime}
                             />
                           </div>
                         ),

@@ -24,12 +24,17 @@ export function MediaPreview({
   name,
   size,
   mime,
+  readOnly = false,
 }: {
   fileConv: string;
   name: string;
   size: number;
   /** The manifest MIME; needed so the inline <video> blob is typed (else macOS won't play). */
   mime?: string;
+  /** Non-interactive: render just the image / video poster — no click-to-enlarge, no play,
+   *  no Save. Used by the history viewer, where media should look like the chat but isn't
+   *  clickable. */
+  readOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
@@ -93,17 +98,19 @@ export function MediaPreview({
       <p className="min-w-0 flex-1 text-xs text-muted-foreground">
         {t(msgKey)}
       </p>
-      <button
-        type="button"
-        data-testid="media-fallback-save"
-        onClick={() => void saveAs()}
-        title={t("common.save")}
-        aria-label={t("common.save")}
-        className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium hover:bg-accent"
-      >
-        <Download className="h-3.5 w-3.5" />
-        {t("common.save")}
-      </button>
+      {!readOnly && (
+        <button
+          type="button"
+          data-testid="media-fallback-save"
+          onClick={() => void saveAs()}
+          title={t("common.save")}
+          aria-label={t("common.save")}
+          className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium hover:bg-accent"
+        >
+          <Download className="h-3.5 w-3.5" />
+          {t("common.save")}
+        </button>
+      )}
     </div>
   );
 
@@ -122,11 +129,44 @@ export function MediaPreview({
   if (!url) return null;
 
   if (video) {
+    // A captured poster frame (see useVideoPoster); a neutral box while it's still loading.
+    const thumb = poster ? (
+      <img
+        src={poster}
+        alt={name}
+        data-testid="file-video"
+        className="max-h-80 w-full rounded-lg object-cover"
+      />
+    ) : (
+      <div
+        data-testid="file-video"
+        className="flex aspect-video w-full items-center justify-center rounded-lg bg-muted"
+      />
+    );
+    // A play badge marks it as a video (purely visual in read-only mode).
+    const playBadge = (
+      <span
+        aria-hidden
+        className="absolute inset-0 flex items-center justify-center"
+      >
+        <span className="rounded-full bg-black/55 p-3 text-white">
+          <Play className="h-6 w-6 fill-current" />
+        </span>
+      </span>
+    );
+    // Read-only (history viewer): show the poster + badge, no click-to-play, no lightbox.
+    if (readOnly) {
+      return (
+        <div className="relative">
+          {thumb}
+          {playBadge}
+        </div>
+      );
+    }
     return (
       <>
-        {/* Inline preview: a captured poster frame (see useVideoPoster) with a play badge.
-            Click opens the fullscreen player — same interaction as an image's lightbox.
-            While the poster is still being captured, show a neutral box (never a black one). */}
+        {/* Inline preview: the poster with a play badge. Click opens the fullscreen player —
+            same interaction as an image's lightbox. */}
         <button
           type="button"
           onClick={() => setLightbox(true)}
@@ -134,27 +174,8 @@ export function MediaPreview({
           aria-label={t("files.playVideo")}
           className="relative mb-1.5 block w-full"
         >
-          {poster ? (
-            <img
-              src={poster}
-              alt={name}
-              data-testid="file-video"
-              className="max-h-80 w-full rounded-lg object-cover"
-            />
-          ) : (
-            <div
-              data-testid="file-video"
-              className="flex aspect-video w-full items-center justify-center rounded-lg bg-muted"
-            />
-          )}
-          <span
-            aria-hidden
-            className="absolute inset-0 flex items-center justify-center"
-          >
-            <span className="rounded-full bg-black/55 p-3 text-white">
-              <Play className="h-6 w-6 fill-current" />
-            </span>
-          </span>
+          {thumb}
+          {playBadge}
         </button>
         {lightbox && (
           <div
@@ -186,6 +207,19 @@ export function MediaPreview({
           </div>
         )}
       </>
+    );
+  }
+
+  // Read-only (history viewer): the image as-is, no click-to-enlarge, no lightbox.
+  if (readOnly) {
+    return (
+      <img
+        src={url}
+        alt={name}
+        data-testid="file-image"
+        onError={() => setImgFailed(true)}
+        className="max-h-80 w-full rounded-lg object-cover"
+      />
     );
   }
 
