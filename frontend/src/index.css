@@ -38,7 +38,7 @@
     /* Signature accents — the only place we spend boldness. */
     --signal: 174 72% 33%; /* = primary teal */
     --verified: 154 64% 34%;
-    --mention: 174 72% 33%; /* teal, same hue as --signal — adapts per theme */
+    --mention: 174 80% 45%; /* brighter teal — legible on bg-muted bubble */
 
     /* Own chat bubble: a softer, lighter teal than the deep --signal so a large filled
        bubble reads comfortable (not heavy) against the paper background. */
