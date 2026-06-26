@@ -1,0 +1,1165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mesh-Talk — a serverless, end-to-end-encrypted messenger for your LAN</title>
+    <meta
+      name="description"
+      content="Mesh-Talk peers find each other on your local network and talk directly — no server, no cloud, no account. End-to-end encrypted the whole way. Free and open source, for macOS, Windows, and Linux."
+    />
+    <meta name="theme-color" content="#08141a" />
+    <meta property="og:title" content="Mesh-Talk" />
+    <meta
+      property="og:description"
+      content="A serverless, end-to-end-encrypted messenger for your local network. No server. No cloud. No account."
+    />
+    <meta property="og:type" content="website" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308141a'/%3E%3Cg stroke='%232fe6ce' stroke-width='1.4' fill='%232fe6ce'%3E%3Cline x1='9' y1='10' x2='23' y2='9' stroke-opacity='.5'/%3E%3Cline x1='9' y1='10' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='24' y2='22' stroke-opacity='.5'/%3E%3Ccircle cx='9' cy='10' r='2.6'/%3E%3Ccircle cx='23' cy='9' r='2.6'/%3E%3Ccircle cx='15' cy='23' r='2.6'/%3E%3Ccircle cx='24' cy='22' r='2.2' fill='%23f4c77b'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --ink: #08141a;
+        --ink-2: #0c1d24;
+        --ink-3: #102832;
+        --line: #173640;
+        --line-2: #21505b;
+        --signal: #2fe6ce;
+        --signal-2: #10b6a6;
+        --paper: #e9f2f0;
+        --muted: #84a39e;
+        --faint: #5a756f;
+        --presence: #f4c77b;
+        --display: "Space Grotesk", system-ui, sans-serif;
+        --body: "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
+        --maxw: 1140px;
+        --pad: clamp(1.25rem, 5vw, 3rem);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--ink);
+        color: var(--paper);
+        font-family: var(--body);
+        font-size: 16px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        overflow-x: hidden;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      :focus-visible {
+        outline: 2px solid var(--signal);
+        outline-offset: 3px;
+        border-radius: 3px;
+      }
+      img {
+        max-width: 100%;
+        display: block;
+      }
+
+      .wrap {
+        width: 100%;
+        max-width: var(--maxw);
+        margin: 0 auto;
+        padding-inline: var(--pad);
+      }
+
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--signal);
+      }
+
+      /* ---------- nav ---------- */
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        backdrop-filter: blur(12px);
+        background: color-mix(in srgb, var(--ink) 82%, transparent);
+        border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+      }
+      .nav__in {
+        display: flex;
+        align-items: center;
+        gap: 1.5rem;
+        height: 64px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-family: var(--display);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        font-size: 1.05rem;
+      }
+      .brand svg {
+        width: 26px;
+        height: 26px;
+      }
+      .nav__links {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 1.6rem;
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+      .nav__links a:hover {
+        color: var(--paper);
+      }
+      .nav__links .ghost {
+        color: var(--paper);
+      }
+      .ver {
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        color: var(--signal);
+        border: 1px solid var(--line-2);
+        border-radius: 999px;
+        padding: 0.2rem 0.6rem;
+      }
+      @media (max-width: 720px) {
+        .nav__links .hide-sm {
+          display: none;
+        }
+      }
+
+      /* ---------- buttons ---------- */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-family: var(--display);
+        font-weight: 500;
+        font-size: 0.95rem;
+        padding: 0.7rem 1.15rem;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        cursor: pointer;
+        transition:
+          transform 0.15s ease,
+          background 0.15s ease,
+          border-color 0.15s ease;
+      }
+      .btn--primary {
+        background: var(--signal);
+        color: #042c28;
+      }
+      .btn--primary:hover {
+        transform: translateY(-2px);
+        background: #4ff0db;
+      }
+      .btn--ghost {
+        border-color: var(--line-2);
+        color: var(--paper);
+      }
+      .btn--ghost:hover {
+        border-color: var(--signal);
+        transform: translateY(-2px);
+      }
+
+      /* ---------- hero ---------- */
+      .hero {
+        position: relative;
+        padding-top: clamp(3.5rem, 9vw, 7rem);
+        padding-bottom: clamp(3.5rem, 8vw, 6.5rem);
+        overflow: hidden;
+      }
+      #mesh {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+        opacity: 0.85;
+        mask-image: radial-gradient(
+          120% 90% at 72% 30%,
+          #000 35%,
+          transparent 78%
+        );
+        -webkit-mask-image: radial-gradient(
+          120% 90% at 72% 30%,
+          #000 35%,
+          transparent 78%
+        );
+      }
+      .hero__in {
+        position: relative;
+        z-index: 1;
+        max-width: 40rem;
+      }
+      .hero h1 {
+        font-family: var(--display);
+        font-weight: 700;
+        font-size: clamp(2.6rem, 7vw, 4.6rem);
+        line-height: 0.98;
+        letter-spacing: -0.03em;
+        margin: 1.2rem 0 0;
+      }
+      .hero h1 .neg {
+        color: var(--signal);
+      }
+      .hero__sub {
+        font-size: clamp(1.05rem, 2vw, 1.22rem);
+        color: var(--muted);
+        margin: 1.4rem 0 0;
+        max-width: 33rem;
+      }
+      .hero__sub b {
+        color: var(--paper);
+        font-weight: 500;
+      }
+      .hero__cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        margin-top: 2.1rem;
+      }
+      .ticker {
+        margin-top: 2.4rem;
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        color: var(--faint);
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.4rem 0.6rem;
+      }
+      #peers {
+        white-space: nowrap;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--presence);
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--presence) 70%, transparent);
+        animation: pulse 2.4s ease-out infinite;
+      }
+      .ticker b {
+        color: var(--signal);
+        font-weight: 500;
+      }
+      @keyframes pulse {
+        0% {
+          box-shadow: 0 0 0 0 color-mix(in srgb, var(--presence) 60%, transparent);
+        }
+        70% {
+          box-shadow: 0 0 0 7px transparent;
+        }
+        100% {
+          box-shadow: 0 0 0 0 transparent;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dot {
+          animation: none;
+        }
+      }
+
+      /* ---------- shared section ---------- */
+      .section {
+        padding-block: clamp(3.5rem, 8vw, 6rem);
+        border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+      }
+      .section__head {
+        max-width: 38rem;
+        margin-bottom: 2.6rem;
+      }
+      .section__head h2 {
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: clamp(1.7rem, 4vw, 2.5rem);
+        line-height: 1.05;
+        letter-spacing: -0.02em;
+        margin: 0.7rem 0 0;
+      }
+      .section__head p {
+        color: var(--muted);
+        margin: 0.9rem 0 0;
+        font-size: 1.05rem;
+      }
+
+      /* ---------- trust strip (three absences) ---------- */
+      .absences {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1px;
+        background: color-mix(in srgb, var(--line) 55%, transparent);
+        border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .absence {
+        background: var(--ink);
+        padding: 1.6rem;
+      }
+      .absence b {
+        font-family: var(--display);
+        font-size: 1.5rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .absence .no {
+        color: var(--signal);
+      }
+      .absence p {
+        color: var(--muted);
+        font-size: 0.92rem;
+        margin: 0.4rem 0 0;
+      }
+      @media (max-width: 640px) {
+        .absences {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ---------- steps (the one real sequence) ---------- */
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1.4rem;
+        counter-reset: step;
+      }
+      .step {
+        position: relative;
+        padding: 1.6rem 1.4rem;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: linear-gradient(180deg, var(--ink-2), var(--ink));
+      }
+      .step__no {
+        font-family: var(--mono);
+        font-size: 0.78rem;
+        color: var(--signal);
+        letter-spacing: 0.15em;
+      }
+      .step h3 {
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: 1.18rem;
+        margin: 0.9rem 0 0.5rem;
+        letter-spacing: -0.01em;
+      }
+      .step p {
+        color: var(--muted);
+        font-size: 0.94rem;
+        margin: 0;
+      }
+      .step .edge {
+        position: absolute;
+        top: 2.1rem;
+        right: -1.1rem;
+        width: 1.4rem;
+        height: 1px;
+        background: var(--line-2);
+        z-index: 1;
+      }
+      @media (max-width: 800px) {
+        .steps {
+          grid-template-columns: 1fr;
+        }
+        .step .edge {
+          display: none;
+        }
+      }
+
+      /* ---------- security: safety-number artifact ---------- */
+      .secure {
+        display: grid;
+        grid-template-columns: 1.05fr 0.95fr;
+        gap: clamp(1.5rem, 4vw, 3rem);
+        align-items: center;
+      }
+      @media (max-width: 860px) {
+        .secure {
+          grid-template-columns: 1fr;
+        }
+      }
+      .safety {
+        border: 1px solid var(--line-2);
+        border-radius: 16px;
+        background:
+          radial-gradient(
+            120% 80% at 100% 0%,
+            color-mix(in srgb, var(--signal) 12%, transparent),
+            transparent 60%
+          ),
+          var(--ink-2);
+        padding: 1.6rem;
+        box-shadow: 0 24px 60px -30px #000;
+      }
+      .safety__top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1.1rem;
+      }
+      .safety__who {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+      }
+      .crest {
+        width: 38px;
+        height: 38px;
+        border-radius: 11px;
+        background: linear-gradient(135deg, var(--signal), var(--signal-2));
+        display: grid;
+        place-items: center;
+        color: #042c28;
+        font-family: var(--display);
+        font-weight: 700;
+      }
+      .safety__who b {
+        font-family: var(--display);
+        font-weight: 600;
+      }
+      .safety__who span {
+        display: block;
+        color: var(--faint);
+        font-size: 0.78rem;
+        font-family: var(--mono);
+      }
+      .verified {
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        color: var(--signal);
+        border: 1px solid color-mix(in srgb, var(--signal) 45%, transparent);
+        border-radius: 999px;
+        padding: 0.2rem 0.6rem;
+      }
+      .digits {
+        font-family: var(--mono);
+        font-size: clamp(0.95rem, 2.4vw, 1.18rem);
+        letter-spacing: 0.12em;
+        color: var(--paper);
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.55rem 0.9rem;
+        margin: 0.4rem 0 1.1rem;
+      }
+      .words {
+        font-family: var(--mono);
+        font-size: 0.86rem;
+        color: var(--muted);
+        line-height: 1.9;
+      }
+      .words span {
+        color: var(--signal);
+      }
+
+      /* ---------- capabilities grid ---------- */
+      .caps {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1px;
+        background: color-mix(in srgb, var(--line) 55%, transparent);
+        border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .cap {
+        background: var(--ink);
+        padding: 1.4rem;
+        transition: background 0.15s ease;
+      }
+      .cap:hover {
+        background: var(--ink-2);
+      }
+      .cap__k {
+        font-family: var(--mono);
+        font-size: 0.7rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--faint);
+      }
+      .cap b {
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: 1.05rem;
+        display: block;
+        margin: 0.7rem 0 0.35rem;
+        letter-spacing: -0.01em;
+      }
+      .cap p {
+        color: var(--muted);
+        font-size: 0.88rem;
+        margin: 0;
+      }
+      @media (max-width: 900px) {
+        .caps {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+      @media (max-width: 520px) {
+        .caps {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ---------- showcase ---------- */
+      .shots {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1.1rem;
+      }
+      .shot {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background: var(--ink-2);
+        position: relative;
+      }
+      .shot img {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+      .shot figcaption {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        padding: 1.4rem 1rem 0.8rem;
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.06em;
+        color: var(--paper);
+        background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--ink) 92%, transparent));
+      }
+      .shot--wide {
+        grid-column: 1 / -1;
+      }
+      @media (max-width: 720px) {
+        .shots {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ---------- download ---------- */
+      .download {
+        text-align: center;
+      }
+      .platforms {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1.1rem;
+        margin: 2.2rem 0 1.4rem;
+      }
+      .platform {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--ink-2);
+        padding: 1.6rem 1rem;
+        transition:
+          border-color 0.15s ease,
+          transform 0.15s ease;
+      }
+      .platform:hover {
+        border-color: var(--signal);
+        transform: translateY(-3px);
+      }
+      .platform svg {
+        width: 30px;
+        height: 30px;
+        margin-bottom: 0.7rem;
+        color: var(--signal);
+      }
+      .platform b {
+        font-family: var(--display);
+        font-weight: 600;
+        display: block;
+      }
+      .platform span {
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.74rem;
+      }
+      .note {
+        color: var(--faint);
+        font-size: 0.84rem;
+        max-width: 36rem;
+        margin: 0 auto;
+      }
+      @media (max-width: 640px) {
+        .platforms {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ---------- footer ---------- */
+      .foot {
+        border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+        padding-block: 2.6rem;
+        color: var(--faint);
+        font-size: 0.86rem;
+      }
+      .foot__in {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem 2rem;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .foot a:hover {
+        color: var(--paper);
+      }
+      .foot__links {
+        display: flex;
+        gap: 1.4rem;
+      }
+
+      /* reveal on scroll */
+      .reveal {
+        opacity: 0;
+        transform: translateY(18px);
+        transition:
+          opacity 0.6s ease,
+          transform 0.6s ease;
+      }
+      .reveal.in {
+        opacity: 1;
+        transform: none;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .reveal {
+          opacity: 1;
+          transform: none;
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ===== nav ===== -->
+    <header class="nav">
+      <div class="wrap nav__in">
+        <a class="brand" href="#top" aria-label="Mesh-Talk home">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <g stroke="#2fe6ce" stroke-width="1.4" fill="#2fe6ce">
+              <line x1="9" y1="10" x2="23" y2="9" stroke-opacity=".5" />
+              <line x1="9" y1="10" x2="15" y2="23" stroke-opacity=".5" />
+              <line x1="23" y1="9" x2="15" y2="23" stroke-opacity=".5" />
+              <line x1="23" y1="9" x2="24" y2="22" stroke-opacity=".5" />
+              <circle cx="9" cy="10" r="2.6" />
+              <circle cx="23" cy="9" r="2.6" />
+              <circle cx="15" cy="23" r="2.6" />
+              <circle cx="24" cy="22" r="2.2" fill="#f4c77b" />
+            </g>
+          </svg>
+          Mesh-Talk
+        </a>
+        <nav class="nav__links">
+          <a class="hide-sm" href="#how">How it works</a>
+          <a class="hide-sm" href="#security">Security</a>
+          <a class="hide-sm" href="#features">Features</a>
+          <a class="ghost" href="https://github.com/OctopusGarage/mesh-talk"
+            >GitHub</a
+          >
+          <a class="ver" href="https://github.com/OctopusGarage/mesh-talk/releases"
+            >v0.1.1</a
+          >
+        </nav>
+      </div>
+    </header>
+
+    <!-- ===== hero ===== -->
+    <main id="top">
+      <section class="hero">
+        <canvas id="mesh" aria-hidden="true"></canvas>
+        <div class="wrap hero__in reveal in">
+          <p class="eyebrow">Serverless · End-to-end encrypted</p>
+          <h1>
+            <span class="neg">No</span> server.<br /><span class="neg">No</span>
+            cloud.<br /><span class="neg">No</span> account.
+          </h1>
+          <p class="hero__sub">
+            Mesh-Talk peers find each other on the
+            <b>local network</b> and talk directly — your messages and files
+            <b>never leave the network</b>, and stay encrypted the whole way.
+          </p>
+          <div class="hero__cta">
+            <a
+              class="btn btn--primary"
+              href="https://github.com/OctopusGarage/mesh-talk/releases"
+              >Download for desktop</a
+            >
+            <a
+              class="btn btn--ghost"
+              href="https://github.com/OctopusGarage/mesh-talk"
+              >Read the source</a
+            >
+          </div>
+          <p class="ticker">
+            <span class="dot" aria-hidden="true"></span>
+            <span id="peers">3 peers</span> discovered on this network · 0 servers
+            contacted
+          </p>
+        </div>
+      </section>
+
+      <!-- ===== three absences ===== -->
+      <section class="section" aria-label="What Mesh-Talk does without">
+        <div class="wrap">
+          <div class="absences reveal">
+            <div class="absence">
+              <b><span class="no">No</span> middleman</b>
+              <p>
+                Devices connect peer-to-peer over the LAN. Nothing is relayed
+                through a company's servers.
+              </p>
+            </div>
+            <div class="absence">
+              <b><span class="no">No</span> sign-up</b>
+              <p>
+                Open the app and you're on. No email, no phone number, no
+                profile held by anyone else.
+              </p>
+            </div>
+            <div class="absence">
+              <b><span class="no">No</span> exit</b>
+              <p>
+                Traffic stays inside your network. Works on an isolated LAN with
+                no internet at all.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== how it works (the real sequence) ===== -->
+      <section class="section" id="how">
+        <div class="wrap">
+          <div class="section__head reveal">
+            <p class="eyebrow">How a conversation starts</p>
+            <h2>Discover, verify, then talk — directly.</h2>
+            <p>
+              No directory to register with. Every step happens between the two
+              devices and the network they share.
+            </p>
+          </div>
+          <div class="steps reveal">
+            <div class="step">
+              <div class="step__no">STEP 01</div>
+              <h3>Discover on the LAN</h3>
+              <p>
+                Each device announces itself with a multicast beacon and builds
+                a live roster of the peers around it.
+              </p>
+              <div class="edge" aria-hidden="true"></div>
+            </div>
+            <div class="step">
+              <div class="step__no">STEP 02</div>
+              <h3>Verify it's really them</h3>
+              <p>
+                Compare a short safety number out loud or by sight. Once
+                verified, an identity change is flagged loudly.
+              </p>
+              <div class="edge" aria-hidden="true"></div>
+            </div>
+            <div class="step">
+              <div class="step__no">STEP 03</div>
+              <h3>Talk end-to-end encrypted</h3>
+              <p>
+                Messages, files, and reactions are sealed with a Double Ratchet
+                — forward-secret, the whole way across.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== security: safety-number artifact ===== -->
+      <section class="section" id="security">
+        <div class="wrap secure">
+          <div class="section__head reveal" style="margin-bottom: 0">
+            <p class="eyebrow">Verifiable trust</p>
+            <h2>You can check it's the right person.</h2>
+            <p>
+              Every contact carries a safety number derived from their keys.
+              Read it together once; if their device ever changes, Mesh-Talk
+              won't let it pass quietly.
+            </p>
+          </div>
+          <figure class="safety reveal" aria-label="A contact's safety number">
+            <div class="safety__top">
+              <div class="safety__who">
+                <span class="crest" aria-hidden="true">M</span>
+                <div>
+                  <b>Mira on the studio LAN</b>
+                  <span>device · 9f2a…c071</span>
+                </div>
+              </div>
+              <span class="verified">✓ Verified</span>
+            </div>
+            <div class="digits" aria-hidden="true">
+              <span>8F2A</span><span>41C7</span><span>9D03</span><span>5BE1</span>
+              <span>0A74</span><span>C2F9</span><span>61D8</span><span>4E3B</span>
+              <span>7C10</span><span>A9F5</span><span>2D6E</span><span>B084</span>
+            </div>
+            <p class="words">
+              <span>amber</span> harbor <span>violet</span> compass
+              <span>quartz</span> meadow <span>signal</span> lantern
+              <span>cedar</span> orbit
+            </p>
+          </figure>
+        </div>
+      </section>
+
+      <!-- ===== capabilities ===== -->
+      <section class="section" id="features">
+        <div class="wrap">
+          <div class="section__head reveal">
+            <p class="eyebrow">A real messenger, not a demo</p>
+            <h2>Everything you'd expect — kept on your network.</h2>
+          </div>
+          <div class="caps reveal">
+            <div class="cap">
+              <div class="cap__k">Conversations</div>
+              <b>DMs &amp; channels</b>
+              <p>One-to-one chats and group channels with members and roles.</p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Forward secrecy</div>
+              <b>Double Ratchet</b>
+              <p>
+                Per-message keys for DMs and groups — a stolen key can't read
+                the past.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Sharing</div>
+              <b>Files &amp; media</b>
+              <p>
+                Send images and videos inline, large files in chunks, all
+                encrypted.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Expression</div>
+              <b>Reactions &amp; stickers</b>
+              <p>Animated stickers, emoji reactions, replies, and @mentions.</p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Control</div>
+              <b>Recall &amp; retention</b>
+              <p>
+                Delete, recall within a window, clear history, or auto-prune by
+                age.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Identity</div>
+              <b>Multi-device</b>
+              <p>
+                Link your own devices to one account with a code-authorized
+                pairing.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Reach</div>
+              <b>Works offline</b>
+              <p>
+                No internet required — pair phones to a laptop hotspot and chat.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Anywhere</div>
+              <b>macOS · Windows · Linux</b>
+              <p>One native desktop app, built on Tauri and a Rust core.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== showcase ===== -->
+      <section class="section" aria-label="Screenshots">
+        <div class="wrap">
+          <div class="section__head reveal">
+            <p class="eyebrow">In the app</p>
+            <h2>Considered down to the last pixel.</h2>
+          </div>
+          <div class="shots reveal">
+            <figure class="shot shot--wide">
+              <img
+                src="screenshots/hero-channel.webp"
+                width="1720"
+                height="1100"
+                loading="lazy"
+                alt="A Mesh-Talk group channel with inline media, reactions, and animated stickers"
+              />
+              <figcaption>A channel — media, reactions, stickers</figcaption>
+            </figure>
+            <figure class="shot">
+              <img
+                src="screenshots/verify.webp"
+                loading="lazy"
+                alt="The contact verification screen showing a safety number"
+              />
+              <figcaption>Verify a contact's safety number</figcaption>
+            </figure>
+            <figure class="shot">
+              <img
+                src="screenshots/themes.webp"
+                loading="lazy"
+                alt="Selectable themes in Mesh-Talk"
+              />
+              <figcaption>Make it yours — selectable themes</figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== download ===== -->
+      <section class="section download" id="download">
+        <div class="wrap">
+          <div class="section__head reveal" style="margin: 0 auto 0">
+            <p class="eyebrow">Free &amp; open source</p>
+            <h2>Get Mesh-Talk.</h2>
+          </div>
+          <div class="platforms reveal">
+            <a
+              class="platform"
+              href="https://github.com/OctopusGarage/mesh-talk/releases"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M16.4 1.6c.1 1-.3 2-1 2.8-.7.8-1.8 1.4-2.8 1.3-.1-1 .4-2 1-2.7.7-.8 1.9-1.4 2.8-1.4ZM19 17.2c-.5 1.2-.8 1.7-1.5 2.8-1 1.5-2.3 3.3-4 3.3-1.5 0-1.9-1-3.9-1-2 0-2.4 1-3.9 1-1.7 0-3-1.7-3.9-3.1C-.7 16.6-1 11.5 1.2 8.8 2.5 7 4.4 6 6.2 6c1.6 0 2.6 1 3.9 1 1.3 0 2-1 3.9-1 1.5 0 3.1.8 4.2 2.3-3.7 2-3.1 7.3.8 8.9Z"
+                />
+              </svg>
+              <b>macOS</b>
+              <span>Apple silicon · Intel</span>
+            </a>
+            <a
+              class="platform"
+              href="https://github.com/OctopusGarage/mesh-talk/releases"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M3 4.6 11 3.5v8.1H3V4.6Zm0 14.8 8 1.1v-8H3v6.9ZM12 3.3 21 2v9.6h-9V3.3Zm0 9.3h9V22l-9-1.3v-8.1Z"
+                />
+              </svg>
+              <b>Windows</b>
+              <span>x64 installer</span>
+            </a>
+            <a
+              class="platform"
+              href="https://github.com/OctopusGarage/mesh-talk/releases"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M12 2c-2 0-3 1.7-3 3.6 0 1.3.1 2.3-.6 3.4-.8 1.2-2.6 2.9-2.6 5.6 0 .9.3 1.6.3 2.3-.3.5-1.2 1-1.2 1.8 0 1 1.2 1.1 2.3 1.4 1 .3 1.7.9 2.6.9.6 0 1-.4 1.2-.9.4 0 .8-.1 1.2 0 .2.5.6.9 1.2.9.9 0 1.6-.6 2.6-.9 1.1-.3 2.3-.4 2.3-1.4 0-.8-.9-1.3-1.2-1.8 0-.7.3-1.4.3-2.3 0-2.7-1.8-4.4-2.6-5.6-.7-1.1-.6-2.1-.6-3.4C15 3.7 14 2 12 2Z"
+                />
+              </svg>
+              <b>Linux</b>
+              <span>AppImage · deb</span>
+            </a>
+          </div>
+          <p class="note">
+            Builds are unsigned by a commercial CA — the release notes walk you
+            through the one-time first-run step on each OS. Prefer to build it
+            yourself?
+            <a
+              style="color: var(--signal)"
+              href="https://github.com/OctopusGarage/mesh-talk#build-from-source"
+              >Build from source.</a
+            >
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <!-- ===== footer ===== -->
+    <footer class="foot">
+      <div class="wrap foot__in">
+        <div>
+          Mesh-Talk · MIT licensed · © 2026 Kingson Wu
+        </div>
+        <nav class="foot__links">
+          <a href="https://github.com/OctopusGarage/mesh-talk">GitHub</a>
+          <a href="https://deepwiki.com/OctopusGarage/mesh-talk">Docs</a>
+          <a href="https://github.com/OctopusGarage/mesh-talk/releases"
+            >Releases</a
+          >
+        </nav>
+      </div>
+    </footer>
+
+    <script>
+      // ---- Signature: an ambient peer-mesh. Nodes drift, near peers link with
+      // signal edges, and a discovery ripple pings outward periodically — a mesh
+      // network drawn for a mesh messenger. Static frame under reduced-motion.
+      (function () {
+        var canvas = document.getElementById("mesh");
+        if (!canvas) return;
+        var ctx = canvas.getContext("2d");
+        var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var SIGNAL = "47,230,206";
+        var PRESENCE = "244,199,123";
+        var nodes = [];
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        var ripple = null;
+        var w = 0,
+          h = 0;
+
+        function resize() {
+          var r = canvas.getBoundingClientRect();
+          w = r.width;
+          h = r.height;
+          canvas.width = w * dpr;
+          canvas.height = h * dpr;
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          var count = Math.max(10, Math.min(26, Math.round((w * h) / 32000)));
+          nodes = [];
+          for (var i = 0; i < count; i++) {
+            nodes.push({
+              x: Math.random() * w,
+              y: Math.random() * h,
+              vx: (Math.random() - 0.5) * 0.18,
+              vy: (Math.random() - 0.5) * 0.18,
+              r: 1.6 + Math.random() * 1.8,
+              warm: i % 9 === 0,
+            });
+          }
+        }
+
+        function draw() {
+          ctx.clearRect(0, 0, w, h);
+          // edges
+          for (var i = 0; i < nodes.length; i++) {
+            for (var j = i + 1; j < nodes.length; j++) {
+              var a = nodes[i],
+                b = nodes[j];
+              var dx = a.x - b.x,
+                dy = a.y - b.y;
+              var d = Math.hypot(dx, dy);
+              if (d < 150) {
+                ctx.strokeStyle =
+                  "rgba(" + SIGNAL + "," + (0.16 * (1 - d / 150)).toFixed(3) + ")";
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+              }
+            }
+          }
+          // ripple
+          if (ripple) {
+            ripple.r += 1.6;
+            var alpha = Math.max(0, 0.5 * (1 - ripple.r / ripple.max));
+            ctx.strokeStyle = "rgba(" + SIGNAL + "," + alpha.toFixed(3) + ")";
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(ripple.x, ripple.y, ripple.r, 0, Math.PI * 2);
+            ctx.stroke();
+            if (ripple.r >= ripple.max) ripple = null;
+          }
+          // nodes
+          for (var k = 0; k < nodes.length; k++) {
+            var n = nodes[k];
+            ctx.fillStyle = "rgba(" + (n.warm ? PRESENCE : SIGNAL) + ",0.9)";
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        function step() {
+          for (var k = 0; k < nodes.length; k++) {
+            var n = nodes[k];
+            n.x += n.vx;
+            n.y += n.vy;
+            if (n.x < 0 || n.x > w) n.vx *= -1;
+            if (n.y < 0 || n.y > h) n.vy *= -1;
+          }
+          draw();
+          requestAnimationFrame(step);
+        }
+
+        function ping() {
+          if (!nodes.length) return;
+          var n = nodes[(Math.random() * nodes.length) | 0];
+          ripple = { x: n.x, y: n.y, r: 0, max: 170 };
+          setTimeout(ping, 2600 + Math.random() * 2600);
+        }
+
+        resize();
+        window.addEventListener("resize", resize);
+        if (reduce) {
+          draw();
+        } else {
+          requestAnimationFrame(step);
+          setTimeout(ping, 1400);
+        }
+      })();
+
+      // ---- peers ticker: count up to a small believable number on the LAN.
+      (function () {
+        var el = document.getElementById("peers");
+        if (!el || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        var n = 0,
+          target = 4;
+        var t = setInterval(function () {
+          n++;
+          el.textContent = n + (n === 1 ? " peer" : " peers");
+          if (n >= target) clearInterval(t);
+        }, 320);
+      })();
+
+      // ---- reveal on scroll
+      (function () {
+        var els = document.querySelectorAll(".reveal");
+        if (!("IntersectionObserver" in window)) {
+          els.forEach(function (e) {
+            e.classList.add("in");
+          });
+          return;
+        }
+        var io = new IntersectionObserver(
+          function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                e.target.classList.add("in");
+                io.unobserve(e.target);
+              }
+            });
+          },
+          { threshold: 0.12 },
+        );
+        els.forEach(function (e) {
+          io.observe(e);
+        });
+      })();
+    </script>
+  </body>
+</html>
