@@ -119,7 +119,12 @@ export function LinkDeviceDialog() {
               <p className="text-xs leading-relaxed text-muted-foreground">
                 {t("linkDevice.showOnOther")}
               </p>
-              <Button variant="secondary" size="sm" onClick={showCode}>
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="link-show-code"
+                onClick={showCode}
+              >
                 {t("linkDevice.showCode")}
               </Button>
             </>
@@ -136,15 +141,21 @@ export function LinkDeviceDialog() {
                   type="button"
                   onClick={copyCode}
                   title={t("common.copy")}
-                  className="group flex w-full items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-left transition-colors hover:bg-muted"
+                  className="group flex w-full items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-left transition-colors hover:bg-muted"
                 >
-                  <span className="min-w-0 flex-1 truncate font-mono text-xl font-semibold tracking-[0.2em] text-signal">
-                    {code}
+                  {/* The FULL code must be readable (the user types it on the other device),
+                      so it's shown grouped in 4s and WRAPS within the column — never
+                      truncated, and never wider than the dialog. */}
+                  <span
+                    data-testid="pairing-code"
+                    className="min-w-0 flex-1 break-words font-mono text-base font-semibold leading-relaxed tracking-wider text-signal"
+                  >
+                    {code.replace(/(.{4})(?=.)/g, "$1 ")}
                   </span>
                   {copied ? (
-                    <Check className="h-4 w-4 shrink-0 text-verified" />
+                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-verified" />
                   ) : (
-                    <Copy className="h-4 w-4 shrink-0 opacity-40 group-hover:opacity-100" />
+                    <Copy className="mt-0.5 h-4 w-4 shrink-0 opacity-40 group-hover:opacity-100" />
                   )}
                 </button>
                 <p className="text-xs leading-relaxed text-muted-foreground">

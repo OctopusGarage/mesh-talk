@@ -378,7 +378,9 @@ export const test = base.extend({
               String(a.target),
             ),
           clear_conversation: (a) =>
-            clearConversation(a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`),
+            clearConversation(
+              a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`,
+            ),
           send_sticker: (a) =>
             recordSticker(
               a.isChannel ? `ch:${a.convId}` : `acc:${a.convId}`,
@@ -484,7 +486,7 @@ export const test = base.extend({
           },
 
           // device linking
-          start_linking: () => "123456",
+          start_linking: () => "0123456789abcdef0123456789abcdef", // 32 hex, like a real PairingCode
           stop_linking: ok,
           link_device: () => SELF.account,
           rekey_account: () => "acc_rekeyed_ffff6666",

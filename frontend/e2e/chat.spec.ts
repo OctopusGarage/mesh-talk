@@ -367,6 +367,19 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("sidebar-action-link").click();
     await expect(page.getByTestId("link-device-dialog")).toBeVisible();
     await expect(page.getByText("Add another of your devices")).toBeVisible();
+
+    // Show the pairing code: the FULL 32-char code must be visible (the user types it on the
+    // other device) and must NOT overflow its container — regression for the truncated/
+    // overflowing text-xl display.
+    await page.getByTestId("link-show-code").click();
+    const codeEl = page.getByTestId("pairing-code");
+    await expect(codeEl).toBeVisible();
+    const shown = (await codeEl.textContent())?.replace(/\s/g, "");
+    expect(shown).toBe("0123456789abcdef0123456789abcdef");
+    const overflowPx = await codeEl.evaluate(
+      (el) => el.scrollWidth - el.clientWidth,
+    );
+    expect(overflowPx).toBeLessThanOrEqual(1);
   });
 
   test("pin a contact moves it to the Pinned section", async ({ page }) => {
