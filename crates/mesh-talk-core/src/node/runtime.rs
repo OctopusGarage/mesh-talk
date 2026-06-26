@@ -33,6 +33,32 @@ const FILE_PULL_INTERVAL_SECS: u64 = 3;
 /// A no-op when no new peers appeared and when we've never set an avatar.
 const PROFILE_REPUBLISH_INTERVAL_SECS: u64 = 3;
 
+/// Which peers to (re)publish our profile to this round: those present now (excluding post
+/// offices, which relay rather than render avatars) that were ABSENT in the previous round.
+/// `present_prev` holds the PREVIOUS round's present set and is updated in place to this
+/// round's. Using a per-round present set — rather than a monotonic "ever seen" set — means a
+/// peer that goes offline (evicted after PEER_TTL) and reconnects is treated as new again and
+/// gets our current avatar, instead of being stuck on whatever it had before it restarted.
+fn profile_republish_targets(
+    present_prev: &mut std::collections::HashSet<String>,
+    peers: &[PeerRecord],
+) -> Vec<PeerRecord> {
+    let mut present_now = std::collections::HashSet::new();
+    let mut targets = Vec::new();
+    for p in peers {
+        if p.post_office {
+            continue;
+        }
+        let uid = p.public.user_id();
+        if !present_prev.contains(&uid) {
+            targets.push(p.clone());
+        }
+        present_now.insert(uid);
+    }
+    *present_prev = present_now;
+    targets
+}
+
 /// Errors starting the node runtime.
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -252,7 +278,13 @@ impl NodeRuntime {
             let roster = Arc::clone(&roster);
             let names = Arc::clone(&names);
             tasks.push(tokio::spawn(async move {
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                // The set of peers PRESENT in the previous poll — NOT a monotonic "ever seen"
+                // set. A peer is republished-to when it's present now but was absent last
+                // round, which covers both first discovery AND a reconnect after the roster
+                // evicted it (PEER_TTL). A monotonic set would never re-publish to a peer that
+                // restarted, so it would keep showing our stale avatar until we re-set it.
+                let mut present_prev: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 loop {
                     let peers: Vec<PeerRecord> = {
                         let r = roster.lock().expect("roster mutex not poisoned");
@@ -267,12 +299,9 @@ impl NodeRuntime {
                             let _ = dir.record(&p.public.user_id(), &p.name);
                         }
                     }
-                    // Re-publish our avatar to peers we hadn't seen before (a no-op if we've
-                    // set no avatar). `seen` only tracks ids, so this stays bounded.
-                    let newcomers = peers
-                        .into_iter()
-                        .filter(|p| !p.post_office && seen.insert(p.public.user_id()));
-                    for peer in newcomers {
+                    // Re-publish our avatar to peers that just (re)appeared (a no-op if we've
+                    // set no avatar). Bounded by the live roster size.
+                    for peer in profile_republish_targets(&mut present_prev, &peers) {
                         node.republish_profile_to(&peer).await;
                     }
                     tokio::time::sleep(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS)).await;
@@ -620,6 +649,46 @@ impl Drop for NodeRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_peer(post_office: bool) -> PeerRecord {
+        PeerRecord {
+            public: crate::identity::device::DeviceIdentity::generate().public(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            name: "p".into(),
+            post_office,
+            account_id: None,
+            last_seen: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn profile_republish_targets_fires_on_first_sight_and_on_reconnect() {
+        let bob = fake_peer(false);
+        let mut present = std::collections::HashSet::new();
+
+        // First sight → publish to Bob.
+        assert_eq!(
+            profile_republish_targets(&mut present, std::slice::from_ref(&bob)).len(),
+            1
+        );
+        // Still present next round → no re-publish (no log churn).
+        assert!(profile_republish_targets(&mut present, std::slice::from_ref(&bob)).is_empty());
+        // Bob goes offline (evicted from the roster).
+        assert!(profile_republish_targets(&mut present, &[]).is_empty());
+        // Bob reconnects → published to AGAIN. The old monotonic `seen` set skipped him here,
+        // so he kept showing our stale avatar until we manually re-set it.
+        assert_eq!(
+            profile_republish_targets(&mut present, std::slice::from_ref(&bob)).len(),
+            1,
+            "a reconnecting peer must be re-published to"
+        );
+
+        // A post office is never a profile target.
+        let mut p2 = std::collections::HashSet::new();
+        assert!(
+            profile_republish_targets(&mut p2, std::slice::from_ref(&fake_peer(true))).is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn start_opens_a_node_and_exposes_its_identity() {
