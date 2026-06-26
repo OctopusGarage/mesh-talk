@@ -471,6 +471,99 @@ async fn recall_account_tombstones_own_message_and_enforces_window() {
     assert_eq!(kept.text, b"too old");
 }
 
+/// Account-conversation read/erase paths that the channel tests don't reach: a sticker in
+/// account history, local delete of a single account message, clearing the whole account
+/// conversation, channel full-text search, and the recall_channel "unknown message" guard.
+#[tokio::test]
+async fn account_history_sticker_delete_clear_channel_search_and_recall_guard() {
+    use crate::node::DmEnvelope;
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        roster,
+        tx,
+        ch_tx,
+        file_tx,
+        &dir.path().join("me.log"),
+        &dir.path().join("me-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    let my_account = node.account_id();
+    let peer_account = "a".repeat(32);
+    let acct_conv = crate::node::conversation::account_conversation_id(&my_account, &peer_account);
+    let now = crate::node::node::now_millis();
+
+    // Seed two of my own account sends (a text and a sticker) directly into the sidecar.
+    let seed = |id: [u8; 32], wall: u64, body: Vec<u8>| {
+        let env = DmEnvelope::new(my_account.clone(), peer_account.clone(), id, body).encode();
+        let mut sl = node.sentlog.lock().unwrap();
+        let seq = sl.entries(&acct_conv).len() as u64 + 1;
+        sl.record(acct_conv, seq, wall, &env).unwrap();
+    };
+    let text_id = EventId::new([11u8; 32]);
+    let sticker_id = EventId::new([12u8; 32]);
+    seed(
+        *text_id.as_bytes(),
+        now,
+        MessageBody::new(b"lunch at noon".to_vec(), None).encode(),
+    );
+    seed(
+        *sticker_id.as_bytes(),
+        now + 1,
+        MessageBody::sticker("1f602".to_string(), "😂".as_bytes().to_vec()).encode(),
+    );
+
+    // Account history renders the sticker (id + emoji fallback) and the text.
+    let hist = node.account_history(&peer_account, 10);
+    assert_eq!(hist.len(), 2);
+    let st = hist
+        .iter()
+        .find(|e| e.id == sticker_id)
+        .expect("sticker entry present");
+    assert_eq!(st.sticker.as_deref(), Some("1f602"));
+    assert_eq!(st.text, "😂".as_bytes());
+
+    // Delete a single account message locally → gone, the other remains.
+    assert_eq!(
+        node.delete_account_message(&peer_account, text_id).unwrap(),
+        1
+    );
+    let hist = node.account_history(&peer_account, 10);
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0].id, sticker_id);
+
+    // Clear the whole account conversation → empty.
+    assert_eq!(node.clear_account_conversation(&peer_account).unwrap(), 1);
+    assert!(node.account_history(&peer_account, 10).is_empty());
+
+    // Channel full-text search finds a channel message (the search test only covered DMs).
+    let channel = node.create_channel("general", vec![]).await.unwrap();
+    node.send_channel_message(channel, b"standup planning at ten")
+        .await
+        .unwrap();
+    let hits = node.search("STANDUP");
+    assert!(
+        hits.iter()
+            .any(|h| h.is_channel && h.text == b"standup planning at ten"),
+        "channel search finds the message"
+    );
+
+    // recall_channel rejects an unknown target id.
+    assert!(
+        node.recall_channel(channel, EventId::new([9u8; 32]))
+            .await
+            .is_err(),
+        "recalling an unknown message errors"
+    );
+}
+
 #[tokio::test]
 async fn channel_sticker_send_recall_and_delete() {
     let dir = tempfile::tempdir().unwrap();
@@ -2705,6 +2798,134 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
     assert_eq!(a_hist.len(), 1);
     assert!(a_hist[0].from_me);
     assert_eq!(a_hist[0].text, b"hi account");
+}
+
+/// Two-node ACCOUNT recall over the wire: the sender recalls their own account message and
+/// the RECEIVER tombstones it — exercising recalled_targets_account's peer path (decrypt the
+/// RecallEnvelope, bind the claimed sender account to the authenticating peer, authorise
+/// against the target's author). Also: a peer cannot recall a message that isn't theirs.
+#[tokio::test]
+async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
+    use crate::identity::account::Account;
+    let alice = DeviceIdentity::generate();
+    let alice_acct = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_acct = Account::generate();
+    let alice_uid = alice.public().user_id();
+    let bob_uid = bob.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+
+    let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_addr = alice_listener.local_addr().unwrap();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = bob_listener.local_addr().unwrap();
+
+    let alice_roster = Arc::new(Mutex::new(Roster::default()));
+    add_account_peer(
+        &alice_roster,
+        &bob,
+        &bob_acct,
+        "Bob",
+        bob_addr.port(),
+        &alice_uid,
+    );
+    let bob_roster = Arc::new(Mutex::new(Roster::default()));
+    add_account_peer(
+        &bob_roster,
+        &alice,
+        &alice_acct,
+        "Alice",
+        alice_addr.port(),
+        &bob_uid,
+    );
+
+    let (a_dm, _a) = mpsc::unbounded_channel();
+    let (a_ch, _b) = mpsc::unbounded_channel();
+    let (a_f, _c) = mpsc::unbounded_channel();
+    let (b_dm, _d) = mpsc::unbounded_channel();
+    let (b_ch, _e) = mpsc::unbounded_channel();
+    let (b_f, _g) = mpsc::unbounded_channel();
+
+    let alice_node = Node::open_with_account(
+        alice,
+        Account::from_secret_bytes(alice_acct.secret_bytes()),
+        alice_roster,
+        a_dm,
+        a_ch,
+        a_f,
+        &dir.path().join("a.log"),
+        &dir.path().join("a-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let bob_node = Node::open_with_account(
+        bob,
+        Account::from_secret_bytes(bob_acct.secret_bytes()),
+        bob_roster,
+        b_dm,
+        b_ch,
+        b_f,
+        &dir.path().join("b.log"),
+        &dir.path().join("b-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+
+    // Bob sends an account message to Alice; its logical id is in Bob's own history at once.
+    bob_node
+        .send_to_account(&alice_acct.account_id(), b"recall me", None)
+        .await
+        .unwrap();
+    let bob_msg_id = {
+        let h = bob_node.account_history(&alice_acct.account_id(), 10);
+        assert_eq!(h.len(), 1);
+        h[0].id
+    };
+
+    // Alice receives it.
+    let mut received = false;
+    for _ in 0..50 {
+        let h = alice_node.account_history(&bob_acct.account_id(), 10);
+        if h.iter()
+            .any(|e| e.id == bob_msg_id && !e.recalled && e.text == b"recall me")
+        {
+            received = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(received, "alice received Bob's account message");
+
+    // A peer cannot recall a message that isn't their own (Alice didn't author it).
+    assert!(
+        alice_node
+            .recall_account(&bob_acct.account_id(), bob_msg_id)
+            .await
+            .is_err(),
+        "alice cannot recall a message she didn't send"
+    );
+
+    // Bob recalls his own message; Alice tombstones it (recalled_targets_account peer path).
+    bob_node
+        .recall_account(&alice_acct.account_id(), bob_msg_id)
+        .await
+        .unwrap();
+    let mut tombstoned = false;
+    for _ in 0..50 {
+        let h = alice_node.account_history(&bob_acct.account_id(), 10);
+        if h.iter().any(|e| e.id == bob_msg_id && e.recalled) {
+            tombstoned = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        tombstoned,
+        "alice tombstones Bob's recalled account message (receiver-side peer recall path)"
+    );
 }
 
 // Regression: sending a FILE to an account (the UI's DM file-send path) must show up in

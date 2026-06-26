@@ -210,6 +210,16 @@ impl IdentityManager {
             .write_encrypted_file(username, "meta/user.json", &user, new_password)
             .map_err(|e| IdentityError::StorageError(e.to_string()))?;
 
+        // Re-encrypt the private key under the new password — it's stored password-encrypted
+        // like every other meta file, so without this it would become permanently unreadable.
+        let private_key: Vec<u8> = self
+            .file_manager
+            .read_encrypted_file(username, "meta/private_key.enc", old_password)
+            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
+        self.file_manager
+            .write_encrypted_file(username, "meta/private_key.enc", &private_key, new_password)
+            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
+
         // Re-encrypt the nickname side file too, if present, so it stays readable under the
         // new password (it's encrypted with the account password like every other file).
         if self
@@ -329,6 +339,72 @@ mod tests {
         assert!(matches!(
             mgr.set_display_name("bob", "wrongpass", "Bob"),
             Err(IdentityError::InvalidPassword)
+        ));
+    }
+
+    #[test]
+    fn change_password_rotates_credentials_and_reencrypts_nickname() {
+        let (mgr, _dir) = manager();
+        mgr.register_user("carol", "oldpassword123").unwrap();
+        mgr.set_display_name("carol", "oldpassword123", "Carol C")
+            .unwrap();
+
+        // The wrong old password is rejected (authenticates with old first).
+        assert!(matches!(
+            mgr.change_password("carol", "wrongold", "newpassword456"),
+            Err(IdentityError::InvalidPassword)
+        ));
+
+        // Rotate to a new password.
+        mgr.change_password("carol", "oldpassword123", "newpassword456")
+            .unwrap();
+
+        // The old password no longer authenticates; the new one does.
+        assert!(matches!(
+            mgr.authenticate_user("carol", "oldpassword123"),
+            Err(IdentityError::InvalidPassword)
+        ));
+        let user = mgr.authenticate_user("carol", "newpassword456").unwrap();
+        // The nickname side file was re-encrypted under the new password and reads back.
+        assert_eq!(user.display_name, "Carol C");
+        // The private key is readable under the new password.
+        assert!(mgr.get_user_private_key("carol", "newpassword456").is_ok());
+    }
+
+    #[test]
+    fn register_and_authenticate_reject_bad_input() {
+        let (mgr, _dir) = manager();
+        // Invalid username on both register and authenticate.
+        assert!(matches!(
+            mgr.register_user("", "supersafepass"),
+            Err(IdentityError::InvalidUsername)
+        ));
+        assert!(matches!(
+            mgr.authenticate_user("", "supersafepass"),
+            Err(IdentityError::InvalidUsername)
+        ));
+
+        mgr.register_user("dave", "supersafepass").unwrap();
+        // Duplicate registration is refused.
+        assert!(matches!(
+            mgr.register_user("dave", "supersafepass"),
+            Err(IdentityError::UserAlreadyExists(_))
+        ));
+        // Unknown user and wrong password.
+        assert!(matches!(
+            mgr.authenticate_user("nobody", "supersafepass"),
+            Err(IdentityError::UserNotFound(_))
+        ));
+        assert!(matches!(
+            mgr.authenticate_user("dave", "wrongpass"),
+            Err(IdentityError::InvalidPassword)
+        ));
+        // The private key reads back for the right password; the public-key getter is the
+        // documented not-implemented path (returns UserNotFound).
+        assert!(mgr.get_user_private_key("dave", "supersafepass").is_ok());
+        assert!(matches!(
+            mgr.get_user_public_key("dave"),
+            Err(IdentityError::UserNotFound(_))
         ));
     }
 }

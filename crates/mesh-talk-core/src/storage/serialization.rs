@@ -38,3 +38,26 @@ where
 
     Ok(serialized_data.data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_and_rejects_garbage_and_future_version() {
+        let bytes = serialize_data(&vec![1u8, 2, 3]).unwrap();
+        let back: Vec<u8> = deserialize_data(&bytes).unwrap();
+        assert_eq!(back, vec![1, 2, 3]);
+
+        // Garbage bytes fail to deserialize.
+        assert!(deserialize_data::<Vec<u8>>(b"not a valid frame").is_err());
+
+        // A version newer than CURRENT_VERSION is rejected.
+        let future = bincode::serialize(&SerializedData {
+            version: CURRENT_VERSION + 1,
+            data: vec![9u8],
+        })
+        .unwrap();
+        assert!(deserialize_data::<Vec<u8>>(&future).is_err());
+    }
+}
