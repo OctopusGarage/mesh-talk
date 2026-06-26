@@ -486,7 +486,7 @@ export function Sidebar() {
         id,
         conv: channelConv(c, name),
         pinned: favorites[id]?.pinned ?? false,
-        subtitle: t("sidebar.memberCount", { count: c.member_count }),
+        subtitle: shortId(id, 12),
       };
     });
 

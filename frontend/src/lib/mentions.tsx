@@ -35,7 +35,7 @@ export function renderWithMentions(text: string) {
       return (
         <span
           key={i}
-          className="rounded bg-primary/15 px-0.5 font-medium text-primary"
+          className="rounded bg-mention/25 px-1 font-semibold text-mention"
         >
           {seg.text}
         </span>
