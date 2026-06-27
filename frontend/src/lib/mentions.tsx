@@ -33,7 +33,7 @@ export function renderWithMentions(text: string) {
   return messageSegments(text).map((seg, i) => {
     if (seg.kind === "mention")
       return (
-        <span key={i} className="font-medium text-mention">
+        <span key={i} className="font-bold text-foreground">
           {seg.text}
         </span>
       );
