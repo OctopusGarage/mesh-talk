@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { IdentityCrest } from "@/components/identity";
 import { fadeSlideUp, listStagger, useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
-import { useChat } from "@/store/chat";
+import { displayName, useChat } from "@/store/chat";
 import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
 
 // We are always reachable to ourselves, and we never appear in our own discovery roster
@@ -27,6 +27,7 @@ export function MembersDialog() {
   const members = useChat((s) => s.members);
   const channelOwner = useChat((s) => s.channelOwner);
   const peers = useChat((s) => s.peers);
+  const favorites = useChat((s) => s.favorites);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
@@ -85,7 +86,11 @@ export function MembersDialog() {
             const isSelf = m.user_id === myId;
             const name = isSelf
               ? myName || m.name || t("common.unnamed")
-              : m.name || t("common.unnamed");
+              : displayName(
+                  favorites,
+                  accountOf(m.user_id) ?? m.user_id,
+                  m.name,
+                ) || t("common.unnamed");
             const status = isSelf
               ? SELF_ONLINE
               : statusFor(accountOf(m.user_id));
