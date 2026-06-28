@@ -10,8 +10,10 @@ import { pickImageFile } from "@/lib/avatarImage";
 import { useAvatar, useAvatars } from "@/store/avatars";
 import { cn } from "@/lib/utils";
 import { AvatarCropDialog } from "@/features/chat/AvatarCropDialog";
-import { AvatarGallery } from "@/components/AvatarGallery";
-import type { AvatarPackName } from "@/lib/avatarPacks";
+import {
+  AvatarGallery,
+  type AvatarGalleryCategory,
+} from "@/components/AvatarGallery";
 
 /**
  * AvatarEditMenu — wraps an identity glyph (its `children`) in a button that opens a small
@@ -24,14 +26,14 @@ export function AvatarEditMenu({
   children,
   className,
   ariaLabel,
-  pack,
+  category,
 }: {
   id: string;
   children: React.ReactNode;
   className?: string;
   ariaLabel: string;
-  /** Built-in preset pack offered alongside "upload" (players for people, clubs for groups). */
-  pack?: AvatarPackName;
+  /** Gallery category offered alongside "upload" (personal for people, group for channels). */
+  category?: AvatarGalleryCategory;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -81,7 +83,7 @@ export function AvatarEditMenu({
             <ImagePlus className="h-4 w-4 text-muted-foreground" />
             {hasPhoto ? t("avatar.change") : t("avatar.set")}
           </button>
-          {pack && (
+          {category && (
             <button
               type="button"
               onClick={() => {
@@ -114,9 +116,9 @@ export function AvatarEditMenu({
         }}
         onCancel={() => setCropFile(null)}
       />
-      {pack && (
+      {category && (
         <AvatarGallery
-          pack={pack}
+          category={category}
           open={gallery}
           onPick={(dataUrl) => {
             setGallery(false);

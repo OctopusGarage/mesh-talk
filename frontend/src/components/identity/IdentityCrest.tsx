@@ -59,7 +59,7 @@ export function IdentityCrest({
           <AvatarEditMenu
             id={editAvatarId}
             ariaLabel={editAvatarLabel ?? name}
-            pack="players"
+            category="personal"
           >
             {glyph}
           </AvatarEditMenu>

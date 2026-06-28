@@ -24,6 +24,10 @@
     "gallery": "Choose from gallery…",
     "galleryTitle": "Choose an avatar",
     "galleryHint": "Pick one to use as the photo.",
+    "tabFootballStars": "⚽ Football",
+    "tabNbaStars": "🏀 NBA",
+    "tabFootballClubs": "⚽ Clubs",
+    "tabNbaTeams": "🏀 Teams",
     "editGroup": "Change group photo",
     "crop": {
       "title": "Crop photo",

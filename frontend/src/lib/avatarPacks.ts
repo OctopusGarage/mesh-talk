@@ -1,6 +1,6 @@
-// Built-in avatar packs the user can pick from, instead of uploading a photo. Two sets:
-// football club logos for GROUP (channel) avatars, and star-player photos for PERSONAL
-// avatars. The manifests are built automatically from the bundled assets via
+// Built-in avatar packs the user can pick from, instead of uploading a photo. Four sets:
+// football clubs + NBA teams for GROUP (channel) avatars, and football stars + NBA stars
+// for PERSONAL avatars. The manifests are built automatically from the bundled assets via
 // `import.meta.glob` (eager URL imports) — drop a file in the folder and it shows up.
 
 export interface AvatarPreset {
@@ -48,8 +48,35 @@ export const PLAYER_AVATARS: AvatarPreset[] = pack(
   }),
 );
 
-export type AvatarPackName = "clubs" | "players";
+export type AvatarPackName = "clubs" | "players" | "nba-players" | "nba-teams";
 
 export function avatarPack(name: AvatarPackName): AvatarPreset[] {
-  return name === "clubs" ? CLUB_AVATARS : PLAYER_AVATARS;
+  switch (name) {
+    case "clubs":
+      return CLUB_AVATARS;
+    case "players":
+      return PLAYER_AVATARS;
+    case "nba-teams":
+      return NBA_TEAM_AVATARS;
+    case "nba-players":
+      return NBA_PLAYER_AVATARS;
+  }
 }
+
+/** NBA team logos — preset GROUP (channel) avatars. */
+export const NBA_TEAM_AVATARS: AvatarPreset[] = pack(
+  import.meta.glob("../assets/avatars/nba-teams/*.webp", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);
+
+/** NBA star photos — preset PERSONAL avatars. */
+export const NBA_PLAYER_AVATARS: AvatarPreset[] = pack(
+  import.meta.glob("../assets/avatars/nba-players/*.webp", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);

@@ -78,7 +78,7 @@ export function ProfileDialog({
           <AvatarEditMenu
             id={seed}
             ariaLabel={t("avatar.editOwn")}
-            pack="players"
+            category="personal"
           >
             <IdentityGlyph seed={seed} size={96} title={displayName} />
           </AvatarEditMenu>

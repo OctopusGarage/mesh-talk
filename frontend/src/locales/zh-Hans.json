@@ -24,6 +24,10 @@
     "gallery": "从图库选择…",
     "galleryTitle": "选择头像",
     "galleryHint": "点一个作为头像。",
+    "tabFootballStars": "⚽ 足球明星",
+    "tabNbaStars": "🏀 NBA球星",
+    "tabFootballClubs": "⚽ 足球俱乐部",
+    "tabNbaTeams": "🏀 NBA球队",
     "editGroup": "更换群头像",
     "crop": {
       "title": "裁剪头像",

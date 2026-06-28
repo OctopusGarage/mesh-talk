@@ -172,7 +172,11 @@ function ChannelHeader({
   return (
     <div className="flex min-w-0 items-center gap-3">
       <div className="relative">
-        <AvatarEditMenu id={id} ariaLabel={t("avatar.editGroup")} pack="clubs">
+        <AvatarEditMenu
+          id={id}
+          ariaLabel={t("avatar.editGroup")}
+          category="group"
+        >
           <GroupAvatar channelId={id} size={36} title={name} />
         </AvatarEditMenu>
         <PresenceDot

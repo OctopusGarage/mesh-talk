@@ -24,6 +24,10 @@
     "gallery": "ギャラリーから選択…",
     "galleryTitle": "アバターを選択",
     "galleryHint": "タップして使用します。",
+    "tabFootballStars": "⚽ サッカー",
+    "tabNbaStars": "🏀 NBA",
+    "tabFootballClubs": "⚽ クラブ",
+    "tabNbaTeams": "🏀 チーム",
     "editGroup": "グループ写真を変更",
     "crop": {
       "title": "写真を切り抜き",
