@@ -67,6 +67,9 @@ pub struct ChannelSummary {
     pub id: ConversationId,
     pub name: String,
     pub member_count: usize,
+    /// The channel owner's device `user_id` — only the owner may rename the channel or
+    /// change its membership. The UI gates the rename action on this.
+    pub owner: String,
 }
 
 /// A search match: a message whose text contains the query, with enough context to
@@ -493,6 +496,7 @@ impl Node {
                     id,
                     name: s.name().to_string(),
                     member_count: s.members().len(),
+                    owner: s.owner().to_string(),
                 })
             })
             .collect()

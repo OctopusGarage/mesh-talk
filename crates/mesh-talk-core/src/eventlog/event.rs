@@ -85,6 +85,10 @@ pub enum EventKind {
     KeyRotation = 6,
     FileManifest = 7,
     Profile = 8,
+    /// A channel rename. Carries the new name (plaintext UTF-8, like the membership
+    /// snapshot's name) and is applied last-writer-wins by `(lamport, id)` — INDEPENDENT
+    /// of the membership epoch, so a rename never collides with a concurrent add/remove.
+    ChannelRename = 9,
 }
 
 /// A single, content-addressed, signed log event.
@@ -379,6 +383,7 @@ mod tests {
             (EventKind::KeyRotation, 6),
             (EventKind::FileManifest, 7),
             (EventKind::Profile, 8),
+            (EventKind::ChannelRename, 9),
         ];
         for (kind, index) in cases {
             assert_eq!(bincode::serialize(&kind).unwrap(), index.to_le_bytes());

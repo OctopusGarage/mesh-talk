@@ -276,6 +276,8 @@ interface ChatState {
   createChannel: (name: string, memberIds: string[]) => Promise<void>;
   addMember: (memberId: string) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
+  /** Rename a channel for everyone (owner-only; the new name syncs to all members). */
+  renameChannel: (channelId: string, name: string) => Promise<void>;
 }
 
 export const useChat = create<ChatState>((set, get) => ({
@@ -675,6 +677,20 @@ export const useChat = create<ChatState>((set, get) => ({
       void get().refreshRoster();
     } catch (e) {
       set({ error: `Couldn't remove member: ${errorMessage(e)}` });
+    }
+  },
+
+  renameChannel: async (channelId, name) => {
+    try {
+      await chat.renameChannel(channelId, name);
+      await get().refreshRoster();
+      // Keep the open conversation's header in sync if it's the one we renamed.
+      const active = get().active;
+      if (active?.kind === "channel" && active.id === channelId) {
+        set({ active: { ...active, name } });
+      }
+    } catch (e) {
+      set({ error: `Couldn't rename channel: ${errorMessage(e)}` });
     }
   },
 }));

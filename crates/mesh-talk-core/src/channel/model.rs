@@ -9,7 +9,7 @@ use crate::channel::crypto::ChannelError;
 use crate::channel::sender_key::{
     open_message as sk_open, seal_message as sk_seal, SenderChain, SenderKey, SenderKeyDistribution,
 };
-use crate::eventlog::event::ConversationId;
+use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
 use bincode::Options;
 use rand_core::OsRng;
@@ -57,6 +57,16 @@ impl ChannelMeta {
     }
 }
 
+/// Encode just the member set for the equal-epoch membership tie-break. Deterministic
+/// across nodes because members are canonicalized (sorted + de-duped) at every
+/// construction site, so the same SET always yields the same bytes.
+fn encode_members(members: &[PublicIdentity]) -> Vec<u8> {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .serialize(members)
+        .expect("members serialize")
+}
+
 /// A fresh random channel id — a `ConversationId` minted at creation, distinct from
 /// the derived DM conversation ids.
 pub fn new_channel_id() -> ConversationId {
@@ -97,6 +107,11 @@ impl MsgHeader {
 pub struct ChannelState {
     id: ConversationId,
     name: String,
+    /// The `(lamport, id)` of the rename event that set the current `name`, for
+    /// last-writer-wins (mirrors the `Profile` LWW convention). The genesis name from the
+    /// membership snapshot starts at the baseline `(0, [0; 32])`, so any real rename event
+    /// (lamport ≥ 1) supersedes it.
+    name_version: (u64, EventId),
     members: Vec<PublicIdentity>,
     epoch: u64,
     owner: String,
@@ -111,6 +126,7 @@ impl ChannelState {
         ChannelState {
             id,
             name: meta.name,
+            name_version: (0, EventId::new([0u8; 32])),
             members: meta.members,
             epoch: meta.epoch,
             owner: meta.owner,
@@ -120,9 +136,11 @@ impl ChannelState {
         }
     }
 
-    /// Adopt a (possibly newer) membership snapshot: if it advances the epoch, take
-    /// its name/members/epoch. Older or equal snapshots are ignored — idempotent
-    /// replay regardless of event arrival order.
+    /// Adopt a (possibly newer) membership snapshot: if it advances the epoch, take its
+    /// members/epoch. Older or equal snapshots are ignored — idempotent replay regardless
+    /// of event arrival order. The NAME is NOT taken from here: it is owned by independent
+    /// `ChannelRename` events (see `apply_rename`), so a rename can never clobber — nor be
+    /// clobbered by — a concurrent membership change at the same epoch.
     ///
     /// Owner authorization is enforced at the call site in `ChannelBook::process`
     /// (the event author must equal the owner). This snapshot's `owner` is additionally
@@ -139,23 +157,27 @@ impl ChannelState {
             Ordering::Greater => true,
             // Two concurrent membership changes can mint the SAME epoch with different
             // member sets. Without a tie-break the result would depend on arrival order
-            // (nodes diverge). Converge deterministically: keep the canonically-greater
-            // snapshot (by encoded bytes), so every node lands on the same membership.
-            Ordering::Equal => {
-                let current = ChannelMeta {
-                    name: self.name.clone(),
-                    members: self.members.clone(),
-                    epoch: self.epoch,
-                    owner: self.owner.clone(),
-                };
-                meta.encode() > current.encode()
-            }
+            // (nodes diverge). Converge deterministically on the canonically-greater MEMBER
+            // SET (by encoded bytes) — name is excluded so it can't sway the membership
+            // winner — so every node lands on the same membership.
+            Ordering::Equal => encode_members(&meta.members) > encode_members(&self.members),
             Ordering::Less => false,
         };
         if take {
-            self.name = meta.name;
             self.members = meta.members;
             self.epoch = meta.epoch;
+        }
+    }
+
+    /// Adopt a channel rename last-writer-wins by `(lamport, id)` — the same ordering the
+    /// log uses for `Profile` updates. Independent of the membership epoch, so renaming
+    /// neither rotates keys nor races a membership change. Owner authorization is enforced
+    /// at the call site in `ChannelBook::process`.
+    pub fn apply_rename(&mut self, name: &str, lamport: u64, id: EventId) {
+        let version = (lamport, id);
+        if version > self.name_version {
+            self.name = name.to_string();
+            self.name_version = version;
         }
     }
 
@@ -360,6 +382,67 @@ mod tests {
         let m1: Vec<String> = s1.members().iter().map(|p| p.user_id()).collect();
         let m2: Vec<String> = s2.members().iter().map(|p| p.user_id()).collect();
         assert_eq!(m1, m2, "concurrent same-epoch membership must converge");
+    }
+
+    #[test]
+    fn rename_and_membership_change_do_not_clobber_each_other() {
+        // A rename and a membership change are orthogonal — name vs members — and must BOTH
+        // survive when applied together, in either order. Before names were split onto their
+        // own `(lamport, id)`-ordered events, both rode the membership epoch, so a same-epoch
+        // tie-break silently dropped one (a rename could revert a member removal, or vice
+        // versa). Now membership comes from `apply_meta`, the name from `apply_rename`.
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let c = DeviceIdentity::generate();
+        let id = new_channel_id();
+        let genesis = meta("general", &[&a, &b, &c], 0);
+        // Remove c at epoch 1. Its `name` field is now inert (apply_meta ignores it).
+        let remove_c = meta("name-is-ignored-here", &[&a, &b], 1);
+        let rename_id = EventId::new([7u8; 32]);
+
+        let mut s1 = ChannelState::from_meta(id, genesis.clone());
+        s1.apply_meta(remove_c.clone());
+        s1.apply_rename("renamed", 5, rename_id);
+
+        let mut s2 = ChannelState::from_meta(id, genesis.clone());
+        s2.apply_rename("renamed", 5, rename_id);
+        s2.apply_meta(remove_c.clone());
+
+        for s in [&s1, &s2] {
+            assert_eq!(
+                s.name(),
+                "renamed",
+                "the rename survives a concurrent removal"
+            );
+            assert_eq!(
+                s.members().len(),
+                2,
+                "the removal survives a concurrent rename"
+            );
+            assert!(!s.is_member(&c.public().user_id()));
+        }
+    }
+
+    #[test]
+    fn apply_rename_is_last_writer_wins_by_lamport_then_id() {
+        let a = DeviceIdentity::generate();
+        let id = new_channel_id();
+        let mut s = ChannelState::from_meta(id, meta("general", &[&a], 0));
+        // First rename adopts the name (any real lamport beats the genesis baseline).
+        s.apply_rename("first", 3, EventId::new([1u8; 32]));
+        assert_eq!(s.name(), "first");
+        // Higher lamport wins.
+        s.apply_rename("second", 5, EventId::new([0u8; 32]));
+        assert_eq!(s.name(), "second");
+        // Lower lamport is ignored (stale replay, idempotent).
+        s.apply_rename("stale", 4, EventId::new([9u8; 32]));
+        assert_eq!(s.name(), "second");
+        // Equal lamport → higher id wins (deterministic cross-node tie-break).
+        s.apply_rename("tiebreak", 5, EventId::new([9u8; 32]));
+        assert_eq!(s.name(), "tiebreak");
+        // A membership change never touches the name.
+        s.apply_meta(meta("ignored", &[&a], 1));
+        assert_eq!(s.name(), "tiebreak");
     }
 
     #[test]

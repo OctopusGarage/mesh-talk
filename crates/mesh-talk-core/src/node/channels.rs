@@ -204,6 +204,53 @@ impl Node {
         Ok(())
     }
 
+    /// Rename `channel` to `new_name`. Posts a `ChannelRename` event carrying just the new
+    /// name; it's applied last-writer-wins by `(lamport, id)`, INDEPENDENT of the membership
+    /// epoch — so a rename neither rotates sender keys nor races a concurrent add/remove (a
+    /// shared-epoch `MembershipChange` could clobber, or be clobbered by, a rename). Owner-
+    /// only: a non-owner's event is dropped by every node's `process`, so it's refused here
+    /// too. The new name converges on every member via the usual distribution.
+    pub async fn rename_channel(
+        &self,
+        channel: ConversationId,
+        new_name: &str,
+    ) -> Result<(), NodeError> {
+        let (current_name, members, owner) = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            let state = book
+                .state(&channel)
+                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+            (
+                state.name().to_string(),
+                state.members().to_vec(),
+                state.owner().to_string(),
+            )
+        };
+        // Only the owner may rename — a non-owner's event would be rejected by every node's
+        // `process`, so refuse it locally too.
+        if self.user_id() != owner {
+            return Err(NodeError::Channel(
+                "only the channel owner can rename the channel".into(),
+            ));
+        }
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(NodeError::Channel("channel name cannot be empty".into()));
+        }
+        // Unchanged name → no-op (don't post a redundant event).
+        if new_name == current_name {
+            return Ok(());
+        }
+        self.append_event(
+            channel,
+            EventKind::ChannelRename,
+            new_name.as_bytes().to_vec(),
+        )?;
+        self.process_channel(channel);
+        self.distribute_channel(channel, &members).await;
+        Ok(())
+    }
+
     /// Send a message to a channel we hold the key for. Distribution is best-effort
     /// and fail-soft: returns `Ok(())` once the event is appended locally, regardless
     /// of how many members were reachable (an offline member catches up via sync).

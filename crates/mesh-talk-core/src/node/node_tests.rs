@@ -1378,6 +1378,101 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
 }
 
 #[tokio::test]
+async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
+    // Alice (owner) renames the channel; the new name must converge on Bob (a member) —
+    // the bug was that a rename never left the originating node. A non-owner's rename is
+    // refused locally (every node would reject the event anyway).
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_pub = bob.public();
+    let dir = tempfile::tempdir().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = listener.local_addr().unwrap();
+
+    let alice_roster = seed_roster(&bob, "Bob", bob_addr.port(), &alice.public().user_id());
+    let bob_roster = Arc::new(Mutex::new(Roster::default()));
+
+    let (alice_dm_tx, _alice_dm_rx) = mpsc::unbounded_channel();
+    let (alice_ch_tx, _alice_ch_rx) = mpsc::unbounded_channel();
+    let (alice_file_tx, _alice_file_rx) = mpsc::unbounded_channel();
+    let (bob_dm_tx, _bob_dm_rx) = mpsc::unbounded_channel();
+    let (bob_ch_tx, mut bob_ch_rx) = mpsc::unbounded_channel();
+    let (bob_file_tx, _bob_file_rx) = mpsc::unbounded_channel();
+
+    let alice_node = Node::open(
+        alice,
+        alice_roster,
+        alice_dm_tx,
+        alice_ch_tx,
+        alice_file_tx,
+        &dir.path().join("a.log"),
+        &dir.path().join("a-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let bob_node = Node::open(
+        bob,
+        bob_roster,
+        bob_dm_tx,
+        bob_ch_tx,
+        bob_file_tx,
+        &dir.path().join("b.log"),
+        &dir.path().join("b-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+
+    let channel = alice_node
+        .create_channel("general", vec![bob_pub])
+        .await
+        .unwrap();
+    alice_node
+        .send_channel_message(channel, b"before rename")
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), bob_ch_rx.recv())
+        .await
+        .expect("bob received the pre-rename message within 5s")
+        .expect("channel stream open");
+    assert_eq!(first.channel_name, "general");
+
+    // A non-owner cannot rename — refused locally, with no epoch bump.
+    let bob_rename = bob_node.rename_channel(channel, "hacked").await;
+    assert!(
+        matches!(bob_rename, Err(NodeError::Channel(_))),
+        "a non-owner member cannot rename the channel"
+    );
+
+    // The owner renames; the change converges on Bob.
+    alice_node.rename_channel(channel, "renamed").await.unwrap();
+    // A message after the rename carries the new name — a deterministic barrier proving
+    // Bob processed the rename's MembershipChange.
+    alice_node
+        .send_channel_message(channel, b"after rename")
+        .await
+        .unwrap();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(5), bob_ch_rx.recv())
+        .await
+        .expect("bob received the post-rename message within 5s")
+        .expect("channel stream open");
+    assert_eq!(second.text, b"after rename");
+    assert_eq!(second.channel_name, "renamed");
+
+    // Both nodes now list the channel under its new name.
+    for node in [&alice_node, &bob_node] {
+        let summary = node
+            .list_channels()
+            .into_iter()
+            .find(|c| c.id == channel)
+            .expect("channel is listed");
+        assert_eq!(summary.name, "renamed");
+    }
+}
+
+#[tokio::test]
 async fn list_channels_reports_created_channels() {
     let me = DeviceIdentity::generate();
     let dir = tempfile::tempdir().unwrap();

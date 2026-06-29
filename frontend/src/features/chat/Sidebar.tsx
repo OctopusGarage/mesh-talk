@@ -343,6 +343,7 @@ export function Sidebar() {
   const themeCrest = THEME_CREST[useTheme((s) => s.theme)];
   const togglePinned = useChat((s) => s.togglePinned);
   const setAlias = useChat((s) => s.setAlias);
+  const renameChannel = useChat((s) => s.renameChannel);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const ready = useChat((s) => s.ready);
@@ -443,14 +444,34 @@ export function Sidebar() {
     options[next]?.focus();
   };
 
+  // A channel I own: renaming it changes the shared (synced) name for everyone. A contact —
+  // or a channel I don't own (the core would reject the change) — gets a personal alias
+  // instead. Single source of truth for that distinction, used by the rename flow + dialog.
+  const ownedChannel = (id: string) =>
+    channels.find((c) => c.channel_id === id && c.owner === myId);
+
   const startRename = (id: string, current: string) => {
     setRenameId(id);
-    setRenameDraft(favorites[id]?.custom_alias ?? current);
+    // For a channel I own we edit the real (synced) name; otherwise the personal alias.
+    setRenameDraft(
+      ownedChannel(id) ? current : (favorites[id]?.custom_alias ?? current),
+    );
   };
   const commitRename = () => {
-    if (renameId) void setAlias(renameId, renameDraft);
+    if (renameId) {
+      const owned = ownedChannel(renameId);
+      if (owned) {
+        const next = renameDraft.trim();
+        if (next && next !== owned.name) void renameChannel(renameId, next);
+      } else {
+        void setAlias(renameId, renameDraft);
+      }
+    }
     setRenameId(null);
   };
+  // The dialog's title + placeholder switch to channel wording when renaming a channel I own.
+  const renamingOwnedChannel =
+    renameId !== null && ownedChannel(renameId) !== undefined;
 
   // Resolve the displayed name (alias overrides the announced name) and split into
   // pinned vs the rest. Sort is stable on the source order within each group. Memoized so
@@ -764,14 +785,22 @@ export function Sidebar() {
       >
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>{t("sidebar.renameTitle")}</DialogTitle>
+            <DialogTitle>
+              {renamingOwnedChannel
+                ? t("sidebar.renameChannelTitle")
+                : t("sidebar.renameTitle")}
+            </DialogTitle>
           </DialogHeader>
           <Input
             autoFocus
             value={renameDraft}
             onChange={(e) => setRenameDraft(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && commitRename()}
-            placeholder={t("sidebar.aliasPlaceholder")}
+            placeholder={
+              renamingOwnedChannel
+                ? t("sidebar.channelNamePlaceholder")
+                : t("sidebar.aliasPlaceholder")
+            }
           />
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setRenameId(null)}>

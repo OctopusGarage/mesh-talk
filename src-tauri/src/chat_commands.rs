@@ -373,6 +373,9 @@ pub struct ChannelInfo {
     pub channel_id: String, // hex
     pub name: String,
     pub member_count: usize,
+    /// The owner's device `user_id` — only the owner may rename the channel. The UI gates
+    /// the synced-rename action on this (non-owners fall back to a local alias).
+    pub owner: String,
 }
 
 fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {
@@ -417,6 +420,7 @@ pub async fn list_channels(
             channel_id: hex::encode(c.id.as_bytes()),
             name: c.name,
             member_count: c.member_count,
+            owner: c.owner,
         })
         .collect())
 }
@@ -512,6 +516,23 @@ pub async fn remove_channel_member(
         rt.handle()
     };
     node.remove_channel_member(channel, &member_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn rename_channel(
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    name: String,
+) -> Result<(), CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    let node = {
+        let guard = state.0.lock().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        rt.handle()
+    };
+    node.rename_channel(channel, &name)
         .await
         .map_err(CommandError::from)
 }

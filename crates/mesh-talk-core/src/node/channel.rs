@@ -246,6 +246,18 @@ impl ChannelBook {
                         }
                     }
                 }
+                EventKind::ChannelRename => {
+                    // Owner-only, like membership: a non-owner's rename is dropped by every
+                    // node. Applied last-writer-wins by (lamport, id), independent of the
+                    // membership epoch.
+                    if let Some(state) = self.states.get_mut(&channel_id) {
+                        if event.author.user_id() == state.owner() {
+                            if let Ok(name) = std::str::from_utf8(&event.ciphertext) {
+                                state.apply_rename(name, event.lamport, event.id);
+                            }
+                        }
+                    }
+                }
                 EventKind::KeyRotation => {
                     let Some(sealed) = SealedKeys::decode(&event.ciphertext) else {
                         continue;

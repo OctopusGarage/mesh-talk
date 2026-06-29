@@ -230,6 +230,7 @@ pub fn run_tauri() {
             crate::chat_commands::create_channel,
             crate::chat_commands::add_channel_member,
             crate::chat_commands::remove_channel_member,
+            crate::chat_commands::rename_channel,
             crate::chat_commands::channel_members,
             crate::chat_commands::send_channel_message,
             crate::chat_commands::channel_history,
