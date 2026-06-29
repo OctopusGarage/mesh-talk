@@ -28,12 +28,7 @@ type Signal =
   | { callId: string; kind: "bye"; reason: ByeReason };
 
 export type CallPhase =
-  | "idle"
-  | "outgoing"
-  | "incoming"
-  | "connecting"
-  | "connected"
-  | "ended";
+  "idle" | "outgoing" | "incoming" | "connecting" | "connected" | "ended";
 
 export interface CallTarget {
   name: string;

@@ -6,12 +6,7 @@ import { create } from "zustand";
 //    look applied via a `data-palette` attribute on top of a dark base (so any token a
 //    palette doesn't override falls back to the dark scale, never the light one).
 export type Theme =
-  | "light"
-  | "dark"
-  | "oled"
-  | "argentina"
-  | "barcelona"
-  | "messi";
+  "light" | "dark" | "oled" | "argentina" | "barcelona" | "messi";
 
 /** Brand palettes (driven by `html[data-palette=…]`); the rest are base modes. */
 const PALETTES = new Set<Theme>(["argentina", "barcelona", "messi"]);

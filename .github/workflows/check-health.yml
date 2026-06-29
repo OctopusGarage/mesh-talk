@@ -55,7 +55,7 @@ jobs:
 
       # 5️⃣ Cache Rust dependencies
       - name: Cache Rust dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -75,7 +75,7 @@ jobs:
 
       # 7️⃣ Cache Node.js dependencies
       - name: Cache Node.js dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: frontend/node_modules
           key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
