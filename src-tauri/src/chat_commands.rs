@@ -781,19 +781,70 @@ fn temp_file_basename(ext: &str, original: Option<&str>, ts: u128) -> String {
 /// clears the badge. Best-effort — a platform without badge support just no-ops.
 #[tauri::command]
 pub async fn set_badge(app: tauri::AppHandle, count: u32) -> Result<(), CommandError> {
-    let n = if count == 0 { None } else { Some(count as i64) };
+    let label = if count == 0 {
+        None
+    } else {
+        Some(count.to_string())
+    };
     // The macOS dock badge is set via NSApp.dockTile (AppKit), which MUST run on the main
-    // thread — but this async command runs on the Tauri runtime thread pool, so calling
-    // set_badge_count directly here silently no-ops (the dock number never appears).
-    // Hop onto the main thread to actually update the dock/taskbar badge.
+    // thread — but this async command runs on the Tauri runtime thread pool. Hop onto the
+    // main thread to actually update the dock/taskbar badge.
     let handle = app.clone();
     app.run_on_main_thread(move || {
-        if let Some(window) = handle.get_webview_window("main") {
-            let _ = window.set_badge_count(n);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = &handle;
+            set_dock_badge(label);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let n = label.and_then(|s| s.parse::<i64>().ok());
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.set_badge_count(n);
+            }
         }
     })
     .map_err(|e| CommandError::Internal(format!("set_badge: {e}")))?;
     Ok(())
+}
+
+/// Set (or clear, with `None`) the macOS dock-icon badge label directly via AppKit.
+///
+/// Why not `WebviewWindow::set_badge_count`? tao's macOS implementation does
+/// `NSApp.dockTile.setBadgeLabel:` but never calls `[dockTile display]`. In a bundled `.app`
+/// the badge then silently fails to repaint (the call returns fine, nothing appears). We also
+/// resolve the app via `NSApplication.sharedApplication` (reliable) rather than the global
+/// `NSApp` (nil until first set), and force a `display()` so the number actually shows.
+///
+/// NOTE: macOS only renders the dock badge if the app is authorized for notification badges
+/// (System Settings ▸ Notifications ▸ <app> ▸ Badges). The app requests that authorization at
+/// startup (see the frontend `ensureNotificationPermission`); without it this silently no-ops.
+///
+/// MUST be called on the main thread (AppKit requirement); callers hop via `run_on_main_thread`.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_dock_badge(label: Option<String>) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use std::ffi::CString;
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let dock_tile: *mut AnyObject = msg_send![app, dockTile];
+        if dock_tile.is_null() {
+            return;
+        }
+        let ns_label: *mut AnyObject = match label.as_deref() {
+            Some(s) => {
+                let c = CString::new(s).unwrap_or_default();
+                msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()]
+            }
+            None => std::ptr::null_mut(),
+        };
+        let _: () = msg_send![dock_tile, setBadgeLabel: ns_label];
+        let _: () = msg_send![dock_tile, display];
+    }
 }
 
 /// The name (SSID) of the Wi-Fi network this machine is on, or `None` if it can't be

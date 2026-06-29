@@ -2531,6 +2531,7 @@ dependencies = [
  "lazy_static",
  "log",
  "mesh-talk-core",
+ "objc2 0.6.4",
  "rand 0.9.3",
  "serde",
  "serde_json",

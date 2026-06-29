@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
 import { chat as chatApi } from "@/lib/api";
+import { ensureNotificationPermission } from "@/lib/notify";
 import { useChat } from "@/store/chat";
 import { usePresence } from "@/store/presence";
 
@@ -17,6 +18,13 @@ export function ChatApp() {
   const totalUnread = useChat((s) =>
     Object.values(s.unread).reduce((a, b) => a + b, 0),
   );
+
+  // Request notification authorization once at startup. On macOS the dock unread badge only
+  // renders if the app is authorized for notification badges, so this is what makes the badge
+  // work out of the box (rather than requiring the user to enable it in System Settings).
+  useEffect(() => {
+    void ensureNotificationPermission();
+  }, []);
 
   useEffect(() => {
     chatApi.setBadge(totalUnread).catch(() => {});

@@ -59,3 +59,23 @@ clap = { version = "4.4", features = ["derive"] }
 lazy_static = "1.4"
 # Dev
 tempfile = "3.8"
+
+# Dev-build ergonomics: full-strength Argon2/PBKDF2 are unbearably slow in an unoptimized
+# debug build — `tauri dev` keystore unlock ("unlocking your encrypted stores") can take
+# minutes and looks like a hang. Optimize ONLY the crypto crates so unlock is fast, while our
+# own crates stay at debug opt-level (keeps devtools + fast incremental builds). Same KDF
+# params, so existing keystores still decrypt — just faster. Release builds are unaffected.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3

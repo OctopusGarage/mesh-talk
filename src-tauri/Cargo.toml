@@ -45,6 +45,13 @@ serde_json = "1" # persist app settings as JSON in the app config dir
 # Windows Credential Manager, Linux Secret Service) — never on plaintext disk.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
+# macOS dock badge: set it directly via AppKit (NSApplication.dockTile) instead of tao's
+# WebviewWindow::set_badge_count — tao calls setBadgeLabel without forcing a dockTile refresh,
+# which silently fails to render in a bundled .app. We add display() to actually paint it.
+# objc2 0.6 is already in the tree via tao, so this reuses the compiled crate (no new version).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json = "1"
