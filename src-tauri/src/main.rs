@@ -4,8 +4,6 @@
 use mesh_talk::run_tauri;
 
 fn main() {
-    eprintln!("=== MESH-TALK MAIN FUNCTION STARTED ===");
     // Run the Tauri version of the application
     run_tauri();
-    eprintln!("=== MESH-TALK MAIN FUNCTION ENDED ===");
 }
