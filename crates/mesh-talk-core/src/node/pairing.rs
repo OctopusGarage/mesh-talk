@@ -8,7 +8,7 @@
 
 use crate::identity::account::DeviceCertificate;
 use crate::identity::device::PublicIdentity;
-use bincode::Options;
+use crate::node::wire::{frame, unframe};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -141,37 +141,6 @@ impl BackfillRecord {
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         unframe(BACKFILL_MAGIC, bytes)
     }
-}
-
-fn frame<T: Serialize>(magic: &[u8], v: &T) -> Vec<u8> {
-    let mut out = Vec::with_capacity(magic.len() + 64);
-    out.extend_from_slice(magic);
-    out.extend_from_slice(
-        &bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .serialize(v)
-            .expect("pairing message serializes"),
-    );
-    out
-}
-
-/// Upper bound on a single pairing/backfill frame before we attempt to deserialize.
-/// Every pairing message is small (keys, a cert, one backfilled message body); a frame
-/// larger than the Noise transport's own `MAX_FRAME` (65535) cannot be legitimate, so
-/// reject it early rather than feeding it to bincode. Defense-in-depth: the transport
-/// already caps wire frames; this guards the in-process decode path too.
-const MAX_PAIRING_FRAME: usize = 65_535;
-
-fn unframe<T: for<'de> Deserialize<'de>>(magic: &[u8], bytes: &[u8]) -> Option<T> {
-    if bytes.len() > MAX_PAIRING_FRAME {
-        return None;
-    }
-    let rest = bytes.strip_prefix(magic)?;
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .reject_trailing_bytes()
-        .deserialize::<T>(rest)
-        .ok()
 }
 
 #[cfg(test)]

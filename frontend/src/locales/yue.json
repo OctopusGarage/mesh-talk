@@ -186,7 +186,13 @@
     "retention": "保留時長",
     "retentionDesc": "自動刪除本地端早於此時長的訊息。",
     "retentionForever": "永久",
-    "retentionDays": "{{count}} 日"
+    "retentionDays": "{{count}} 日",
+    "sectionExperimental": "實驗功能",
+    "calls": "語音同視像通話",
+    "callsDesc": "開啟 1:1 語音同視像通話。實驗功能：淨係喺區域網用，可能唔穩定。",
+    "ringtone": "鈴聲",
+    "ringtoneDesc": "有電話打入時嘅鈴聲。揀一個就會試播。",
+    "ringtonePreview": "試聽"
   },
   "search": {
     "title": "搜尋訊息",
@@ -247,6 +253,61 @@
     "rekey": "重設金鑰",
     "rekeyed": "已重設金鑰。新帳戶：{{id}}…",
     "rekeyFailed": "重設金鑰失敗：{{error}}"
+  },
+  "webrtcTest": {
+    "trigger": "語音/視像自我測試",
+    "title": "語音/視像自我測試",
+    "description": "睇下呢個版本嘅 webview 用唔用到相機、咪同 WebRTC。每個平台（macOS、Windows、Linux）都行一次。",
+    "run": "開始測試",
+    "running": "測試緊…",
+    "localLabel": "你部相機",
+    "remoteLabel": "回環回顯",
+    "step": {
+      "capture": "相機 + 咪擷取",
+      "devices": "媒體裝置",
+      "connect": "WebRTC 對等連線",
+      "media": "媒體串流回顯"
+    },
+    "captureDetail": "{{video}} 路視像，{{audio}} 路聲音",
+    "devicesDetail": "{{cameras}} 個相機，{{mics}} 個咪",
+    "connectDetail": "對等連線搞掂（host 候選，冇 STUN/TURN）。",
+    "mediaDetail": "即時媒體畫面正喺 WebRTC 度傳緊。",
+    "timeout": "等連線等到逾時。",
+    "candidatesTitle": "收集到嘅 ICE 候選",
+    "noCandidates": "暫時未有 —— 行一次測試啦。",
+    "candidatesHint": "喺區域網入面，host 候選已經夠 —— 唔使 STUN/TURN。",
+    "loopbackNote": "過到即係呢個 webview 喺本機支援 getUserMedia + WebRTC。打去第二部機仲要睇區域網（AP 隔離 / 防火牆可能會阻住直連媒體）。"
+  },
+  "call": {
+    "start": "打電話",
+    "offlineHint": "打唔到——對方離線",
+    "incoming": "有電話打入",
+    "calling": "撥緊…",
+    "connecting": "連接緊…",
+    "inCall": "通話中",
+    "accept": "聽",
+    "decline": "唔聽",
+    "cancel": "取消",
+    "hangup": "收線",
+    "mute": "靜音",
+    "unmute": "解除靜音",
+    "cameraOff": "閂鏡頭",
+    "cameraOn": "開鏡頭",
+    "audioOnly": "凈係語音",
+    "unknown": "唔知邊個",
+    "declined": "對方唔聽",
+    "busy": "對方講緊電話",
+    "failed": "通話失敗",
+    "experimental": "實驗",
+    "experimentalHint": "實驗功能——通話可能唔穩定",
+    "voice": "語音通話",
+    "video": "視像通話",
+    "ringtone": {
+      "classic": "經典鈴聲",
+      "oldPhone": "舊式電話",
+      "digital": "電子鈴聲",
+      "marimba": "馬林巴"
+    }
   },
   "diagnostics": {
     "trigger": "診斷 / 尋人",

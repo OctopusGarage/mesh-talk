@@ -186,7 +186,13 @@
     "retention": "保留时长",
     "retentionDesc": "自动删除本机上早于此时长的消息。",
     "retentionForever": "永久",
-    "retentionDays": "{{count}} 天"
+    "retentionDays": "{{count}} 天",
+    "sectionExperimental": "实验功能",
+    "calls": "语音与视频通话",
+    "callsDesc": "启用 1:1 语音和视频通话。实验性：仅限局域网，可能不稳定。",
+    "ringtone": "铃声",
+    "ringtoneDesc": "来电时的提示音。选择即可试听。",
+    "ringtonePreview": "试听"
   },
   "search": {
     "title": "搜索消息",
@@ -247,6 +253,61 @@
     "rekey": "重置密钥",
     "rekeyed": "已重置密钥。新账户：{{id}}…",
     "rekeyFailed": "重置密钥失败：{{error}}"
+  },
+  "webrtcTest": {
+    "trigger": "语音/视频自检",
+    "title": "语音/视频自检",
+    "description": "检测当前版本的 webview 能否使用摄像头、麦克风和 WebRTC。请在每个平台（macOS、Windows、Linux）各运行一次。",
+    "run": "运行自检",
+    "running": "检测中…",
+    "localLabel": "你的摄像头",
+    "remoteLabel": "回环回显",
+    "step": {
+      "capture": "摄像头 + 麦克风采集",
+      "devices": "媒体设备",
+      "connect": "WebRTC 对等连接",
+      "media": "媒体流回显"
+    },
+    "captureDetail": "{{video}} 路视频，{{audio}} 路音频",
+    "devicesDetail": "{{cameras}} 个摄像头，{{mics}} 个麦克风",
+    "connectDetail": "对等连接已建立（host 候选，无 STUN/TURN）。",
+    "mediaDetail": "实时媒体帧正通过 WebRTC 传输。",
+    "timeout": "等待连接超时。",
+    "candidatesTitle": "已收集的 ICE 候选",
+    "noCandidates": "暂无 —— 请运行自检。",
+    "candidatesHint": "在局域网内，host 候选就足够了 —— 无需 STUN/TURN。",
+    "loopbackNote": "通过即说明此 webview 在本机支持 getUserMedia + WebRTC。能否呼叫其他设备还取决于局域网（AP 隔离 / 防火墙可能阻断直连媒体）。"
+  },
+  "call": {
+    "start": "发起通话",
+    "offlineHint": "无法通话——对方离线",
+    "incoming": "来电",
+    "calling": "正在呼叫…",
+    "connecting": "连接中…",
+    "inCall": "通话中",
+    "accept": "接听",
+    "decline": "拒绝",
+    "cancel": "取消",
+    "hangup": "挂断",
+    "mute": "静音",
+    "unmute": "取消静音",
+    "cameraOff": "关闭摄像头",
+    "cameraOn": "打开摄像头",
+    "audioOnly": "仅语音",
+    "unknown": "未知",
+    "declined": "对方已拒绝",
+    "busy": "对方忙线中",
+    "failed": "通话失败",
+    "experimental": "实验性",
+    "experimentalHint": "实验性功能——通话可能不稳定",
+    "voice": "语音通话",
+    "video": "视频通话",
+    "ringtone": {
+      "classic": "经典铃声",
+      "oldPhone": "老式电话",
+      "digital": "数码铃声",
+      "marimba": "马林巴"
+    }
   },
   "diagnostics": {
     "trigger": "诊断 / 发现",

@@ -186,7 +186,13 @@
     "retention": "Keep history for",
     "retentionDesc": "Automatically erase messages older than this from this device.",
     "retentionForever": "Forever",
-    "retentionDays": "{{count}} days"
+    "retentionDays": "{{count}} days",
+    "sectionExperimental": "Experimental",
+    "calls": "Voice & video calls",
+    "callsDesc": "Enable 1:1 voice and video calls. Experimental: LAN-only and may be unreliable.",
+    "ringtone": "Ringtone",
+    "ringtoneDesc": "The sound for incoming calls. Pick one to preview it.",
+    "ringtonePreview": "Preview"
   },
   "search": {
     "title": "Search messages",
@@ -247,6 +253,61 @@
     "rekey": "Re-key",
     "rekeyed": "Re-keyed. New account: {{id}}…",
     "rekeyFailed": "Re-key failed: {{error}}"
+  },
+  "webrtcTest": {
+    "trigger": "Voice / video self-test",
+    "title": "Voice / video self-test",
+    "description": "Check whether this build's webview can use the camera, microphone, and WebRTC. Run it once on each platform (macOS, Windows, Linux).",
+    "run": "Run self-test",
+    "running": "Testing…",
+    "localLabel": "Your camera",
+    "remoteLabel": "Loopback echo",
+    "step": {
+      "capture": "Camera + microphone capture",
+      "devices": "Media devices",
+      "connect": "WebRTC peer connection",
+      "media": "Media stream echo"
+    },
+    "captureDetail": "{{video}} video track(s), {{audio}} audio track(s)",
+    "devicesDetail": "{{cameras}} camera(s), {{mics}} microphone(s)",
+    "connectDetail": "Peer connection established (host candidates, no STUN/TURN).",
+    "mediaDetail": "Live media frames flowing through WebRTC.",
+    "timeout": "Timed out waiting for the connection.",
+    "candidatesTitle": "ICE candidates gathered",
+    "noCandidates": "None yet — run the test.",
+    "candidatesHint": "On a LAN, host candidates are enough — no STUN/TURN needed.",
+    "loopbackNote": "A pass proves this webview supports getUserMedia + WebRTC on this machine. Calling another device additionally depends on the LAN (AP isolation / firewall can block direct media)."
+  },
+  "call": {
+    "start": "Start call",
+    "offlineHint": "Can't call — contact is offline",
+    "incoming": "Incoming call",
+    "calling": "Calling…",
+    "connecting": "Connecting…",
+    "inCall": "In call",
+    "accept": "Accept",
+    "decline": "Decline",
+    "cancel": "Cancel",
+    "hangup": "Hang up",
+    "mute": "Mute",
+    "unmute": "Unmute",
+    "cameraOff": "Turn camera off",
+    "cameraOn": "Turn camera on",
+    "audioOnly": "Audio only",
+    "unknown": "Unknown",
+    "declined": "Call declined",
+    "busy": "Contact is busy",
+    "failed": "Call failed",
+    "experimental": "Experimental",
+    "experimentalHint": "Experimental — calls may be unreliable",
+    "voice": "Voice call",
+    "video": "Video call",
+    "ringtone": {
+      "classic": "Classic ring",
+      "oldPhone": "Old phone",
+      "digital": "Digital",
+      "marimba": "Marimba"
+    }
   },
   "diagnostics": {
     "trigger": "Diagnostics / discovery",

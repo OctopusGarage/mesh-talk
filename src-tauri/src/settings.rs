@@ -47,6 +47,20 @@ pub struct AppSettings {
     /// means keep forever. New field → `#[serde(default)]` for forward-compat.
     #[serde(default)]
     pub retention_days: u32,
+    /// Voice/video calls (experimental, 1:1, LAN-only). Default OFF — the feature is not yet
+    /// reliable, so it is opt-in. `#[serde(default)]` makes a bool default to `false`, which
+    /// is exactly the off-by-default we want, and keeps older `settings.json` forward-compat.
+    #[serde(default)]
+    pub calls_enabled: bool,
+    /// The incoming-call ringtone id (see frontend `lib/ringtones.ts`). A cosmetic UI
+    /// preference; the backend only stores it. Defaults to the classic phone ring.
+    #[serde(default = "default_ringtone")]
+    pub ringtone: String,
+}
+
+/// The default ringtone id (the classic phone ring).
+fn default_ringtone() -> String {
+    "classic".to_string()
 }
 
 /// Default for both toggles (a messenger should run in the background and notify).
@@ -63,6 +77,8 @@ impl Default for AppSettings {
             stay_signed_in: true,
             last_user: None,
             retention_days: 0,
+            calls_enabled: false,
+            ringtone: default_ringtone(),
         }
     }
 }
@@ -167,4 +183,43 @@ pub async fn set_app_settings(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_json_without_the_new_fields_loads_with_defaults() {
+        // A settings.json written by a build BEFORE calls_enabled/ringtone existed must still
+        // load — the missing fields fall back to their defaults rather than failing the whole
+        // parse (which would silently reset every toggle). This is the forward-compat contract.
+        let json = r#"{"minimize_to_tray":true,"notifications":false}"#;
+        let s: AppSettings = serde_json::from_str(json).expect("loads with defaults");
+        assert!(!s.calls_enabled, "calls default OFF");
+        assert_eq!(s.ringtone, "classic", "ringtone defaults to classic");
+        assert!(s.minimize_to_tray);
+        assert!(!s.notifications);
+        assert_eq!(s.retention_days, 0);
+        assert!(s.stay_signed_in);
+    }
+
+    #[test]
+    fn settings_round_trip_through_json_preserves_calls_and_ringtone() {
+        let s = AppSettings {
+            calls_enabled: true,
+            ringtone: "marimba".to_string(),
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&s).expect("serializes");
+        let back: AppSettings = serde_json::from_str(&json).expect("deserializes");
+        assert!(back.calls_enabled);
+        assert_eq!(back.ringtone, "marimba");
+    }
+
+    #[test]
+    fn the_default_ringtone_is_classic() {
+        assert_eq!(AppSettings::default().ringtone, "classic");
+        assert!(!AppSettings::default().calls_enabled);
+    }
 }

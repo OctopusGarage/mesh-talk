@@ -181,6 +181,14 @@ export const chat = {
   rekeyAccount: () => invoke<string>("rekey_account"),
 };
 
+/** Real-time call signaling: send an opaque WebRTC payload (SDP / "bye") to a specific
+ * device (peer user_id). Device-addressed + ephemeral; inbound signals arrive as the
+ * `call-signal` Tauri event (see store/calls.ts). */
+export const calls = {
+  signal: (target: string, payload: string) =>
+    invoke<void>("send_call_signal", { target, payload }),
+};
+
 export const diag = {
   getPeers: () => invoke<DiagPeerInfo[]>("diag_get_peers"),
   networkInfo: () => invoke<DiagNetworkInfo>("diag_network_info"),

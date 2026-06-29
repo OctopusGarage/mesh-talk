@@ -2,15 +2,18 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
+import { CallDialog } from "./CallDialog";
 import { chat as chatApi } from "@/lib/api";
 import { ensureNotificationPermission } from "@/lib/notify";
 import { useChat } from "@/store/chat";
 import { usePresence } from "@/store/presence";
+import { useSettings } from "@/store/settings";
 
 export function ChatApp() {
   const { t } = useTranslation();
   const start = useChat((s) => s.start);
   const startPresence = usePresence((s) => s.start);
+  const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
   const clearError = useChat((s) => s.clearError);
   // Total unread across all conversations → the OS app-icon badge (dock/taskbar count).
@@ -24,7 +27,8 @@ export function ChatApp() {
   // work out of the box (rather than requiring the user to enable it in System Settings).
   useEffect(() => {
     void ensureNotificationPermission();
-  }, []);
+    void loadSettings();
+  }, [loadSettings]);
 
   useEffect(() => {
     chatApi.setBadge(totalUnread).catch(() => {});
@@ -49,6 +53,7 @@ export function ChatApp() {
     >
       <Sidebar />
       <ConversationView />
+      <CallDialog />
       {error && (
         <div
           role="alert"

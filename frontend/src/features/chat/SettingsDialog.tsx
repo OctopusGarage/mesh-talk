@@ -2,12 +2,15 @@ import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bell,
+  BellRing,
+  FlaskConical,
   FolderOpen,
   History,
   KeyRound,
   Languages,
   MinusSquare,
   Palette,
+  Play,
   Rocket,
   Settings,
 } from "lucide-react";
@@ -22,7 +25,16 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
 import { settings as settingsApi } from "@/lib/api";
+import { useSettings } from "@/store/settings";
+import {
+  DEFAULT_RINGTONE,
+  RINGTONE_IDS,
+  asRingtoneId,
+  previewRingtone,
+  type RingtoneId,
+} from "@/lib/ringtones";
 import {
   resolveLanguage,
   setLanguage,
@@ -106,6 +118,8 @@ export function SettingsDialog() {
   const [downloadDir, setDownloadDir] = useState("");
   const [staySignedIn, setStaySignedIn] = useState(true);
   const [retentionDays, setRetentionDays] = useState(0);
+  const [callsEnabled, setCallsEnabled] = useState(false);
+  const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
 
   // Load current state whenever the dialog opens.
   useEffect(() => {
@@ -117,6 +131,8 @@ export function SettingsDialog() {
         setDownloadDir(s.download_dir);
         setStaySignedIn(s.stay_signed_in);
         setRetentionDays(s.retention_days);
+        setCallsEnabled(s.calls_enabled);
+        setRingtone(asRingtoneId(s.ringtone));
       },
       () => {},
     );
@@ -162,6 +178,27 @@ export function SettingsDialog() {
     void settingsApi
       .get()
       .then((cur) => settingsApi.set({ ...cur, retention_days: days }))
+      .catch(() => {});
+  };
+  // Opt into the experimental calls feature. Update the reactive store immediately so the
+  // conversation header's call buttons appear/disappear without waiting for a reload.
+  const onCalls = (v: boolean) => {
+    setCallsEnabled(v);
+    useSettings.getState().setCallsEnabled(v);
+    void settingsApi
+      .get()
+      .then((cur) => settingsApi.set({ ...cur, calls_enabled: v }))
+      .catch(() => {});
+  };
+  // Pick a ringtone: persist it, reflect it in the reactive store, and play a preview so the
+  // user hears the choice immediately.
+  const onRingtone = (id: RingtoneId) => {
+    setRingtone(id);
+    useSettings.getState().setRingtone(id);
+    previewRingtone(id);
+    void settingsApi
+      .get()
+      .then((cur) => settingsApi.set({ ...cur, ringtone: id }))
       .catch(() => {});
   };
   const onLaunch = async (v: boolean) => {
@@ -373,6 +410,63 @@ export function SettingsDialog() {
                 </select>
               }
             />
+          </Section>
+
+          <Section title={t("settings.sectionExperimental")}>
+            <Row
+              id="setting-calls"
+              icon={<FlaskConical className="h-4 w-4 text-amber-500" />}
+              title={t("settings.calls")}
+              desc={t("settings.callsDesc")}
+              control={
+                <div className="flex flex-col items-end gap-1.5">
+                  <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                    {t("call.experimental")}
+                  </Badge>
+                  <Switch
+                    id="setting-calls"
+                    checked={callsEnabled}
+                    onCheckedChange={onCalls}
+                    aria-label={t("settings.calls")}
+                  />
+                </div>
+              }
+            />
+            {callsEnabled && (
+              <Row
+                id="setting-ringtone"
+                icon={<BellRing className="h-4 w-4" />}
+                title={t("settings.ringtone")}
+                desc={t("settings.ringtoneDesc")}
+                control={
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => previewRingtone(ringtone)}
+                      title={t("settings.ringtonePreview")}
+                      aria-label={t("settings.ringtonePreview")}
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                    </Button>
+                    <select
+                      id="setting-ringtone"
+                      data-testid="settings-ringtone-select"
+                      value={ringtone}
+                      onChange={(e) => onRingtone(e.target.value as RingtoneId)}
+                      className={SELECT_CLASS}
+                      aria-label={t("settings.ringtone")}
+                    >
+                      {RINGTONE_IDS.map((id) => (
+                        <option key={id} value={id}>
+                          {t(`call.ringtone.${id}`)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                }
+              />
+            )}
           </Section>
         </div>
       </DialogContent>

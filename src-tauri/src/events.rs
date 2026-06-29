@@ -63,6 +63,8 @@ pub const EVENT_FILE_RECEIVED: &str = "file-received";
 pub const EVENT_FILE_PROGRESS: &str = "file-progress";
 /// A peer propagated their avatar (a signed profile) to us.
 pub const EVENT_PROFILE_RECEIVED: &str = "profile-received";
+/// An inbound call signal (WebRTC SDP / "bye") from an authenticated peer. Ephemeral.
+pub const EVENT_CALL_SIGNAL: &str = "call-signal";
 
 #[derive(serde::Serialize, Clone)]
 pub struct ProfileReceivedEvent {
@@ -86,6 +88,30 @@ pub fn emit_profile_received<R: Runtime>(
     };
     if let Err(e) = app_handle.emit(EVENT_PROFILE_RECEIVED, event) {
         log::error!("Failed to emit profile event: {e}");
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct CallSignalEvent {
+    /// The AUTHENTICATED sender device user_id (bound to the Noise channel, not self-asserted).
+    pub from: String,
+    /// The opaque signaling JSON the peer's frontend produced (call id, kind, SDP).
+    pub payload: String,
+}
+
+/// Emit an inbound call signal to the frontend. The payload is the peer's signaling JSON,
+/// passed through verbatim (JSON is valid UTF-8). Ephemeral — nothing is persisted.
+pub fn emit_call_signal<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    from: String,
+    payload: Vec<u8>,
+) {
+    let event = CallSignalEvent {
+        from,
+        payload: String::from_utf8_lossy(&payload).into_owned(),
+    };
+    if let Err(e) = app_handle.emit(EVENT_CALL_SIGNAL, event) {
+        log::error!("Failed to emit call-signal event: {e}");
     }
 }
 

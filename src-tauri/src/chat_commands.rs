@@ -167,6 +167,25 @@ pub async fn send_dm(
         .map_err(CommandError::from)
 }
 
+/// Send an opaque WebRTC call signal (SDP offer/answer / "bye") to a specific device
+/// `target` (a peer user_id). Ephemeral and device-addressed — never logged, never an
+/// account fan-out. Errors if the peer is offline/unknown (a live call needs both online).
+#[tauri::command]
+pub async fn send_call_signal(
+    state: tauri::State<'_, NodeState>,
+    target: String,
+    payload: String,
+) -> Result<(), CommandError> {
+    let node = {
+        let guard = state.0.lock().await;
+        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        rt.handle()
+    };
+    node.send_call_signal(&target, payload.as_bytes())
+        .await
+        .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub async fn history(
     state: tauri::State<'_, NodeState>,

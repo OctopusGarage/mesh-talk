@@ -38,6 +38,7 @@ import { SearchDialog } from "./SearchDialog";
 import { FilesTray } from "./FilesTray";
 import { LinkDeviceDialog } from "./LinkDeviceDialog";
 import { DiagnosticsDialog } from "./DiagnosticsDialog";
+import { WebRtcTestDialog } from "./WebRtcTestDialog";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ProfileDialog } from "./ProfileDialog";
@@ -46,6 +47,7 @@ import { useAuth } from "@/store/auth";
 import { chat, diag } from "@/lib/api";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { convKey, useChat, type Conversation } from "@/store/chat";
+import { useSettings } from "@/store/settings";
 import {
   presenceLabel,
   presenceStatus,
@@ -270,6 +272,8 @@ function UtilityMenu() {
   const theme = useTheme((s) => s.theme);
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useAuth((s) => s.logout);
+  // The WebRTC self-test only makes sense for the calls feature, so it rides the same gate.
+  const callsEnabled = useSettings((s) => s.callsEnabled);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -296,6 +300,7 @@ function UtilityMenu() {
           <div className="flex items-center gap-0.5">
             <LinkDeviceDialog />
             <DiagnosticsDialog />
+            {callsEnabled && <WebRtcTestDialog />}
             <SettingsDialog />
             <AboutDialog />
           </div>

@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  CallSignalEvent,
   ChannelMessageEvent,
   DmReceivedEvent,
   FileProgressEvent,
@@ -14,6 +15,7 @@ export function subscribeNodeEvents(handlers: {
   onFile?: (e: FileReceivedEvent) => void;
   onFileProgress?: (e: FileProgressEvent) => void;
   onProfile?: (e: ProfileReceivedEvent) => void;
+  onCallSignal?: (e: CallSignalEvent) => void;
 }): () => void {
   const unlisteners: Promise<UnlistenFn>[] = [];
   if (handlers.onDm) {
@@ -46,6 +48,13 @@ export function subscribeNodeEvents(handlers: {
     unlisteners.push(
       listen<ProfileReceivedEvent>("profile-received", (e) =>
         handlers.onProfile!(e.payload),
+      ),
+    );
+  }
+  if (handlers.onCallSignal) {
+    unlisteners.push(
+      listen<CallSignalEvent>("call-signal", (e) =>
+        handlers.onCallSignal!(e.payload),
       ),
     );
   }

@@ -146,6 +146,10 @@ export interface AppSettings {
   last_user: string | null;
   /** Keep chat history for at most this many days (0 = forever); older messages are erased. */
   retention_days: number;
+  /** Voice/video calls (experimental, 1:1, LAN-only). Default off; opt-in via Settings. */
+  calls_enabled: boolean;
+  /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */
+  ringtone: string;
 }
 
 // --- Environment / About (src-tauri/src/diagnostics.rs) ---
@@ -226,4 +230,9 @@ export interface FileProgressEvent {
 export interface ProfileReceivedEvent {
   account_id: string;
   avatar: string | null; // data-URL, or null when the peer cleared their avatar
+}
+
+export interface CallSignalEvent {
+  from: string; // authenticated sender device user_id (bound to the Noise channel)
+  payload: string; // opaque signaling JSON (call id, kind, SDP) — see store/calls.ts
 }

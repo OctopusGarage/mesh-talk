@@ -108,6 +108,12 @@ impl Node {
             self.serve_pairing(&mut channel, req).await;
             return;
         }
+        // A call signal (SDP/bye): surface it live (bound to the authenticated peer) and
+        // close — it is ephemeral and never enters the sync/event-log path.
+        if let Some(signal) = crate::node::call::CallSignal::decode(&first) {
+            self.serve_call_signal(&channel, signal);
+            return;
+        }
         // The first frame may be a Request, which makes serve_wire_bytes await the peer's
         // streamed have-chunks — so it needs the same idle timeout as the loop, or a peer that
         // sends one Request then stalls would pin this task (and its connection permit) forever.

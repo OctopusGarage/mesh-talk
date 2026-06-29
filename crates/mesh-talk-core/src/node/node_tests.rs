@@ -127,6 +127,109 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
 }
 
 #[tokio::test]
+async fn send_call_signal_to_unknown_peer_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let roster = Arc::new(Mutex::new(Roster::default())); // empty
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        roster,
+        tx,
+        ch_tx,
+        file_tx,
+        &dir.path().join("me.log"),
+        &dir.path().join("me-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let err = node.send_call_signal("nope", b"{}").await.unwrap_err();
+    assert!(matches!(err, NodeError::UnknownPeer(u) if u == "nope"));
+}
+
+#[tokio::test]
+async fn two_nodes_exchange_a_call_signal_and_bind_from_to_the_authenticated_peer() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let alice_uid = alice.public().user_id();
+    let bob_uid = bob.public().user_id();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = listener.local_addr().unwrap();
+
+    let alice_roster = seed_roster(&bob, "Bob", bob_addr.port(), &alice_uid);
+    let bob_roster = seed_roster(&alice, "Alice", 4000, &bob_uid);
+
+    let dir = tempfile::tempdir().unwrap();
+    let (alice_tx, _alice_rx) = mpsc::unbounded_channel();
+    // Bob's DM receiver: a call signal must NOT surface as a DM (it never enters the log).
+    let (bob_tx, mut bob_dm_rx) = mpsc::unbounded_channel();
+    let (a_ch_tx, _a_ch_rx) = mpsc::unbounded_channel();
+    let (b_ch_tx, _b_ch_rx) = mpsc::unbounded_channel();
+    let (a_file_tx, _a_file_rx) = mpsc::unbounded_channel();
+    let (b_file_tx, _b_file_rx) = mpsc::unbounded_channel();
+    let alice_node = Node::open(
+        alice,
+        alice_roster,
+        alice_tx,
+        a_ch_tx,
+        a_file_tx,
+        &dir.path().join("alice.log"),
+        &dir.path().join("alice-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let bob_node = Node::open(
+        bob,
+        bob_roster,
+        bob_tx,
+        b_ch_tx,
+        b_file_tx,
+        &dir.path().join("bob.log"),
+        &dir.path().join("bob-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let mut bob_call_rx = bob_node
+        .take_call_signal_receiver()
+        .expect("call-signal receiver is claimable once");
+
+    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+
+    // The payload self-asserts a DIFFERENT sender ("from": all-f's). The receiver must IGNORE
+    // it and bind `from` to the cryptographically-authenticated Noise peer (Alice).
+    let spoofed = "f".repeat(32);
+    let payload = format!(r#"{{"kind":"offer","sdp":"v=0","from":"{spoofed}"}}"#);
+    alice_node
+        .send_call_signal(&bob_uid, payload.as_bytes())
+        .await
+        .expect("send_call_signal");
+
+    let signal = tokio::time::timeout(Duration::from_secs(5), bob_call_rx.recv())
+        .await
+        .expect("bob received a call signal within 5s")
+        .expect("call-signal channel open");
+    // Authenticated binding: from is Alice's real user_id, NOT the spoofed payload field.
+    assert_eq!(signal.from, alice_uid);
+    assert_ne!(signal.from, spoofed);
+    // Payload is delivered opaquely, byte-for-byte.
+    assert_eq!(signal.payload, payload.as_bytes());
+
+    // It is ephemeral: nothing surfaced on the DM path, and Bob's event log stayed empty.
+    assert!(
+        bob_dm_rx.try_recv().is_err(),
+        "a call signal must not surface as a DM"
+    );
+    let conv = dm_conversation_id(&alice_node.identity.public(), &bob_node.identity.public());
+    assert!(
+        bob_node.log.lock().unwrap().events(&conv).is_empty(),
+        "a call signal must not be appended to the event log"
+    );
+}
+
+#[tokio::test]
 async fn offline_dm_delivered_via_post_office_over_loopback() {
     // Alice sends Bob a DM while Bob is offline; a post office holds it; Bob
     // drains it and decrypts — all in-process over loopback TCP.

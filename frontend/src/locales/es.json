@@ -182,7 +182,13 @@
     "retention": "Conservar historial",
     "retentionDesc": "Borra automáticamente de este dispositivo los mensajes más antiguos que esto.",
     "retentionForever": "Para siempre",
-    "retentionDays": "{{count}} días"
+    "retentionDays": "{{count}} días",
+    "sectionExperimental": "Experimental",
+    "calls": "Llamadas de voz y vídeo",
+    "callsDesc": "Activa las llamadas de voz y vídeo 1:1. Experimental: solo LAN y puede ser poco fiable.",
+    "ringtone": "Tono de llamada",
+    "ringtoneDesc": "El sonido de las llamadas entrantes. Elige uno para escucharlo.",
+    "ringtonePreview": "Escuchar"
   },
   "search": {
     "title": "Buscar mensajes",
@@ -243,6 +249,61 @@
     "rekey": "Regenerar claves",
     "rekeyed": "Claves regeneradas. Nueva cuenta: {{id}}…",
     "rekeyFailed": "Error al regenerar claves: {{error}}"
+  },
+  "webrtcTest": {
+    "trigger": "Autodiagnóstico de voz/vídeo",
+    "title": "Autodiagnóstico de voz/vídeo",
+    "description": "Comprueba si el webview de esta compilación puede usar la cámara, el micrófono y WebRTC. Ejecútalo una vez en cada plataforma (macOS, Windows, Linux).",
+    "run": "Ejecutar diagnóstico",
+    "running": "Probando…",
+    "localLabel": "Tu cámara",
+    "remoteLabel": "Eco de bucle",
+    "step": {
+      "capture": "Captura de cámara y micrófono",
+      "devices": "Dispositivos multimedia",
+      "connect": "Conexión entre pares WebRTC",
+      "media": "Eco del flujo multimedia"
+    },
+    "captureDetail": "{{video}} pista(s) de vídeo, {{audio}} pista(s) de audio",
+    "devicesDetail": "{{cameras}} cámara(s), {{mics}} micrófono(s)",
+    "connectDetail": "Conexión entre pares establecida (candidatos host, sin STUN/TURN).",
+    "mediaDetail": "Fotogramas multimedia fluyendo por WebRTC.",
+    "timeout": "Se agotó el tiempo de espera de la conexión.",
+    "candidatesTitle": "Candidatos ICE recopilados",
+    "noCandidates": "Ninguno todavía: ejecuta la prueba.",
+    "candidatesHint": "En una LAN, los candidatos host bastan: no se necesita STUN/TURN.",
+    "loopbackNote": "Si pasa, demuestra que este webview admite getUserMedia + WebRTC en esta máquina. Llamar a otro dispositivo depende además de la LAN (el aislamiento de AP o el firewall pueden bloquear el medio directo)."
+  },
+  "call": {
+    "start": "Iniciar llamada",
+    "offlineHint": "No se puede llamar: el contacto está desconectado",
+    "incoming": "Llamada entrante",
+    "calling": "Llamando…",
+    "connecting": "Conectando…",
+    "inCall": "En llamada",
+    "accept": "Aceptar",
+    "decline": "Rechazar",
+    "cancel": "Cancelar",
+    "hangup": "Colgar",
+    "mute": "Silenciar",
+    "unmute": "Activar micrófono",
+    "cameraOff": "Apagar cámara",
+    "cameraOn": "Encender cámara",
+    "audioOnly": "Solo audio",
+    "unknown": "Desconocido",
+    "declined": "Llamada rechazada",
+    "busy": "El contacto está ocupado",
+    "failed": "La llamada falló",
+    "experimental": "Experimental",
+    "experimentalHint": "Experimental: las llamadas pueden ser poco fiables",
+    "voice": "Llamada de voz",
+    "video": "Videollamada",
+    "ringtone": {
+      "classic": "Clásico",
+      "oldPhone": "Teléfono antiguo",
+      "digital": "Digital",
+      "marimba": "Marimba"
+    }
   },
   "diagnostics": {
     "trigger": "Diagnóstico / descubrimiento",

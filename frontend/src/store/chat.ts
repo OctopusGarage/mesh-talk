@@ -4,6 +4,7 @@ import { errorMessage, sendFailReason, type SendFailReason } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import { notifyInbound } from "@/lib/notify";
 import { useAvatars } from "@/store/avatars";
+import { useCalls } from "@/store/calls";
 import { useTransfers } from "@/store/transfers";
 import type {
   AccountInfo,
@@ -427,12 +428,14 @@ export const useChat = create<ChatState>((set, get) => ({
       onFileProgress: (e) => useTransfers.getState().applyProgress(e),
       onProfile: (e) =>
         useAvatars.getState().mergeReceived(e.account_id, e.avatar),
+      onCallSignal: (e) => useCalls.getState().onSignal(e),
     });
 
     return () => {
       cancelled = true;
       clearInterval(roster);
       unlisten();
+      useCalls.getState().teardown();
     };
   },
 

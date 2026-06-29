@@ -186,7 +186,13 @@
     "retention": "保存期間",
     "retentionDesc": "この期間より古いメッセージをこの端末から自動的に消去します。",
     "retentionForever": "無期限",
-    "retentionDays": "{{count}}日"
+    "retentionDays": "{{count}}日",
+    "sectionExperimental": "実験的機能",
+    "calls": "音声・ビデオ通話",
+    "callsDesc": "1:1 の音声・ビデオ通話を有効にします。実験的機能：LAN 限定で、不安定な場合があります。",
+    "ringtone": "着信音",
+    "ringtoneDesc": "着信時に鳴る音。選ぶと試聴できます。",
+    "ringtonePreview": "試聴"
   },
   "search": {
     "title": "メッセージを検索",
@@ -247,6 +253,61 @@
     "rekey": "鍵を再生成",
     "rekeyed": "鍵を再生成しました。新しいアカウント：{{id}}…",
     "rekeyFailed": "鍵の再生成に失敗しました：{{error}}"
+  },
+  "webrtcTest": {
+    "trigger": "音声・ビデオの自己テスト",
+    "title": "音声・ビデオの自己テスト",
+    "description": "このビルドの webview がカメラ・マイク・WebRTC を使えるか確認します。各プラットフォーム（macOS、Windows、Linux）で一度ずつ実行してください。",
+    "run": "自己テストを実行",
+    "running": "テスト中…",
+    "localLabel": "あなたのカメラ",
+    "remoteLabel": "ループバック",
+    "step": {
+      "capture": "カメラ・マイクの取得",
+      "devices": "メディアデバイス",
+      "connect": "WebRTC ピア接続",
+      "media": "メディアストリームの折り返し"
+    },
+    "captureDetail": "映像トラック {{video}} 本、音声トラック {{audio}} 本",
+    "devicesDetail": "カメラ {{cameras}} 台、マイク {{mics}} 台",
+    "connectDetail": "ピア接続を確立しました（host 候補のみ、STUN/TURN なし）。",
+    "mediaDetail": "WebRTC を通じてメディアフレームが流れています。",
+    "timeout": "接続待ちがタイムアウトしました。",
+    "candidatesTitle": "収集された ICE 候補",
+    "noCandidates": "まだありません — テストを実行してください。",
+    "candidatesHint": "LAN では host 候補だけで十分です — STUN/TURN は不要です。",
+    "loopbackNote": "成功すれば、この webview が本機で getUserMedia + WebRTC をサポートしていることを示します。他の端末への発信は LAN にも依存します（AP 分離 / ファイアウォールが直接メディアを遮断する場合があります）。"
+  },
+  "call": {
+    "start": "通話を開始",
+    "offlineHint": "通話できません——相手がオフラインです",
+    "incoming": "着信",
+    "calling": "呼び出し中…",
+    "connecting": "接続中…",
+    "inCall": "通話中",
+    "accept": "応答",
+    "decline": "拒否",
+    "cancel": "キャンセル",
+    "hangup": "終了",
+    "mute": "ミュート",
+    "unmute": "ミュート解除",
+    "cameraOff": "カメラをオフ",
+    "cameraOn": "カメラをオン",
+    "audioOnly": "音声のみ",
+    "unknown": "不明",
+    "declined": "通話が拒否されました",
+    "busy": "相手は通話中です",
+    "failed": "通話に失敗しました",
+    "experimental": "実験的",
+    "experimentalHint": "実験的機能——通話は不安定な場合があります",
+    "voice": "音声通話",
+    "video": "ビデオ通話",
+    "ringtone": {
+      "classic": "クラシック",
+      "oldPhone": "固定電話",
+      "digital": "デジタル",
+      "marimba": "マリンバ"
+    }
   },
   "diagnostics": {
     "trigger": "診断 / 検出",

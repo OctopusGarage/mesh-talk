@@ -139,6 +139,7 @@ impl NodeRuntime {
         on_channel: impl Fn(crate::node::channel::ReceivedChannelMessage) + Send + 'static,
         on_file: impl Fn(crate::node::filebook::ReceivedFile) + Send + 'static,
         on_profile: impl Fn(crate::node::ReceivedProfile) + Send + 'static,
+        on_call_signal: impl Fn(crate::node::ReceivedCallSignal) + Send + 'static,
     ) -> Result<NodeRuntime, RuntimeError> {
         let dir = base_dir.join("accounts").join(account_id);
         std::fs::create_dir_all(&dir)?;
@@ -267,6 +268,14 @@ impl NodeRuntime {
             tasks.push(tokio::spawn(async move {
                 while let Some(p) = profile_rx.recv().await {
                     on_profile(p);
+                }
+            }));
+        }
+        // Forward inbound call signals (WebRTC SDP/bye) to the host app — ephemeral, never logged.
+        if let Some(mut call_signal_rx) = node.take_call_signal_receiver() {
+            tasks.push(tokio::spawn(async move {
+                while let Some(s) = call_signal_rx.recv().await {
+                    on_call_signal(s);
                 }
             }));
         }
@@ -705,6 +714,7 @@ mod tests {
             |_ch| {},
             |_f| {},
             |_p| {},
+            |_s| {},
         )
         .await
         .expect("runtime starts");
@@ -731,6 +741,7 @@ mod tests {
             |_ch| {},
             |_f| {},
             |_p| {},
+            |_s| {},
         )
         .await
         .expect("runtime reopens");
@@ -755,6 +766,7 @@ mod tests {
             |_ch| {},
             |_f| {},
             |_p| {},
+            |_s| {},
         )
         .await
         .expect("runtime starts");

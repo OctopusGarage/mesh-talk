@@ -22,6 +22,7 @@ import {
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
 import { VerifyContactDialog } from "./VerifyContactDialog";
+import { CallButtons } from "./CallDialog";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { TransferBar } from "./TransferBar";
 import { chat as chatApi } from "@/lib/api";
@@ -424,7 +425,10 @@ export function ConversationView() {
           <MembersDialog />
         ) : (
           active.kind === "account" && (
-            <VerifyContactDialog accountId={active.id} name={headerName} />
+            <>
+              <CallButtons accountId={active.id} name={headerName} />
+              <VerifyContactDialog accountId={active.id} name={headerName} />
+            </>
           )
         )}
       </header>

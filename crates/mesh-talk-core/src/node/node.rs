@@ -226,6 +226,14 @@ pub struct Node {
     /// [`Node::take_profile_receiver`].
     pub(in crate::node) profile_incoming: mpsc::UnboundedSender<ReceivedProfile>,
     pub(in crate::node) profile_rx: Mutex<Option<mpsc::UnboundedReceiver<ReceivedProfile>>>,
+    /// Live stream of inbound call signals (WebRTC SDP/bye), surfaced to the app. Like
+    /// `profile_incoming`, the node owns BOTH ends (created in `open_with_account`) so the
+    /// constructor signature is unchanged; the runtime claims the receiver once via
+    /// [`Node::take_call_signal_receiver`]. Ephemeral — never touches the event log.
+    pub(in crate::node) call_signal_incoming:
+        mpsc::UnboundedSender<crate::node::call::ReceivedCallSignal>,
+    pub(in crate::node) call_signal_rx:
+        Mutex<Option<mpsc::UnboundedReceiver<crate::node::call::ReceivedCallSignal>>>,
     /// Profile events we've already surfaced this session (dedup), so re-syncing a peer's
     /// device-pair conversation doesn't re-emit a profile we already applied.
     pub(in crate::node) profiles_emitted: Mutex<HashSet<EventId>>,
@@ -402,12 +410,16 @@ impl Node {
         let media = crate::node::media_store::MediaStore::open(dir)
             .map_err(|e| LogError::Io(std::io::Error::other(format!("media store open: {e}"))))?;
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
+        let (call_signal_tx, call_signal_rx) =
+            mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
         Ok(Arc::new(Self {
             identity,
             account,
             profiles: Mutex::new(profiles),
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
+            call_signal_incoming: call_signal_tx,
+            call_signal_rx: Mutex::new(Some(call_signal_rx)),
             profiles_emitted: Mutex::new(HashSet::new()),
             reaction_cache: Mutex::new(HashMap::new()),
             my_profile: Mutex::new(None),
@@ -465,6 +477,17 @@ impl Node {
         self.profile_rx
             .lock()
             .expect("profile_rx mutex not poisoned")
+            .take()
+    }
+
+    /// Claim the receiver for live inbound call signals (WebRTC SDP/bye). Returns it once;
+    /// later calls return `None` (the runtime takes it exactly once at startup).
+    pub fn take_call_signal_receiver(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::node::call::ReceivedCallSignal>> {
+        self.call_signal_rx
+            .lock()
+            .expect("call_signal_rx mutex not poisoned")
             .take()
     }
 
