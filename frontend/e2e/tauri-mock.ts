@@ -578,6 +578,15 @@ export const test = base.extend({
         for (const listener of listeners[event] ?? []) listener.cb(payload);
       };
 
+      (window as unknown as Record<string, unknown>).__mockSetPresence = (
+        next: Record<
+          string,
+          { online: boolean; last_seen_secs: number | null }
+        >,
+      ) => {
+        Object.assign(presenceMap, next);
+      };
+
       // Inject an inbound message into the store (so a subsequent history reload returns it),
       // mirroring how the real backend persists a received message before emitting its event.
       (window as unknown as Record<string, unknown>).__mockInject = (
