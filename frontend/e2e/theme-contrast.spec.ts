@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
+import { contrastRatio } from "./helpers/ui-audit";
 
 const BOB = "acc_bob_bbbb2222";
 const SENT_URL = "https://sent.example.test";
@@ -50,31 +51,8 @@ test("message text and links stay readable across every theme", async ({
   );
   await expect(page.getByRole("link", { name: RECEIVED_URL })).toBeVisible();
 
-  const results = await page.evaluate(
-    ({ themes, sentUrl, receivedUrl, minContrast }) => {
-      const parseRgb = (value: string) => {
-        const channels = value.match(/[\d.]+/g)?.map(Number);
-        if (!channels || channels.length < 3) {
-          throw new Error(`Cannot parse color: ${value}`);
-        }
-        return channels.slice(0, 3).map((channel) => channel / 255);
-      };
-
-      const luminance = (value: string) => {
-        const [red, green, blue] = parseRgb(value).map((channel) =>
-          channel <= 0.03928
-            ? channel / 12.92
-            : ((channel + 0.055) / 1.055) ** 2.4,
-        );
-        return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-      };
-
-      const contrast = (foreground: string, background: string) => {
-        const fg = luminance(foreground);
-        const bg = luminance(background);
-        return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
-      };
-
+  const checks = await page.evaluate(
+    ({ themes, sentUrl, receivedUrl }) => {
       const applyTheme = (theme: string) => {
         const root = document.documentElement;
         const isPalette = ["argentina", "barcelona", "messi"].includes(theme);
@@ -115,18 +93,7 @@ test("message text and links stay readable across every theme", async ({
           bubbleForLink(receivedUrl);
 
         const sentBubbleStyle = getComputedStyle(sentBubble);
-        const sentTextContrast = contrast(
-          sentBubbleStyle.color,
-          sentBubbleStyle.backgroundColor,
-        );
-        const sentLinkContrast = contrast(
-          getComputedStyle(sentLink).color,
-          sentBubbleStyle.backgroundColor,
-        );
-        const receivedLinkContrast = contrast(
-          getComputedStyle(receivedLink).color,
-          getComputedStyle(receivedBubble).backgroundColor,
-        );
+        const receivedBubbleStyle = getComputedStyle(receivedBubble);
 
         const logRect = log.getBoundingClientRect();
         const bodyOverflows =
@@ -139,17 +106,13 @@ test("message text and links stay readable across every theme", async ({
 
         return {
           theme,
-          sentTextContrast,
-          sentLinkContrast,
-          receivedLinkContrast,
+          sentTextColor: sentBubbleStyle.color,
+          sentBubbleBackground: sentBubbleStyle.backgroundColor,
+          sentLinkColor: getComputedStyle(sentLink).color,
+          receivedLinkColor: getComputedStyle(receivedLink).color,
+          receivedBubbleBackground: receivedBubbleStyle.backgroundColor,
           bodyOverflows,
           bubbleOverflows,
-          pass:
-            sentTextContrast >= minContrast &&
-            sentLinkContrast >= minContrast &&
-            receivedLinkContrast >= minContrast &&
-            !bodyOverflows &&
-            !bubbleOverflows,
         };
       });
     },
@@ -157,14 +120,28 @@ test("message text and links stay readable across every theme", async ({
       themes: THEMES,
       sentUrl: SENT_URL,
       receivedUrl: RECEIVED_URL,
-      minContrast: MIN_TEXT_CONTRAST,
     },
   );
 
-  expect(results).toEqual(
+  expect(checks).toEqual(
     expect.arrayContaining(
       THEMES.map((theme) => expect.objectContaining({ theme })),
     ),
   );
-  expect(results.filter((result) => !result.pass)).toEqual([]);
+  for (const check of checks) {
+    expect(
+      contrastRatio(check.sentTextColor, check.sentBubbleBackground),
+      `${check.theme} sent text`,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+    expect(
+      contrastRatio(check.sentLinkColor, check.sentBubbleBackground),
+      `${check.theme} sent link`,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+    expect(
+      contrastRatio(check.receivedLinkColor, check.receivedBubbleBackground),
+      `${check.theme} received link`,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+    expect(check.bodyOverflows, `${check.theme} body overflow`).toBe(false);
+    expect(check.bubbleOverflows, `${check.theme} bubble overflow`).toBe(false);
+  }
 });
