@@ -25,6 +25,7 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   for (const id of [
     "open-profile",
     "sidebar-overflow",
+    `conversation-rename-${BOB.account}`,
     `conversation-pin-${BOB.account}`,
   ]) {
     await expectMinTargetSize(page.getByTestId(id), 32, id);
