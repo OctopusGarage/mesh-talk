@@ -75,4 +75,5 @@ coverage/
 # Playwright
 frontend/playwright-report/
 frontend/test-results/
+.worktrees/
 docs/superpowers/
