@@ -277,7 +277,7 @@ export function Composer({
           <div
             data-testid="emoji-picker"
             data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 max-h-72 w-64 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
+            className="absolute bottom-full left-0 mb-2 max-h-72 w-64 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
           >
             <div className="grid grid-cols-10 gap-0.5">
               {EMOJIS.map((e) => (
@@ -286,7 +286,7 @@ export function Composer({
                   type="button"
                   data-testid={`emoji-option-${e}`}
                   onClick={() => insertEmoji(e)}
-                  className="rounded-md p-1 text-lg leading-none hover:bg-accent"
+                  className="rounded-md p-1 text-lg leading-none hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-label={t("composer.insertEmoji", { emoji: e })}
                 >
                   {e}
@@ -300,7 +300,7 @@ export function Composer({
           <div
             data-testid="sticker-panel"
             data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 max-h-72 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
+            className="absolute bottom-full left-0 mb-2 max-h-72 w-80 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
           >
             <div className="grid grid-cols-5 gap-1">
               {STICKERS.map((s) => (
@@ -333,7 +333,7 @@ export function Composer({
           <div
             data-testid="screenshot-menu"
             data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 w-56 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border bg-popover p-1 shadow-elevation"
+            className="absolute bottom-full left-0 mb-2 w-56 max-w-full overflow-hidden rounded-xl border bg-popover p-1 shadow-elevation"
           >
             <button
               type="button"
