@@ -1,4 +1,4 @@
-import { test } from "./tauri-mock";
+import { expect, test } from "./tauri-mock";
 import { enterChat, BOB, CAROL } from "./helpers/session";
 import {
   expectElementsWithin,
@@ -32,6 +32,14 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   }
 
   await expectVisibleFocus(page, page.getByTestId("sidebar-overflow"));
+  await expectVisibleFocus(
+    page,
+    page.getByTestId(`conversation-rename-${BOB.account}`),
+  );
+  await expectVisibleFocus(
+    page,
+    page.getByTestId(`conversation-pin-${BOB.account}`),
+  );
   await expectVisibleFocus(
     page,
     page.getByTestId(`conversation-row-${BOB.account}`),
@@ -71,6 +79,10 @@ test("stranded prompt dismiss target meets interaction invariants", async ({
     page.getByTestId("stranded-dismiss"),
     32,
     "stranded-dismiss",
+  );
+  await expect(page.getByTestId("stranded-dismiss")).toHaveAttribute(
+    "aria-label",
+    "Dismiss",
   );
   await expectVisibleFocus(page, page.getByTestId("stranded-dismiss"));
 });

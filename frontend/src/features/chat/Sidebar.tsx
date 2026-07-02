@@ -706,6 +706,7 @@ export function Sidebar() {
             data-testid="stranded-dismiss"
             onClick={() => setStrandedDismissed(true)}
             title={t("common.dismiss")}
+            aria-label={t("common.dismiss")}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <X className="h-3.5 w-3.5" />
