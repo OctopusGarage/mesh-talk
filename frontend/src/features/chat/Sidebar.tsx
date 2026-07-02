@@ -150,7 +150,7 @@ function Row({
         onClick={onRename}
         title={t("sidebar.rename")}
         aria-label={t("sidebar.rename")}
-        className="hidden rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground group-hover:block"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-[background-color,color,opacity] hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100"
       >
         <Pencil className="h-3.5 w-3.5" />
       </button>
@@ -161,10 +161,10 @@ function Row({
         title={pinned ? t("sidebar.unpin") : t("sidebar.pin")}
         aria-label={pinned ? t("sidebar.unpin") : t("sidebar.pin")}
         className={cn(
-          "rounded-md p-1 transition-colors hover:bg-accent",
+          "flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-[background-color,color,opacity] hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           pinned
-            ? "text-signal"
-            : "hidden text-muted-foreground hover:text-foreground group-hover:block",
+            ? "text-signal opacity-100"
+            : "text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100",
         )}
       >
         {pinned ? (
@@ -705,7 +705,7 @@ export function Sidebar() {
             data-testid="stranded-dismiss"
             onClick={() => setStrandedDismissed(true)}
             title={t("common.dismiss")}
-            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <X className="h-3.5 w-3.5" />
           </button>
