@@ -150,7 +150,7 @@ function Row({
         onClick={onRename}
         data-testid={`conversation-rename-${conv.id}`}
         title={t("sidebar.rename")}
-        aria-label={t("sidebar.rename")}
+        aria-label={`${t("sidebar.rename")} ${conv.name}`}
         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-[background-color,color,opacity] hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100"
       >
         <Pencil className="h-3.5 w-3.5" />
@@ -160,7 +160,9 @@ function Row({
         onClick={onTogglePin}
         data-testid={`conversation-pin-${conv.id}`}
         title={pinned ? t("sidebar.unpin") : t("sidebar.pin")}
-        aria-label={pinned ? t("sidebar.unpin") : t("sidebar.pin")}
+        aria-label={`${pinned ? t("sidebar.unpin") : t("sidebar.pin")} ${
+          conv.name
+        }`}
         className={cn(
           "flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-[background-color,color,opacity] hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           pinned

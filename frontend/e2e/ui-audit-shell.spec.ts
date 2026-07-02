@@ -32,6 +32,12 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   }
 
   await expectVisibleFocus(page, page.getByTestId("sidebar-overflow"));
+  await expect(
+    page.getByTestId(`conversation-rename-${BOB.account}`),
+  ).toHaveAttribute("aria-label", /bob/i);
+  await expect(
+    page.getByTestId(`conversation-pin-${BOB.account}`),
+  ).toHaveAttribute("aria-label", /bob/i);
   await expectVisibleFocus(
     page,
     page.getByTestId(`conversation-rename-${BOB.account}`),
