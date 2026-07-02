@@ -30,6 +30,10 @@ test("message log actions, menus, and reaction chips stay usable", async ({
   await expect(page.getByTestId("message-context-menu")).toBeVisible();
   const menuBox = await page.getByTestId("message-context-menu").boundingBox();
   expect(menuBox).not.toBeNull();
+  const viewport = page.viewportSize();
+  expect(viewport).not.toBeNull();
   expect(menuBox!.x).toBeGreaterThanOrEqual(0);
   expect(menuBox!.y).toBeGreaterThanOrEqual(0);
+  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(viewport!.height);
 });
