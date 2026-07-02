@@ -163,10 +163,13 @@ pub fn run_tauri() {
                 let _ = window.set_decorations(false);
             }
 
-            // A login-time autostart launch should come up hidden to the tray.
-            if std::env::args().any(|a| a == "--hidden") {
+            // The window is created hidden in `tauri.conf.json`, then explicitly shown only
+            // for normal launches. This avoids a visible flash on Windows autostart where a
+            // visible window would otherwise be created first and hidden later in setup.
+            if !std::env::args().any(|a| a == "--hidden") {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
             }
 
