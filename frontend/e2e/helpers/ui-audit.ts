@@ -25,7 +25,9 @@ export async function expectElementsWithin(
 ) {
   const failures = await page.evaluate(
     ({ childSelector, parentSelector }) => {
-      const parent = document.querySelector(parentSelector) as HTMLElement | null;
+      const parent = document.querySelector(
+        parentSelector,
+      ) as HTMLElement | null;
       if (!parent) return [`missing parent ${parentSelector}`];
       const pr = parent.getBoundingClientRect();
       return Array.from(document.querySelectorAll<HTMLElement>(childSelector))
@@ -171,9 +173,7 @@ export function contrastRatio(foreground: string, background: string) {
   };
   const luminance = (value: string) => {
     const [red, green, blue] = parseRgb(value).map((channel) =>
-      channel <= 0.03928
-        ? channel / 12.92
-        : ((channel + 0.055) / 1.055) ** 2.4,
+      channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
     );
     return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
   };
@@ -182,7 +182,10 @@ export function contrastRatio(foreground: string, background: string) {
   return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
 }
 
-export async function expectDialogFitsViewport(page: Page, dialogTestId: string) {
+export async function expectDialogFitsViewport(
+  page: Page,
+  dialogTestId: string,
+) {
   const result = await page.getByTestId(dialogTestId).evaluate((dialog) => {
     const rect = dialog.getBoundingClientRect();
     return {

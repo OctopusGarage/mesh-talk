@@ -17,7 +17,9 @@ export async function enterChat(page: Page, user = "tester") {
     await page.getByTestId("login-submit").click();
   }
   await expect(page.getByTestId("chat-shell")).toBeVisible();
-  await expect(page.getByTestId(`conversation-row-${BOB.account}`)).toBeVisible();
+  await expect(
+    page.getByTestId(`conversation-row-${BOB.account}`),
+  ).toBeVisible();
 }
 
 export async function openBobDm(page: Page) {

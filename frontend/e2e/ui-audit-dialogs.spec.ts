@@ -26,7 +26,8 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
       hasDialogClose: false,
     },
     {
-      open: async () => page.getByTestId("conversation-history-trigger").click(),
+      open: async () =>
+        page.getByTestId("conversation-history-trigger").click(),
       surface: "conversation-history-dialog",
       hasDialogClose: true,
     },
