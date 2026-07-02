@@ -22,6 +22,14 @@ ignore = [
   # bincode 1.x unmaintained (direct dep, used for local at-rest serialization).
   # No vulnerability; migration to bincode 2.x is tracked separately.
   "RUSTSEC-2025-0141",
+  # `quick-xml` XML parser DoS advisories. Mesh-Talk does not directly parse XML;
+  # these arrive through Tauri's `plist` metadata path and the Windows notification
+  # backend (`tauri-winrt-notification`). As of 2026-07-02, the latest crates.io
+  # releases still require quick-xml < 0.41 (`plist` 1.9.0 -> 0.39,
+  # `tauri-winrt-notification` 0.7.2 -> 0.37), so there is no publishable upstream
+  # upgrade path yet. Revisit and remove when those crates ship quick-xml >= 0.41.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
 ]
 
 [licenses]
