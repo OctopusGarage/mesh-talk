@@ -338,7 +338,7 @@ export function MessageBubble({
                     : cn(
                         "rounded-2xl px-3.5 py-2",
                         mine
-                          ? "rounded-br-md bg-bubble-own text-primary-foreground shadow-sm"
+                          ? "rounded-br-md bg-bubble-own text-[hsl(var(--bubble-own-foreground))] shadow-sm"
                           : "rounded-bl-md border border-border bg-muted text-foreground shadow-elevation",
                       ),
                   mentioned && "border-l-2 border-signal",
@@ -384,7 +384,7 @@ export function MessageBubble({
                   <FileBubble file={m.file!} mine={mine} />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
-                    {renderWithMentions(m.text)}
+                    {renderWithMentions(m.text, { ownBubble: mine })}
                   </span>
                 )}
               </div>
