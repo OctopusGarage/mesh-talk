@@ -521,8 +521,18 @@ function Actions({
   disabled: boolean;
 }) {
   const { t } = useTranslation();
+  const [focused, setFocused] = useState(false);
   return (
-    <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+    <div
+      onFocusCapture={() => setFocused(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setFocused(false);
+        }
+      }}
+      style={focused ? { opacity: 1 } : undefined}
+      className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+    >
       <button
         onClick={onReply}
         disabled={disabled}
