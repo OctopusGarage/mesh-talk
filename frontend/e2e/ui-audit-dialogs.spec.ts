@@ -58,9 +58,13 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
         32,
         `${item.surface} close`,
       );
+      await page.keyboard.press("Escape");
+    } else {
+      await expectSurfaceMotionSettled(surface);
+      await surface.focus();
+      await page.keyboard.press("Escape");
     }
 
-    await page.keyboard.press("Escape");
     await expect(surface).toHaveCount(0);
   }
 });
