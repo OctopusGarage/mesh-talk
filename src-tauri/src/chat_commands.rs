@@ -816,9 +816,9 @@ fn temp_file_basename(ext: &str, original: Option<&str>, ts: u128) -> String {
 ///   System Settings → Privacy & Security → Screen Recording.
 /// - Windows/Linux: not wired up yet — returns a clear error (cross-platform capture is a
 ///   documented follow-up; see `capture_png`).
-/// Set the OS app-icon unread badge: the macOS dock number, the Windows taskbar overlay,
-/// or the Linux Unity launcher count. `count` is the total unread messages; 0 (or None)
-/// clears the badge. Best-effort — a platform without badge support just no-ops.
+/// Set the OS app-icon unread badge: the macOS dock number or Linux launcher count.
+/// `count` is the total unread messages; 0 (or None) clears the badge. Best-effort — a
+/// platform without stable count-badge support (notably Windows) intentionally no-ops.
 #[tauri::command]
 pub async fn set_badge(app: tauri::AppHandle, count: u32) -> Result<(), CommandError> {
     let label = if count == 0 {
@@ -836,12 +836,29 @@ pub async fn set_badge(app: tauri::AppHandle, count: u32) -> Result<(), CommandE
             let _ = &handle;
             set_dock_badge(label);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
         {
             let n = label.and_then(|s| s.parse::<i64>().ok());
             if let Some(window) = handle.get_webview_window("main") {
                 let _ = window.set_badge_count(n);
             }
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            let _ = (handle, label);
         }
     })
     .map_err(|e| CommandError::Internal(format!("set_badge: {e}")))?;
