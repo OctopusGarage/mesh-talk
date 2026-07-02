@@ -27,7 +27,7 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
     "sidebar-overflow",
     `conversation-pin-${BOB.account}`,
   ]) {
-    await expectMinTargetSize(page.getByTestId(id), 32);
+    await expectMinTargetSize(page.getByTestId(id), 32, id);
   }
 
   await expectVisibleFocus(page, page.getByTestId("sidebar-overflow"));
