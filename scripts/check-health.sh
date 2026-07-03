@@ -57,6 +57,15 @@ if [ ! -f "Makefile" ] || [ ! -d "src-tauri" ] || [ ! -d "frontend" ]; then
     exit 1
 fi
 
+# Keep Cargo's target/ from growing without bound. This is intentionally best-effort:
+# cleanup failures should not block formatting, tests, or commits.
+if [ -x "scripts/clean-target-cache.sh" ]; then
+    print_status "success" "Pruning stale Cargo target cache when needed..."
+    if ! scripts/clean-target-cache.sh --yes; then
+        print_status "warning" "Cargo target cache cleanup failed; continuing."
+    fi
+fi
+
 # Check Rust toolchain
 print_status "success" "Checking Rust toolchain..."
 if ! command_exists cargo; then

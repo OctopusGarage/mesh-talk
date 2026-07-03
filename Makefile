@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test e2e clean check
+.PHONY: dev build test e2e clean clean-target-cache clean-target-cache-dry-run check
 
 dev: install-deps frontend-install
 	@echo "Development environment configured!"
@@ -22,6 +22,12 @@ e2e:
 
 clean:
 	cd src-tauri && cargo clean
+
+clean-target-cache:
+	./scripts/clean-target-cache.sh --yes
+
+clean-target-cache-dry-run:
+	./scripts/clean-target-cache.sh --dry-run
 
 # Frontend commands
 .PHONY: frontend-dev frontend-build
@@ -78,6 +84,8 @@ help:
 	@echo "  make test             Run the workspace unit/integration tests"
 	@echo "  make e2e              Run the end-to-end multi-process tests (slow)"
 	@echo "  make clean            Clean build artifacts"
+	@echo "  make clean-target-cache      Prune stale Cargo target cache"
+	@echo "  make clean-target-cache-dry-run Preview target cache pruning"
 	@echo "  make check            Run all quality checks"
 	@echo "  make lint             Run linting tools"
 	@echo "  make fix              Automatically fix code issues"
