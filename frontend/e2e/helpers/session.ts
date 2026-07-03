@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect } from "../tauri-mock";
+import type { Theme } from "@/lib/theme";
 
 export const BOB = { account: "acc_bob_bbbb2222", device: "device_bob_2222" };
 export const CAROL = {
@@ -22,8 +23,21 @@ export async function enterChat(page: Page, user = "tester") {
   ).toBeVisible();
 }
 
+export async function seedTheme(page: Page, theme: Theme) {
+  await page.addInitScript(
+    (nextTheme) => localStorage.setItem("mesh-talk-theme", nextTheme),
+    theme,
+  );
+}
+
 export async function openBobDm(page: Page) {
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+}
+
+export async function seedThemeBeforeLoad(page: Page, theme: string) {
+  await page.addInitScript((nextTheme) => {
+    localStorage.setItem("mesh-talk-theme", nextTheme);
+  }, theme);
 }
