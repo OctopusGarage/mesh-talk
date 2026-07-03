@@ -72,7 +72,8 @@ lcov.info
 *.info
 coverage/
 
-# Playwright
+# Playwright: local runs still ignore the generated artifacts; CI uploads them on failure.
 frontend/playwright-report/
 frontend/test-results/
+.worktrees/
 docs/superpowers/

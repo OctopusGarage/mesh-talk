@@ -338,7 +338,7 @@ export function MessageBubble({
                     : cn(
                         "rounded-2xl px-3.5 py-2",
                         mine
-                          ? "rounded-br-md bg-bubble-own text-primary-foreground shadow-sm"
+                          ? "rounded-br-md bg-bubble-own text-[hsl(var(--bubble-own-foreground))] shadow-sm"
                           : "rounded-bl-md border border-border bg-muted text-foreground shadow-elevation",
                       ),
                   mentioned && "border-l-2 border-signal",
@@ -384,7 +384,7 @@ export function MessageBubble({
                   <FileBubble file={m.file!} mine={mine} />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
-                    {renderWithMentions(m.text)}
+                    {renderWithMentions(m.text, { ownBubble: mine })}
                   </span>
                 )}
               </div>
@@ -463,7 +463,7 @@ export function MessageBubble({
                   aria-label={`${me ? "Remove your" : "Add"} ${r.emoji} reaction`}
                   onClick={() => m.id && onReact(m.id, r.emoji)}
                   className={cn(
-                    "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors",
+                    "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     me
                       ? "border-signal bg-signal/15 text-signal"
                       : "border-border bg-muted/50 hover:bg-muted",
@@ -521,15 +521,25 @@ function Actions({
   disabled: boolean;
 }) {
   const { t } = useTranslation();
+  const [focused, setFocused] = useState(false);
   return (
-    <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+    <div
+      onFocusCapture={() => setFocused(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setFocused(false);
+        }
+      }}
+      style={focused ? { opacity: 1 } : undefined}
+      className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+    >
       <button
         onClick={onReply}
         disabled={disabled}
         data-testid="message-reply"
         title={t("message.reply")}
         aria-label={t("message.reply")}
-        className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30"
+        className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30"
       >
         <CornerUpLeft className="h-3.5 w-3.5" />
       </button>
@@ -540,7 +550,7 @@ function Actions({
             data-testid="message-react"
             title={t("message.react")}
             aria-label={t("message.react")}
-            className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30"
+            className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30"
           >
             <SmilePlus className="h-3.5 w-3.5" />
           </button>

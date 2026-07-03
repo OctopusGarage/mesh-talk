@@ -59,6 +59,86 @@ const EMOJIS = [
   "🤗",
 ];
 
+function useReducedMotion() {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduced(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+  return reduced;
+}
+
+function StickerThumb({ src, alt }: { src: string; alt: string }) {
+  const reducedMotion = useReducedMotion();
+  const [thumb, setThumb] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!reducedMotion) return;
+    let active = true;
+    setThumb(null);
+
+    void (async () => {
+      try {
+        const blob = await fetch(src).then((res) => res.blob());
+        const bitmap = await createImageBitmap(blob);
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          bitmap.close();
+          return;
+        }
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        if (active) setThumb(canvas.toDataURL("image/webp"));
+      } catch {
+        if (active) setThumb(null);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [reducedMotion, src]);
+
+  return reducedMotion ? (
+    thumb ? (
+      <img
+        src={thumb}
+        alt={alt}
+        loading="eager"
+        decoding="async"
+        width={48}
+        height={48}
+        className="h-12 w-12"
+        draggable={false}
+      />
+    ) : (
+      <div
+        className="flex h-12 w-12 items-center justify-center text-2xl leading-none"
+        aria-hidden="true"
+      >
+        {alt}
+      </div>
+    )
+  ) : (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      decoding="async"
+      width={48}
+      height={48}
+      className="h-12 w-12"
+      draggable={false}
+    />
+  );
+}
+
 export function Composer({
   onSend,
   onAttach,
@@ -277,7 +357,7 @@ export function Composer({
           <div
             data-testid="emoji-picker"
             data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 w-72 rounded-xl border bg-popover p-2 shadow-elevation"
+            className="absolute bottom-full left-0 mb-2 max-h-72 w-64 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
           >
             <div className="grid grid-cols-10 gap-0.5">
               {EMOJIS.map((e) => (
@@ -286,7 +366,7 @@ export function Composer({
                   type="button"
                   data-testid={`emoji-option-${e}`}
                   onClick={() => insertEmoji(e)}
-                  className="rounded-md p-1 text-lg leading-none hover:bg-accent"
+                  className="rounded-md p-1 text-lg leading-none hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-label={t("composer.insertEmoji", { emoji: e })}
                 >
                   {e}
@@ -300,7 +380,7 @@ export function Composer({
           <div
             data-testid="sticker-panel"
             data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 max-h-72 w-80 overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
+            className="absolute bottom-full left-0 mb-2 max-h-72 w-80 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
           >
             <div className="grid grid-cols-5 gap-1">
               {STICKERS.map((s) => (
@@ -312,17 +392,11 @@ export function Composer({
                     onSendSticker(s.id, s.emoji);
                     setShowStickers(false);
                   }}
-                  className="rounded-lg p-1 hover:bg-accent"
+                  className="rounded-lg p-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   title={s.emoji}
                   aria-label={t("composer.sendSticker", { emoji: s.emoji })}
                 >
-                  <img
-                    src={s.url}
-                    alt={s.emoji}
-                    loading="lazy"
-                    className="h-12 w-12"
-                    draggable={false}
-                  />
+                  <StickerThumb src={s.url} alt={s.emoji} />
                 </button>
               ))}
             </div>
@@ -333,7 +407,7 @@ export function Composer({
           <div
             data-testid="screenshot-menu"
             data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 w-56 overflow-hidden rounded-xl border bg-popover p-1 shadow-elevation"
+            className="absolute bottom-full left-0 mb-2 w-56 max-w-full overflow-hidden rounded-xl border bg-popover p-1 shadow-elevation"
           >
             <button
               type="button"
@@ -342,7 +416,7 @@ export function Composer({
                 setShowShot(false);
                 onScreenshot(false);
               }}
-              className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent"
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {t("screenshot.now")}
             </button>
@@ -353,7 +427,7 @@ export function Composer({
                 setShowShot(false);
                 onScreenshot(true);
               }}
-              className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent"
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {t("screenshot.hidden")}
             </button>

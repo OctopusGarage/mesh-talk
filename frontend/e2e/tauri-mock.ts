@@ -292,7 +292,16 @@ export const test = base.extend({
       const ok = () => null;
 
       // --- Event listener registry (for __mockEmit) -------------------------
-      const listeners: Record<string, Array<(p: unknown) => void>> = {};
+      const listeners: Record<
+        string,
+        Array<{ id: number; cb: (p: unknown) => void }>
+      > = {};
+
+      const unregisterListener = (event: string, eventId: number) => {
+        listeners[event] = (listeners[event] ?? []).filter(
+          (listener) => listener.id !== eventId,
+        );
+      };
 
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
@@ -566,7 +575,16 @@ export const test = base.extend({
         event: string,
         payload: unknown,
       ) => {
-        for (const cb of listeners[event] ?? []) cb(payload);
+        for (const listener of listeners[event] ?? []) listener.cb(payload);
+      };
+
+      (window as unknown as Record<string, unknown>).__mockSetPresence = (
+        next: Record<
+          string,
+          { online: boolean; last_seen_secs: number | null }
+        >,
+      ) => {
+        Object.assign(presenceMap, next);
       };
 
       // Inject an inbound message into the store (so a subsequent history reload returns it),
@@ -600,10 +618,17 @@ export const test = base.extend({
               const cb = (window as unknown as Record<string, unknown>)[
                 `_${handlerId}`
               ] as ((m: { payload: unknown }) => void) | undefined;
-              (listeners[ev] ||= []).push((payload) => cb?.({ payload }));
-              return Math.floor(Math.random() * 1e9);
+              const eventId = Math.floor(Math.random() * 1e9);
+              (listeners[ev] ||= []).push({
+                id: eventId,
+                cb: (payload) => cb?.({ payload }),
+              });
+              return eventId;
             }
-            if (cmd === "plugin:event|unlisten") return null;
+            if (cmd === "plugin:event|unlisten") {
+              unregisterListener(String(args.event), Number(args.eventId));
+              return null;
+            }
             // Autostart plugin commands (read/enable/disable) — benign defaults.
             if (cmd.startsWith("plugin:autostart|")) {
               return cmd.endsWith("is_enabled") ? false : null;
@@ -615,6 +640,11 @@ export const test = base.extend({
           },
           convertFileSrc: (p: string) => p,
         },
+        configurable: true,
+      });
+
+      Object.defineProperty(window, "__TAURI_EVENT_PLUGIN_INTERNALS__", {
+        value: { unregisterListener },
         configurable: true,
       });
     });
