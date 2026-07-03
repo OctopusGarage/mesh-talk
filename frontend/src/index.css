@@ -43,6 +43,9 @@
     /* Own chat bubble: a softer, lighter teal than the deep --signal so a large filled
        bubble reads comfortable (not heavy) against the paper background. */
     --bubble-own: 174 58% 43%;
+    --bubble-own-foreground: 220 28% 10%;
+    --bubble-own-link: 220 28% 10%;
+    --message-link: 174 82% 24%;
 
     --radius: 0.625rem;
   }
@@ -76,6 +79,9 @@
     /* Own chat bubble: slightly softer/less neon than the raw signal accent so the filled
        bubble is calm rather than loud against the ink surfaces. */
     --bubble-own: 173 52% 44%;
+    --bubble-own-foreground: 220 30% 7%;
+    --bubble-own-link: 220 30% 7%;
+    --message-link: 172 66% 50%;
   }
 
   /* Pure-black (OLED) variant: layered on top of `.dark`, it pushes the near-black
@@ -125,6 +131,9 @@
     --verified: 150 56% 34%;
     --mention: 202 84% 46%;
     --bubble-own: 202 74% 48%;
+    --bubble-own-foreground: 215 54% 12%;
+    --bubble-own-link: 215 54% 12%;
+    --message-link: 202 88% 30%;
   }
 
   /* Barcelona — Blaugrana: a garnet crest over deep blue surfaces, with a regal gold
@@ -153,6 +162,9 @@
     --verified: 150 52% 52%;
     --mention: 344 72% 52%;
     --bubble-own: 344 58% 47%;
+    --bubble-own-foreground: 40 40% 96%;
+    --bubble-own-link: 40 40% 96%;
+    --message-link: 344 88% 72%;
   }
 
   /* Messi — an airy, LIGHT BLUE theme bridging both his homes: Barça blaugrana blue + the
@@ -182,6 +194,9 @@
     --verified: 150 56% 34%;
     --mention: 214 84% 48%;
     --bubble-own: 214 76% 50%;
+    --bubble-own-foreground: 0 0% 100%;
+    --bubble-own-link: 0 0% 100%;
+    --message-link: 214 90% 38%;
   }
 
   /* ── Brand-theme ambient wallpaper ────────────────────────────────────────────

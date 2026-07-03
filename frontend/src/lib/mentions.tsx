@@ -29,7 +29,14 @@ function openExternal(url: string) {
 }
 
 /** Render `text` with @mentions highlighted and URLs as external links. */
-export function renderWithMentions(text: string) {
+export function renderWithMentions(
+  text: string,
+  options: { ownBubble?: boolean } = {},
+) {
+  const linkTone = options.ownBubble
+    ? "text-[hsl(var(--bubble-own-link))] decoration-[hsl(var(--bubble-own-link)/0.7)]"
+    : "text-[hsl(var(--message-link))] decoration-[hsl(var(--message-link)/0.65)]";
+
   return messageSegments(text).map((seg, i) => {
     if (seg.kind === "mention")
       return (
@@ -46,7 +53,7 @@ export function renderWithMentions(text: string) {
             e.preventDefault();
             openExternal(seg.text);
           }}
-          className="break-all text-primary underline underline-offset-2 hover:opacity-80"
+          className={`break-all ${linkTone} underline underline-offset-2 hover:opacity-80`}
         >
           {seg.text}
         </a>

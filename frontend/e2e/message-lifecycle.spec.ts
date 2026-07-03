@@ -55,7 +55,9 @@ test("delete a message removes it locally", async ({ page }) => {
   await expect(page.getByText("delete me")).toHaveCount(0);
 });
 
-test("a seeded (old) message offers delete but not recall", async ({ page }) => {
+test("a seeded (old) message offers delete but not recall", async ({
+  page,
+}) => {
   await enterBobDm(page);
   // My seeded reply is older than the 2-minute window → no recall, but delete is allowed.
   await page.getByText("thanks! glad to be here").click({ button: "right" });

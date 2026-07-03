@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { messageSegments, mentionsName } from "./mentions";
+import { messageSegments, mentionsName, renderWithMentions } from "./mentions";
 
 describe("messageSegments", () => {
   it("splits a mention out of surrounding text", () => {
@@ -53,5 +53,26 @@ describe("mentionsName", () => {
   it("escapes regex metacharacters in the name", () => {
     expect(mentionsName("@a.b", "a.b")).toBe(true);
     expect(mentionsName("@axb", "a.b")).toBe(false);
+  });
+});
+
+describe("renderWithMentions", () => {
+  it("uses the regular primary link color outside own bubbles", () => {
+    const parts = renderWithMentions("see https://example.com");
+    const link = parts.find((part) => part.type === "a");
+
+    expect(link?.props.className).toContain("text-[hsl(var(--message-link))]");
+  });
+
+  it("uses own-bubble foreground color for sent links", () => {
+    const parts = renderWithMentions("see https://example.com", {
+      ownBubble: true,
+    });
+    const link = parts.find((part) => part.type === "a");
+
+    expect(link?.props.className).toContain(
+      "text-[hsl(var(--bubble-own-link))]",
+    );
+    expect(link?.props.className).not.toContain("var(--message-link)");
   });
 });
