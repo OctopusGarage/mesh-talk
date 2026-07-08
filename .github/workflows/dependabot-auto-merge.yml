@@ -1,37 +1,26 @@
 name: Dependabot auto-merge
 
-# Auto-merge SAFE Dependabot PRs once the required "verify" check passes (so a build-breaking
-# bump can never merge). Safe = any PATCH + dev-dependency minor/patch (dev tooling, never
-# shipped). Production minor/major and ANY major stay manual: for the many 0.x crates here a
-# "semver-minor" (e.g. rand 0.8 -> 0.9, bincode 1 -> 3) is actually breaking.
-#
-# EXCLUDES github-actions: those PRs modify .github/workflows/, which the built-in GITHUB_TOKEN
-# is NOT permitted to merge (no `workflows` permission — enablePullRequestAutoMerge errors). Merge
-# them manually (one click), or, for full automation, run this with a PAT/GitHub-App token that
-# has `workflow` scope (set as a secret and used as GH_TOKEN below).
-#
-# Requires "Allow auto-merge" in repo settings + branch protection with the "verify" check required.
-on: pull_request_target
+on: pull_request
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  auto-merge:
+  dependabot:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
       - name: Fetch Dependabot metadata
-        id: meta
+        id: metadata
         uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Enable auto-merge for safe updates
-        if: >
-          steps.meta.outputs.package-ecosystem != 'github_actions' &&
-          ( steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-            (steps.meta.outputs.dependency-type == 'direct:development' &&
-             steps.meta.outputs.update-type != 'version-update:semver-major') )
+      # Auto-merge all Dependabot updates that target the dev branch.
+      # Required CI status checks gate the merge.
+      - name: Enable auto-merge
+        if: github.event.pull_request.base.ref == 'dev'
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
