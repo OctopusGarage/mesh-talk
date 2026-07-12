@@ -1,0 +1,77 @@
+{
+  "name": "mesh-talk-agent-workflow-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-AI-001",
+      "name": "code reviewer finds correctness/security/test risks first",
+      "subject_file": ".claude/agents/code-reviewer.md",
+      "min_score": 0.9,
+      "scenario": "A future edit weakens the Mesh-Talk code-review agent. Evaluate whether the prompt still forces prioritized, evidence-backed review findings for a Rust/Tauri encrypted messenger.",
+      "rubric": [
+        "Requires review of the diff or PR scope before judging unrelated code.",
+        "Prioritizes correctness and security before style.",
+        "Requires test coverage or regression-test assessment.",
+        "Requires concrete file:line style findings and actionable suggestions.",
+        "Forbids inventing findings when the diff is clean or unverified."
+      ]
+    },
+    {
+      "id": "MT-AI-002",
+      "name": "e2e runner executes and triages real backend E2E",
+      "subject_file": ".claude/agents/e2e-runner.md",
+      "min_score": 0.9,
+      "scenario": "A future edit changes the E2E runner prompt. Evaluate whether it still runs real mesh-talk-node multi-process tests and reports only evidence-backed green/failure states.",
+      "rubric": [
+        "Requires running make e2e or the equivalent ignored multi-process Rust tests.",
+        "Explains startup timeout, process death, delivery assertion, and multicast environment triage.",
+        "Requires rerun or clear evidence before classifying flakes.",
+        "Requires per-test verdict and exact failure evidence.",
+        "Forbids claiming green unless the test output was observed."
+      ]
+    },
+    {
+      "id": "MT-AI-003",
+      "name": "bug hunter reports only verified correctness/security bugs",
+      "subject_file": ".claude/agents/bug-hunter.md",
+      "min_score": 0.9,
+      "scenario": "A future edit makes the bug-hunter prompt more speculative. Evaluate whether it still demands verified bugs, concrete repros, and severity.",
+      "rubric": [
+        "Requires verified findings, not speculative style complaints.",
+        "Focuses on Mesh-Talk high-risk surfaces: parsers, crypto, sync, relay, transport, and account/device routing.",
+        "Requires repro input or event sequence for every confirmed issue.",
+        "Requires severity, blast radius, and fix direction.",
+        "Keeps the agent read-only."
+      ]
+    },
+    {
+      "id": "MT-AI-004",
+      "name": "project agent rules preserve validation and architecture context",
+      "subject_file": "AGENTS.md",
+      "min_score": 0.85,
+      "scenario": "A future edit weakens repo-level agent guidance. Evaluate whether the rules still identify project structure, core modules, testing layers, build commands, and security constraints.",
+      "rubric": [
+        "Lists core Rust modules and Tauri/frontend structure.",
+        "Documents make test, make e2e, frontend e2e, and check-health entry points.",
+        "Identifies architecture docs before crypto, sync, or transport changes.",
+        "Requires networking/crypto changes to ship integration assertions.",
+        "Includes security and quality gate expectations."
+      ]
+    },
+    {
+      "id": "MT-AI-005",
+      "name": "delivery eval runbook makes real and deterministic gates explicit",
+      "subject_file": "docs/evals/delivery-ai-regression.md",
+      "min_score": 0.85,
+      "scenario": "A future edit removes key runbook detail. Evaluate whether the runbook still distinguishes deterministic smoke, real smoke, real AI eval, trigger rules, known gaps, and human review.",
+      "rubric": [
+        "Names the deterministic smoke command and the real AI eval command.",
+        "Names full real smoke commands for backend and frontend workflows.",
+        "Explains local, CI, PR, Codex, and Claude Code triggers.",
+        "States when human review is still required.",
+        "Does not claim model-output quality is proven without running a model-backed eval."
+      ]
+    }
+  ]
+}

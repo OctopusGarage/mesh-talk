@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test e2e clean clean-target-cache clean-target-cache-dry-run check
+.PHONY: dev build test e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run check
 
 dev: install-deps frontend-install
 	@echo "Development environment configured!"
@@ -19,6 +19,15 @@ test:
 # (--test-threads=1) to avoid discovery-port / CPU contention between the heavy processes.
 e2e:
 	nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli -- --ignored --test-threads=1
+
+eval-smoke:
+	./scripts/ai-eval-smoke.sh
+
+ai-eval:
+	node scripts/ai-eval.mjs
+
+smoke-full:
+	./scripts/run-real-smoke.sh
 
 clean:
 	cd src-tauri && cargo clean
@@ -83,6 +92,9 @@ help:
 	@echo "  make build            Build the application for release"
 	@echo "  make test             Run the workspace unit/integration tests"
 	@echo "  make e2e              Run the end-to-end multi-process tests (slow)"
+	@echo "  make eval-smoke       Run delivery and AI regression smoke checks"
+	@echo "  make ai-eval          Run real model-backed AI evals (requires AI_EVAL_COMMAND)"
+	@echo "  make smoke-full       Run full real smoke: unit/integration + backend/UI E2E"
 	@echo "  make clean            Clean build artifacts"
 	@echo "  make clean-target-cache      Prune stale Cargo target cache"
 	@echo "  make clean-target-cache-dry-run Preview target cache pruning"

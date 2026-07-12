@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "core_modules": [
+    {
+      "name": "node",
+      "paths": ["crates/mesh-talk-core/src/node/"],
+      "coverage": ["crates/mesh-talk-core/src/node/node_tests.rs", "crates/mesh-talk-core/tests/two_node_cli.rs", "make e2e"]
+    },
+    {
+      "name": "identity",
+      "paths": ["crates/mesh-talk-core/src/identity/"],
+      "coverage": ["cargo test -p mesh-talk-core --lib identity"]
+    },
+    {
+      "name": "transport",
+      "paths": ["crates/mesh-talk-core/src/transport/", "crates/mesh-talk-core/src/node/transport.rs"],
+      "coverage": ["cargo test -p mesh-talk-core --lib transport", "make e2e"]
+    },
+    {
+      "name": "discovery",
+      "paths": ["crates/mesh-talk-core/src/discovery/"],
+      "coverage": ["cargo test -p mesh-talk-core --lib discovery", "make e2e"]
+    },
+    {
+      "name": "eventlog",
+      "paths": ["crates/mesh-talk-core/src/eventlog/"],
+      "coverage": ["cargo test -p mesh-talk-core --lib eventlog", "crates/mesh-talk-core/tests/decoder_smoke.rs"]
+    },
+    {
+      "name": "ratchet",
+      "paths": ["crates/mesh-talk-core/src/ratchet/"],
+      "coverage": ["cargo test -p mesh-talk-core --lib ratchet"]
+    },
+    {
+      "name": "channel",
+      "paths": ["crates/mesh-talk-core/src/channel/", "crates/mesh-talk-core/src/node/channel.rs"],
+      "coverage": ["cargo test -p mesh-talk-core --lib channel", "crates/mesh-talk-core/tests/channel_and_file_cli.rs"]
+    },
+    {
+      "name": "dm",
+      "paths": ["crates/mesh-talk-core/src/dm.rs", "crates/mesh-talk-core/src/node/dm.rs"],
+      "coverage": ["cargo test -p mesh-talk-core --lib dm", "crates/mesh-talk-core/tests/two_node_cli.rs"]
+    },
+    {
+      "name": "file",
+      "paths": ["crates/mesh-talk-core/src/file/", "crates/mesh-talk-core/src/node/files.rs"],
+      "coverage": ["cargo test -p mesh-talk-core --lib file", "crates/mesh-talk-core/tests/channel_and_file_cli.rs"]
+    },
+    {
+      "name": "postoffice",
+      "paths": ["crates/mesh-talk-core/src/postoffice/", "crates/mesh-talk-core/src/node/postbox.rs"],
+      "coverage": ["cargo test -p mesh-talk-core --lib postoffice", "crates/mesh-talk-core/tests/post_office_offline.rs"]
+    },
+    {
+      "name": "storage",
+      "paths": ["crates/mesh-talk-core/src/storage/"],
+      "coverage": ["cargo test -p mesh-talk-core --lib storage", "crates/mesh-talk-core/tests/persistent_history.rs"]
+    }
+  ],
+  "frontend_workflows": [
+    {
+      "name": "auth and chat shell",
+      "coverage": ["frontend/e2e/chat.spec.ts", "frontend/src/store/auth.test.ts", "frontend/src/store/chat.test.ts"]
+    },
+    {
+      "name": "message lifecycle",
+      "coverage": ["frontend/e2e/message-lifecycle.spec.ts", "frontend/e2e/wide-message.spec.ts", "frontend/e2e/narrow-width.spec.ts"]
+    },
+    {
+      "name": "files and media",
+      "coverage": ["frontend/e2e/files-tray-attachments-only.spec.ts", "frontend/e2e/download-remembered.spec.ts", "frontend/src/features/chat/mediaFile.test.ts"]
+    },
+    {
+      "name": "identity, members, avatars",
+      "coverage": ["frontend/e2e/avatar-gallery.spec.ts", "frontend/e2e/avatar-crop.spec.ts", "frontend/e2e/channel-member-avatar.spec.ts", "frontend/e2e/members-self.spec.ts"]
+    },
+    {
+      "name": "theme and layout",
+      "coverage": ["frontend/e2e/theme-picker.spec.ts", "frontend/e2e/theme-contrast.spec.ts", "frontend/e2e/ui-visual-regression.spec.ts", "frontend/e2e/ui-audit-shell.spec.ts", "frontend/e2e/ui-audit-message-log.spec.ts", "frontend/e2e/ui-audit-composer.spec.ts", "frontend/e2e/ui-audit-dialogs.spec.ts"]
+    }
+  ]
+}

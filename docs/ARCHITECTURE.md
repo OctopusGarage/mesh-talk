@@ -120,7 +120,8 @@ and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
   `src-tauri/` — the Tauri desktop shell, a thin layer that depends on the core. Shared
   dependency versions live in the root `[workspace.dependencies]`. The app references the
   core as `mesh_talk_core::…`; a third party can depend on `mesh-talk-core` alone (no Tauri).
-- **Local gate** (`scripts/check-health.sh`): fmt,
+- **Local gate** (`scripts/check-health.sh`): delivery / AI regression smoke,
+  fmt,
   `clippy --workspace --all-targets -D warnings`, ESLint, frontend tests (Vitest), full
   `cargo test --workspace`, typos, cargo-deny, cargo-machete, gitleaks, shellcheck, audits,
   both builds — **mirrors CI** so failures surface locally, not on CI. The `hooks/pre-commit`
@@ -135,6 +136,11 @@ and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
     wire decoder; the `decoder_smoke` test is the always-on stable complement.
   - *Mutation testing* (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
   - *Coverage* (Codecov), *clippy `-D warnings`*, *cargo-deny*, *cargo-machete*, *CodeQL*, *gitleaks*.
+  - *Delivery / AI regression smoke* (`make eval-smoke`) keeps core smoke examples,
+    prompt/agent contracts, local hooks, PR validation, and CI wiring from drifting.
+    *Real model-backed AI eval* (`make ai-eval`, with `AI_EVAL_COMMAND`) scores the stable
+    prompt/workflow cases. *Full real smoke* (`make smoke-full`) runs unit/integration plus
+    backend and frontend E2E.
   - *Claude operations* (`.claude/`): `/bug-hunt` fans out read-only `bug-hunter` subagents
     (adversarial audit, verified findings only) over the core; `code-reviewer` reviews a diff;
     `/e2e` runs the `e2e-runner` over the real multi-process integration suite.
