@@ -61,6 +61,12 @@ jobs:
           npm ci
           npm run build
 
+      - name: Delivery and AI eval smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          make eval-smoke
+          node --test scripts/test-ai-eval.mjs
+
       - name: Lint frontend (ESLint)
         if: matrix.os == 'ubuntu-latest'
         working-directory: frontend

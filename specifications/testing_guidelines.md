@@ -83,6 +83,31 @@ The frontend also has a Playwright UI end-to-end suite (selectors keyed on
 cd frontend && npm run e2e        # CI: .github/workflows/e2e-ui.yml
 ```
 
+## Delivery / AI Regression Smoke
+
+The project has a deterministic smoke gate for delivery verification and AI-agent prompt
+contracts:
+
+```bash
+make eval-smoke
+```
+
+The real model-backed eval is:
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' make ai-eval
+```
+
+The complete real smoke suite is:
+
+```bash
+make smoke-full
+```
+
+Run `make eval-smoke` when changing code, prompts, model configuration, agent rules, workflow
+scripts, CI, or core protocol flows. Run `make ai-eval` for prompt/model/agent workflow
+changes. Run `make smoke-full` for release-critical changes or broad workflow changes.
+
 ## Testing Best Practices
 
 1. **Rust Tests**:

@@ -57,6 +57,18 @@ if [ ! -f "Makefile" ] || [ ! -d "src-tauri" ] || [ ! -d "frontend" ]; then
     exit 1
 fi
 
+print_status "success" "Running delivery / AI eval smoke..."
+if ! scripts/ai-eval-smoke.sh; then
+    print_status "error" "Delivery / AI eval smoke failed. Fix the missing coverage or trigger wiring."
+    exit 1
+fi
+
+print_status "success" "Running AI eval harness tests..."
+if ! node --test scripts/test-ai-eval.mjs; then
+    print_status "error" "AI eval harness tests failed."
+    exit 1
+fi
+
 # Keep Cargo's target/ from growing without bound. This is intentionally best-effort:
 # cleanup failures should not block formatting, tests, or commits.
 if [ -x "scripts/clean-target-cache.sh" ]; then
@@ -84,6 +96,14 @@ fi
 print_status "success" "Installing dependencies..."
 make install-deps >/dev/null 2>&1 || true
 make frontend-install >/dev/null 2>&1 || true
+
+# Tauri's `generate_context!` validates that `frontendDist` exists even during clippy/test
+# compilation. FAST mode intentionally skips the real frontend build, so create the ignored
+# directory when needed; the full gate and CI still build real assets.
+if [ "$FAST" = "1" ] && [ ! -d "frontend/dist" ]; then
+    print_status "success" "Creating frontend/dist placeholder for Tauri context generation..."
+    mkdir -p frontend/dist
+fi
 
 # Check code formatting (Rust)
 print_status "success" "Checking Rust code formatting..."

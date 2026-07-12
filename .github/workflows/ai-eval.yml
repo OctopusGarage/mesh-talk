@@ -1,0 +1,59 @@
+name: AI Eval
+
+# Deterministic eval-smoke and harness tests run on PRs that touch prompts, agent rules,
+# workflow wiring, or eval assets. The real model-backed eval is semi-automatic: configure
+# AI_EVAL_COMMAND as a repository secret and run this workflow manually, or let the path
+# trigger run it when the secret exists.
+on:
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - ".claude/**"
+      - "docs/evals/**"
+      - "scripts/ai-eval*.mjs"
+      - "scripts/ai-eval-smoke.sh"
+      - "scripts/run-real-smoke.sh"
+      - ".github/workflows/ai-eval.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    name: Deterministic eval contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+      - name: Eval smoke
+        run: make eval-smoke
+      - name: AI eval harness tests
+        run: node --test scripts/test-ai-eval.mjs
+
+  real-ai-eval:
+    name: Real model-backed AI eval
+    runs-on: ubuntu-latest
+    env:
+      AI_EVAL_COMMAND: ${{ secrets.AI_EVAL_COMMAND }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+      - name: Run real AI eval when provider is configured
+        run: |
+          if [ -z "${AI_EVAL_COMMAND:-}" ]; then
+            echo "::warning::AI_EVAL_COMMAND is not configured; real model-backed eval was not run."
+            exit 0
+          fi
+          make ai-eval
+      - name: Upload AI eval report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ai-eval-report
+          path: target/ai-eval/
+          if-no-files-found: ignore

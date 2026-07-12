@@ -24,6 +24,12 @@
             "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.rs) rustfmt --edition 2021 \"$f\" 2>/dev/null || true;; esac",
             "timeout": 15,
             "statusMessage": "Formatting Rust file"
+          },
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); \"$CLAUDE_PROJECT_DIR/scripts/ai-eval-smoke.sh\" --changed \"$f\"",
+            "timeout": 30,
+            "statusMessage": "Running AI eval smoke if needed"
           }
         ]
       }
