@@ -41,7 +41,7 @@ impl DeviceIdentity {
     /// Generate a fresh identity from the OS CSPRNG.
     pub fn generate() -> Self {
         let signing_key = SigningKey::generate(&mut rand_core::OsRng);
-        let dh_secret = StaticSecret::random_from_rng(rand_core::OsRng);
+        let dh_secret = StaticSecret::random();
         Self {
             signing_key,
             dh_secret,
