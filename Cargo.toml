@@ -43,7 +43,7 @@ pbkdf2 = "0.12"
 sha2 = "0.10"
 hkdf = "0.12"
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets", "getrandom"] }
 snow = "0.9"
 zeroize = "1"
 argon2 = { version = "0.5", features = ["std"] }
