@@ -1,6 +1,8 @@
 name: Dependabot auto-merge
 
-on: pull_request
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -11,12 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
-      - name: Fetch Dependabot metadata
-        id: metadata
-        uses: dependabot/fetch-metadata@v3
-        with:
-          github-token: "${{ secrets.GITHUB_TOKEN }}"
-
       # Auto-merge all Dependabot updates that target the dev branch.
       # Required CI status checks gate the merge.
       - name: Enable auto-merge
