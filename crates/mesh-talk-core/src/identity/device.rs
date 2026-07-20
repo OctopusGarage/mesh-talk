@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
+use super::random_signing_key;
+
 /// The public half of a device identity — safe to share on the network.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicIdentity {
@@ -40,7 +42,7 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     /// Generate a fresh identity from the OS CSPRNG.
     pub fn generate() -> Self {
-        let signing_key = SigningKey::generate(&mut rand_core::OsRng);
+        let signing_key = random_signing_key();
         let dh_secret = StaticSecret::random();
         Self {
             signing_key,
