@@ -35,7 +35,7 @@ jobs:
 
     steps:
       # 1️⃣ Checkout
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # 2️⃣ Setup Node.js
       - name: Setup Node.js
