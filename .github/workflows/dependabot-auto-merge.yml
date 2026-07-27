@@ -2,22 +2,71 @@ name: Dependabot auto-merge
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Dependabot PR number to retry
+        required: true
+        type: number
 
 permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
-      # Auto-merge all Dependabot updates that target the dev branch.
-      # Required CI status checks gate the merge.
+      # Auto-merge Dependabot updates that target the dev branch.
+      # Required CI status checks gate the merge; this workflow only enables it.
       - name: Enable auto-merge
-        if: github.event.pull_request.base.ref == 'dev'
-        run: gh pr merge --auto --squash "$PR_URL"
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            pr_url="$SERVER_URL/$REPOSITORY/pull/$PR_NUMBER"
+          else
+            pr_url="$EVENT_PR_URL"
+          fi
+
+          author="$(gh pr view "$pr_url" --json author --jq '.author.login')"
+          base="$(gh pr view "$pr_url" --json baseRefName --jq '.baseRefName')"
+          is_draft="$(gh pr view "$pr_url" --json isDraft --jq '.isDraft')"
+
+          if [ "$author" != "dependabot[bot]" ]; then
+            echo "Skipping non-Dependabot PR from $author"
+            exit 0
+          fi
+
+          if [ "$base" != "dev" ]; then
+            echo "Skipping PR targeting $base"
+            exit 0
+          fi
+
+          if [ "$is_draft" = "true" ]; then
+            echo "Skipping draft PR"
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            if gh pr merge --auto --squash "$pr_url"; then
+              exit 0
+            fi
+            echo "Auto-merge enable failed on attempt $attempt; retrying..."
+            sleep 5
+          done
+
+          gh pr merge --auto --squash "$pr_url"
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PR_URL: ${{ github.event.pull_request.html_url || '' }}
+          PR_NUMBER: ${{ inputs.pr_number || '' }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

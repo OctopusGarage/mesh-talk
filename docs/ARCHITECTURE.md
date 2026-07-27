@@ -128,7 +128,7 @@ and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
   commits are enforced by `hooks/pre-push`.
 - **CI** (`.github/workflows/`): `ci.yml` (ubuntu+macOS matrix → the `verify` aggregate
   check, required by branch protection; coverage → Codecov on Linux), `check-health.yml`,
-  `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (patch-only),
+  `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (Dependabot PRs to `dev`, gated by required checks),
   `glib-0.20-watch.yml` (monthly dep watcher).
 - **Automated bug-finding** (defence in depth — surfaces issues without anyone looking):
   - *Coverage-guided fuzzing* (`fuzz/`, `fuzz.yml`, weekly + dispatch) of every untrusted
