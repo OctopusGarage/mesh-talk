@@ -23,6 +23,23 @@ updates:
       interval: weekly
     open-pull-requests-limit: 10
     groups:
+      # Keep peer-coupled frontend stacks in one PR, including majors.
+      # Required checks still gate auto-merge, but this prevents impossible
+      # split PRs like React 19 without ReactDOM 19.
+      react-stack:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      tailwind-stack:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+          - "tailwindcss-animate"
+          - "tailwind-merge"
+          - "postcss"
+          - "autoprefixer"
       npm-minor-patch:
         update-types:
           - minor

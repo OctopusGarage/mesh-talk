@@ -58,7 +58,7 @@ export function SearchDialog() {
   const [hits, setHits] = useState<SearchHitInfo[]>([]);
   const [searching, setSearching] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
-  const timer = useRef<ReturnType<typeof setTimeout>>();
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
     // Don't invoke backend search before the node is up (gates the one node-dependent

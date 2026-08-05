@@ -30,7 +30,7 @@ jobs:
     steps:
       # 1️⃣ Checkout code
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       # 2️⃣ Install Rust toolchain
       - name: Install Rust
@@ -67,7 +67,7 @@ jobs:
 
       # 6️⃣ Install Node.js
       - name: Install Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'

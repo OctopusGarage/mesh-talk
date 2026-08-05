@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
 /*
   "Ink & Signal" design tokens.
@@ -415,6 +414,14 @@
       scroll-behavior: auto !important;
     }
   }
+}
+
+/* Tailwind v4 leaves `ring-2` transparent unless a ring color is also present.
+   Provide the app's default focus ring color for interactive controls; component
+   focus-visible:ring-* colors still override this when they opt into a specific color. */
+:is(button, [role="button"], a[href]):focus-visible {
+  outline: 2px solid hsl(var(--ring)) !important;
+  outline-offset: 2px !important;
 }
 
 /* Presence "breathing" pulse for the online status dot. Halts under reduced-motion
