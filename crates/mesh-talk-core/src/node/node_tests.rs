@@ -3823,7 +3823,24 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(got, Some(avatar), "bob received alice's avatar");
+    assert_eq!(got, Some(avatar.clone()), "bob received alice's avatar");
+    assert_eq!(
+        bob_node.log.lock().unwrap().pending_profile_compactions(),
+        1,
+        "profile processing queues compaction for maintenance"
+    );
+
+    let profile_conv = crate::node::conversation::dm_conversation_id(
+        &alice_node.identity.public(),
+        &bob_node.identity.public(),
+    );
+    let before_duplicate = bob_node.log.lock().unwrap().events(&profile_conv).len();
+    alice_node.set_avatar(Some(avatar.clone())).await.unwrap();
+    let after_duplicate = bob_node.log.lock().unwrap().events(&profile_conv).len();
+    assert_eq!(
+        after_duplicate, before_duplicate,
+        "setting the unchanged avatar must not append another profile event"
+    );
 
     // A STALE update (older updated_at) must NOT overwrite the newer one Bob holds.
     let newer = b"data:image/jpeg;base64,WFla".to_vec();

@@ -26,7 +26,7 @@ use crate::storage::encryption::{
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -173,25 +173,30 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     pub fn rewrite(&mut self, records: &[R]) -> Result<(), LogError> {
         let tmp = self.path.with_extension("compact-tmp");
         {
-            let mut f = OpenOptions::new()
+            let f = OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .open(&tmp)?;
-            f.write_all(&self.magic)?;
-            f.write_all(&self.salt)?;
+            let mut writer = BufWriter::new(f);
+            writer.write_all(&self.magic)?;
+            writer.write_all(&self.salt)?;
             for record in records {
-                f.write_all(&self.encode_record(record)?)?;
+                writer.write_all(&self.encode_record(record)?)?;
             }
-            f.flush()?;
+            let f = writer
+                .into_inner()
+                .map_err(|error| LogError::Io(error.into_error()))?;
             f.sync_all()?;
         }
+        // Reopen before replacing the live path. If this fails, the original log is
+        // untouched and the caller can safely retry the compaction.
+        let f = OpenOptions::new().read(true).append(true).open(&tmp)?;
         std::fs::rename(&tmp, &self.path)?;
-        // Reopen the live append handle on the freshly-written file.
-        self.file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(&self.path)?;
+        // Keep the already-open handle: it refers to the rewritten inode even after the
+        // rename, so there is no post-rename reopen failure that could leave `self.file`
+        // pointing at the unlinked old inode.
+        self.file = f;
         Ok(())
     }
 }

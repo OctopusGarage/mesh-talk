@@ -29,6 +29,15 @@ impl Node {
                 )));
             }
         }
+        if self
+            .my_profile
+            .lock()
+            .expect("my_profile mutex not poisoned")
+            .as_ref()
+            .is_some_and(|current| current.avatar.as_ref() == avatar.as_ref())
+        {
+            return Ok(());
+        }
         let payload = ProfilePayload::new(&self.account, avatar, now_millis());
         // Hold it so on-discovery re-publish sends the current version.
         *self
@@ -173,13 +182,22 @@ impl Node {
                 });
             }
         }
-        // Bound on-disk growth: drop superseded, unreferenced profile events for this
-        // conversation (safe — they're never referenced as parents). Best-effort; runs
-        // opportunistically on each profile sync, amortized by COMPACT_PROFILE_MIN.
-        let _ = self
-            .log
+        // Bound on-disk growth: schedule dropping superseded, unreferenced profile events
+        // for this conversation (safe — they're never referenced as parents). The runtime
+        // maintenance task performs the expensive rewrite outside this sync callback.
+        self.log
             .lock()
             .expect("log mutex not poisoned")
-            .compact_superseded_profiles(&conv);
+            .request_profile_compaction(conv);
+    }
+
+    /// Drain one deferred profile compaction without holding any async/network state.
+    pub(in crate::node) fn drain_profile_compaction(
+        &self,
+    ) -> Result<Option<usize>, crate::eventlog::LogError> {
+        self.log
+            .lock()
+            .expect("log mutex not poisoned")
+            .drain_one_profile_compaction()
     }
 }
