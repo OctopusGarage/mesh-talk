@@ -26,8 +26,10 @@ use crate::eventlog::LogError;
 use crate::storage::record_log::EncryptedRecordLog;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const MAGIC: &[u8; 6] = b"MTLOG1";
+const PROFILE_COMPACTION_COOLDOWN: Duration = Duration::from_secs(10);
 
 /// A durable event log: an in-memory [`EventLog`] backed by an encrypted,
 /// append-only [`EncryptedRecordLog`]. On append it validates, persists, then
@@ -39,6 +41,8 @@ const MAGIC: &[u8; 6] = b"MTLOG1";
 pub struct PersistentEventLog {
     log: EventLog,
     file: EncryptedRecordLog<Event>,
+    pending_profile_compactions: HashSet<ConversationId>,
+    last_profile_compactions: HashMap<ConversationId, Instant>,
 }
 
 impl PersistentEventLog {
@@ -56,7 +60,12 @@ impl PersistentEventLog {
         for event in events {
             log.index_trusted(event);
         }
-        Ok(Self { log, file })
+        Ok(Self {
+            log,
+            file,
+            pending_profile_compactions: HashSet::new(),
+            last_profile_compactions: HashMap::new(),
+        })
     }
 
     /// Validate, persist, then index an event.
@@ -101,6 +110,49 @@ impl PersistentEventLog {
     /// Number of events held for `conversation`.
     pub fn conversation_len(&self, conversation: &ConversationId) -> usize {
         self.log.events(conversation).len()
+    }
+
+    /// Mark a conversation for profile compaction. Requests are coalesced until the
+    /// maintenance path drains them, so a burst of profile syncs cannot enqueue repeated
+    /// rewrites for the same conversation.
+    pub fn request_profile_compaction(&mut self, conversation: ConversationId) {
+        self.pending_profile_compactions.insert(conversation);
+    }
+
+    /// Compact at most one pending profile conversation. A failed compaction remains pending
+    /// for a later retry; successful no-op attempts are consumed because the authoritative
+    /// check found nothing currently worth rewriting. Successful compactions for the same
+    /// conversation are rate-limited so a burst of syncs cannot repeatedly rewrite the file.
+    pub fn drain_one_profile_compaction(&mut self) -> Result<Option<usize>, LogError> {
+        self.drain_one_profile_compaction_at(Instant::now())
+    }
+
+    fn drain_one_profile_compaction_at(&mut self, now: Instant) -> Result<Option<usize>, LogError> {
+        let Some(conversation) = self
+            .pending_profile_compactions
+            .iter()
+            .copied()
+            .find(|conv| {
+                self.last_profile_compactions
+                    .get(conv)
+                    .is_none_or(|last| now.duration_since(*last) >= PROFILE_COMPACTION_COOLDOWN)
+            })
+        else {
+            return Ok(None);
+        };
+        match self.compact_superseded_profiles(&conversation) {
+            Ok(dropped) => {
+                self.pending_profile_compactions.remove(&conversation);
+                self.last_profile_compactions.insert(conversation, now);
+                Ok(Some(dropped))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_profile_compactions(&self) -> usize {
+        self.pending_profile_compactions.len()
     }
 
     /// Drop every event whose conversation is NOT in `keep`, compacting the on-disk
@@ -435,6 +487,83 @@ mod tests {
         }
         assert_eq!(log.compact_superseded_profiles(&conv).unwrap(), 0);
         assert_eq!(log.events(&conv).len(), 4);
+    }
+
+    #[test]
+    fn profile_compaction_requests_are_coalesced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let first = ConversationId::new([1u8; 32]);
+        let second = ConversationId::new([2u8; 32]);
+
+        log.request_profile_compaction(first);
+        log.request_profile_compaction(first);
+        log.request_profile_compaction(second);
+
+        assert_eq!(log.pending_profile_compactions(), 2);
+        assert_eq!(log.drain_one_profile_compaction().unwrap(), Some(0));
+        assert_eq!(log.pending_profile_compactions(), 1);
+        assert_eq!(log.drain_one_profile_compaction().unwrap(), Some(0));
+        assert_eq!(log.pending_profile_compactions(), 0);
+        assert_eq!(log.drain_one_profile_compaction().unwrap(), None);
+    }
+
+    #[test]
+    fn profile_compaction_respects_per_conversation_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let conversation = ConversationId::new([3u8; 32]);
+
+        log.request_profile_compaction(conversation);
+        assert_eq!(log.drain_one_profile_compaction().unwrap(), Some(0));
+
+        log.request_profile_compaction(conversation);
+        assert_eq!(log.drain_one_profile_compaction().unwrap(), None);
+        assert_eq!(log.pending_profile_compactions(), 1);
+
+        let after_cooldown = Instant::now() + PROFILE_COMPACTION_COOLDOWN + Duration::from_secs(1);
+        assert_eq!(
+            log.drain_one_profile_compaction_at(after_cooldown).unwrap(),
+            Some(0)
+        );
+        assert_eq!(log.pending_profile_compactions(), 0);
+    }
+
+    #[test]
+    fn failed_profile_compaction_keeps_original_log_and_pending_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let conversation = ConversationId::new([1u8; 32]);
+
+        let message = mk(&id, 1, 1, b"hi");
+        let message_id = message.id;
+        log.append(message).unwrap();
+        for i in 0..10u64 {
+            log.append(Event::new(
+                &id,
+                conversation,
+                2 + i,
+                vec![message_id],
+                2 + i,
+                0,
+                EventKind::Profile,
+                format!("avatar{i}").into_bytes(),
+            ))
+            .unwrap();
+        }
+
+        // Make the temporary rewrite target unusable. The original file must remain readable,
+        // and the maintenance request must remain queued for a later retry.
+        std::fs::create_dir(path.with_extension("compact-tmp")).unwrap();
+        log.request_profile_compaction(conversation);
+        assert!(log.drain_one_profile_compaction().is_err());
+        assert_eq!(log.pending_profile_compactions(), 1);
+
+        drop(log);
+        let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(reopened.events(&conversation).len(), 11);
     }
 
     #[test]

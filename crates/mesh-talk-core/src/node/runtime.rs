@@ -33,6 +33,9 @@ const FILE_PULL_INTERVAL_SECS: u64 = 3;
 /// A no-op when no new peers appeared and when we've never set an avatar.
 const PROFILE_REPUBLISH_INTERVAL_SECS: u64 = 3;
 
+/// How often the node performs at most one deferred profile-log compaction.
+const PROFILE_COMPACTION_INTERVAL_SECS: u64 = 3;
+
 /// Which peers to (re)publish our profile to this round: those present now (excluding post
 /// offices, which relay rather than render avatars) that were ABSENT in the previous round.
 /// `present_prev` holds the PREVIOUS round's present set and is updated in place to this
@@ -245,6 +248,28 @@ impl NodeRuntime {
                 loop {
                     node.pull_pending_files().await;
                     tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
+                }
+            }));
+        }
+        {
+            let node = Arc::clone(&node);
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    let node_for_compaction = Arc::clone(&node);
+                    match tokio::task::spawn_blocking(move || {
+                        node_for_compaction.drain_profile_compaction()
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            log::warn!("profile log compaction failed; will retry: {error}");
+                        }
+                        Err(error) => {
+                            log::warn!("profile compaction task failed: {error}");
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(PROFILE_COMPACTION_INTERVAL_SECS)).await;
                 }
             }));
         }
