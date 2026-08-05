@@ -1,14 +1,14 @@
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use rand_core::OsRng;
 use std::convert::TryInto;
+
+use super::random_signing_key;
 
 pub struct KeyManager;
 
 impl KeyManager {
     pub fn generate_keypair() -> Result<(VerifyingKey, SigningKey), Box<dyn std::error::Error>> {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
+        let signing_key = random_signing_key();
         let verifying_key = signing_key.verifying_key();
         Ok((verifying_key, signing_key))
     }

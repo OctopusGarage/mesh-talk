@@ -149,8 +149,14 @@ function hasVisibleFocusTreatment(style: FocusStyle) {
     style.outlineStyle !== "hidden" &&
     style.outlineWidth !== "0px";
   const hasShadow =
-    style.boxShadow !== "none" && !style.boxShadow.includes("rgba(0, 0, 0, 0)");
+    style.boxShadow !== "none" && hasNonTransparentShadow(style.boxShadow);
   return hasOutline || hasShadow;
+}
+
+function hasNonTransparentShadow(boxShadow: string) {
+  return /(?:rgb\((?!0 0 0 \/ 0|0, 0, 0, 0)|rgba\((?!0, 0, 0, 0)|hsl\(|oklch\(|color\()/i.test(
+    boxShadow,
+  );
 }
 
 function focusTreatmentChanged(before: FocusStyle, after: FocusStyle) {

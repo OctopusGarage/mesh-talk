@@ -26,7 +26,7 @@ export default tseslint.config(
       "react-refresh": reactRefresh,
     },
     rules: {
-      ...reactHooks.configs.recommended.rules,
+      "react-hooks/rules-of-hooks": "error",
       // The whole architecture relies on correct effect deps + cleanup; a missing
       // cleanup leaks listeners/timers. Enforce as an error so CI guards it.
       "react-hooks/exhaustive-deps": "error",

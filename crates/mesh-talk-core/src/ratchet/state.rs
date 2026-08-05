@@ -6,7 +6,6 @@ use crate::ratchet::kdf::{kdf_ck, kdf_rk, message_keys};
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use bincode::Options;
-use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -83,7 +82,7 @@ fn dh(secret: &StaticSecret, public: &PublicKey) -> [u8; 32] {
 /// Initialise the SENDER (Alice): she knows the shared secret + Bob's initial ratchet
 /// public key, and sets up the first sending chain via a DH ratchet.
 pub fn init_alice(shared_secret: &[u8; 32], bob_ratchet_pub: &[u8; 32]) -> RatchetState {
-    let dhs_secret = StaticSecret::random_from_rng(OsRng);
+    let dhs_secret = StaticSecret::random();
     let dhs_public = PublicKey::from(&dhs_secret);
     let dhr = PublicKey::from(*bob_ratchet_pub);
     let (rk, cks) = kdf_rk(shared_secret, &dh(&dhs_secret, &dhr));
@@ -227,7 +226,7 @@ impl RatchetState {
         self.rk = rk2;
         self.ckr = Some(ckr);
         // New sending keypair + sending chain.
-        self.dhs_secret = StaticSecret::random_from_rng(OsRng);
+        self.dhs_secret = StaticSecret::random();
         self.dhs_public = PublicKey::from(&self.dhs_secret);
         let (rk3, cks) = kdf_rk(&self.rk, &dh(&self.dhs_secret, header_pub));
         self.rk = rk3;

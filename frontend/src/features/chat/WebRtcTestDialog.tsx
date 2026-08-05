@@ -316,7 +316,7 @@ const VideoTile = ({
   label,
   muted,
 }: {
-  videoRef: React.RefObject<HTMLVideoElement>;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
   label: string;
   muted?: boolean;
 }) => (

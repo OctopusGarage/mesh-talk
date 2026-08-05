@@ -3,7 +3,7 @@
 //! public key, binding the device to the account). The `account_id` is the user's
 //! stable cross-device handle. Pure crypto — persistence + networking are later plans.
 
-use crate::identity::device::DeviceIdentity;
+use crate::identity::{device::DeviceIdentity, random_signing_key};
 use bincode::Options;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
@@ -85,7 +85,7 @@ pub struct Account {
 impl Account {
     pub fn generate() -> Self {
         Account {
-            signing_key: SigningKey::generate(&mut rand_core::OsRng),
+            signing_key: random_signing_key(),
         }
     }
 
