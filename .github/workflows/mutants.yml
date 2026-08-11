@@ -50,7 +50,7 @@ jobs:
           npm run build
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-mutants
 
