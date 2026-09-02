@@ -64,11 +64,12 @@ pub fn encrypt_data(
     key: &EncryptionKey,
 ) -> Result<(Vec<u8>, [u8; NONCE_SIZE]), StorageError> {
     let nonce_bytes = generate_nonce()?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::try_from(nonce_bytes.as_slice())
+        .map_err(|e| StorageError::Encryption(e.to_string()))?;
     let cipher = Aes256Gcm::new(key.as_bytes().into());
 
     let ciphertext = cipher
-        .encrypt(nonce, data)
+        .encrypt(&nonce, data)
         .map_err(|e| StorageError::Encryption(e.to_string()))?;
 
     Ok((ciphertext, nonce_bytes))
@@ -79,11 +80,12 @@ pub fn decrypt_data(
     nonce: &[u8; NONCE_SIZE],
     key: &EncryptionKey,
 ) -> Result<Vec<u8>, StorageError> {
-    let nonce = Nonce::from_slice(nonce);
+    let nonce =
+        Nonce::try_from(nonce.as_slice()).map_err(|e| StorageError::Decryption(e.to_string()))?;
     let cipher = Aes256Gcm::new(key.as_bytes().into());
 
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| StorageError::Decryption(e.to_string()))?;
 
     Ok(plaintext)
