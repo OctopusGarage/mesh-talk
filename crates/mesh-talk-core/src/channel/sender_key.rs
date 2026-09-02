@@ -210,8 +210,9 @@ pub fn seal_message(
 ) -> Result<Vec<u8>, SenderKeyError> {
     let (mut key, mut nonce) = message_keys(mk);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| SenderKeyError::Encrypt)?;
+    let mut aead_nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| SenderKeyError::Encrypt)?;
     let result = cipher.encrypt(
-        Nonce::from_slice(&nonce),
+        &aead_nonce,
         Payload {
             msg: plaintext,
             aad,
@@ -219,6 +220,7 @@ pub fn seal_message(
     );
     key.zeroize();
     nonce.zeroize();
+    aead_nonce.as_mut_slice().zeroize();
     result.map_err(|_| SenderKeyError::Encrypt)
 }
 
@@ -229,8 +231,9 @@ pub fn open_message(
 ) -> Result<Vec<u8>, SenderKeyError> {
     let (mut key, mut nonce) = message_keys(mk);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| SenderKeyError::Decrypt)?;
+    let mut aead_nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| SenderKeyError::Decrypt)?;
     let result = cipher.decrypt(
-        Nonce::from_slice(&nonce),
+        &aead_nonce,
         Payload {
             msg: ciphertext,
             aad,
@@ -238,6 +241,7 @@ pub fn open_message(
     );
     key.zeroize();
     nonce.zeroize();
+    aead_nonce.as_mut_slice().zeroize();
     result.map_err(|_| SenderKeyError::Decrypt)
 }
 
