@@ -95,7 +95,13 @@ jobs:
         if: failure() && matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $test = Get-ChildItem target/debug/deps/mesh_talk-*.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $test = $null
+          foreach ($candidate in Get-ChildItem target/debug/deps/mesh_talk-*.exe) {
+            Write-Host "Checking test harness: $($candidate.Name)"
+            & $candidate.FullName --list
+            Write-Host "Harness exit code: $LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) { $test = $candidate; break }
+          }
           if (-not $test) { throw 'No application test executable found' }
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -108,7 +114,7 @@ jobs:
           Copy-Item $test.FullName $copy
           $manifest = Join-Path $env:RUNNER_TEMP 'common-controls.manifest'
           '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" /></dependentAssembly></dependency></assembly>' | Set-Content $manifest -Encoding utf8
-          & $mt.FullName "-manifest:$manifest" "-outputresource:$copy;#1"
+          & $mt.FullName -manifest $manifest "-outputresource:$copy;#1"
           if ($LASTEXITCODE -ne 0) { throw 'Manifest embedding failed' }
           & $copy --list
           if ($LASTEXITCODE -ne 0) { throw 'Test harness still cannot load with Common Controls v6' }
