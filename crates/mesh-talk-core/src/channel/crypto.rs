@@ -112,8 +112,9 @@ pub fn seal_channel_message(key: &GroupKey, plaintext: &[u8]) -> Result<Vec<u8>,
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| ChannelError::Encrypt)?;
     let mut nonce = [0u8; NONCE_SIZE];
     OsRng.fill_bytes(&mut nonce);
+    let nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| ChannelError::Encrypt)?;
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|_| ChannelError::Encrypt)?;
     let mut out = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
     out.extend_from_slice(&nonce);
@@ -131,8 +132,9 @@ pub fn open_channel_message(key: &GroupKey, envelope: &[u8]) -> Result<Vec<u8>, 
     }
     let (nonce, ciphertext) = envelope.split_at(NONCE_SIZE);
     let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| ChannelError::Decrypt)?;
+    let nonce = Nonce::try_from(nonce).map_err(|_| ChannelError::Decrypt)?;
     cipher
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| ChannelError::Decrypt)
 }
 

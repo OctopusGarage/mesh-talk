@@ -10,6 +10,11 @@ use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
 use crate::node::conversation::dm_conversation_id;
 use crate::node::profile::{ProfilePayload, MAX_AVATAR_BYTES};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Each pass reclaims at most one conversation; the persistent log also applies a cooldown.
+const PROFILE_COMPACTION_INTERVAL: Duration = Duration::from_secs(3);
 
 impl Node {
     /// Set (or clear) this user's OWN avatar and PROPAGATE it to peers. `avatar` is the
@@ -183,8 +188,8 @@ impl Node {
             }
         }
         // Bound on-disk growth: schedule dropping superseded, unreferenced profile events
-        // for this conversation (safe — they're never referenced as parents). The runtime
-        // maintenance task performs the expensive rewrite outside this sync callback.
+        // for this conversation (safe — they're never referenced as parents). The accept
+        // loop performs the expensive rewrite outside this sync callback.
         self.log
             .lock()
             .expect("log mutex not poisoned")
@@ -199,5 +204,22 @@ impl Node {
             .lock()
             .expect("log mutex not poisoned")
             .drain_one_profile_compaction()
+    }
+
+    /// Owned by the accept-loop future, rather than a detached background task.
+    pub(in crate::node) async fn run_profile_compaction_loop(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(PROFILE_COMPACTION_INTERVAL).await;
+            let node = Arc::clone(&self);
+            match tokio::task::spawn_blocking(move || node.drain_profile_compaction()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    log::warn!("profile log compaction failed; will retry: {error}");
+                }
+                Err(error) => {
+                    log::warn!("profile compaction task failed: {error}");
+                }
+            }
+        }
     }
 }

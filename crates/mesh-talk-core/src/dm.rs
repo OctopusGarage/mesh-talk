@@ -140,9 +140,11 @@ pub fn seal(
     dh2.zeroize();
 
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| DmError::Encrypt)?;
-    let result = cipher.encrypt(Nonce::from_slice(&nonce), plaintext);
+    let mut aead_nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| DmError::Encrypt)?;
+    let result = cipher.encrypt(&aead_nonce, plaintext);
     key.zeroize();
     nonce.zeroize();
+    aead_nonce.as_mut_slice().zeroize();
     let ciphertext = result.map_err(|_| DmError::Encrypt)?;
 
     let envelope = SealedEnvelope {
@@ -188,9 +190,11 @@ pub fn open(
     dh2.zeroize();
 
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| DmError::Decrypt)?;
-    let result = cipher.decrypt(Nonce::from_slice(&nonce), envelope.ciphertext.as_ref());
+    let mut aead_nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| DmError::Decrypt)?;
+    let result = cipher.decrypt(&aead_nonce, envelope.ciphertext.as_ref());
     key.zeroize();
     nonce.zeroize();
+    aead_nonce.as_mut_slice().zeroize();
     result.map_err(|_| DmError::Decrypt)
 }
 

@@ -347,8 +347,9 @@ impl Drop for RatchetState {
 fn aead_encrypt(mk: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, RatchetError> {
     let (mut key, mut nonce) = message_keys(mk);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| RatchetError::Decrypt)?;
+    let mut aead_nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| RatchetError::Decrypt)?;
     let result = cipher.encrypt(
-        Nonce::from_slice(&nonce),
+        &aead_nonce,
         Payload {
             msg: plaintext,
             aad,
@@ -356,14 +357,16 @@ fn aead_encrypt(mk: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, 
     );
     key.zeroize();
     nonce.zeroize();
+    aead_nonce.as_mut_slice().zeroize();
     result.map_err(|_| RatchetError::Decrypt)
 }
 
 fn aead_decrypt(mk: &[u8; 32], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, RatchetError> {
     let (mut key, mut nonce) = message_keys(mk);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| RatchetError::Decrypt)?;
+    let mut aead_nonce = Nonce::try_from(nonce.as_slice()).map_err(|_| RatchetError::Decrypt)?;
     let result = cipher.decrypt(
-        Nonce::from_slice(&nonce),
+        &aead_nonce,
         Payload {
             msg: ciphertext,
             aad,
@@ -371,6 +374,7 @@ fn aead_decrypt(mk: &[u8; 32], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>,
     );
     key.zeroize();
     nonce.zeroize();
+    aead_nonce.as_mut_slice().zeroize();
     result.map_err(|_| RatchetError::Decrypt)
 }
 
