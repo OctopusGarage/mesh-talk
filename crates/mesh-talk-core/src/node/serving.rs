@@ -59,9 +59,17 @@ impl Node {
         Ok(true)
     }
 
-    /// Accept inbound connections on `listener` and serve each on its own task,
-    /// until the listener errors. (The binary calls this; the test drives it too.)
+    /// Accept inbound connections and maintain deferred profile compactions.
+    /// Maintenance runs on the blocking pool and stops when this future is dropped;
+    /// CLI and SDK hosts get the same log maintenance as the desktop runtime.
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
+        tokio::select! {
+            _ = Arc::clone(&self).run_profile_compaction_loop() => {}
+            _ = self.accept_connections(listener) => {}
+        }
+    }
+
+    async fn accept_connections(self: Arc<Self>, listener: TcpListener) {
         let conns = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS));
         loop {
             // Reserve a connection slot BEFORE accepting, so we never serve more than the cap;

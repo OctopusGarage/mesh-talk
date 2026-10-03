@@ -2,7 +2,7 @@ use crate::services::user::User;
 use mesh_talk_core::identity::manager::IdentityManager;
 use mesh_talk_core::storage::file_manager::FileManager;
 
-use rand::{distr::Alphanumeric, RngExt};
+use rand::distr::{Alphanumeric, Distribution};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,8 +57,8 @@ impl Session {
             .as_secs();
 
         // Generate a cryptographically secure random token
-        let token: String = rand::rng()
-            .sample_iter(Alphanumeric)
+        let token: String = Alphanumeric
+            .sample_iter(rand::rng())
             .take(32)
             .map(char::from)
             .collect();

@@ -3748,6 +3748,136 @@ async fn account_history_backfills_to_a_linked_device() {
     assert_eq!(hist[0].text, b"old message");
 }
 
+// The CLI runs Node directly; its accept loop must also maintain the durable log.
+#[tokio::test]
+async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_roster = seed_roster(
+        &bob,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+        &alice.public().user_id(),
+    );
+    let bob_roster = seed_roster(&alice, "Alice", 4000, &bob.public().user_id());
+    let dir = tempfile::tempdir().unwrap();
+    let (a_dm, _a_rx) = mpsc::unbounded_channel();
+    let (a_ch, _a_ch_rx) = mpsc::unbounded_channel();
+    let (a_file, _a_file_rx) = mpsc::unbounded_channel();
+    let (b_dm, mut b_rx) = mpsc::unbounded_channel();
+    let (b_ch, _b_ch_rx) = mpsc::unbounded_channel();
+    let (b_file, _b_file_rx) = mpsc::unbounded_channel();
+    let alice_node = Node::open(
+        alice,
+        alice_roster,
+        a_dm,
+        a_ch,
+        a_file,
+        &dir.path().join("alice.log"),
+        &dir.path().join("alice-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let bob_path = dir.path().join("bob.log");
+    let bob_node = Node::open(
+        bob,
+        bob_roster,
+        b_dm,
+        b_ch,
+        b_file,
+        &bob_path,
+        &dir.path().join("bob-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let conv = dm_conversation_id(&alice_node.identity.public(), &bob_node.identity.public());
+    add_account_peer(
+        &bob_node.roster,
+        &alice_node.identity,
+        &alice_node.account,
+        "Alice",
+        4000,
+        &bob_node.identity.public().user_id(),
+    );
+    // An ordinary message must survive reclaiming eight superseded profiles.
+    let message = alice_node
+        .dm_ratchet
+        .lock()
+        .unwrap()
+        .encrypt(
+            &alice_node.identity,
+            &bob_node.identity.public(),
+            &MessageBody::new(b"keep me".to_vec(), None).encode(),
+        )
+        .unwrap();
+    alice_node
+        .append_event(conv, EventKind::Message, message)
+        .unwrap();
+    for i in 0..9 {
+        let profile = crate::node::profile::ProfilePayload::new(
+            &alice_node.account,
+            Some(vec![i]),
+            u64::from(i) + 1,
+        );
+        alice_node
+            .append_event(
+                conv,
+                EventKind::Profile,
+                crate::dm::seal(
+                    &alice_node.identity,
+                    &bob_node.identity.public().x25519_pub,
+                    &profile.encode(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let accept = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    let peer = alice_node.roster.lock().unwrap().peers()[0].clone();
+    alice_node.deliver_direct(&peer, conv).await.unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(5), b_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.text, b"keep me");
+    let compacted = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if bob_node.log.lock().unwrap().conversation_len(&conv) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    accept.abort();
+    let _ = accept.await;
+    assert!(
+        compacted.is_ok(),
+        "the CLI accept loop must reclaim superseded profiles"
+    );
+    assert_eq!(
+        bob_node.peer_avatar(&alice_node.account.account_id()),
+        Some(vec![8])
+    );
+    let reopened = PersistentEventLog::open(&bob_path, "pw").unwrap();
+    assert_eq!(reopened.conversation_len(&conv), 2);
+    assert_eq!(
+        reopened
+            .events(&conv)
+            .iter()
+            .filter(|e| e.kind == EventKind::Message)
+            .count(),
+        1
+    );
+    // Compaction must leave the live append handle attached to the rewritten file.
+    bob_node
+        .append_event(conv, EventKind::Message, b"after compaction".to_vec())
+        .unwrap();
+    let reopened = PersistentEventLog::open(&bob_path, "pw").unwrap();
+    assert_eq!(reopened.conversation_len(&conv), 3);
+}
+
 // Avatar propagation: Alice sets a custom avatar; it must ride the reliable sync to Bob,
 // who ends up holding Alice's avatar bytes keyed by Alice's ACCOUNT id. Mirrors the
 // account-delivery rig.
@@ -3824,11 +3954,6 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert_eq!(got, Some(avatar.clone()), "bob received alice's avatar");
-    assert_eq!(
-        bob_node.log.lock().unwrap().pending_profile_compactions(),
-        1,
-        "profile processing queues compaction for maintenance"
-    );
 
     let profile_conv = crate::node::conversation::dm_conversation_id(
         &alice_node.identity.public(),

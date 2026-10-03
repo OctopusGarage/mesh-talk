@@ -80,6 +80,11 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   re-verified (hash + signature) on ingest.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
+  Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
+  loop shared by desktop, CLI, and SDK hosts: every 3 seconds it drains at most one
+  conversation on the blocking pool, with a 10-second per-conversation cooldown.
+  Dropping the accept-loop future stops scheduling maintenance; an already-running
+  blocking rewrite finishes atomically. The log mutex serializes rewrites with appends.
 
 ## 4. Networking & delivery (`discovery/`, `node/`, `postoffice/`)
 
