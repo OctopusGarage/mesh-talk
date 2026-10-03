@@ -1,0 +1,86 @@
+name: Linux tray geometry diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/linux-tray-diagnostics.yml
+      - scripts/diagnostics/tray-geometry*.mjs
+      - scripts/diagnostics/linux-tray-host.py
+      - src-tauri/src/tray.rs
+      - src-tauri/src/lib.rs
+
+permissions:
+  contents: read
+
+jobs:
+  native-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-window-diagnostics
+          cache-on-failure: true
+      - name: Install native X11, WebKit and tray dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb openbox dbus-x11 xdotool x11-utils imagemagick python3-dbus python3-gi
+      - name: Validate evidence classifier and Python syntax
+        run: |
+          node --test scripts/diagnostics/tray-geometry-report.test.mjs
+          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/diagnostics/linux-tray-host.py").read_text())'
+      - name: Install native Tauri driver
+        run: cargo install tauri-driver --version 2.0.6 --locked
+      - name: Build unchanged production frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Build unchanged release application
+        run: cargo build --locked --release -p mesh-talk --bin mesh-talk
+      - name: Observe production close-to-tray and actual exported Show menu
+        env:
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+          GDK_BACKEND: x11
+        run: |
+          export NATIVE_TRAY_ARTIFACT_DIR="$RUNNER_TEMP/tray-geometry-artifacts"
+          mkdir -p "$NATIVE_TRAY_ARTIFACT_DIR"
+          # Environment variables are intentionally expanded by the inner shell.
+          # shellcheck disable=SC2016
+          xvfb-run -a -s '-screen 0 1600x1200x24' dbus-run-session -- bash -e -c '
+            openbox > "$NATIVE_TRAY_ARTIFACT_DIR/openbox.log" 2>&1 &
+            for attempt in {1..50}; do
+              if xprop -root _NET_SUPPORTING_WM_CHECK | rg -q "window id"; then break; fi
+              sleep 0.1
+            done
+            xprop -root _NET_SUPPORTING_WM_CHECK | rg -q "window id"
+            node scripts/diagnostics/tray-geometry.mjs target/release/mesh-talk
+          '
+      - name: Publish scoped observation
+        if: always()
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            const reportPath = path.join(process.env.RUNNER_TEMP, "tray-geometry-artifacts/report.json");
+            if (fs.existsSync(reportPath)) {
+              const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Issue #137 native X11 observation\n\n" + JSON.stringify(report.analysis ?? {status: report.status, error: report.error}, null, 2) + "\n");
+            }
+          '
+      - name: Upload independent desktop images and native evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-tray-geometry-${{ github.sha }}
+          path: ${{ runner.temp }}/tray-geometry-artifacts
+          retention-days: 7
