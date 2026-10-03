@@ -14,11 +14,15 @@ const controls = resolve(process.env.NATIVE_CONSOLE_CONTROL_DIR);
 await mkdir(artifacts, { recursive: true });
 const report = { platform: process.platform, controls: {}, calls: [] };
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
-const driver = spawn("tauri-driver", ["--port", "4445"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+// tauri-driver proxies to a native driver on 4445; its own listener must be distinct.
+const driver = spawn("tauri-driver", ["--port", "4444"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 let driverLog = "";
 let driverError;
 driver.on("error", (error) => { driverError = error; });
-for (const stream of [driver.stdout, driver.stderr]) stream.on("data", (chunk) => { driverLog += chunk; });
+for (const stream of [driver.stdout, driver.stderr]) stream.on("data", (chunk) => {
+  // Bound diagnostic memory even when a driver failure produces a flood of repeated errors.
+  if (driverLog.length < 512 * 1024) driverLog += chunk;
+});
 let observer;
 let observerLog = "";
 let observerError;
@@ -34,7 +38,7 @@ async function until(description, check, timeout = 30000) {
 }
 
 async function request(method, path, body) {
-  const response = await fetch(`http://127.0.0.1:4445${path}`, {
+  const response = await fetch(`http://127.0.0.1:4444${path}`, {
     method, headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(150000),
