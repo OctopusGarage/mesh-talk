@@ -38,6 +38,27 @@ function evidence() {
   };
 }
 
+test("bounded WMI generation delay still requires distinct owned child processes", () => {
+  const data = evidence();
+  data.events = data.events.filter((e) => e.kind !== "window" || e.isFixture);
+  const children = data.events.filter((e) => e.kind === "process-start");
+  children.forEach((e) => { e.timestamp += 900; e.timestampSource = "wmi-event"; });
+  assert.equal(analyzeNetworkConsole(data).applicationOwnedNetshStarts, 3);
+  children[2].processId = children[1].processId;
+  assert.throws(() => analyzeNetworkConsole(data), /distinct/);
+});
+
+test("late actual start timestamps and unbounded WMI delays cannot establish query ownership", () => {
+  for (const source of ["process-start-time", "wmi-event"]) {
+    const data = evidence();
+    data.events = data.events.filter((e) => e.kind !== "window" || e.isFixture);
+    const child = data.events.find((e) => e.kind === "process-start");
+    child.timestamp += source === "wmi-event" ? 3000 : 900;
+    child.timestampSource = source;
+    assert.throws(() => analyzeNetworkConsole(data), /application-owned netsh/);
+  }
+});
+
 test("correlates real app child and visible console during a natural query", () => {
   const result = analyzeNetworkConsole(evidence());
   assert.equal(result.status, "console-window-observed");

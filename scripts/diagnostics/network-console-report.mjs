@@ -30,8 +30,29 @@ export function analyzeNetworkConsole({ applicationPid, controls, calls, events 
     e.name === "netsh.exe" && e.parentPid === applicationPid);
   const ownedWindow = (window) => children.some((child) => child.processId === window.processId &&
     Math.abs(child.timestamp - window.timestamp) <= 2000);
-  assert.ok(calls.every((c) => children.some((e) => within(e.timestamp, c)) ||
-    visible.some((window) => within(window.timestamp, c) && ownedWindow(window))),
+  assert.equal(new Set(children.map((e) => e.processId)).size, children.length,
+    "child process evidence must contain distinct PIDs");
+  // Short-lived hidden children can exit before WMI delivery. Its event generation
+  // time is batched (not the OS process start time), so allow only that source a
+  // bounded delay. Match one-to-one: one event must never satisfy multiple queries.
+  const assignments = new Map();
+  const match = (callIndex, visited) => children.some((child, childIndex) => {
+    if (visited.has(childIndex)) return false;
+    const call = calls[callIndex];
+    const timed = child.timestampSource === "wmi-event" ?
+      child.timestamp >= call.start - 100 && child.timestamp <= call.end + 2000 :
+      within(child.timestamp, call);
+    const windowTimed = visible.some((window) => window.processId === child.processId &&
+      within(window.timestamp, call) && ownedWindow(window));
+    if (!timed && !windowTimed) return false;
+    visited.add(childIndex);
+    if (!assignments.has(childIndex) || match(assignments.get(childIndex), visited)) {
+      assignments.set(childIndex, callIndex);
+      return true;
+    }
+    return false;
+  });
+  assert.ok(children.length === calls.length && calls.every((_, i) => match(i, new Set())),
     "each query must launch an application-owned netsh process");
   const bindings = events.filter((e) => e.kind === "console-owner" && e.parentPid === applicationPid &&
     children.some((child) => child.processId === e.processId));
