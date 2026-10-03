@@ -49,6 +49,6 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 
 ## Design history
 
-Per-phase design specs and implementation plans live under
-[`docs/superpowers/specs/`](superpowers/specs/) and
-[`docs/superpowers/plans/`](superpowers/plans/). Detailed task history lives in git.
+The current design is documented in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
+Historical design specs, implementation plans, and detailed task history are
+available in git history; the former `docs/superpowers/` files are not tracked.
