@@ -498,6 +498,20 @@ fn require_session(state: &AppState) -> CommandResult<crate::state::SessionInfo>
 // Node lifecycle bridge
 // ---------------------------------------------------------------------------
 
+/// Startup errors can embed the account directory. Redact every occurrence at
+/// the logging boundary while preserving the error category and remaining context.
+fn node_start_error_for_log(
+    error: &mesh_talk_core::node::RuntimeError,
+    account_id: &str,
+) -> String {
+    let diagnostic = error.to_string();
+    if account_id.is_empty() {
+        diagnostic
+    } else {
+        diagnostic.replace(account_id, "[account]")
+    }
+}
+
 /// Spawn the node runtime in the background, wiring its inbound callbacks to the
 /// app's Tauri events, and store it in `node_handle`. Shared by login and by account
 /// adoption after device linking (which drops the old runtime and re-spawns; `start`
@@ -571,9 +585,13 @@ pub(crate) fn spawn_node_runtime(
         {
             Ok(runtime) => {
                 *node_handle.0.lock().await = Some(runtime);
-                log::info!("Node started for account {account_id}");
+                // Keep lifecycle diagnostics without persisting an account identifier.
+                log::info!("Node started");
             }
-            Err(e) => log::warn!("Node failed to start: {e}"),
+            Err(e) => log::warn!(
+                "Node failed to start: {}",
+                node_start_error_for_log(&e, &account_id)
+            ),
         }
     });
 }
@@ -614,6 +632,52 @@ pub async fn adopt_linked_account(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_error_redacts_account_paths_but_keeps_failure_context() {
+        use mesh_talk_core::node::RuntimeError;
+        use mesh_talk_core::storage::errors::StorageError;
+
+        let account_id = "d86128de-1a5a-4449-b5cc-fb3c82aa49f8";
+        let error = RuntimeError::Open(
+            StorageError::DirectoryCreationFailed(
+                format!("/data/accounts/{account_id}/nested/{account_id}").into(),
+            )
+            .into(),
+        );
+        let diagnostic = super::node_start_error_for_log(&error, account_id);
+        assert!(!diagnostic.contains(account_id));
+        assert!(diagnostic.contains("Failed to create directory"));
+        assert!(diagnostic.contains("/data/accounts/[account]/nested/[account]"));
+    }
+
+    #[test]
+    fn startup_error_preserves_unrelated_errors_and_handles_an_empty_identifier() {
+        let error = mesh_talk_core::node::RuntimeError::Io(std::io::Error::from(
+            std::io::ErrorKind::AddrInUse,
+        ));
+        assert_eq!(
+            super::node_start_error_for_log(&error, "an-account"),
+            error.to_string()
+        );
+        assert_eq!(
+            super::node_start_error_for_log(&error, ""),
+            error.to_string()
+        );
+    }
+
+    #[test]
+    fn startup_error_redacts_account_identifiers_in_windows_io_messages() {
+        let account_id = "d86128de-1a5a-4449-b5cc-fb3c82aa49f8";
+        let error = mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(r"access denied: C:\data\accounts\{account_id}\identity.keystore"),
+        ));
+        let diagnostic = super::node_start_error_for_log(&error, account_id);
+        assert!(!diagnostic.contains(account_id));
+        assert!(diagnostic.contains("access denied"));
+        assert!(diagnostic.contains(r"C:\data\accounts\[account]\identity.keystore"));
+    }
+
     use super::*;
 
     // The frontend (frontend/src/lib/error.ts) hard-depends on this exact shape:
