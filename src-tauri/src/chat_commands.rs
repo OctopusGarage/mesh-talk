@@ -1365,6 +1365,7 @@ pub async fn clear_conversation(
 #[derive(Serialize)]
 pub struct SearchHitInfo {
     pub is_channel: bool,
+    pub account_id: Option<String>,
     pub target: String,
     pub label: String,
     pub from_me: bool,
@@ -1393,6 +1394,7 @@ pub async fn search(
         .into_iter()
         .map(|h| SearchHitInfo {
             is_channel: h.is_channel,
+            account_id: h.account_id,
             target: h.target,
             label: h.label,
             from_me: h.from_me,

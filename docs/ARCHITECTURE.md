@@ -112,6 +112,30 @@ per multi-device contact). `features/chat/` is the 3-pane app (sidebar · messag
 members) with replies, reactions, @mentions, file send + a received-files tray, search,
 and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
 
+**Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
+the signed-in local user's hidden account IDs and last-known names are stored separately
+in `accounts/<local-user-id>/hidden-contacts.json`. Mutations validate the session owner
+and replace the file atomically; this metadata is local to the device, not synced.
+Settings provides a searchable management dialog and offline restoration; contact rows
+also offer a hide action in their context menu, with an explicit confirmation.
+Visibility filters are projections over the raw roster: contact lists, new-group invite
+choices and DM search omit hidden accounts (including new devices for that account).
+Raw discovery, cryptographic identity lookup, history, pins/aliases, message/file/call
+receipt, notifications, and existing shared groups remain unchanged. This is **not** a
+communication block or a way to become invisible to peers. A failed initial policy load
+offers retry without briefly showing hidden contacts; stale responses from another login
+cannot overwrite the current user's UI policy.
+Atomic replacement is the save commit point. The file is synced before replacement;
+directory synchronization afterward is best effort (a failure is logged without contact
+data and does not falsely report that the committed change failed). A filesystem that
+cannot sync directories cannot guarantee rename durability through a subsequent crash.
+Search hits carry their verified account binding from the scan's own roster snapshot,
+so a device leaving the live roster cannot expose a hidden account's search results.
+Last-known names are display metadata: control characters are removed and names are
+bounded before saving, so an abusive peer name cannot prevent hiding its account.
+The hidden-contact tests also exercise actual registered Tauri command dispatch through
+the headless mock runtime, including persisted hide and restoration after stopping the node.
+
 ## 6. Binaries
 
 - `mesh-talk` (`main.rs` → `lib.rs::run_tauri`) — the desktop app.

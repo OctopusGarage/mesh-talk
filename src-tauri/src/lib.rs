@@ -18,6 +18,7 @@ pub mod avatars;
 pub mod chat_commands;
 pub mod commands;
 pub mod config_store;
+pub mod contact_policy;
 pub mod diagnostics;
 pub mod events;
 pub mod favorites;
@@ -208,9 +209,12 @@ pub fn run_tauri() {
         .manage(trust_state)
         .manage(favorites_state)
         .manage(avatars_state)
+        .manage(crate::contact_policy::HiddenContactsState::default())
         .manage(crate::chat_commands::NodeState::empty())
         .invoke_handler(tauri::generate_handler![
             commands::login,
+            crate::contact_policy::get_hidden_contacts,
+            crate::contact_policy::set_contact_hidden,
             commands::logout,
             commands::register,
             commands::rename_account,

@@ -14,6 +14,7 @@ import type {
   EnvInfo,
   FavoriteInfo,
   HistoryItem,
+  HiddenContactsSnapshot,
   LoginResult,
   LogoutResult,
   PeerInfo,
@@ -208,6 +209,18 @@ export const obs = {
   logFile: () => invoke<string>("get_log_file"),
   logTail: () => invoke<string>("read_log_tail"),
   saveLogTail: (dest: string) => invoke<void>("save_log_tail", { dest }),
+};
+
+export const contactPolicy = {
+  get: (owner: string) =>
+    invoke<HiddenContactsSnapshot>("get_hidden_contacts", { owner }),
+  set: (owner: string, account: string, hidden: boolean, name: string) =>
+    invoke<HiddenContactsSnapshot>("set_contact_hidden", {
+      owner,
+      account,
+      hidden,
+      name,
+    }),
 };
 
 export const favorites = {

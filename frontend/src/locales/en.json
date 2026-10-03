@@ -1,4 +1,25 @@
 {
+  "contactVisibility": {
+    "section": "Contacts",
+    "title": "Hidden contacts",
+    "settingsDesc": "Keep selected contacts out of your lists.",
+    "manage": "Manage",
+    "hidden": "Hidden",
+    "add": "Add contact",
+    "search": "Search name or account ID",
+    "hide": "Hide contact",
+    "restore": "Restore",
+    "confirmTitle": "Hide this contact?",
+    "description": "Hides all devices of this account from contact lists and direct-message search. History is kept. Messages and calls can still arrive; shared groups are unchanged.",
+    "localOnly": "Applies only to the signed-in user on this device.",
+    "emptyHidden": "No hidden contacts.",
+    "noCandidates": "No contacts available to hide.",
+    "noMatches": "No matching contacts.",
+    "loadError": "Could not load contact visibility. Retry to display contacts safely.",
+    "saveError": "Could not save. Your saved contact visibility has not changed.",
+    "retry": "Retry",
+    "allHidden": "All contacts are hidden. Restore them in Settings."
+  },
   "common": {
     "cancel": "Cancel",
     "create": "Create",

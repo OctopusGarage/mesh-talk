@@ -1,4 +1,25 @@
 {
+  "contactVisibility": {
+    "section": "联系人",
+    "title": "隐藏联系人",
+    "settingsDesc": "从列表中隐藏不想看到的联系人。",
+    "manage": "管理",
+    "hidden": "已隐藏",
+    "add": "添加联系人",
+    "search": "搜索名称或账号 ID",
+    "hide": "隐藏联系人",
+    "restore": "恢复显示",
+    "confirmTitle": "隐藏这位联系人？",
+    "description": "将从联系人列表和私聊搜索中隐藏该账号的所有设备。聊天历史保留，仍可收到消息和来电；共同群聊不受影响。",
+    "localOnly": "仅对本设备当前登录用户生效。",
+    "emptyHidden": "暂无隐藏的联系人。",
+    "noCandidates": "没有可隐藏的联系人。",
+    "noMatches": "没有匹配的联系人。",
+    "loadError": "无法载入联系人显示设置，请重试后查看联系人。",
+    "saveError": "保存失败，已保存的联系人显示设置未改变。",
+    "retry": "重试",
+    "allHidden": "所有联系人已隐藏，可在设置中恢复显示。"
+  },
   "common": {
     "cancel": "取消",
     "create": "创建",

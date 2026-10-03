@@ -1,4 +1,25 @@
 {
+  "contactVisibility": {
+    "section": "聯絡人",
+    "title": "隱藏聯絡人",
+    "settingsDesc": "喺列表隱藏唔想見到嘅聯絡人。",
+    "manage": "管理",
+    "hidden": "已隱藏",
+    "add": "新增聯絡人",
+    "search": "搜尋名稱或帳號 ID",
+    "hide": "隱藏聯絡人",
+    "restore": "恢復顯示",
+    "confirmTitle": "隱藏呢位聯絡人？",
+    "description": "會喺聯絡人列表同私訊搜尋隱藏呢個帳號嘅所有裝置。聊天記錄會保留，仍然可以收到訊息同來電；共同群組唔受影響。",
+    "localOnly": "只對呢部裝置目前登入嘅用戶生效。",
+    "emptyHidden": "暫時冇隱藏嘅聯絡人。",
+    "noCandidates": "冇可以隱藏嘅聯絡人。",
+    "noMatches": "搵唔到符合嘅聯絡人。",
+    "loadError": "載入唔到聯絡人顯示設定，請重試後查看聯絡人。",
+    "saveError": "儲存失敗，已儲存嘅聯絡人顯示設定冇改變。",
+    "retry": "重試",
+    "allHidden": "所有聯絡人都已隱藏，可以喺設定恢復顯示。"
+  },
   "common": {
     "cancel": "取消",
     "create": "建立",

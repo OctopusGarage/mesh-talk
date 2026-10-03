@@ -6,6 +6,7 @@ import {
   FlaskConical,
   FolderOpen,
   History,
+  EyeOff,
   KeyRound,
   Languages,
   MinusSquare,
@@ -42,6 +43,7 @@ import {
   type Language,
 } from "@/lib/i18n";
 import { ThemePicker } from "./ThemePicker";
+import { HiddenContactsDialog } from "./HiddenContactsDialog";
 
 /** A section group: a small display-font label over a stack of rows. */
 function Section({
@@ -254,6 +256,14 @@ export function SettingsDialog() {
         </DialogHeader>
 
         <div className="grid max-h-[70vh] gap-5 overflow-y-auto pr-0.5">
+          <Section title={t("contactVisibility.section")}>
+            <Row
+              icon={<EyeOff className="h-4 w-4" />}
+              title={t("contactVisibility.title")}
+              desc={t("contactVisibility.settingsDesc")}
+              control={<HiddenContactsDialog />}
+            />
+          </Section>
           <Section title={t("settings.sectionAppearance")}>
             <div>
               <div className="flex items-center gap-2 text-sm font-medium">

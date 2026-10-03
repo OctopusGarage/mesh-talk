@@ -8,10 +8,17 @@ import { ensureNotificationPermission } from "@/lib/notify";
 import { useChat } from "@/store/chat";
 import { usePresence } from "@/store/presence";
 import { useSettings } from "@/store/settings";
+import { useAuth } from "@/store/auth";
+import { useContactPolicy } from "@/store/contactPolicy";
 
 export function ChatApp() {
   const { t } = useTranslation();
   const start = useChat((s) => s.start);
+  const owner = useAuth((s) => s.user?.id);
+  useEffect(() => {
+    if (owner) void useContactPolicy.getState().load(owner);
+    return () => useContactPolicy.getState().reset();
+  }, [owner]);
   const startPresence = usePresence((s) => s.start);
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);

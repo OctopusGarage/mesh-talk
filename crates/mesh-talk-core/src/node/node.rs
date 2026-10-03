@@ -77,6 +77,9 @@ pub struct ChannelSummary {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub is_channel: bool,
+    /// Verified account binding from the same roster snapshot as this hit.
+    /// UI filtering/navigation must not depend on a later, possibly evicted roster.
+    pub account_id: Option<String>,
     /// The peer user-id (DM) or channel id hex (channel) — the navigation target.
     pub target: String,
     /// The peer or channel display name.

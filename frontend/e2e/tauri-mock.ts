@@ -313,7 +313,7 @@ export const test = base.extend({
           login: (a) => ({
             success: true,
             user: {
-              id: "u_self",
+              id: a.username === "other_user" ? "u_other" : "u_self",
               username: String(a.username ?? "tester"),
               display_name: String(a.username ?? "tester"),
             },
@@ -454,6 +454,7 @@ export const test = base.extend({
             if (!q) return [];
             const hits: Array<{
               is_channel: boolean;
+              account_id?: string | null;
               target: string;
               label: string;
               from_me: boolean;
@@ -481,6 +482,7 @@ export const test = base.extend({
                   const dev = peers.find((p) => p.account_id === acct)?.user_id;
                   hits.push({
                     is_channel: false,
+                    account_id: acct,
                     target: dev ?? acct,
                     label: a2?.names[0] ?? "contact",
                     from_me: m.from_me,
@@ -501,6 +503,25 @@ export const test = base.extend({
           rekey_account: () => "acc_rekeyed_ffff6666",
 
           // favorites
+          get_hidden_contacts: (a) => ({
+            owner: String(a.owner),
+            contacts: JSON.parse(
+              localStorage.getItem(`mock-hidden-${a.owner}`) ?? "[]",
+            ),
+          }),
+          set_contact_hidden: (a) => {
+            const key = `mock-hidden-${a.owner}`;
+            const contacts: Array<{ account_id: string; name: string }> =
+              JSON.parse(localStorage.getItem(key) ?? "[]");
+            const next = contacts.filter((c) => c.account_id !== a.account);
+            if (a.hidden)
+              next.push({
+                account_id: String(a.account),
+                name: String(a.name),
+              });
+            localStorage.setItem(key, JSON.stringify(next));
+            return { owner: String(a.owner), contacts: next };
+          },
           get_favorites: () => Object.values(favorites),
           set_favorite: (a) => {
             const id = String(a.id);

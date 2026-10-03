@@ -47,6 +47,16 @@ impl SessionState {
     pub fn get(&self) -> Option<SessionInfo> {
         self.inner.lock().unwrap().clone()
     }
+
+    /// Run an owner-authorized operation while retaining the live session guard.
+    /// Callers see only the local user id; password and session token stay private.
+    pub(crate) fn with_owner<T>(
+        &self,
+        operation: impl FnOnce(Option<&str>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self.inner.lock().map_err(|_| "Session lock unavailable")?;
+        operation(guard.as_ref().map(|session| session.user.user_id.as_str()))
+    }
 }
 
 /// Managed Tauri state: the auth service + the current in-memory session. (The legacy

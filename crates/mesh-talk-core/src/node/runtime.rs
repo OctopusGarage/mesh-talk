@@ -374,6 +374,11 @@ impl NodeRuntime {
         &self.account_id
     }
 
+    /// Local host account namespace used for this runtime's persistent stores.
+    pub fn host_account_id(&self) -> Option<&str> {
+        self.account_path.parent()?.file_name()?.to_str()
+    }
+
     /// Force an immediate re-announce + /24 rescan, on top of the periodic timers.
     /// Useful when LAN discovery is flaky (e.g. first-contact lost to UDP drops):
     /// the user can press "announce now" to converge without waiting for the next
@@ -749,6 +754,7 @@ mod tests {
 
         // The cryptographic account is created on disk and stable across reopen.
         assert_eq!(runtime.account_id().len(), 32); // account_id is 32 hex chars
+        assert_eq!(runtime.host_account_id(), Some("alice-user-id"));
         assert!(node_dir.join("account.keystore").exists());
         assert_eq!(runtime.account_id(), runtime2.account_id());
     }

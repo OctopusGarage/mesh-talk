@@ -1,4 +1,25 @@
 {
+  "contactVisibility": {
+    "section": "Contactos",
+    "title": "Contactos ocultos",
+    "settingsDesc": "Oculta de las listas los contactos que elijas.",
+    "manage": "Gestionar",
+    "hidden": "Ocultos",
+    "add": "Añadir contacto",
+    "search": "Buscar nombre o ID de cuenta",
+    "hide": "Ocultar contacto",
+    "restore": "Mostrar",
+    "confirmTitle": "¿Ocultar este contacto?",
+    "description": "Oculta todos los dispositivos de esta cuenta en las listas de contactos y la búsqueda de mensajes directos. Se conserva el historial. Seguirás recibiendo mensajes y llamadas; los grupos compartidos no cambian.",
+    "localOnly": "Solo afecta al usuario conectado en este dispositivo.",
+    "emptyHidden": "No hay contactos ocultos.",
+    "noCandidates": "No hay contactos disponibles para ocultar.",
+    "noMatches": "No hay contactos coincidentes.",
+    "loadError": "No se pudo cargar la visibilidad. Reintenta para mostrar los contactos de forma segura.",
+    "saveError": "No se pudo guardar. La visibilidad guardada no ha cambiado.",
+    "retry": "Reintentar",
+    "allHidden": "Todos los contactos están ocultos. Muéstralos en Ajustes."
+  },
   "common": {
     "cancel": "Cancelar",
     "create": "Crear",
