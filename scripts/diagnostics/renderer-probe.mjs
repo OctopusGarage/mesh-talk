@@ -1,16 +1,18 @@
 /** #133: runner-only probe, unchanged production binary, independently captured X11 pixels. */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, readlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, readlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { analyzeRenderer, matchesRenderedInput } from "./renderer-report.mjs";
+import { rendererLaunch, ownedExecutablePid } from "./renderer-launch.mjs";
 
 assert.equal(process.platform, "linux", "Native Linux X11 required");
 assert.ok(process.argv[2] && process.env.NATIVE_RENDERER_ARTIFACT_DIR);
-const application = resolve(process.argv[2]);
+const launch = rendererLaunch(process.argv[2], process.env);
+const application = launch.executable;
 const artifacts = resolve(process.env.NATIVE_RENDERER_ARTIFACT_DIR);
 await mkdir(artifacts, { recursive: true });
-const report = { application, paints: [], environment: {
+const report = { application, launcher: launch.launcher, source: launch.source, paints: [], environment: {
   display: process.env.DISPLAY, backend: process.env.GDK_BACKEND,
   dmabufOverride: process.env.WEBKIT_DISABLE_DMABUF_RENDERER ?? null,
   compositingOverride: process.env.WEBKIT_DISABLE_COMPOSITING_MODE ?? null,
@@ -75,6 +77,17 @@ async function observePaint(check) {
   // Missing paint with a responsive DOM is an observation, not a harness exception.
   return false;
 }
+async function applicationPid() {
+  const entries = (await readdir("/proc")).filter(entry => /^\d+$/.test(entry));
+  const records = await Promise.all(entries.map(async entry => {
+    const [executable, status] = await Promise.all([
+      readlink(`/proc/${entry}/exe`).catch(() => null),
+      readFile(`/proc/${entry}/status`, "utf8").catch(() => ""),
+    ]);
+    return { pid: Number(entry), executable, parentPid: Number(status.match(/^PPid:\s+(\d+)/m)?.[1]) };
+  }));
+  return ownedExecutablePid(records, application, driver.pid);
+}
 try {
   driver = spawn("tauri-driver", ["--port", "4444", "--native-port", "4445"],
     { stdio: ["ignore", "pipe", "pipe"] });
@@ -86,15 +99,13 @@ try {
     try { await request("GET", "/status", undefined, 1000); return true; } catch { return false; }
   }, 30000);
   const created = await request("POST", "/session", {
-    capabilities: { alwaysMatch: { "tauri:options": { application } } },
+    capabilities: { alwaysMatch: { "tauri:options": { application: launch.launcher } } },
   }, 120000);
   session = created.sessionId;
   assert.ok(session);
   report.sessionReady = true;
   // Identify the original process/window before waiting for frontend readiness.
-  report.applicationPid = Number(native("pgrep",
-    ["-f", `^${application.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`]).trim());
-  assert.ok(Number.isInteger(report.applicationPid) && report.applicationPid > 0);
+  report.applicationPid = await until("original executable under owned driver", applicationPid);
   const windows = await until("one mapped application window", () => {
     try {
       const found = native("xdotool", ["search", "--onlyvisible", "--pid",

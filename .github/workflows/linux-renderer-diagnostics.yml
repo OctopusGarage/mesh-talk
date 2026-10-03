@@ -16,6 +16,10 @@ jobs:
   native-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [dev, published-deb, published-appimage]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -34,20 +38,60 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb openbox dbus-x11 xdotool x11-utils imagemagick tesseract-ocr mesa-utils ripgrep
       - name: Validate classifier and probe syntax
         run: |
-          node --test scripts/diagnostics/renderer-report.test.mjs
+          node --test scripts/diagnostics/renderer-*.test.mjs
           node --check scripts/diagnostics/renderer-probe.mjs
       - name: Install native Tauri driver
         run: cargo install tauri-driver --version 2.0.6 --locked
       - name: Build unchanged production frontend
+        if: matrix.source == 'dev'
         working-directory: frontend
         run: |
           npm ci
           npm run build
       - name: Build one unchanged production release binary
+        if: matrix.source == 'dev'
         run: cargo build --locked --release -p mesh-talk --bin mesh-talk
+      - name: Download and verify the reported v0.1.4 release archive
+        if: matrix.source != 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/published-package"
+          gh release download v0.1.4 --repo OctopusGarage/mesh-talk --pattern mesh-talk_v0.1.4_linux_x86_64.zip --dir "$RUNNER_TEMP/published-package"
+          cd "$RUNNER_TEMP/published-package"
+          printf '%s  %s\n' 093cca4ce6d2dad3fb5c333b20d7b6118fff073d9afd6c5f20477d8f7b0d59c1 mesh-talk_v0.1.4_linux_x86_64.zip | sha256sum --check
+          unzip -q mesh-talk_v0.1.4_linux_x86_64.zip
+          cd release
+          sha256sum --check SHA256SUMS
+      - name: Prepare actual packaged executable and launcher
+        env:
+          PACKAGE_SOURCE: ${{ matrix.source }}
+        run: |
+          case "$PACKAGE_SOURCE" in
+            dev)
+              executable="$GITHUB_WORKSPACE/target/release/mesh-talk"
+              launcher="$executable"
+              ;;
+            published-deb)
+              sudo apt-get install -y "$RUNNER_TEMP/published-package/release/mesh-talk_v0.1.4_amd64.deb"
+              executable="/usr/bin/mesh-talk"
+              launcher="$executable"
+              ;;
+            published-appimage)
+              cd "$RUNNER_TEMP/published-package"
+              chmod +x release/mesh-talk_v0.1.4_amd64.AppImage
+              release/mesh-talk_v0.1.4_amd64.AppImage --appimage-extract > extract.log
+              executable="$RUNNER_TEMP/published-package/squashfs-root/usr/bin/mesh-talk"
+              launcher="$RUNNER_TEMP/published-package/squashfs-root/AppRun"
+              ;;
+          esac
+          test -x "$executable"
+          test -x "$launcher"
+          printf 'NATIVE_RENDERER_EXECUTABLE=%s\nNATIVE_RENDERER_LAUNCHER=%s\n' "$executable" "$launcher" >> "$GITHUB_ENV"
       - name: Compare default and DMABUF-disabled presentation
         env:
           GDK_BACKEND: x11
+          NATIVE_RENDERER_SOURCE: ${{ matrix.source }}
         run: |
           failed=0
           for variant in default dmabuf-disabled; do
@@ -61,7 +105,11 @@ jobs:
             export XDG_CACHE_HOME="$RUNNER_TEMP/renderer-profiles/$variant/cache"
             mkdir -p "$NATIVE_RENDERER_ARTIFACT_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
             dpkg-query -W libwebkit2gtk-4.1-0 libgtk-3-0t64 libgl1-mesa-dri > "$NATIVE_RENDERER_ARTIFACT_DIR/packages.txt"
-            sha256sum target/release/mesh-talk > "$NATIVE_RENDERER_ARTIFACT_DIR/application.sha256"
+            sha256sum "$NATIVE_RENDERER_EXECUTABLE" > "$NATIVE_RENDERER_ARTIFACT_DIR/application.sha256"
+            if [ -f "$RUNNER_TEMP/published-package/mesh-talk_v0.1.4_linux_x86_64.zip" ]; then
+              sha256sum "$RUNNER_TEMP/published-package/mesh-talk_v0.1.4_linux_x86_64.zip" > "$NATIVE_RENDERER_ARTIFACT_DIR/release-archive.sha256"
+            fi
+            if [ -d /dev/dri ]; then ls -l /dev/dri; else printf 'No /dev/dri GPU devices\n'; fi > "$NATIVE_RENDERER_ARTIFACT_DIR/gpu-devices.txt"
           # Variables are intentionally expanded by the inner shell.
           # shellcheck disable=SC2016
             if ! timeout --kill-after=10s 300s xvfb-run -a -s '-screen 0 1600x1200x24' dbus-run-session -- bash -e -c '
@@ -72,7 +120,7 @@ jobs:
               done
               xprop -root _NET_SUPPORTING_WM_CHECK | rg -q "window id"
               timeout --kill-after=2s 15s glxinfo -B > "$NATIVE_RENDERER_ARTIFACT_DIR/graphics.txt" 2>&1 || true
-              node scripts/diagnostics/renderer-probe.mjs target/release/mesh-talk
+              node scripts/diagnostics/renderer-probe.mjs "$NATIVE_RENDERER_LAUNCHER"
             '; then
               failed=1
             fi
@@ -80,12 +128,15 @@ jobs:
           exit "$failed"
       - name: Publish scoped observation
         if: always()
+        env:
+          PACKAGE_SOURCE: ${{ matrix.source }}
         run: |
           node --input-type=module -e '
             import fs from "node:fs";
             import path from "node:path";
             fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-              "## Issue #133 native renderer comparison\n\nSame release binary on X11/Xvfb. This is not a VMware GPU reproduction and cannot establish that #133 is fixed.\n\n");
+              "## Issue #133 native renderer comparison: " + process.env.PACKAGE_SOURCE +
+              "\n\nSame executable within each A/B pair on X11/Xvfb. Published AppImage uses its extracted AppRun fallback (not a FUSE mount). This is not a VMware GPU reproduction and cannot establish that #133 is fixed.\n\n");
             for (const variant of ["default", "dmabuf-disabled"]) {
               const file = path.join(process.env.RUNNER_TEMP, "renderer-artifacts", variant, "report.json");
               const evidence = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
@@ -97,6 +148,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: linux-renderer-${{ github.sha }}
+          name: linux-renderer-${{ matrix.source }}-${{ github.sha }}
           path: ${{ runner.temp }}/renderer-artifacts
           retention-days: 7
