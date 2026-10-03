@@ -8,6 +8,7 @@ on:
     paths:
       - .github/workflows/native-window-diagnostics.yml
       - scripts/diagnostics/window-controls.mjs
+      - scripts/diagnostics/assert-window-capabilities.mjs
       - src-tauri/capabilities/default.json
 
 permissions:
@@ -77,7 +78,10 @@ jobs:
             capability.permissions = capability.permissions.filter(p => !controls.includes(p));
             fs.writeFileSync(source, JSON.stringify(capability, null, 2));
           '
+          # Invalidate only the app package, not its dependency cache, for each ACL variant.
+          cargo clean --release -p mesh-talk
           cargo build --locked --release -p mesh-talk --bin mesh-talk
+          node scripts/diagnostics/assert-window-capabilities.mjs
       - name: Reproduce ACL denial (Linux)
         if: runner.os == 'Linux'
         continue-on-error: true
@@ -120,9 +124,12 @@ jobs:
           node --input-type=module -e '
             import fs from "node:fs";
             import path from "node:path";
-            fs.copyFileSync(path.join(process.env.RUNNER_TEMP, "window-capability.json"), "src-tauri/capabilities/default.json");
+            // Write bytes instead of preserving the original Windows file timestamp.
+            fs.writeFileSync("src-tauri/capabilities/default.json", fs.readFileSync(path.join(process.env.RUNNER_TEMP, "window-capability.json")));
           '
+          cargo clean --release -p mesh-talk
           cargo build --locked --release -p mesh-talk --bin mesh-talk
+          node scripts/diagnostics/assert-window-capabilities.mjs
       - name: Native window controls (Linux)
         if: runner.os == 'Linux'
         env:
