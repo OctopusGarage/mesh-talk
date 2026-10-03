@@ -13,10 +13,10 @@ pub(crate) struct HiddenPositions(Mutex<HashMap<String, PhysicalPosition<i32>>>)
 
 #[cfg(target_os = "linux")]
 fn is_x11(window: &Window) -> bool {
-    use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     matches!(
-        window.display_handle().map(|handle| handle.as_raw()),
-        Ok(RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_))
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_))
     )
 }
 

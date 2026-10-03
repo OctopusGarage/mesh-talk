@@ -57,18 +57,6 @@ jobs:
           trap 'cp "$RUNNER_TEMP/window-visibility.rs" "$source"' EXIT
           for variant in baseline fixed; do
             cp "$RUNNER_TEMP/window-visibility.rs" "$source"
-            # Runner-only boundary trace: no window coordinates or user content.
-            # shellcheck disable=SC2016
-            node --input-type=module -e '
-              import fs from "node:fs";
-              const file = "src-tauri/src/window_visibility.rs";
-              let source = fs.readFileSync(file, "utf8");
-              const expressions = ["is_x11(window)", "window.is_visible()?", "window.is_maximized()?", "window.is_minimized()?", "window.is_fullscreen()?", "window.outer_position().ok()", "window.state::<HiddenPositions>()", "state.0.lock()", "window.hide()", "window.show()?"];
-              for (const [index, expression] of expressions.entries()) {
-                source = source.replaceAll(expression, `{ eprintln!("tray geometry boundary ${index}"); ${expression} }`);
-              }
-              fs.writeFileSync(file, source);
-            '
             export NATIVE_TRAY_EXPECTED=preserved
             if [ "$variant" = baseline ]; then
               python3 -c 'import pathlib; p=pathlib.Path("src-tauri/src/window_visibility.rs"); s=p.read_text(); needle="window.set_position(position)?;"; assert s.count(needle)==1; p.write_text(s.replace(needle, "let _ = position;"))'
