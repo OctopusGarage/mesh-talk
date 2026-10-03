@@ -3,7 +3,13 @@
 
 use mesh_talk::run_tauri;
 
+#[cfg(any(target_os = "linux", test))]
+mod linux_renderer;
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    linux_renderer::configure();
+
     // Run the Tauri version of the application
     run_tauri();
 }

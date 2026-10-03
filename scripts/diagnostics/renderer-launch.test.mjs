@@ -1,7 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resolve } from "node:path";
-import { rendererLaunch, ownedExecutablePid } from "./renderer-launch.mjs";
+import { rendererLaunch, ownedExecutablePid, graphicsConfigurationFromLog } from "./renderer-launch.mjs";
+
+test("graphics evidence belongs to the verified process, not the previous variant", () => {
+  const log = [
+    "Linux graphics configuration: pid=10 WEBKIT_DISABLE_DMABUF_RENDERER=1",
+    "Linux graphics configuration: pid=20 GDK_BACKEND=x11",
+    "Linux graphics configuration: pid=20 WEBKIT_DISABLE_DMABUF_RENDERER=unset",
+    "Linux graphics configuration: pid=30 WEBKIT_DISABLE_DMABUF_RENDERER=1",
+  ].join("\n");
+  assert.deepEqual(graphicsConfigurationFromLog(log, 20), {
+    GDK_BACKEND: "x11", WEBKIT_DISABLE_DMABUF_RENDERER: "unset",
+  });
+  assert.deepEqual(graphicsConfigurationFromLog(log, 40), {});
+});
+test("graphics log extraction retains only allowlisted keys and classifications", () => {
+  assert.deepEqual(graphicsConfigurationFromLog([
+    "Linux graphics configuration: pid=20 PRIVATE_KEY=1",
+    "Linux graphics configuration: pid=20 GDK_BACKEND=private",
+    "Linux graphics configuration: pid=20 GDK_BACKEND=custom",
+    "Linux graphics configuration: pid=20 WEBKIT_DISABLE_COMPOSITING_MODE=unset",
+  ].join("\n"), 20), { GDK_BACKEND: "custom", WEBKIT_DISABLE_COMPOSITING_MODE: "unset" });
+  assert.throws(() => graphicsConfigurationFromLog("", 0));
+});
 
 test("ordinary release launches and verifies the same executable", () => {
   const config = rendererLaunch("target/release/mesh-talk");
@@ -21,6 +43,15 @@ test("AppRun launch still verifies the actual packaged ELF instead of the shell 
 test("rejects missing launcher and unrecognized package provenance", () => {
   assert.throws(() => rendererLaunch(""));
   assert.throws(() => rendererLaunch("/tmp/app", { NATIVE_RENDERER_SOURCE: "unknown" }));
+});
+test("compatibility probe explicitly passes the new flag only to a current dev binary", () => {
+  assert.deepEqual(rendererLaunch("/tmp/app").args, []);
+  assert.deepEqual(rendererLaunch("/tmp/app", { NATIVE_RENDERER_COMPAT: "1" }).args,
+    ["--linux-renderer-compat"]);
+  assert.throws(() => rendererLaunch("/tmp/AppRun", {
+    NATIVE_RENDERER_SOURCE: "published-appimage", NATIVE_RENDERER_COMPAT: "1",
+  }));
+  assert.throws(() => rendererLaunch("/tmp/app", { NATIVE_RENDERER_COMPAT: "yes" }));
 });
 test("selects the actual executable under the owned driver regardless of AppRun argv0", () => {
   const records = [

@@ -8,6 +8,9 @@ on:
       - .github/workflows/linux-renderer-diagnostics.yml
       - scripts/diagnostics/renderer-*.mjs
       - src-tauri/src/main.rs
+      - src-tauri/src/linux_renderer.rs
+      - src-tauri/src/diagnostics.rs
+      - src-tauri/src/lib.rs
 
 permissions:
   contents: read
@@ -48,7 +51,7 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: Build one unchanged production release binary
+      - name: Build one production release binary
         if: matrix.source == 'dev'
         run: cargo build --locked --release -p mesh-talk --bin mesh-talk
       - name: Download and verify the reported v0.1.4 release archive
@@ -88,16 +91,26 @@ jobs:
           test -x "$executable"
           test -x "$launcher"
           printf 'NATIVE_RENDERER_EXECUTABLE=%s\nNATIVE_RENDERER_LAUNCHER=%s\n' "$executable" "$launcher" >> "$GITHUB_ENV"
-      - name: Compare default and DMABUF-disabled presentation
+      - name: Compare default, environment override and explicit compatibility startup
         env:
           GDK_BACKEND: x11
           NATIVE_RENDERER_SOURCE: ${{ matrix.source }}
         run: |
           failed=0
-          for variant in default dmabuf-disabled; do
-            unset WEBKIT_DISABLE_DMABUF_RENDERER WEBKIT_DISABLE_COMPOSITING_MODE
+          variants="default dmabuf-disabled"
+          if [ "$NATIVE_RENDERER_SOURCE" = dev ]; then
+            variants="$variants compat-flag compat-explicit-zero"
+          fi
+          for variant in $variants; do
+            unset WEBKIT_DISABLE_DMABUF_RENDERER WEBKIT_DISABLE_COMPOSITING_MODE NATIVE_RENDERER_COMPAT
             if [ "$variant" = dmabuf-disabled ]; then
               export WEBKIT_DISABLE_DMABUF_RENDERER=1
+            fi
+            if [ "$variant" = compat-flag ] || [ "$variant" = compat-explicit-zero ]; then
+              export NATIVE_RENDERER_COMPAT=1
+            fi
+            if [ "$variant" = compat-explicit-zero ]; then
+              export WEBKIT_DISABLE_DMABUF_RENDERER=0
             fi
             export NATIVE_RENDERER_ARTIFACT_DIR="$RUNNER_TEMP/renderer-artifacts/$variant"
             export XDG_CONFIG_HOME="$RUNNER_TEMP/renderer-profiles/$variant/config"
@@ -137,11 +150,15 @@ jobs:
             fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
               "## Issue #133 native renderer comparison: " + process.env.PACKAGE_SOURCE +
               "\n\nSame executable within each A/B pair on X11/Xvfb. Published AppImage uses its extracted AppRun fallback (not a FUSE mount). This is not a VMware GPU reproduction and cannot establish that #133 is fixed.\n\n");
-            for (const variant of ["default", "dmabuf-disabled"]) {
+            const variants = ["default", "dmabuf-disabled"];
+            if (process.env.PACKAGE_SOURCE === "dev") variants.push("compat-flag", "compat-explicit-zero");
+            for (const variant of variants) {
               const file = path.join(process.env.RUNNER_TEMP, "renderer-artifacts", variant, "report.json");
               const evidence = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
               fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "### " + variant + "\n\n" +
-                JSON.stringify({analysis: evidence.analysis, error: evidence.error ?? (evidence.analysis ? null : "No report produced")}, null, 2) + "\n\n");
+                JSON.stringify({analysis: evidence.analysis, effectiveConfiguration: evidence.effectiveConfiguration,
+                  singleInstancePreserved: evidence.singleInstancePreserved,
+                  error: evidence.error ?? (evidence.analysis ? null : "No report produced")}, null, 2) + "\n\n");
             }
           '
       - name: Upload independent X11 images and native evidence

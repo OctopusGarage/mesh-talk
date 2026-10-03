@@ -1,10 +1,10 @@
-/** #133: runner-only probe, unchanged production binary, independently captured X11 pixels. */
+/** #133: runner-only probe, production binary, independently captured X11 pixels. */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdir, readdir, readFile, readlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { analyzeRenderer, matchesRenderedInput } from "./renderer-report.mjs";
-import { rendererLaunch, ownedExecutablePid } from "./renderer-launch.mjs";
+import { rendererLaunch, ownedExecutablePid, graphicsConfigurationFromLog } from "./renderer-launch.mjs";
 
 assert.equal(process.platform, "linux", "Native Linux X11 required");
 assert.ok(process.argv[2] && process.env.NATIVE_RENDERER_ARTIFACT_DIR);
@@ -12,13 +12,14 @@ const launch = rendererLaunch(process.argv[2], process.env);
 const application = launch.executable;
 const artifacts = resolve(process.env.NATIVE_RENDERER_ARTIFACT_DIR);
 await mkdir(artifacts, { recursive: true });
-const report = { application, launcher: launch.launcher, source: launch.source, paints: [], environment: {
+const report = { application, launcher: launch.launcher, args: launch.args, source: launch.source, paints: [], environment: {
   display: process.env.DISPLAY, backend: process.env.GDK_BACKEND,
   dmabufOverride: process.env.WEBKIT_DISABLE_DMABUF_RENDERER ?? null,
   compositingOverride: process.env.WEBKIT_DISABLE_COMPOSITING_MODE ?? null,
   desktop: "Xvfb/Openbox", gpuEquivalentToVMware: false,
 } };
 let driver;
+let secondInstance;
 let session;
 let driverLog = "";
 let launchError;
@@ -35,6 +36,21 @@ async function request(method, path, body, timeout = 30000) {
   return result.value;
 }
 const execute = (script, args = []) => request("POST", `/session/${session}/execute/sync`, { script, args });
+async function effectiveGraphicsConfiguration() {
+  // /proc/PID/environ reflects exec-time environment, not main()'s subsequent set_var.
+  // Ask the running app for its bounded log tail and keep only allowlisted graphics rows.
+  const result = await request("POST", `/session/${session}/execute/async`, {
+    script: 'const done = arguments[arguments.length - 1]; window.__TAURI__.core.invoke("read_log_tail").then(value => done({value}), error => done({error: String(error)}));',
+    args: [],
+  });
+  assert.equal(result.error, undefined, "running application log must be readable");
+  const configuration = graphicsConfigurationFromLog(result.value, report.applicationPid);
+  assert.equal(configuration.GDK_BACKEND, "x11");
+  assert.equal(configuration.WEBKIT_DISABLE_COMPOSITING_MODE, "unset");
+  const expected = process.env.WEBKIT_DISABLE_DMABUF_RENDERER ?? (launch.args.length ? "1" : "unset");
+  assert.equal(configuration.WEBKIT_DISABLE_DMABUF_RENDERER, expected);
+  return configuration;
+}
 async function until(description, check, timeout = 15000) {
   const deadline = Date.now() + timeout;
   do {
@@ -99,7 +115,7 @@ try {
     try { await request("GET", "/status", undefined, 1000); return true; } catch { return false; }
   }, 30000);
   const created = await request("POST", "/session", {
-    capabilities: { alwaysMatch: { "tauri:options": { application: launch.launcher } } },
+    capabilities: { alwaysMatch: { "tauri:options": { application: launch.launcher, args: launch.args } } },
   }, 120000);
   session = created.sessionId;
   assert.ok(session);
@@ -119,6 +135,28 @@ try {
   await request("POST", `/session/${session}/timeouts`, { script: 10000, implicit: 5000 });
   await until("production login DOM ready", () => execute(
     'return !!window.__TAURI__ && !!document.querySelector("[data-testid=login-username]");'));
+  if (launch.source === "dev") {
+    report.effectiveConfiguration = await effectiveGraphicsConfiguration();
+    // A compatibility launch must not silently reconfigure or replace an existing instance.
+    let secondError;
+    let secondStderr = "";
+    let secondClosed = false;
+    secondInstance = spawn(launch.launcher, ["--linux-renderer-compat"],
+      { stdio: ["ignore", "ignore", "pipe"] });
+    secondInstance.on("error", error => { secondError = error; });
+    secondInstance.on("close", () => { secondClosed = true; });
+    secondInstance.stderr.on("data", data => { secondStderr = (secondStderr + data).slice(-65536); });
+    await until("second instance exits without replacing original", () => {
+      if (secondError) throw secondError;
+      return secondClosed;
+    });
+    assert.equal(secondInstance.exitCode, 0);
+    assert.match(secondStderr, /Fully quit any existing Mesh-Talk instance/);
+    assert.equal(await applicationPid(), report.applicationPid);
+    assert.deepEqual(await effectiveGraphicsConfiguration(), report.effectiveConfiguration);
+    await verifyWindow();
+    report.singleInstancePreserved = true;
+  }
   report.domReady = true;
   const viewport = await execute("return {width:innerWidth,height:innerHeight,scale:devicePixelRatio};");
   report.viewport = viewport;
@@ -194,6 +232,7 @@ try {
   console.log(JSON.stringify(report.analysis));
   if (report.analysis.status === "inconclusive") process.exitCode = 1;
   if (session) await request("DELETE", `/session/${session}`, undefined, 5000).catch(() => {});
+  if (secondInstance && secondInstance.exitCode === null) secondInstance.kill();
   if (report.applicationPid &&
     await readlink(`/proc/${report.applicationPid}/exe`).catch(() => "") === application) {
     try { process.kill(report.applicationPid); } catch { /* Already exited. */ }

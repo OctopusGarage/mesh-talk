@@ -111,6 +111,8 @@ pub fn run_tauri() {
             if let Err(e) = crate::logger::init_logging(app.handle()) {
                 log::error!("Failed to initialize logging: {e}");
             }
+            #[cfg(target_os = "linux")]
+            crate::diagnostics::log_linux_graphics_configuration();
             // Seed the managed settings from disk before any window/notification logic runs.
             crate::settings::load_into_state(&app.handle().clone(), &app.state::<SettingsState>());
             crate::trust::load_into_state(
