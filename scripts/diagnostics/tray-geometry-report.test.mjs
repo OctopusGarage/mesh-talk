@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeTrayGeometry } from "./tray-geometry-report.mjs";
+import { analyzeTrayGeometry, assertTrayGeometryExpectation } from "./tray-geometry-report.mjs";
+
+test("fixed expectation rejects any position or size change and baseline requires all rounds", () => {
+  const fixed = { rounds: 3, positionChanges: 0, sizeChanges: 0 };
+  assert.doesNotThrow(() => assertTrayGeometryExpectation(fixed, "preserved"));
+  assert.throws(() => assertTrayGeometryExpectation({ ...fixed, positionChanges: 1 }, "preserved"));
+  assert.throws(() => assertTrayGeometryExpectation({ ...fixed, sizeChanges: 1 }, "preserved"));
+  assert.throws(() => assertTrayGeometryExpectation(fixed, "changed"));
+  assert.doesNotThrow(() => assertTrayGeometryExpectation({ ...fixed, positionChanges: 3 }, "changed"));
+  assert.throws(() => assertTrayGeometryExpectation(fixed, "invalid"));
+});
 
 function evidence() {
   const geometry = { x: 180, y: 140, width: 900, height: 700 };

@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
 
+export function assertTrayGeometryExpectation(analysis, expected) {
+  assert.ok(["changed", "preserved"].includes(expected), "invalid geometry expectation");
+  assert.equal(analysis.rounds, 3);
+  assert.equal(analysis.sizeChanges, 0, "window size must not change");
+  assert.equal(analysis.positionChanges, expected === "changed" ? 3 : 0,
+    "all native rounds must match the expected position behavior");
+}
+
 export function analyzeTrayGeometry({ applicationPid, windowId, rounds }) {
   assert.ok(Number.isInteger(applicationPid) && applicationPid > 0 && windowId);
   assert.equal(rounds.length, 3, "three complete native rounds required");

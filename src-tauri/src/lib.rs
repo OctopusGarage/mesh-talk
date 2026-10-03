@@ -29,6 +29,7 @@ pub mod settings;
 pub mod state;
 pub mod tray;
 pub mod trust;
+mod window_visibility;
 
 use crate::settings::SettingsState;
 use crate::state::AppState;
@@ -85,9 +86,9 @@ pub fn run_tauri() {
         // so we surface the existing window instead of spawning a duplicate that would
         // fight over the keystore + discovery port.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
                 let _ = window.unminimize();
-                let _ = window.show();
+                let _ = crate::window_visibility::show(&window);
                 let _ = window.set_focus();
             }
         }))
@@ -105,6 +106,8 @@ pub fn run_tauri() {
             Some(vec!["--hidden"]),
         ))
         .setup(move |app| {
+            #[cfg(target_os = "linux")]
+            app.manage(crate::window_visibility::HiddenPositions::default());
             if let Err(e) = crate::logger::init_logging(app.handle()) {
                 log::error!("Failed to initialize logging: {e}");
             }
@@ -193,7 +196,7 @@ pub fn run_tauri() {
                         .unwrap_or(true);
                     if hide {
                         api.prevent_close();
-                        let _ = window.hide();
+                        let _ = crate::window_visibility::hide(window);
                     }
                 }
             }

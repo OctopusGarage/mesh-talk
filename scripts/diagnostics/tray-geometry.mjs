@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdir, readFile, readlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { analyzeTrayGeometry } from "./tray-geometry-report.mjs";
+import { analyzeTrayGeometry, assertTrayGeometryExpectation } from "./tray-geometry-report.mjs";
 
 assert.equal(process.platform, "linux", "Native Linux X11 required");
 assert.ok(process.argv[2] && process.env.NATIVE_TRAY_ARTIFACT_DIR);
@@ -130,6 +130,9 @@ try {
     await screenshot(`${index}-after`);
   }
   report.analysis = analyzeTrayGeometry(report);
+  if (process.env.NATIVE_TRAY_EXPECTED) {
+    assertTrayGeometryExpectation(report.analysis, process.env.NATIVE_TRAY_EXPECTED);
+  }
   console.log(JSON.stringify(report.analysis));
 } catch (error) {
   report.error = String(error);

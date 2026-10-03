@@ -2600,6 +2600,7 @@ dependencies = [
  "mesh-talk-core",
  "objc2 0.6.4",
  "rand 0.10.3",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tauri",

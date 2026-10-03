@@ -997,11 +997,11 @@ pub async fn capture_screen(
     app: tauri::AppHandle,
     hide_window: bool,
 ) -> Result<Vec<u8>, CommandError> {
-    let window = app.get_webview_window("main");
+    let window = app.get_webview_window("main").map(|w| w.as_ref().window());
 
     if hide_window {
         if let Some(w) = &window {
-            let _ = w.hide();
+            let _ = crate::window_visibility::hide(w);
         }
         // Give the compositor a moment to actually remove the window from the screen before
         // we capture, otherwise it can still be in the shot.
@@ -1012,7 +1012,7 @@ pub async fn capture_screen(
 
     if hide_window {
         if let Some(w) = &window {
-            let _ = w.show();
+            let _ = crate::window_visibility::show(w);
             let _ = w.set_focus();
         }
     }

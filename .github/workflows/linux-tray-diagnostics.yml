@@ -10,6 +10,8 @@ on:
       - scripts/diagnostics/linux-tray-host.py
       - src-tauri/src/tray.rs
       - src-tauri/src/lib.rs
+      - src-tauri/src/window_visibility.rs
+      - src-tauri/src/chat_commands.rs
 
 permissions:
   contents: read
@@ -45,18 +47,28 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: Build unchanged release application
-        run: cargo build --locked --release -p mesh-talk --bin mesh-talk
-      - name: Observe production close-to-tray and actual exported Show menu
+      - name: Verify baseline and fixed release placement on the same native desktop
         env:
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
           GDK_BACKEND: x11
         run: |
-          export NATIVE_TRAY_ARTIFACT_DIR="$RUNNER_TEMP/tray-geometry-artifacts"
-          mkdir -p "$NATIVE_TRAY_ARTIFACT_DIR"
+          source=src-tauri/src/window_visibility.rs
+          cp "$source" "$RUNNER_TEMP/window-visibility.rs"
+          trap 'cp "$RUNNER_TEMP/window-visibility.rs" "$source"' EXIT
+          for variant in baseline fixed; do
+            cp "$RUNNER_TEMP/window-visibility.rs" "$source"
+            export NATIVE_TRAY_EXPECTED=preserved
+            if [ "$variant" = baseline ]; then
+              python3 -c 'import pathlib; p=pathlib.Path("src-tauri/src/window_visibility.rs"); s=p.read_text(); needle="window.set_position(position)?;"; assert s.count(needle)==1; p.write_text(s.replace(needle, "let _ = position;"))'
+              export NATIVE_TRAY_EXPECTED=changed
+            fi
+            cargo clean --release -p mesh-talk
+            cargo build --locked --release -p mesh-talk --bin mesh-talk
+            export NATIVE_TRAY_ARTIFACT_DIR="$RUNNER_TEMP/tray-geometry-artifacts/$variant"
+            mkdir -p "$NATIVE_TRAY_ARTIFACT_DIR"
           # Environment variables are intentionally expanded by the inner shell.
           # shellcheck disable=SC2016
-          xvfb-run -a -s '-screen 0 1600x1200x24' dbus-run-session -- bash -e -c '
+            xvfb-run -a -s '-screen 0 1600x1200x24' dbus-run-session -- bash -e -c '
             openbox > "$NATIVE_TRAY_ARTIFACT_DIR/openbox.log" 2>&1 &
             for attempt in {1..50}; do
               if xprop -root _NET_SUPPORTING_WM_CHECK | rg -q "window id"; then break; fi
@@ -64,17 +76,20 @@ jobs:
             done
             xprop -root _NET_SUPPORTING_WM_CHECK | rg -q "window id"
             node scripts/diagnostics/tray-geometry.mjs target/release/mesh-talk
-          '
+            '
+          done
       - name: Publish scoped observation
         if: always()
         run: |
           node --input-type=module -e '
             import fs from "node:fs";
             import path from "node:path";
-            const reportPath = path.join(process.env.RUNNER_TEMP, "tray-geometry-artifacts/report.json");
+            for (const variant of ["baseline", "fixed"]) {
+            const reportPath = path.join(process.env.RUNNER_TEMP, "tray-geometry-artifacts", variant, "report.json");
             if (fs.existsSync(reportPath)) {
               const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
-              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Issue #137 native X11 observation\n\n" + JSON.stringify(report.analysis ?? {status: report.status, error: report.error}, null, 2) + "\n");
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "## Issue #137 native X11: " + variant + "\n\n" + JSON.stringify({analysis: report.analysis, status: report.status, error: report.error}, null, 2) + "\n");
+            }
             }
           '
       - name: Upload independent desktop images and native evidence
