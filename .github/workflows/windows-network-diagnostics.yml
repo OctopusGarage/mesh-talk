@@ -9,6 +9,9 @@ on:
       - scripts/diagnostics/network-console*.mjs
       - scripts/diagnostics/windows-console-observer.ps1
       - scripts/diagnostics/console-fixture.rs
+      - src-tauri/src/chat_commands.rs
+      - src-tauri/src/main.rs
+      - frontend/src/features/chat/Sidebar.tsx
 
 permissions:
   contents: read
@@ -64,26 +67,54 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: Build unchanged production application and observer controls
+      - name: Build observer controls
         shell: pwsh
         run: |
-          cargo build --locked --release -p mesh-talk --bin mesh-talk
-          if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
           New-Item -ItemType Directory -Path $env:NATIVE_CONSOLE_CONTROL_DIR -Force | Out-Null
           rustc --edition 2021 --check-cfg 'cfg(console_child)' --cfg console_child -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-child.exe"
           if ($LASTEXITCODE -ne 0) { throw 'Console child fixture build failed' }
           rustc --edition 2021 --check-cfg 'cfg(console_child)' -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-launcher.exe"
           if ($LASTEXITCODE -ne 0) { throw 'GUI parent fixture build failed' }
-      - name: Observe real sign-in, idle polling and actual network_name IPC
-        run: node scripts/diagnostics/network-console.mjs target/release/mesh-talk.exe
+      - name: Verify baseline and fixed production application on the same native runner
+        shell: pwsh
+        run: |
+          $source = 'src-tauri/src/chat_commands.rs'
+          $original = [System.IO.File]::ReadAllBytes((Resolve-Path $source))
+          $text = [System.Text.Encoding]::UTF8.GetString($original)
+          $needle = 'const CREATE_NO_WINDOW: u32 = 0x0800_0000;'
+          if ([regex]::Matches($text, [regex]::Escape($needle)).Count -ne 1) { throw 'Expected unique production flag declaration' }
+          $artifactRoot = $env:NATIVE_NETWORK_ARTIFACT_DIR
+          try {
+            foreach ($variant in @('baseline', 'fixed')) {
+              if ($variant -eq 'baseline') {
+                [System.IO.File]::WriteAllText((Resolve-Path $source), $text.Replace($needle, 'const CREATE_NO_WINDOW: u32 = 0x0000_0000;'), [System.Text.UTF8Encoding]::new($false))
+                $env:NATIVE_NETWORK_EXPECTED = 'observed'
+              } else {
+                [System.IO.File]::WriteAllBytes((Resolve-Path $source), $original)
+                $env:NATIVE_NETWORK_EXPECTED = 'hidden'
+              }
+              # Rebuild the application package, retaining cached dependencies.
+              cargo clean --release -p mesh-talk
+              if ($LASTEXITCODE -ne 0) { throw 'Application clean failed' }
+              cargo build --locked --release -p mesh-talk --bin mesh-talk
+              if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+              $env:NATIVE_NETWORK_ARTIFACT_DIR = Join-Path $artifactRoot $variant
+              node scripts/diagnostics/network-console.mjs target/release/mesh-talk.exe
+              if ($LASTEXITCODE -ne 0) { throw "$variant native verification failed" }
+            }
+          } finally {
+            [System.IO.File]::WriteAllBytes((Resolve-Path $source), $original)
+            $env:NATIVE_NETWORK_ARTIFACT_DIR = $artifactRoot
+          }
       - name: Publish observation without claiming whole-screen flicker reproduction
         if: always()
         shell: pwsh
         run: |
-          $reportPath = Join-Path $env:NATIVE_NETWORK_ARTIFACT_DIR 'report.json'
-          if (Test-Path -LiteralPath $reportPath) {
+          foreach ($variant in @('baseline', 'fixed')) {
+            $reportPath = Join-Path $env:NATIVE_NETWORK_ARTIFACT_DIR "$variant/report.json"
+            if (-not (Test-Path -LiteralPath $reportPath)) { continue }
             $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-            '## Issue #138 native Windows observation' >> $env:GITHUB_STEP_SUMMARY
+            "## Issue #138 native Windows: $variant" >> $env:GITHUB_STEP_SUMMARY
             if ($report.analysis) {
               $report.analysis | ConvertTo-Json | Out-String >> $env:GITHUB_STEP_SUMMARY
             } else {

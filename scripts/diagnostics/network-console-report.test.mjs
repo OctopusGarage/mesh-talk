@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeNetworkConsole } from "./network-console-report.mjs";
+import { analyzeNetworkConsole, assertNetworkConsoleExpectation } from "./network-console-report.mjs";
+
+test("fixed expectation requires successful child observations and no visible correlations", () => {
+  const analysis = { naturalCalls: 2, manualCalls: 6, applicationOwnedNetshStarts: 8,
+    correlatedCalls: 0, unverifiedTemporalCalls: 0 };
+  assert.doesNotThrow(() => assertNetworkConsoleExpectation(analysis, "hidden"));
+  assert.throws(() => assertNetworkConsoleExpectation({ ...analysis, correlatedCalls: 1 }, "hidden"));
+  assert.throws(() => assertNetworkConsoleExpectation({ ...analysis, unverifiedTemporalCalls: 1 }, "hidden"));
+  assert.throws(() => assertNetworkConsoleExpectation({ ...analysis, applicationOwnedNetshStarts: 7 }, "hidden"));
+  assert.throws(() => assertNetworkConsoleExpectation(analysis, "observed"));
+  assert.doesNotThrow(() => assertNetworkConsoleExpectation({ ...analysis, correlatedCalls: 8 }, "observed"));
+  assert.throws(() => assertNetworkConsoleExpectation(analysis, "invalid"));
+});
 import { installNetworkTrace } from "./network-console-trace.mjs";
 
 function evidence() {

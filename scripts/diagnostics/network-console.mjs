@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { analyzeNetworkConsole } from "./network-console-report.mjs";
+import { analyzeNetworkConsole, assertNetworkConsoleExpectation } from "./network-console-report.mjs";
 import { installNetworkTrace } from "./network-console-trace.mjs";
 
 assert.equal(process.platform, "win32", "A native Windows desktop is required");
@@ -182,6 +182,9 @@ try {
   await stopObserver();
   report.events = JSON.parse((await readFile(resolve(artifacts, "events.json"), "utf8")).replace(/^\uFEFF/, ""));
   report.analysis = analyzeNetworkConsole(report);
+  if (process.env.NATIVE_NETWORK_EXPECTED) {
+    assertNetworkConsoleExpectation(report.analysis, process.env.NATIVE_NETWORK_EXPECTED);
+  }
   console.log(JSON.stringify(report.analysis));
   await invoke("logout");
 } catch (error) {

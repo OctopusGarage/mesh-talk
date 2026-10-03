@@ -1,6 +1,16 @@
 /** Classify native evidence without treating an absent observation as a fix. */
 import assert from "node:assert/strict";
 
+export function assertNetworkConsoleExpectation(analysis, expected) {
+  assert.ok(["observed", "hidden"].includes(expected), "invalid native expectation");
+  assert.equal(analysis.naturalCalls, 2, "two real natural polls required");
+  assert.equal(analysis.manualCalls, 6, "six real manual queries required");
+  assert.equal(analysis.applicationOwnedNetshStarts, 8, "all eight child launches required");
+  assert.equal(analysis.unverifiedTemporalCalls, 0, "ambiguous console evidence is not accepted");
+  assert.equal(analysis.correlatedCalls, expected === "observed" ? 8 : 0,
+    "native console observation must match the expected variant");
+}
+
 export function analyzeNetworkConsole({ applicationPid, controls, calls, events }) {
   const within = (timestamp, interval, margin = 100) =>
     timestamp >= interval.start - margin && timestamp <= interval.end + margin;

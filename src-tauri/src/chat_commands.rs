@@ -937,8 +937,13 @@ fn current_ssid() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn current_ssid() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    // Piped output alone does not suppress a console in a Windows GUI process.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = std::process::Command::new("netsh")
         .args(["wlan", "show", "interfaces"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
