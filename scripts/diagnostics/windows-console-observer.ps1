@@ -27,6 +27,7 @@ public class NativeConsoleEvent {
     public uint processId;
     public uint parentPid;
     public string name;
+    public string timestampSource;
     public string className;
     public bool visible;
     public bool isNetsh;
@@ -147,12 +148,27 @@ public static class NativeConsoleObserver {
             new WqlEventQuery("SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName = 'netsh.exe'"))) {
             watcher.EventArrived += delegate(object sender, EventArrivedEventArgs args) {
                 ManagementBaseObject data = args.NewEvent;
-                Record(new NativeConsoleEvent {
+                NativeConsoleEvent entry = new NativeConsoleEvent {
                     kind = "process-start", name = "netsh.exe",
+                    deliveredAt = Now(), timestampSource = "wmi-event",
                     timestamp = (long)(Convert.ToUInt64(data["TIME_CREATED"]) / 10000) - 11644473600000L,
                     processId = Convert.ToUInt32(data["ProcessID"]),
                     parentPid = Convert.ToUInt32(data["ParentProcessID"])
-                });
+                };
+                // WMI TIME_CREATED is the event's time, not necessarily the child's creation time.
+                // Prefer the kernel-backed StartTime while the short-lived child still exists.
+                try {
+                    using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById((int)entry.processId)) {
+                        if (process.ProcessName.Equals("netsh", StringComparison.OrdinalIgnoreCase)) {
+                            entry.timestamp = new DateTimeOffset(process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds();
+                            entry.timestampSource = "process-start-time";
+                        }
+                    }
+                } catch (ArgumentException) {
+                } catch (InvalidOperationException) {
+                } catch (System.ComponentModel.Win32Exception) {
+                }
+                Record(entry);
             };
             try {
                 watcher.Start();

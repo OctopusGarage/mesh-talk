@@ -18,12 +18,15 @@ export function analyzeNetworkConsole({ applicationPid, controls, calls, events 
     "natural polling must run twice without accelerated timers");
   const children = events.filter((e) => e.kind === "process-start" &&
     e.name === "netsh.exe" && e.parentPid === applicationPid);
-  assert.ok(calls.every((c) => children.some((e) => within(e.timestamp, c))),
+  const ownedWindow = (window) => children.some((child) => child.processId === window.processId &&
+    Math.abs(child.timestamp - window.timestamp) <= 2000);
+  assert.ok(calls.every((c) => children.some((e) => within(e.timestamp, c)) ||
+    visible.some((window) => within(window.timestamp, c) && ownedWindow(window))),
     "each query must launch an application-owned netsh process");
   const bindings = events.filter((e) => e.kind === "console-owner" && e.parentPid === applicationPid &&
     children.some((child) => child.processId === e.processId));
   const correlated = calls.filter((c) => visible.some((e) => within(e.timestamp, c) &&
-    bindings.some((binding) => binding.hwnd === e.hwnd && within(binding.timestamp, c))));
+    (ownedWindow(e) || bindings.some((binding) => binding.hwnd === e.hwnd && within(binding.timestamp, c)))));
   const temporal = calls.filter((c) => !correlated.includes(c) &&
     visible.some((e) => e.isNetsh && within(e.timestamp, c)));
   return {

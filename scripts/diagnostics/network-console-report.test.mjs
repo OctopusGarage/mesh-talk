@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { analyzeNetworkConsole } from "./network-console-report.mjs";
+import { installNetworkTrace } from "./network-console-trace.mjs";
 
 function evidence() {
   return {
@@ -89,5 +90,42 @@ test("a console binding for another parent cannot verify window ownership", () =
 test("native event time, not delayed delivery time, determines correlation", () => {
   const data = evidence();
   data.events.find((e) => e.isNetsh).deliveredAt = 4000;
+  assert.equal(analyzeNetworkConsole(data).status, "console-window-observed");
+});
+
+test("observes real fetch responses without replacing immutable Tauri invoke", async () => {
+  const response = new Response("null", { headers: { "Tauri-Response": "ok" } });
+  const seen = [];
+  const internals = Object.freeze({ invoke: () => {} });
+  const original = internals.invoke;
+  const target = {
+    __TAURI_INTERNALS__: internals,
+    location: { href: "http://tauri.localhost" },
+    fetch: async (...args) => { seen.push(args); return response; },
+  };
+  assert.equal(installNetworkTrace(target), true);
+  const options = { method: "POST", body: "{}" };
+  assert.equal(await target.fetch("http://ipc.localhost/network_name", options), response);
+  assert.equal(internals.invoke, original);
+  assert.deepEqual(seen, [["http://ipc.localhost/network_name", options]]);
+  assert.equal(target.nativeNetworkCalls[0].ok, true);
+  assert.ok(target.nativeNetworkCalls[0].end >= target.nativeNetworkCalls[0].start);
+});
+
+test("transport tracing ignores other endpoints and preserves backend failures", async () => {
+  const failed = new Response("null", { headers: { "Tauri-Response": "error" } });
+  const target = { location: { href: "http://tauri.localhost" }, fetch: async () => failed };
+  assert.equal(installNetworkTrace(target), true);
+  await target.fetch("http://ipc.localhost/login");
+  await target.fetch("https://example.com/network_name");
+  assert.equal(target.nativeNetworkCalls.length, 0);
+  assert.equal(await target.fetch("http://ipc.localhost/network_name"), failed);
+  assert.equal(target.nativeNetworkCalls[0].ok, false);
+});
+
+test("native window PID can establish ownership even if console attachment is too late", () => {
+  const data = evidence();
+  data.events = data.events.filter((e) => e.kind !== "console-owner");
+  data.events.find((e) => e.isNetsh).processId = 51;
   assert.equal(analyzeNetworkConsole(data).status, "console-window-observed");
 });

@@ -4,6 +4,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { analyzeNetworkConsole } from "./network-console-report.mjs";
+import { installNetworkTrace } from "./network-console-trace.mjs";
 
 assert.equal(process.platform, "win32", "A native Windows desktop is required");
 assert.ok(process.argv[2] && process.env.NATIVE_NETWORK_ARTIFACT_DIR && process.env.NATIVE_CONSOLE_CONTROL_DIR,
@@ -131,20 +132,8 @@ try {
 
   const settings = await invoke("get_app_settings");
   await invoke("set_app_settings", { settings: { ...settings, stay_signed_in: false } });
-  // Observe only this IPC boundary; call the original unchanged, without logging arguments/results.
-  await execute(`
-    window.nativeNetworkCalls = [];
-    window.nativeNetworkPhase = 'natural';
-    const original = window.__TAURI_INTERNALS__.invoke;
-    window.__TAURI_INTERNALS__.invoke = function(command, ...args) {
-      if (command !== 'network_name') return original.call(this, command, ...args);
-      const entry = { phase: window.nativeNetworkPhase, start: Date.now() };
-      window.nativeNetworkCalls.push(entry);
-      return original.call(this, command, ...args).then(value => {
-        entry.end = Date.now(); entry.ok = true; return value;
-      }, error => { entry.end = Date.now(); entry.ok = false; throw error; });
-    };
-  `);
+  // Tauri invoke is immutable. Observe its real fetch transport without changing IPC/results.
+  assert.equal(await execute(`return (${installNetworkTrace.toString()})(window);`), true);
   // Generate ephemeral credentials inside the WebView: no plaintext secret in driver logs/artifacts.
   const registered = await asyncExecute(`
     const done = arguments[arguments.length - 1];
@@ -175,6 +164,9 @@ try {
   const screenshot = await request("GET", `/session/${session}/screenshot`);
   await writeFile(resolve(artifacts, "signed-in.png"), Buffer.from(screenshot, "base64"));
   console.log("Signed in to real release GUI; waiting for unchanged 60-second sidebar polling");
+  await until("first real network IPC response observed", () => execute(`
+    return window.nativeNetworkCalls.some(c => c.phase === 'natural' && c.end);
+  `), 15000);
   await until("two completed natural network queries", async () => {
     assert.equal(observer.exitCode, null, "Native observer exited during idle observation");
     return execute(`return window.nativeNetworkCalls.filter(c => c.phase === 'natural' && c.end).length >= 2;`);
@@ -199,6 +191,9 @@ try {
   process.exitCode = 1;
 } finally {
   await stopObserver().catch(() => {});
+  if (session) report.calls = await execute("return window.nativeNetworkCalls ?? [];").catch(() => report.calls);
+  report.events ??= await readFile(resolve(artifacts, "events.json"), "utf8")
+    .then(text => JSON.parse(text.replace(/^\uFEFF/, ""))).catch(() => []);
   if (session) await request("DELETE", `/session/${session}`).catch(() => {});
   const remaining = await applicationPids().catch(() => []);
   if (remaining.includes(report.applicationPid)) {
