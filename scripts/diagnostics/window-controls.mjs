@@ -1,13 +1,13 @@
 /** Native-only regression probe for #136. No Tauri mocks or privileged test commands. */
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { mkdir, readdir, readlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const application = resolve(process.argv[2] ?? "");
 assert.ok(process.argv[2], "Usage: node window-controls.mjs <application>");
 assert.ok(["linux", "win32"].includes(process.platform), "Native Linux/Windows required");
-const artifacts = resolve("native-window-artifacts");
+const artifacts = resolve(process.env.NATIVE_WINDOW_ARTIFACT_DIR ?? "native-window-artifacts");
 await mkdir(artifacts, { recursive: true });
 const driver = spawn("tauri-driver", ["--port", "4444"], { stdio: ["ignore", "pipe", "pipe"] });
 let driverLog = "";
@@ -19,6 +19,24 @@ for (const stream of [driver.stdout, driver.stderr]) {
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 let session;
 const report = { platform: process.platform, application, checks: [] };
+
+async function applicationPids() {
+  if (process.platform === "win32") {
+    const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $env:NATIVE_WINDOW_APPLICATION } | ForEach-Object { $_.ProcessId }"], {
+      encoding: "utf8", timeout: 10000, windowsHide: true,
+      env: { ...process.env, NATIVE_WINDOW_APPLICATION: application },
+    });
+    return output.trim().split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b);
+  }
+  const entries = await readdir("/proc");
+  const matches = await Promise.all(entries.filter((entry) => /^\d+$/.test(entry)).map(async (entry) => {
+    // Other users' processes and processes that exit during enumeration are irrelevant.
+    const executable = await readlink(`/proc/${entry}/exe`).catch(() => null);
+    return executable === application ? Number(entry) : null;
+  }));
+  return matches.filter((pid) => pid !== null).sort((a, b) => a - b);
+}
 
 async function request(method, path, body) {
   const response = await fetch(`http://127.0.0.1:4444${path}`, {
@@ -73,6 +91,7 @@ async function restore() {
   });
   await until("single-instance restores main window", async () =>
     (await state("is_visible")) && !(await state("is_minimized")));
+  assert.deepEqual(await applicationPids(), [report.applicationPid], "Restoration must reuse the original process");
 }
 
 try {
@@ -90,6 +109,9 @@ try {
   await until("real Tauri UI ready", () => execute(`
     return !!window.__TAURI__ && !!document.querySelector('button[aria-label="Close"]');
   `));
+  const pids = await applicationPids();
+  assert.equal(pids.length, 1, "Exactly one process must run the tested application binary");
+  report.applicationPid = pids[0];
   await execute(`
     window.nativeWindowErrors = [];
     window.addEventListener('unhandledrejection', event => {
@@ -134,16 +156,11 @@ try {
   assert.ok(report.checks.every((entry) => entry.passed && entry.restored), "Window controls failed; see report.json");
   await invoke("set_app_settings", { settings: { ...settings, minimize_to_tray: false } });
   await click("Close").catch((error) => {
-    // A driver may report loss of its target during the close click; closure is checked below.
+    // A driver may report loss of its target during the close click; process exit is checked below.
     console.log(`Close-to-exit click response: ${error}`);
   });
-  await until("close-to-exit destroys main window", async () => {
-    try { return (await request("GET", `/session/${session}/window/handles`)).length === 0; }
-    catch (error) {
-      if (/invalid session id|no such window/i.test(String(error))) return true;
-      throw error;
-    }
-  });
+  await until("close-to-exit terminates the application process", async () =>
+    !(await applicationPids()).includes(report.applicationPid));
   report.closeToExit = true;
   console.log("PASS: native buttons, native state, restoration and close-to-exit");
 } catch (error) {
@@ -152,6 +169,11 @@ try {
   process.exitCode = 1;
 } finally {
   if (session) await request("DELETE", `/session/${session}`).catch(() => {});
+  const remaining = await applicationPids().catch(() => []);
+  if (report.applicationPid && remaining.includes(report.applicationPid)) {
+    // Clean up only the exact executable/PID launched for this test, never a name-wide kill.
+    try { process.kill(report.applicationPid); } catch { /* Already exited. */ }
+  }
   if (process.platform === "win32" && driver.pid) {
     // Kill only this owned driver tree; Windows otherwise leaves the native driver alive.
     spawnSync("taskkill", ["/PID", String(driver.pid), "/T", "/F"], { stdio: "ignore" });
