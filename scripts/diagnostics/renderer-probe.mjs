@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdir, readlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { analyzeRenderer } from "./renderer-report.mjs";
+import { analyzeRenderer, matchesRenderedInput } from "./renderer-report.mjs";
 
 assert.equal(process.platform, "linux", "Native Linux X11 required");
 assert.ok(process.argv[2] && process.env.NATIVE_RENDERER_ARTIFACT_DIR);
@@ -64,6 +64,16 @@ function pixel(file, point) {
     "+repage", "-depth", "8", "txt:-"]).match(/\(\s*(\d+),\s*(\d+),\s*(\d+)(?:,|\))/);
   assert.ok(rgb, "independent screenshot must yield an RGB pixel");
   return rgb.slice(1, 4).map(Number);
+}
+async function observePaint(check) {
+  const deadline = Date.now() + 5000;
+  do {
+    await pause(250);
+    await verifyWindow();
+    if (check()) return true;
+  } while (Date.now() < deadline);
+  // Missing paint with a responsive DOM is an observation, not a harness exception.
+  return false;
 }
 try {
   driver = spawn("tauri-driver", ["--port", "4444", "--native-port", "4445"],
@@ -131,16 +141,38 @@ try {
       if (paint.actual.every((value, channel) => Math.abs(value - expected[channel]) <= 4)) break;
     } while (Date.now() < deadline);
   }
-  await execute('document.getElementById("__native_renderer_probe").remove();');
+  const inputRect = await execute(`
+    document.getElementById("__native_renderer_probe").remove();
+    const input = document.querySelector("[data-testid=login-username]");
+    input.style.caretColor = "transparent";
+    const r = input.getBoundingClientRect();
+    return {x:r.x+12,y:r.y+6,width:r.width-24,height:r.height-12};
+  `);
+  // Wait for actual removal paint; a completed DOM command does not imply presentation.
+  report.markerRemovedPainted = await observePaint(() => {
+    const current = pixel(capture("before-input"), report.paints[1].point);
+    return report.paints.every(paint =>
+      current.some((value, channel) => Math.abs(value - paint.expected[channel]) > 4));
+  });
+  const region = `${Math.round(inputRect.width * viewport.scale)}x${Math.round(inputRect.height * viewport.scale)}+${Math.round(inputRect.x * viewport.scale)}+${Math.round(inputRect.y * viewport.scale)}`;
   const element = await request("POST", `/session/${session}/element`, {
     using: "css selector", value: "[data-testid=login-username]",
   });
   const elementId = element["element-6066-11e4-a52e-4f735466cecf"];
-  await request("POST", `/session/${session}/element/${elementId}/value`, { text: "renderer-probe" });
+  await request("POST", `/session/${session}/element/${elementId}/value`, { text: "renderprobe" });
   report.interaction = await execute(
-    'return document.querySelector("[data-testid=login-username]").value === "renderer-probe";');
+    'return document.querySelector("[data-testid=login-username]").value === "renderprobe";');
   await verifyWindow();
-  capture("interaction");
+  report.interactionPainted = await observePaint(() => {
+    const file = capture("interaction");
+    const crop = resolve(artifacts, "input-text.png");
+    native("convert", [file, "-crop", region, "+repage", "-colorspace", "Gray",
+      "-negate", "-resize", "300%", crop]);
+    // Recognize pixels without giving OCR the expected word; caret/placeholder changes cannot pass.
+    report.renderedInput = native("tesseract", [crop, "stdout", "--psm", "7", "-l", "eng",
+      "-c", "tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz", "quiet"]).trim();
+    return matchesRenderedInput(report.renderedInput);
+  });
 } catch (error) {
   report.error = String(error);
   console.error(report.error);

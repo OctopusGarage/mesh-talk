@@ -1,3 +1,7 @@
+export function matchesRenderedInput(text) {
+  return typeof text === "string" && text.trim() === "renderprobe";
+}
+
 export function analyzeRenderer(data) {
   const limitation = "X11/Xvfb observation only; not a VMware GPU reproduction or proof of remediation.";
   const inconclusive = { status: "inconclusive", limitation };
@@ -13,6 +17,7 @@ export function analyzeRenderer(data) {
   }
   const painted = data.paints.filter(paint =>
     paint.actual.every((value, channel) => Math.abs(value - paint.expected[channel]) <= 4)).length;
+  if (painted === 2 && (data.interactionPainted !== true || data.markerRemovedPainted !== true)) return inconclusive;
   return { status: painted === 2 ? "presentation-observed" : "presentation-failure-observed",
     painted, attempted: 2, limitation };
 }

@@ -1,23 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeRenderer } from "./renderer-report.mjs";
+import { analyzeRenderer, matchesRenderedInput } from "./renderer-report.mjs";
 
 function evidence() {
   return { sessionReady: true, ownerVerified: true, mapped: true, domReady: true,
-    interaction: true, paints: [
+    interaction: true, interactionPainted: true, markerRemovedPainted: true, paints: [
       { expected: [255, 0, 255], actual: [255, 0, 255] },
       { expected: [0, 255, 0], actual: [0, 255, 0] },
     ] };
 }
+test("only exact rendered probe text establishes input presentation, not placeholder or caret changes", () => {
+  assert.equal(matchesRenderedInput("renderprobe\n"), true);
+  for (const text of ["", "alice", "renderer-probe", "renderprobe extra", null]) {
+    assert.equal(matchesRenderedInput(text), false);
+  }
+});
 test("two independently observed colors and native input establish scoped presentation success", () => {
   assert.equal(analyzeRenderer(evidence()).status, "presentation-observed");
 });
 test("responsive DOM with missing desktop paint is a presentation failure, not a loading error", () => {
   const data = evidence(); data.paints[1].actual = [255, 255, 255];
+  data.interactionPainted = false;
   assert.equal(analyzeRenderer(data).status, "presentation-failure-observed");
 });
 test("missing readiness, ownership, mapping or native interaction is inconclusive", () => {
-  for (const key of ["sessionReady", "ownerVerified", "mapped", "domReady", "interaction"]) {
+  for (const key of ["sessionReady", "ownerVerified", "mapped", "domReady", "interaction", "interactionPainted", "markerRemovedPainted"]) {
     const data = evidence(); data[key] = false;
     assert.equal(analyzeRenderer(data).status, "inconclusive");
   }
