@@ -68,6 +68,10 @@ jobs:
           node --test scripts/test-ai-eval.mjs
           node --test scripts/diagnostics/*.test.mjs
 
+      - name: Validate release checksum generation
+        shell: bash
+        run: node --test scripts/diagnostics/release-workflow.test.mjs
+
       - name: Lint frontend (ESLint)
         if: matrix.os == 'ubuntu-latest'
         working-directory: frontend

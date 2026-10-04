@@ -135,20 +135,17 @@ jobs:
       - name: Generate SHA256 checksums
         shell: bash
         run: |
+          set -euo pipefail
           cd release
 
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -Command "
-              Get-ChildItem -File | Where-Object { \$_.Name -ne 'SHA256SUMS' } |
-              ForEach-Object { \$h = Get-FileHash -Algorithm SHA256 \$_.FullName; \"\$($h.Hash)  \$($_.Name)\" } |
-              Out-File -Encoding ASCII SHA256SUMS
-            "
+          if command -v sha256sum >/dev/null 2>&1; then
+            find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec sha256sum {} \; > SHA256SUMS
+            test -s SHA256SUMS
+            sha256sum -c SHA256SUMS
           else
-            if command -v sha256sum >/dev/null 2>&1; then
-              find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec sha256sum {} \; > SHA256SUMS
-            else
-              find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec shasum -a 256 {} \; > SHA256SUMS
-            fi
+            find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec shasum -a 256 {} \; > SHA256SUMS
+            test -s SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
           fi
 
           echo "SHA256SUMS created:"
