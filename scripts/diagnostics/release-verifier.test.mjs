@@ -8,6 +8,7 @@ import test from "node:test";
 
 const script = fileURLToPath(new URL("../release/verify-release.sh", import.meta.url));
 const sha = "a".repeat(40);
+const bashPath = (path) => path.replaceAll("\\", "/");
 
 test("signature and provenance failures stop the real aggregate verifier before metadata inspection", () => {
   const root = mkdtempSync(join(tmpdir(), "mesh-talk-verifier-"));
@@ -24,8 +25,8 @@ test("signature and provenance failures stop the real aggregate verifier before 
     writeFileSync(join(bin, "cosign"), '#!/usr/bin/env bash\nexit "${SIGNATURE_EXIT:-0}"\n', { mode: 0o755 });
     const record = join(root, "provenance-args.txt");
     writeFileSync(join(bin, "gh"), '#!/usr/bin/env bash\nprintf "%s\\n" "$@" >> "$VERIFIER_ARGS_RECORD"\nexit "${PROVENANCE_EXIT:-0}"\n', { mode: 0o755 });
-    const args = [script, assets, "v0.1.5", "0.1.5", "OctopusGarage/mesh-talk", "refs/tags/v0.1.5", sha];
-    const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, VERIFIER_ARGS_RECORD: record };
+    const args = [bashPath(script), bashPath(assets), "v0.1.5", "0.1.5", "OctopusGarage/mesh-talk", "refs/tags/v0.1.5", sha];
+    const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, VERIFIER_ARGS_RECORD: bashPath(record) };
     assert.equal(spawnSync("bash", args, { env: { ...env, SIGNATURE_EXIT: "43" } }).status, 43);
     assert.equal(spawnSync("bash", args, { env: { ...env, PROVENANCE_EXIT: "44" } }).status, 44);
     const forwarded = readFileSync(record, "utf8").split(/\r?\n/);
@@ -34,7 +35,7 @@ test("signature and provenance failures stop the real aggregate verifier before 
     assert.notEqual(spawnSync("bash", args, { env }).status, 0);
     // Empty PATH is set inside the already-running Bash process, so missing
     // verification tooling is a deterministic failure on every platform.
-    const missing = spawnSync("bash", ["-c", 'PATH="$1"; source "$2" "${@:3}"', "fixture", join(root, "empty-bin"), ...args]);
+    const missing = spawnSync("bash", ["-c", 'PATH="$1"; source "$2" "${@:3}"', "fixture", bashPath(join(root, "empty-bin")), ...args]);
     assert.equal(missing.status, 127);
   } finally {
     rmSync(root, { recursive: true, force: true });
