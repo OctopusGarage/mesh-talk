@@ -250,6 +250,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
+          # Publish once, only after every platform and its provenance are verified.
+          draft: true
           tag_name: ${{ github.ref_name }}
           body_path: release_notes.md
           generate_release_notes: true # append an auto changelog under the notes above

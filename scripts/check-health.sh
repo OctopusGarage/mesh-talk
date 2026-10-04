@@ -63,9 +63,14 @@ if ! scripts/ai-eval-smoke.sh; then
     exit 1
 fi
 
-print_status "success" "Running AI eval harness tests..."
+print_status "success" "Running AI eval harness and diagnostic regression tests..."
 if ! node --test scripts/test-ai-eval.mjs; then
     print_status "error" "AI eval harness tests failed."
+    exit 1
+fi
+
+if ! node --test scripts/diagnostics/*.test.mjs; then
+    print_status "error" "Diagnostic regression tests failed."
     exit 1
 fi
 

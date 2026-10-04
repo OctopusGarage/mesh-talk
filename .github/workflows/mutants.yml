@@ -81,5 +81,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mutants-report
-          path: src-tauri/mutants.out/
-          if-no-files-found: ignore
+          path: mutants.out/
+          if-no-files-found: error

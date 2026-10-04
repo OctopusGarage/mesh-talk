@@ -11,6 +11,59 @@ mod tests {
     const ME: &str = "cccccccccccccccccccccccccccccccc";
 
     #[test]
+    fn owner_length_contract_accepts_128_and_rejects_129_bytes() {
+        let accepted = "a".repeat(128);
+        let rejected = "a".repeat(129);
+        assert!(authorize(Some(&accepted), &accepted).is_ok());
+        assert!(authorize(Some(&rejected), &rejected).is_err());
+    }
+
+    #[test]
+    fn policy_file_size_contract_accepts_two_mib_and_preserves_oversized_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        let path = store.path("alice");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = br#"{"owner":"alice","contacts":[]}"#.to_vec();
+        // Fixed public limits, independent of the implementation constant.
+        bytes.resize(2_097_152, b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(store
+            .get(Some("alice"), "alice")
+            .unwrap()
+            .contacts
+            .is_empty());
+        bytes.push(b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(store.get(Some("alice"), "alice").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn non_not_found_read_failure_is_not_an_empty_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        let blocked = store.path("alice");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("preserved"), b"untouched").unwrap();
+        assert!(store.get(Some("alice"), "alice").is_err());
+        assert_eq!(
+            std::fs::read(blocked.join("preserved")).unwrap(),
+            b"untouched"
+        );
+        // Unix reports ENOTDIR for a file in an intermediate path. Windows maps
+        // that situation to NotFound, so use the final-path directory above there.
+        #[cfg(unix)]
+        {
+            let blocked_root = dir.path().join("blocked-root");
+            std::fs::write(&blocked_root, b"untouched").unwrap();
+            let store = HiddenContactsState::new(blocked_root.clone());
+            assert!(store.get(Some("alice"), "alice").is_err());
+            assert_eq!(std::fs::read(blocked_root).unwrap(), b"untouched");
+        }
+    }
+
+    #[test]
     fn persistence_isolated_idempotent_and_offline_restore() {
         let dir = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(dir.path().to_owned());

@@ -66,6 +66,7 @@ jobs:
         run: |
           make eval-smoke
           node --test scripts/test-ai-eval.mjs
+          node --test scripts/diagnostics/*.test.mjs
 
       - name: Lint frontend (ESLint)
         if: matrix.os == 'ubuntu-latest'
