@@ -131,14 +131,15 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         .manage(HiddenContactsState::new(root.path().to_owned()))
         .invoke_handler(tauri::generate_handler![
             get_hidden_contacts,
-            set_contact_hidden
+            set_contact_hidden,
+            crate::chat_commands::search
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
         .unwrap();
-    let invoke = |command: &str, body: serde_json::Value| {
+    let invoke_raw = |command: &str, body: serde_json::Value| {
         tauri::test::get_ipc_response(
             &webview,
             tauri::webview::InvokeRequest {
@@ -157,8 +158,22 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
                 invoke_key: tauri::test::INVOKE_KEY.into(),
             },
         )
-        .map(|body| body.deserialize::<HiddenContactsSnapshot>().unwrap())
     };
+    let invoke = |command: &str, body: serde_json::Value| {
+        invoke_raw(command, body).map(|body| body.deserialize::<HiddenContactsSnapshot>().unwrap())
+    };
+    let hits = invoke_raw(
+        "search",
+        serde_json::json!({ "query": "existing conversation before hide" }),
+    )
+    .unwrap()
+    .deserialize::<serde_json::Value>()
+    .unwrap();
+    assert!(hits.as_array().unwrap().iter().any(|hit| {
+        hit["account_id"] == bob_account
+            && hit["text"] == "existing conversation before hide"
+            && hit["is_channel"] == false
+    }));
     let hidden = invoke(
         "set_contact_hidden",
         serde_json::json!({
