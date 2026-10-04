@@ -137,13 +137,21 @@ jobs:
         run: |
           set -euo pipefail
           cd release
+          shopt -s nullglob dotglob
+          files=()
+          for file in ./*; do
+            if [[ -f "$file" && ! -L "$file" && "$file" != './SHA256SUMS' ]]; then
+              files+=("$file")
+            fi
+          done
+          test "${#files[@]}" -gt 0
 
           if command -v sha256sum >/dev/null 2>&1; then
-            find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec sha256sum {} \; > SHA256SUMS
+            sha256sum "${files[@]}" > SHA256SUMS
             test -s SHA256SUMS
             sha256sum -c SHA256SUMS
           else
-            find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -exec shasum -a 256 {} \; > SHA256SUMS
+            shasum -a 256 "${files[@]}" > SHA256SUMS
             test -s SHA256SUMS
             shasum -a 256 -c SHA256SUMS
           fi
