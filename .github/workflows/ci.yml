@@ -5,6 +5,10 @@ on:
     branches: ["**"]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Read-only: every job just checks out and runs tooling — nothing writes back.
 permissions:
   contents: read
@@ -66,7 +70,14 @@ jobs:
         run: |
           make eval-smoke
           node --test scripts/test-ai-eval.mjs
-          node --test scripts/diagnostics/*.test.mjs
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Diagnostic and release gate regressions (all platforms)
+        shell: bash
+        run: node --test scripts/diagnostics/*.test.mjs
 
       - name: Validate release checksum generation
         shell: bash
@@ -153,7 +164,14 @@ jobs:
 
       - name: Shellcheck scripts
         if: matrix.os == 'ubuntu-latest'
-        run: shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh hooks/*
+        run: shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/*
+
+      - name: Validate GitHub Actions workflows
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint"
 
       - name: Install supply-chain tools
         if: matrix.os == 'ubuntu-latest'
