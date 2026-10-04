@@ -1,16 +1,21 @@
 // Drive the real embedded W3C server and a real CLI node. No IPC replacement,
 // seeded roster, browser substitute, or downloaded JavaScript driver is used.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { spawn, execFileSync } from "node:child_process";
+import { randomBytes, createHash } from "node:crypto";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
+import { coreScenarios, restartedCoreScenarios, writeChildCommand } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
+const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const sourceSha = process.env.EVAL_SOURCE_SHA ?? gitSha;
+assert.match(sourceSha, /^[0-9a-f]{40}$/);
+assert.equal(sourceSha, gitSha, "evaluation source SHA matches checked-out source");
 const appBinary = resolve(process.env.NATIVE_CONTACT_APP ?? `target/release/examples/native-contact-eval${executableSuffix}`);
 const nodeBinary = resolve(process.env.NATIVE_CONTACT_NODE ?? `target/release/mesh-talk-node${executableSuffix}`);
 const output = resolve(process.env.NATIVE_CONTACT_OUTPUT ?? "target/hidden-contacts-native");
@@ -28,6 +33,9 @@ const started = Date.now();
 let previousScenario = started;
 const report = { schema: 1, platform: process.platform, native: true, mocked: false, scenarios: {}, startedAt: new Date().toISOString(), input: "embedded W3C DOM automation in actual native webview; contextmenu and focus-before-click dialog triggers use execute; keyboard uses in-process AppKit on macOS, owned-PID OS input on Windows/Linux; no physical keyboard user study", driver: { crate: "tauri-plugin-wdio-webdriver", version: "1.4.0", clickOrderingSource: "src/platform/executor.rs:688-701 (click_element)" }, kdf: { example: "fast-test-kdf (existing dev-dependency)", cli: "regular production KDF" } };
 const owned = new Set();
+report.schema = 2;
+report.sourceSha = sourceSha;
+if (process.env.GITHUB_RUN_ID) report.runId = process.env.GITHUB_RUN_ID;
 let app, peer, session, endpoint, account, userId, signedInUser;
 const registeredOwners = new Map();
 const redact = value => String(value).replaceAll(password, "[REDACTED]");
@@ -37,12 +45,16 @@ function launch(binary, args) {
   child.output = "";
   for (const stream of [child.stdout, child.stderr]) stream.on("data", data => { child.output = (child.output + redact(data)).slice(-64000); });
   child.on("error", error => { child.output += redact(error.message); });
+  child.stdin.on("error", error => { child.output += redact(`stdin: ${error.message}`); });
   child.on("close", () => owned.delete(child));
   return child;
 }
 async function stop(child, graceful = false) {
   if (!child || !owned.has(child)) return;
-  if (graceful) child.stdin.write("/quit\n"); else child.kill("SIGTERM");
+  if (graceful) {
+    try { await writeChildCommand(child, "/quit\n"); }
+    catch (error) { child.output += redact(`graceful shutdown: ${error.message}`); child.kill("SIGTERM"); }
+  } else child.kill("SIGTERM");
   const deadline = Date.now() + 10000;
   while (owned.has(child) && Date.now() < deadline) await delay(100);
   if (owned.has(child)) {
@@ -97,13 +109,19 @@ async function appKitKey(keyName) {
   const nonce = randomBytes(8).toString("hex");
   const result = await command("POST", "/execute/async", { script: "const key=arguments[0],nonce=arguments[1],done=arguments[arguments.length-1]; window.__TAURI__.event.listen('native-contact-key-result',e=>{if(e.payload.nonce===nonce){unlisten();done(e.payload);}}).then(fn=>{unlisten=fn; return window.__TAURI__.event.emit('native-contact-key',{key,nonce});}).catch(e=>done({error:String(e)})); let unlisten=()=>{};", args: [keyName, nonce] });
   assert.equal(result.error, null, `native AppKit input failed: ${result.error}`);
+  if (result.focus) report.nativeFocus = result.focus;
 }
 async function focusOwnedWindow() {
   if (process.platform !== "darwin") return;
   // Background WKWebViews can suspend modal animations. Activate only the
   // fixture process before waiting for animations or delivering native keys.
   await appKitKey("Focus");
-  await until("owned native application focus", () => execute("return document.hasFocus();"), 10000);
+  try {
+    await until("owned native application focus", () => execute("return document.hasFocus();"), 10000);
+  } catch (error) {
+    await appKitKey("Focus");
+    throw error;
+  }
 }
 async function click(id) { await command("POST", `/element/${await element(id)}/click`, {}); }
 async function openDialog(id) {
@@ -161,8 +179,11 @@ async function screenshot(name) {
 }
 async function passed(name, observations) {
   const filename = `${name}.json`;
-  await writeFile(join(output, filename), JSON.stringify({ name, observations, at: new Date().toISOString() }, null, 2));
-  report.scenarios[name] = { passed: true, elapsedMs: Date.now() - previousScenario, evidence: [filename, await screenshot(name)] };
+  await writeFile(join(output, filename), JSON.stringify({ name, sourceSha, observations, at: new Date().toISOString() }, null, 2));
+  const logFile = `${name}.log`;
+  await writeFile(join(output, logFile), redact(`APP\n${app?.output ?? ""}\nPEER\n${peer?.output ?? ""}`));
+  report.scenarios[name] = { passed: true, elapsedMs: Date.now() - previousScenario, evidence: [filename, await screenshot(name), logFile] };
+  report.scenarios[name].evidenceDigests = Object.fromEntries(await Promise.all(report.scenarios[name].evidence.map(async file => [file, createHash("sha256").update(await readFile(join(output, file))).digest("hex")])));
   previousScenario = Date.now();
   console.log(`PASS ${name}`);
 }
@@ -259,6 +280,8 @@ try {
   account = accounts.account_id;
   await element(row());
   await click(row());
+  const coreContext = { execute, observe, until, passed, fill, click, peer, account, userId, fixture, history, row, privacySettings, key, signOut, login, userName, peerName, command, focusOwnedWindow, openDialog, settledDialog, element, exists, owner: signedInUser, nonce: randomBytes(4).toString("hex") };
+  const coreState = await coreScenarios(coreContext);
   const beforeText = `native-before-${randomBytes(4).toString("hex")}`;
   await fill("composer-input", beforeText);
   await click("composer-send");
@@ -291,18 +314,19 @@ try {
   await until("manual reply permission saved", async () => (await privacyPolicy()).allowed_accounts.some(a => a.id === account && a.source === "Manual"));
   const privateReply = `native-private-${randomBytes(4).toString("hex")}`;
   const ownAccount = await observe("account_id");
-  peer.stdin.write(`/account-msg ${ownAccount} ${privateReply}\n`);
+  await writeChildCommand(peer, `/account-msg ${ownAccount} ${privateReply}\n`);
   await until("authorized private reply delivered", async () => (await history()).some(h => h.text === privateReply));
   await passed("privacy-reply", { manualGrantAfterRevocation: true, realCliReplyStored: true, policy: await privacyPolicy() });
   await stop(app);
   await startApp();
   await login(userName);
+  await restartedCoreScenarios(coreContext, coreState);
   const restoredPrivacy = await privacyPolicy();
   assert.equal(restoredPrivacy.invisible, true);
   assert.ok(restoredPrivacy.allowed_accounts.some(a => a.id === account && a.source === "Manual"));
   assert.ok((await history()).some(h => h.text === privateReply));
   const restartReply = `native-private-restart-${randomBytes(4).toString("hex")}`;
-  peer.stdin.write(`/account-msg ${ownAccount} ${restartReply}\n`);
+  await writeChildCommand(peer, `/account-msg ${ownAccount} ${restartReply}\n`);
   await until("private reply delivered after actual app restart", async () => (await history()).some(h => h.text === restartReply));
   await passed("privacy-restart", { restored: restoredPrivacy, realCliReplyAfterRestart: true, historyRetained: true });
   // Restore public mode before evaluating independent contact-list hiding.
@@ -334,12 +358,12 @@ try {
   assert.ok((await observe("list_accounts")).some(a => a.account_id === account));
   await passed("raw-peer-retained", { rawPeerPresent: true, accountPresent: true });
 
-  peer.stdin.write("/peers\n");
+  await writeChildCommand(peer, "/peers\n");
   await until("CLI discovered GUI identity", () => peer.output.includes(`peer ${userId}`));
   const hiddenText = `native-hidden-${randomBytes(4).toString("hex")}`;
   const guiAccount = await observe("account_id");
   assert.match(guiAccount, /^[0-9a-f]{32}$/);
-  peer.stdin.write(`/account-msg ${guiAccount} ${hiddenText}\n`);
+  await writeChildCommand(peer, `/account-msg ${guiAccount} ${hiddenText}\n`);
   await until("CLI account command completed", () => {
     if (peer.output.includes("account send failed:")) throw new Error(peer.output);
     return peer.output.includes("account message sent");
@@ -426,7 +450,7 @@ try {
   assert.ok((await history()).some(h => h.text === beforeText));
   assert.ok((await history()).some(h => h.text === hiddenText));
   await passed("offline-restore", { realPeerStopped: true, rawRosterExpired: true, persistedIdentityRestored: true, durableHistoryRetained: true });
-  const errors = await validateEvidence(report, output);
+  const errors = await validateEvidence(report, output, { sourceSha: gitSha, platform: process.platform });
   assert.deepEqual(errors, []);
 } catch (error) {
   report.failure = redact(error.stack ?? error);
@@ -442,7 +466,7 @@ try {
   }
   report.finishedAt = new Date().toISOString();
   report.elapsedMs = Date.now() - started;
-  report.validationErrors = await validateEvidence(report, output);
+  report.validationErrors = await validateEvidence(report, output, { sourceSha: gitSha, platform: process.platform });
   if (report.validationErrors.length) process.exitCode = 1;
   await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2));
   await writeFile(join(output, "native-app.log"), redact(app?.output ?? "app not started"));

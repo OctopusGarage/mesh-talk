@@ -16,6 +16,8 @@ seeked = "seeked"
 [default.extend-identifiers]
 # "UPnP" (Universal Plug and Play) trips the Pn->On heuristic.
 UPnP = "UPnP"
+# PNG filter 4 uses the Paeth predictor (a proper algorithm name).
+paeth = "paeth"
 
 [files]
 extend-exclude = [

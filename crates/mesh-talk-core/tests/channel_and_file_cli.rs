@@ -11,6 +11,8 @@
 //! ~instant rather than ~60-70s of real KDF. Nodes are started SEQUENTIALLY (start A,
 //! await its line, then start B) so a slow machine never runs two KDF cold starts at once.
 
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -88,8 +90,7 @@ impl CliNode {
 
 impl Drop for CliNode {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        support::stop_cli(&mut self.child, &mut self.stdin);
     }
 }
 
@@ -197,11 +198,13 @@ fn two_cli_nodes_transfer_a_file() {
     let discovery_port = 49000 + (std::process::id() % 100) as u16;
 
     // A small file with known bytes, inside the tempdir (cleaned up on every exit path).
-    let src = dir.path().join("payload.txt");
+    let source_dir = dir.path().join("source files");
+    std::fs::create_dir(&source_dir).expect("source directory with spaces");
+    let src = source_dir.join("payload with spaces.txt");
     let payload = b"mesh-talk-file-e2e-known-bytes\n";
     std::fs::write(&src, payload).expect("write source file");
 
-    let (mut alpha, _alpha_uid, bravo, bravo_uid) = two_converged_nodes(dir.path(), discovery_port);
+    let (mut alpha, alpha_uid, bravo, bravo_uid) = two_converged_nodes(dir.path(), discovery_port);
 
     // Alpha sends the file to Bravo by user_id prefix.
     alpha.send(&format!("/sendfile {} {}", &bravo_uid[..8], src.display()));
@@ -209,7 +212,10 @@ fn two_cli_nodes_transfer_a_file() {
     // Bravo prints the inbound-file line (saved into his data dir) with name + size.
     let got = bravo
         .wait_for(
-            |l| l.starts_with("file from ") && l.contains("payload.txt"),
+            |l| {
+                l.starts_with(&format!("file from {alpha_uid}:"))
+                    && l.contains("payload with spaces.txt")
+            },
             Duration::from_secs(20),
         )
         .expect("Bravo received and saved Alpha's file");
