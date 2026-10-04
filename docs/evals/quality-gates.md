@@ -78,6 +78,8 @@ Each platform signs its ZIP and records build provenance. Builds only upload wor
 artifacts; they cannot independently publish or update a release. The aggregate job
 downloads all four outputs and requires exactly four ZIPs, four signature bundles
 and one nonempty CycloneDX SBOM.
+Native builds reuse the Tauri CLI installed by `npm ci` from the committed lockfile,
+instead of compiling an unpinned latest CLI independently on every runner.
 
 The gate verifies signatures against the exact repository, workflow and source ref,
 and provenance against the exact source commit on GitHub-hosted runners. It inspects
