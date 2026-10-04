@@ -32,8 +32,6 @@ jobs:
         os: [ubuntu-24.04, windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    env:
-      NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -61,9 +59,13 @@ jobs:
         run: cargo build --release --locked -p mesh-talk --example native-contact-eval
       - name: Run native evaluation (Linux desktop session)
         if: runner.os == 'Linux'
+        env:
+          NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
         run: xvfb-run -a dbus-run-session -- node scripts/diagnostics/hidden-contacts.mjs
       - name: Run native evaluation (Windows and macOS desktop)
         if: runner.os != 'Linux'
+        env:
+          NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
         run: node scripts/diagnostics/hidden-contacts.mjs
       - name: Upload native evidence even on failure
         if: always()
