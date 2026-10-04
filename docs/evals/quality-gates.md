@@ -134,7 +134,7 @@ The `verified-release-evidence` workflow artifact and job summary retain source 
 asset hashes. A failed build, verifier or metadata tool leaves the release unpublished.
 
 To run the gate locally (requires cosign, gh, Python 3.11+, exiftool, msiinfo, dpkg-deb,
-rpm, 7zz/7z and unsquashfs (`squashfs-tools`; the directory must contain only the nine release assets):
+rpm, 7zz/7z and unsquashfs from `squashfs-tools`; the directory must contain only the nine release assets):
 
 ```sh
 bash scripts/release/verify-release.sh /path/to/assets vX.Y.Z X.Y.Z \
