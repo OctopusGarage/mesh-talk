@@ -37,6 +37,22 @@ use crate::state::AppState;
 use std::sync::Arc;
 use tauri::{Manager, WindowEvent};
 
+// Set only through the explicitly configured entry point used by the native
+// evaluation example. Ordinary application startup never sets this value.
+static RUNTIME_DATA_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+static RUNTIME_DISCOVERY_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+pub(crate) fn configured_discovery_port() -> u16 {
+    RUNTIME_DISCOVERY_PORT
+        .get()
+        .copied()
+        .unwrap_or(mesh_talk_core::node::DEFAULT_DISCOVERY_PORT)
+}
+
+pub(crate) fn configured_data_root() -> Option<&'static std::path::PathBuf> {
+    RUNTIME_DATA_ROOT.get()
+}
+
 /// The user's home directory, cross-platform: `HOME` on Unix/macOS, `USERPROFILE` on
 /// Windows (where `HOME` is normally unset). Anchors the app's data + logs at `~/.mesh-talk`.
 pub(crate) fn user_home_dir() -> Option<std::path::PathBuf> {
@@ -48,6 +64,9 @@ pub(crate) fn user_home_dir() -> Option<std::path::PathBuf> {
 /// The app's data directory (`~/.mesh-talk`, falling back to `./.mesh-talk` if no home
 /// dir is resolvable). Single source of truth for the keystore, node, and logs locations.
 pub(crate) fn data_dir() -> std::path::PathBuf {
+    if let Some(root) = configured_data_root() {
+        return root.clone();
+    }
     user_home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".mesh-talk")
@@ -56,6 +75,29 @@ pub(crate) fn data_dir() -> std::path::PathBuf {
 /// Tauri application entry point. The serverless node is the whole product now;
 /// it starts per-session on login (see `commands::login` → `spawn_node_runtime`).
 pub fn run_tauri() {
+    run_tauri_configured(None, None, |builder| builder);
+}
+
+/// Run the same desktop application with an optional explicit storage root and
+/// builder extension. The native evaluation example supplies its dev-only
+/// driver here; the shipping entry point supplies neither.
+pub fn run_tauri_configured(
+    data_root: Option<std::path::PathBuf>,
+    discovery_port: Option<u16>,
+    extend: impl FnOnce(tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry>,
+) {
+    if let Some(port) = discovery_port {
+        assert_ne!(port, 0, "configured discovery port must be nonzero");
+        RUNTIME_DISCOVERY_PORT
+            .set(port)
+            .expect("runtime configured only once");
+    }
+    if let Some(root) = data_root {
+        assert!(root.is_absolute(), "configured data root must be absolute");
+        RUNTIME_DATA_ROOT
+            .set(root)
+            .expect("runtime configured only once");
+    }
     let _timer = perf_monitor!("application_startup");
     log::info!("Starting Mesh-Talk desktop runtime");
 
@@ -81,7 +123,17 @@ pub fn run_tauri() {
     let favorites_state = crate::favorites::FavoritesState::default();
     let avatars_state = crate::avatars::AvatarsState::default();
 
-    tauri::Builder::default()
+    let mut context = tauri::generate_context!();
+    if let Some(root) = configured_data_root() {
+        let namespace = root
+            .parent()
+            .and_then(|p| p.file_name())
+            .expect("fixture namespace")
+            .to_string_lossy();
+        context.config_mut().identifier = format!("com.mesh-talk.native-eval.{namespace}");
+    }
+
+    let builder = tauri::Builder::default()
         // Single-instance MUST be the first plugin registered (Tauri requirement): its
         // callback runs in the already-running process when a second launch is attempted,
         // so we surface the existing window instead of spawning a duplicate that would
@@ -92,7 +144,9 @@ pub fn run_tauri() {
                 let _ = crate::window_visibility::show(&window);
                 let _ = window.set_focus();
             }
-        }))
+        }));
+    // Extensions come after single-instance, which must remain the first plugin.
+    extend(builder)
         // Restore window size/position across launches (clamps off-screen geometry).
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
@@ -287,7 +341,7 @@ pub fn run_tauri() {
             crate::avatars::get_avatars,
             crate::avatars::set_avatar
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .unwrap_or_else(|e| {
             // A failed launch must be a non-zero exit, not a silent success.
             log::error!("Error while running tauri application: {e}");

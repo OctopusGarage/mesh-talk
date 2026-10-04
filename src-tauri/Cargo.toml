@@ -58,6 +58,7 @@ objc2 = "0.6"
 raw-window-handle = "0.6"
 
 [dev-dependencies]
+tauri-plugin-wdio-webdriver = "=1.4.0"
 tauri = { version = "2", features = ["test"] }
 serde_json = "1"
 # Collapse the password KDFs (Argon2 + PBKDF2) to a trivial cost FOR TESTS ONLY. Cargo activates
@@ -66,6 +67,10 @@ serde_json = "1"
 # auth_service tests pay ~12s per derivation (≈200s total) because it links mesh-talk-core as a
 # normal (non-test) dependency and so doesn't inherit the core crate's own `cfg(test)` cheap path.
 mesh-talk-core = { path = "../crates/mesh-talk-core", features = ["fast-test-kdf"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry"] }
 
 [lints]
 workspace = true

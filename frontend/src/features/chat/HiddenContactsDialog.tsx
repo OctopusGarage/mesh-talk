@@ -316,6 +316,7 @@ export function HiddenContactsDialog() {
         )}
         {loaded && (
           <Tabs
+            className="min-w-0"
             value={tab}
             onValueChange={(value) => {
               setTab(value);

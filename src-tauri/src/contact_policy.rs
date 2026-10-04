@@ -1,4 +1,7 @@
 #[cfg(test)]
+mod native_mesh_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

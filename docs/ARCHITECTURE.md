@@ -135,6 +135,12 @@ Last-known names are display metadata: control characters are removed and names 
 bounded before saving, so an abusive peer name cannot prevent hiding its account.
 The hidden-contact tests also exercise actual registered Tauri command dispatch through
 the headless mock runtime, including persisted hide and restoration after stopping the node.
+An additional real-mesh regression keeps authenticated discovery and encrypted delivery
+running while an account and its newly added device are hidden, then reopens durable history.
+The `native-contact-eval` example uses the same desktop builder with isolated data/config
+roots and a dev-only embedded WebDriver. The normal entry point has no driver plugin or
+storage override. Three-platform native scenarios and the usability rubric are documented
+in [the hidden-contact evaluation runbook](evals/hidden-contacts.md).
 
 ## 6. Binaries
 

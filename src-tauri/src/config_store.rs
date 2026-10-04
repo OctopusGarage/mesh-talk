@@ -14,6 +14,9 @@ pub fn config_path<R: tauri::Runtime>(
     filename: &str,
 ) -> Option<PathBuf> {
     use tauri::Manager;
+    if let Some(root) = crate::configured_data_root() {
+        return Some(root.join("config").join(filename));
+    }
     app.path().app_config_dir().ok().map(|d| d.join(filename))
 }
 

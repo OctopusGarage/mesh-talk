@@ -266,3 +266,96 @@ test("narrow settings management remains usable with keyboard and no overflow", 
   await page.keyboard.press("Enter");
   await expect(page.getByTestId(`restore-contact-${bob}`)).toHaveCount(0);
 });
+
+test("hide confirmation defaults to safe keyboard cancellation and explains its scope", async ({
+  page,
+}) => {
+  await login(page);
+  await page.getByTestId(`conversation-row-${bob}`).click({ button: "right" });
+  await page.getByTestId(`hide-contact-menu-${bob}`).click();
+  const dialog = page.getByTestId("hide-contact-dialog");
+  await expect(dialog).toContainText("Messages and calls can still arrive");
+  await expect(dialog).toContainText("signed-in user on this device");
+  await expect(page.getByTestId("hide-contact-cancel")).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId(`conversation-row-${bob}`)).toBeVisible();
+  await page.getByTestId(`conversation-row-${bob}`).click({ button: "right" });
+  await page.getByTestId(`hide-contact-menu-${bob}`).click();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId(`conversation-row-${bob}`)).toBeVisible();
+});
+
+test("hiding all contacts does not misreport a disconnected network", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await login(page);
+  await hideBob(page);
+  const carol = "acc_carol_cccc3333";
+  await page
+    .getByTestId(`conversation-row-${carol}`)
+    .click({ button: "right" });
+  await page.getByTestId(`hide-contact-menu-${carol}`).click();
+  await page.getByTestId("hide-contact-confirm").click();
+  await expect(
+    page.getByText("All contacts are hidden. Restore them in Settings."),
+  ).toBeVisible();
+  await page.clock.fastForward(25_000);
+  await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
+  await expect(
+    page.getByTestId("conversation-row-chan_team_dddd4444"),
+  ).toBeVisible();
+  await manage(page);
+  await expect(page.getByTestId(`restore-contact-${bob}`)).toBeVisible();
+  await expect(page.getByTestId(`restore-contact-${carol}`)).toBeVisible();
+});
+
+test("maximum saved name stays inside narrow management and keyboard restore works", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+  await page.evaluate(
+    ({ account, name }) => {
+      localStorage.setItem(
+        "mock-hidden-u_self",
+        JSON.stringify([{ account_id: account, name }]),
+      );
+    },
+    { account: bob, name: "界".repeat(256) },
+  );
+  await login(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await manage(page);
+  const dialog = page.getByTestId("hidden-contacts-dialog");
+  const layout = await dialog.evaluate((element) => ({
+    overflow: element.scrollWidth - element.clientWidth,
+    offenders: Array.from(element.querySelectorAll("*"))
+      .filter(
+        (child) =>
+          child.getBoundingClientRect().right >
+          element.getBoundingClientRect().right,
+      )
+      .map((child) => ({ tag: child.tagName, className: child.className })),
+  }));
+  await page.screenshot({
+    path: testInfo.outputPath("hidden-contact-maximum-name.png"),
+    animations: "disabled",
+  });
+  expect(layout.overflow, JSON.stringify(layout)).toBe(0);
+  const restore = page.getByTestId(`restore-contact-${bob}`);
+  await expect(restore).toBeInViewport();
+  await restore.focus();
+  await page.keyboard.press("Enter");
+  await expect(restore).toHaveCount(0);
+  await page.getByTestId("hidden-contacts-add-tab").click();
+  await page.getByTestId(`hide-contact-${bob}`).click();
+  await expect(page.getByTestId("hide-contact-cancel")).toBeFocused();
+  await page.screenshot({
+    path: testInfo.outputPath("hidden-contact-narrow-confirmation.png"),
+    animations: "disabled",
+  });
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("hide-contact-dialog")).toHaveCount(0);
+});
