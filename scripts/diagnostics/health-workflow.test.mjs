@@ -17,3 +17,12 @@ test("health workflow uses a supported toolchain action and installs required sc
   assert.match(workflow, /go install github\.com\/rhysd\/actionlint\/cmd\/actionlint@v1\.7\.12/);
   assert.match(readFileSync(new URL("../check-health.sh", import.meta.url), "utf8"), /for tool in cargo-deny cargo-machete typos gitleaks shellcheck actionlint/);
 });
+
+test("Windows health and diagnostic gates explicitly execute Bash", () => {
+  for (const [file, name] of [["check-health.yml", "Run unified health check"], ["ci.yml", "Diagnostic and release gate regressions (all platforms)"]]) {
+    const workflow = readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
+    const step = workflow.split(/^      - /m).find((value) => value.startsWith(`name: ${name}\n`));
+    assert.ok(step, name);
+    assert.match(step, /^        shell: bash$/m, "PowerShell must not treat .sh as a file association or pass test globs literally");
+  }
+});

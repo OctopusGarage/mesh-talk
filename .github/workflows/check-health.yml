@@ -113,6 +113,6 @@ jobs:
 
       # 🔟 Run unified health check
       - name: Run unified health check
+        shell: bash
         run: |
-          chmod +x scripts/check-health.sh
-          ./scripts/check-health.sh
+          bash scripts/check-health.sh
