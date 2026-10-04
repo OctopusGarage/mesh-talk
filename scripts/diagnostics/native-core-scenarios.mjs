@@ -62,6 +62,7 @@ export async function revealLatestNativeMessage({ execute, until, command }, tex
 export async function revealHistoricalNativeMessage({ execute, until, command, key }, text) {
   // Virtuoso's real scroller is keyboard-focusable. Native PageUp exercises
   // normal browser scrolling, rather than mutating its virtual-list state.
+  await until("restarted message log hydrated", () => execute("return !!document.querySelector('[role=log]');"));
   const log = await command("POST", "/element", { using: "css selector", value: '[role="log"]' });
   await command("POST", `/element/${log["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
   await until("historical message visibly rendered after native PageUp", async () => {

@@ -75,7 +75,14 @@ test("native historical rendering uses the focusable message log and real PageUp
 
 test("native historical rendering does not turn missing history into success", async () => {
   const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
-  await assert.rejects(revealHistoricalNativeMessage({ execute: async (_script, args) => !args, command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }), key: async () => {}, until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("history not visible"); } }, "missing message"), /history not visible/);
+  await assert.rejects(revealHistoricalNativeMessage({ execute: async (_script, args) => !args, command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }), key: async () => {}, until: async (_label, poll) => { if (await poll()) return true; throw new Error("history not visible"); } }, "missing message"), /history not visible/);
+});
+
+test("native historical rendering waits for asynchronous history hydration before locating the scroller", async () => {
+  const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
+  let hydrated = false, polls = 0;
+  await revealHistoricalNativeMessage({ execute: async (_script, args) => args ? true : (hydrated = ++polls > 1), command: async () => { assert.equal(hydrated, true); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async () => { throw new Error("visible history needs no key"); }, until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("not hydrated"); } }, "restored message");
+  assert.equal(polls, 2);
 });
 
 test("native layout coverage rejects invalid or indistinguishable viewport tiers", async () => {
