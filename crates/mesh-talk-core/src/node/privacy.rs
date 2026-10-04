@@ -79,6 +79,8 @@ pub struct PrivacyPolicy {
     snapshot: PrivacySnapshot,
 }
 impl PrivacyPolicy {
+    /// Open encrypted policy or create a public default; malformed data fails closed.
+    /// The caller must serialize ownership and keep the parent directory trusted.
     pub fn open(path: &Path, password: &str) -> io::Result<Self> {
         if !check_path(path)? {
             let salt = generate_salt();
@@ -137,6 +139,7 @@ impl PrivacyPolicy {
             snapshot,
         })
     }
+    /// Return a detached snapshot for the authorized local settings UI.
     pub fn snapshot(&self) -> PrivacySnapshot {
         self.snapshot.clone()
     }
@@ -149,11 +152,13 @@ impl PrivacyPolicy {
                 .binary_search_by(|a| a.id.as_str().cmp(id))
                 .is_ok()
     }
+    /// Commit visibility before replacing memory; failed writes preserve prior state.
     pub fn set_invisible(&mut self, invisible: bool) -> io::Result<()> {
         let mut next = self.snapshot.clone();
         next.invisible = invisible;
         self.commit(next)
     }
+    /// Persist a validated account grant, retaining sorted uniqueness and Manual priority.
     pub fn grant(&mut self, id: &str, name: &str, source: PermissionSource) -> io::Result<()> {
         if !valid_id(id) {
             return Err(invalid());
@@ -173,33 +178,28 @@ impl PrivacyPolicy {
                     a.source = source;
                 }
             }
-            Err(i) => {
+            Err(_) => {
                 if next.allowed_accounts.len() == 1024 {
                     return Err(invalid());
                 }
-                next.allowed_accounts.insert(
-                    i,
-                    AllowedAccount {
-                        id: id.into(),
-                        name,
-                        source,
-                    },
-                );
+                next.allowed_accounts.push(AllowedAccount {
+                    id: id.into(),
+                    name,
+                    source,
+                });
+                next.allowed_accounts
+                    .sort_unstable_by(|a, b| a.id.cmp(&b.id));
             }
         }
         self.commit(next)
     }
+    /// Persist removal of this account; revoking an absent valid ID is a no-op.
     pub fn revoke(&mut self, id: &str) -> io::Result<()> {
         if !valid_id(id) {
             return Err(invalid());
         }
         let mut next = self.snapshot.clone();
-        if let Ok(i) = next
-            .allowed_accounts
-            .binary_search_by(|a| a.id.as_str().cmp(id))
-        {
-            next.allowed_accounts.remove(i);
-        }
+        next.allowed_accounts.retain(|account| account.id != id);
         self.commit(next)
     }
     fn commit(&mut self, next: PrivacySnapshot) -> io::Result<()> {

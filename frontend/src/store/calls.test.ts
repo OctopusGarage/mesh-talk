@@ -180,6 +180,75 @@ describe("local actions send the right signal", () => {
 });
 
 describe("outgoing call (engine happy path)", () => {
+  it("a login switch during a pending grant stops media and sends no offer", async () => {
+    let resolveGrant!: () => void;
+    const grant = new Promise<void>((resolve) => {
+      resolveGrant = resolve;
+    });
+    invoke.mockImplementation((command) =>
+      command === "initiate_privacy_contact"
+        ? grant
+        : Promise.resolve(undefined),
+    );
+    const stop = vi.fn();
+    getUserMedia.mockResolvedValueOnce({
+      getTracks: () => [{ stop, enabled: true }],
+      getVideoTracks: () => [],
+      getAudioTracks: () => [],
+    });
+    const call = useCalls
+      .getState()
+      .startCall(
+        { name: "Bob", accountId: "b".repeat(32), deviceIds: ["bob"] },
+        false,
+      );
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("initiate_privacy_contact", {
+      owner: "alice",
+      account: "b".repeat(32),
+    });
+    useAuth.setState({
+      user: { id: "carol", username: "carol", display_name: "Carol" },
+    });
+    resolveGrant();
+    await call;
+    expect(
+      invoke.mock.calls.some(([command]) => command === "send_call_signal"),
+    ).toBe(false);
+    expect(useCalls.getState().phase).toBe("idle");
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("a login switch while opening media neither grants permission nor sends an offer", async () => {
+    const stop = vi.fn();
+    const stream = {
+      getTracks: () => [{ stop, enabled: true }],
+      getVideoTracks: () => [],
+      getAudioTracks: () => [],
+    };
+    let resolveMedia!: (value: typeof stream) => void;
+    getUserMedia.mockReturnValueOnce(
+      new Promise<typeof stream>((resolve) => {
+        resolveMedia = resolve;
+      }),
+    );
+    const call = useCalls
+      .getState()
+      .startCall(
+        { name: "Bob", accountId: "b".repeat(32), deviceIds: ["bob"] },
+        false,
+      );
+    await flush();
+    useAuth.setState({
+      user: { id: "carol", username: "carol", display_name: "Carol" },
+    });
+    resolveMedia(stream);
+    await call;
+    expect(invoke).not.toHaveBeenCalled();
+    expect(useCalls.getState().phase).toBe("idle");
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
   it("a cancelled call's late permission failure cannot end a newer call", async () => {
     let rejectGrant!: (reason: Error) => void;
     const pending = new Promise((_, reject) => {

@@ -1,3 +1,5 @@
+//! Local account-scoped contact presentation policy, separate from network admission.
+
 #[cfg(test)]
 mod native_mesh_tests;
 
