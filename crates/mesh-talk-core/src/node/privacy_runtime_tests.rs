@@ -9,6 +9,74 @@ use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
 #[tokio::test]
+async fn ipv4_mapped_authenticated_route_is_canonical_and_can_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    for (node, name, port) in [(&alice, "Alice", 1), (&bob, "Bob", port)] {
+        node.configure_privacy(
+            &dir.path().join(name.to_lowercase()),
+            "pw",
+            &node.signed_announce(name, port),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    let proof = bob.signed_announce("Bob", port);
+    alice
+        .privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .policy
+        .grant(&bob.account_id(), "Bob", PermissionSource::Manual)
+        .unwrap();
+    let mapped = IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped());
+    // Exact source representation returned by a dual-stack listener accepting
+    // an IPv4 peer. Presence must not turn a usable IPv4 route into a v6 dial.
+    alice
+        .remember_peer(&bob.identity.public(), Some(&proof), mapped)
+        .unwrap();
+    assert_eq!(
+        alice
+            .roster
+            .lock()
+            .unwrap()
+            .get(&bob.user_id())
+            .unwrap()
+            .addr
+            .ip(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+    assert_eq!(
+        alice.cached_routing_peers()[0].addr.ip(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+    let expected = bob.identity.public();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = bob.privacy_accept(stream).await.unwrap();
+        channel.send(b"authenticated reply").await.unwrap();
+    });
+    // Also accept mapped hints from previously persisted routes. Only the IP
+    // representation changes; the full Noise peer identity remains pinned.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut channel = alice
+            .privacy_dial((mapped, port).into(), &expected)
+            .await
+            .unwrap();
+        assert_eq!(channel.recv().await.unwrap(), b"authenticated reply");
+        server.await.unwrap();
+    })
+    .await
+    .expect("mapped route did not complete an authenticated reply");
+}
+
+#[tokio::test]
 async fn explicit_rehome_invalidates_channels_even_when_allowlist_snapshot_is_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));

@@ -500,6 +500,7 @@ impl Node {
         announce: Option<&Announce>,
         ip: std::net::IpAddr,
     ) -> Result<(), TransportError> {
+        let ip = crate::transport::net::canonical_peer_ip(ip);
         let Some(announce) = announce else {
             return Ok(());
         };
@@ -548,6 +549,8 @@ impl Node {
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        let mut addr = addr;
+        addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         let own = self.own_presence();
         let _operation = self.privacy.gate.read().await;
         let generation = self.privacy.generation.load(Ordering::SeqCst);

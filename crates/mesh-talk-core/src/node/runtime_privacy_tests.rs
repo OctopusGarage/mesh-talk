@@ -329,17 +329,52 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
 #[tokio::test]
 async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes() {
     let dir = tempfile::tempdir().unwrap();
-    let (alice, _) = start(dir.path(), "alice", 0).await;
+    // Fixed keys guarantee nine routes sort before Bob, without an unbounded
+    // search for identities below a randomly generated live fingerprint.
+    let mut identities: Vec<_> = (1..=10)
+        .map(|i| crate::identity::device::DeviceIdentity::from_secret_bytes([i; 32], [i + 32; 32]))
+        .collect();
+    identities.sort_by_key(|device| device.public().user_id());
+    let bob_identity = identities.pop().unwrap();
+    crate::identity::keystore::save(
+        &dir.path().join("accounts/bob/identity.keystore"),
+        "pw",
+        &bob_identity,
+    )
+    .unwrap();
     let (bob, _) = start(dir.path(), "bob", 0).await;
     let live_id = bob.user_id().to_owned();
+    // Explicitly owned SDK Alice has no automatic runtime probe competing
+    // with this fixture's two rounds or their cursor assertions.
+    let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let (ctx, _) = tokio::sync::mpsc::unbounded_channel();
+    let (ftx, _) = tokio::sync::mpsc::unbounded_channel();
+    let alice = Node::open(
+        crate::identity::device::DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        tx,
+        ctx,
+        ftx,
+        &dir.path().join("alice-messages.log"),
+        &dir.path().join("alice-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    alice
+        .configure_privacy(
+            dir.path(),
+            "pw",
+            &alice.signed_announce("Alice", listener.local_addr().unwrap().port()),
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let accept = tokio::spawn(alice.clone().run_accept_loop(listener));
     let account = crate::identity::account::Account::generate();
     let mut stalled = Vec::new();
     let mut proofs = Vec::new();
-    while proofs.len() < 9 {
-        let device = crate::identity::device::DeviceIdentity::generate();
-        if device.public().user_id() >= live_id {
-            continue;
-        }
+    for device in identities {
+        assert!(device.public().user_id() < live_id);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         proofs.push(crate::discovery::Announce::new_with_account(
             &device,
@@ -351,7 +386,7 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
     }
     proofs.push(bob.node.signed_announce("Live Bob", bob.listen_tcp_port()));
     {
-        let mut state = alice.node.privacy.state.write().unwrap();
+        let mut state = alice.privacy.state.write().unwrap();
         let state = state.as_mut().unwrap();
         for proof in proofs {
             state
@@ -372,20 +407,60 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
                 .unwrap();
         }
     }
-    // The tracked runtime loop's initial empty round has already completed.
+    // A legitimate policy operation delays the honest responder beyond the
+    // old fixture's 300ms deadline. Fair selection must not require instant auth.
+    let delayed_gate = bob.node.privacy.gate.clone();
+    let mut delayed_responder = Some(delayed_gate.write().await);
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
+    assert_eq!(
+        alice
+            .privacy
+            .route_probe_cursor
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
     alice
-        .node
         .probe_private_routes_with_budget(Duration::from_millis(300))
         .await;
-    alice
-        .node
-        .probe_private_routes_with_budget(Duration::from_millis(300))
-        .await;
+    assert_eq!(
+        alice
+            .privacy
+            .route_probe_cursor
+            .load(std::sync::atomic::Ordering::Relaxed),
+        8
+    );
+    assert!(alice.roster.lock().unwrap().get(&live_id).is_none());
+    {
+        let round =
+            alice.probe_private_routes_with_budget(super::super::transport::HANDSHAKE_TIMEOUT);
+        tokio::pin!(round);
+        let release = tokio::time::sleep(Duration::from_millis(400));
+        tokio::pin!(release);
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                tokio::select! {
+                    _ = &mut release, if delayed_responder.is_some() => drop(delayed_responder.take()),
+                    _ = &mut round => break,
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if alice.roster.lock().unwrap().get(&live_id).is_some() { break; }
+                    }
+                }
+            }
+        }).await.expect("live peer did not complete pinned authentication within the production probe deadline");
+        // Dropping the pending round cancels the other stalled child probes.
+    }
+    assert_eq!(
+        alice
+            .privacy
+            .route_probe_cursor
+            .load(std::sync::atomic::Ordering::Relaxed),
+        16
+    );
     assert!(
-        alice.peers().iter().any(|p| p.public.user_id() == live_id),
+        alice.roster.lock().unwrap().get(&live_id).is_some(),
         "later live route was starved by the same first eight stalled devices"
     );
+    accept.abort();
     drop(stalled);
 }
 
