@@ -44,6 +44,21 @@ export async function signedPeerObservation({ peer, userId, peerName, observe, u
   return rawPeer;
 }
 
+export async function revealLatestNativeMessage({ execute, until, command }, text) {
+  await until("incoming attachment visibly rendered in native message log", async () => {
+    const state = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect(),b=document.querySelector('button[aria-label=\"Jump to latest messages\"]'),q=b?.getBoundingClientRect();return {visible:!!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right,jump:!!q&&q.width>0&&q.height>0};", [text]);
+    if (state.visible) return true;
+    // The production virtual list deliberately preserves a history reader's
+    // position. Reveal new content through its real user-facing control, not
+    // by replacing IPC or directly mutating the scroll position.
+    if (state.jump) {
+      const button = await command("POST", "/element", { using: "css selector", value: 'button[aria-label="Jump to latest messages"]' });
+      await command("POST", `/element/${button["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
+    }
+    return false;
+  });
+}
+
 export async function coreScenarios(c) {
   const { execute, observe, until, passed, fill, click, peer, account, userId,
     fixture, history, row, privacySettings, key, signOut, login, userName } = c;
@@ -119,7 +134,7 @@ export async function coreScenarios(c) {
   const attachment = await until("real incoming attachment manifest durable", async () => (await history()).find(h => h.file?.name === fileName));
   assert.equal(attachment.file.media, false);
   assert.equal(attachment.file.size, bytes.length);
-  await rendered(fileName);
+  await revealLatestNativeMessage(c, fileName);
   const classification = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e && !!e.querySelector('button') && !e.querySelector('[data-testid=file-image],[data-testid=file-video]');", [fileName]);
   assert.equal(classification, true);
   await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is outside embedded W3C DOM automation; download not invoked because its default destination is outside the fixture." });

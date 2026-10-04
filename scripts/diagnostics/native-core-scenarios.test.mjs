@@ -39,6 +39,21 @@ test("signed discovery queries again when the first CLI roster is still empty", 
   assert.equal(queries, 2);
 });
 
+test("native attachment rendering uses the visible jump-to-latest control when history is scrolled", async () => {
+  const { revealLatestNativeMessage } = await import("./native-core-scenarios.mjs");
+  let observations = 0;
+  const commands = [];
+  await revealLatestNativeMessage({ execute: async () => ++observations === 1 ? { visible: false, jump: true } : { visible: true, jump: false }, command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": "jump" }; }, until: async (_label, poll) => { for (let i = 0; i < 2; i++) if (await poll()) return true; throw new Error("not visibly rendered"); } }, "attachment.txt");
+  assert.equal(commands[0].body.value, 'button[aria-label="Jump to latest messages"]');
+  assert.equal(commands[1].path, "/element/jump/click");
+  assert.equal(observations, 2);
+});
+
+test("native attachment rendering still fails if no visible message or jump control exists", async () => {
+  const { revealLatestNativeMessage } = await import("./native-core-scenarios.mjs");
+  await assert.rejects(revealLatestNativeMessage({ execute: async () => ({ visible: false, jump: false }), command: async () => { throw new Error("unexpected action"); }, until: async (_label, poll) => { if (await poll()) return true; throw new Error("not visibly rendered"); } }, "attachment.txt"), /not visibly rendered/);
+});
+
 test("child command awaits delivery and preserves exact newlines", async () => {
   let received;
   const child = { stdin: new Writable({ write(bytes, _encoding, done) { received = bytes.toString(); done(); } }) };
