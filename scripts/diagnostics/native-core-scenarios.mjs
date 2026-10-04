@@ -21,6 +21,29 @@ export function writeChildCommand(child, text) {
   });
 }
 
+export function nativeMessageContents(nonce) {
+  return [`你好 🌍 café ${nonce}`, `first ${nonce}
+second line
+第三行`, `long-${nonce}-` + "mesh消息🙂 ".repeat(300) + `end-${nonce}`];
+}
+
+export async function signedPeerObservation({ peer, userId, peerName, observe, until }) {
+  // Sign-out/sign-in creates a fresh node. Discovery is asynchronous: the old
+  // CLI output is not proof that the replacement UI node has rediscovered it.
+  const rawPeer = await until("restarted UI rediscovers signed CLI identity", async () =>
+    (await observe("list_peers")).find(p => p.name === peerName));
+  let outputStart = peer.output.length;
+  await until("fresh CLI roster sees UI node", async () => {
+    if (peer.output.slice(outputStart).includes(`peer ${userId}`)) return true;
+    // Discovery in the opposite direction may also lag. A single empty roster
+    // response cannot become successful unless we actually query it again.
+    outputStart = peer.output.length;
+    await writeChildCommand(peer, "/peers\n");
+    return peer.output.slice(outputStart).includes(`peer ${userId}`);
+  });
+  return rawPeer;
+}
+
 export async function coreScenarios(c) {
   const { execute, observe, until, passed, fill, click, peer, account, userId,
     fixture, history, row, privacySettings, key, signOut, login, userName } = c;
@@ -44,9 +67,7 @@ export async function coreScenarios(c) {
   await key("\uE00C");
   await until("profile evidence dialog dismissed", async () => !await c.exists("profile-dialog"));
   await c.command("POST", "/window/rect", { width: 1100, height: 760 });
-  await writeChildCommand(peer, "/peers\n");
-  await until("CLI signed discovery sees UI node", () => peer.output.includes(`peer ${userId}`));
-  const rawPeer = (await observe("list_peers")).find(p => p.name === c.peerName);
+  const rawPeer = await signedPeerObservation(c);
   assert.ok(rawPeer);
   assert.match(rawPeer.user_id, /^[0-9a-f]{32}$/);
   await passed("signed-peer-discovery", { accountId: account, peerUserId: rawPeer.user_id, cliSawGui: true });
@@ -63,9 +84,7 @@ export async function coreScenarios(c) {
   await rendered(inbound);
   await until("inbound persisted", async () => (await history()).some(h => h.text === inbound && !h.from_me));
   await passed("direct-messages", { uiToCliRendered: true, uiToCliPersisted: true, cliToUiRendered: true, cliToUiPersisted: true });
-  const contents = [`你好 🌍 café ${c.nonce}`, `first ${c.nonce}
-second line
-第三行`, `long-${c.nonce}-` + "mesh消息🙂 ".repeat(300)];
+  const contents = nativeMessageContents(c.nonce);
   assert.equal(contents[1].split("\n").length, 3, "real multiline textarea fixture");
   let multilineLayout;
   for (const text of contents) {
