@@ -40,6 +40,12 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/diagnostics/native-multicast-probe.mjs
+      - name: Route the fixture multicast group locally (macOS runner only)
+        if: runner.os == 'macOS'
+        run: sudo route -n add -host 224.0.0.167 -interface 127.0.0.1
+      - name: Verify macOS local multicast route
+        if: runner.os == 'macOS'
+        run: node scripts/diagnostics/native-multicast-probe.mjs --require
 
   native:
     name: Real native UI (${{ matrix.os }})
@@ -61,6 +67,11 @@ jobs:
         with:
           # Keep compiled dependencies when a scenario fails, not its verdict.
           cache-on-failure: true
+      - name: Route the fixture multicast group locally (macOS runner only)
+        if: runner.os == 'macOS'
+        run: |
+          sudo route -n add -host 224.0.0.167 -interface 127.0.0.1
+          node scripts/diagnostics/native-multicast-probe.mjs --require
       - name: Linux native webview dependencies
         if: runner.os == 'Linux'
         run: |

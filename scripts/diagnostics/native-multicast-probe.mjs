@@ -34,4 +34,5 @@ try {
     try { socket.close(); } catch { /* a failed socket may already be closed */ }
   }
   console.log(JSON.stringify(report));
+  if (process.argv.includes("--require") && !report.received) process.exitCode = 1;
 }

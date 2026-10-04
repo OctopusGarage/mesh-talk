@@ -34,6 +34,12 @@ binary/output paths, including a shared local Cargo target directory.
 The example attaches a dev-only embedded WebDriver to the same desktop builder. Normal
 release applications do not include the driver or enable its server. Test accounts and
 configuration use isolated fixture roots; neither `HOME` nor `USERPROFILE` is reassigned.
+GitHub's macOS runner does not return same-host multicast with its default routing,
+as independently measured by `native-multicast-probe.mjs` without product code.
+Only the disposable macOS runner routes the single fixture group `224.0.0.167`
+over loopback and requires a real UDP round trip before testing. This is native
+same-host integration coverage, not proof
+of discovery over every physical LAN. No workstation route is changed.
 The example and CLI share one freshly allocated UDP port for real signed multicast
 discovery, so test announcements and roster evidence do not mix with nearby production
 users. The normal desktop entry point still uses `DEFAULT_DISCOVERY_PORT`. The fixture's
