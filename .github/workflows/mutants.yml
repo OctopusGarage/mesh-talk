@@ -77,7 +77,8 @@ jobs:
         run: cargo mutants --no-shuffle -j 2 -- -- --test-threads=2
 
       - name: Upload mutants report
-        if: always()
+        # A test-only/config-only diff can exit successfully without creating a report.
+        if: always() && hashFiles('mutants.out/**') != ''
         uses: actions/upload-artifact@v7
         with:
           name: mutants-report

@@ -18,4 +18,5 @@ test("mutation report upload includes the workspace-root output directory", () =
   const upload = workflow.split(/^      - /m).find((step) => /name: Upload mutants report/.test(step));
   assert.ok(upload, "mutation report upload must be present");
   assert.match(upload, /^\s+(?:path: )?mutants\.out\/\s*$/m);
+  assert.match(upload, /if: always\(\) && hashFiles\('mutants\.out\/\*\*'\) != ''/);
 });
