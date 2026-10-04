@@ -10,6 +10,7 @@ on:
       - "crates/mesh-talk-core/**"
       - "Cargo.lock"
       - "scripts/diagnostics/hidden-contacts*"
+      - "scripts/diagnostics/native-multicast-probe.mjs"
       - ".github/workflows/hidden-contacts-native.yml"
   pull_request:
     paths:
@@ -18,6 +19,7 @@ on:
       - "crates/mesh-talk-core/**"
       - "Cargo.lock"
       - "scripts/diagnostics/hidden-contacts*"
+      - "scripts/diagnostics/native-multicast-probe.mjs"
       - ".github/workflows/hidden-contacts-native.yml"
 
 permissions:
@@ -41,6 +43,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep compiled dependencies when a scenario fails, not its verdict.
+          cache-on-failure: true
       - name: Linux native webview dependencies
         if: runner.os == 'Linux'
         run: |
@@ -53,6 +58,8 @@ jobs:
           npm run build
       - name: Verify fail-closed evidence validator
         run: node --test scripts/diagnostics/hidden-contacts-report.test.mjs
+      - name: Diagnose runner multicast capability
+        run: node scripts/diagnostics/native-multicast-probe.mjs
       - name: Build production app and CLI with regular KDF
         run: cargo build --release --locked -p mesh-talk --bin mesh-talk -p mesh-talk-core --bin mesh-talk-node
       - name: Build dev-only native driver example
@@ -72,6 +79,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: hidden-contacts-native-${{ matrix.os }}
-          path: ${{ runner.temp }}/hidden-contacts-native
+          # Publish evidence only, never fixture keystores or account data.
+          path: |
+            ${{ runner.temp }}/hidden-contacts-native/*.json
+            ${{ runner.temp }}/hidden-contacts-native/*.png
+            ${{ runner.temp }}/hidden-contacts-native/native-*.log
           if-no-files-found: error
           retention-days: 14
