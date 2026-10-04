@@ -12,6 +12,7 @@ on:
       - src-tauri/src/chat_commands.rs
       - src-tauri/src/main.rs
       - src-tauri/build.rs
+      - src-tauri/windows.manifest
       - frontend/src/features/chat/Sidebar.tsx
 
 permissions:

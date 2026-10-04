@@ -13,9 +13,10 @@ fn main() {
         // Let the linker embed it for every executable; remove only the RC manifest
         // to avoid duplicate resources while preserving application icons/version.
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
-        println!(
-            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\""
-        );
+        println!("cargo:rerun-if-changed=windows.manifest");
+        let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("windows.manifest");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
         let attributes = tauri_build::Attributes::new()
             .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
         tauri_build::try_build(attributes).expect("failed to build Windows application resources");
