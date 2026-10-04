@@ -72,6 +72,7 @@ jobs:
           python-version: '3.12'
 
       - name: Diagnostic and release gate regressions (all platforms)
+        shell: bash
         run: node --test scripts/diagnostics/*.test.mjs
 
       - name: Validate release checksum generation
