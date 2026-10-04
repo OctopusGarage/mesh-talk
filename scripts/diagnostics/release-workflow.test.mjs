@@ -27,8 +27,8 @@ for (const runner of ["Windows", "Linux", "macOS"]) {
         assert.equal(lines.length, files.size, "checksums must not include SHA256SUMS itself");
         const names = new Set();
         for (const line of lines) {
-          const match = line.match(/^([a-f\d]{64}) {2}(?:\.\/)?(.+)$/i);
-          assert.ok(match, "checksum entry must contain a SHA-256 digest and full filename");
+          const match = line.match(/^([a-f\d]{64}) [ *](?:\.\/)?(.+)$/i);
+          assert.ok(match, `checksum entry must contain a SHA-256 digest and full filename: ${line}`);
           const bytes = files.get(match[2]);
           assert.ok(bytes, "checksum must reference an actual installer");
           assert.ok(!names.has(match[2]), "each installer must appear exactly once");
