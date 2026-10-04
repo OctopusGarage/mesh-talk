@@ -136,7 +136,7 @@ async function fill(id, text) {
   await command("POST", `/element/${el}/value`, { text });
 }
 async function key(value) {
-  const keys = { "\uE004": [48, "{TAB}", "Tab"], "\uE007": [36, "{ENTER}", "Return"], "\uE00C": [53, "{ESC}", "Escape"] };
+  const keys = { "\uE004": [48, "{TAB}", "Tab"], "\uE007": [36, "{ENTER}", "Return"], "\uE00C": [53, "{ESC}", "Escape"], "\uE00E": [116, "{PGUP}", "Prior"] };
   const mapping = keys[value];
   assert.ok(mapping, "supported native evaluation key");
   const pid = app.pid;
@@ -149,7 +149,7 @@ async function key(value) {
   }
   if (process.platform === "darwin") {
     await focusOwnedWindow();
-    const keyName = { "\uE004": "Tab", "\uE007": "Enter", "\uE00C": "Escape" }[value];
+    const keyName = { "\uE004": "Tab", "\uE007": "Enter", "\uE00C": "Escape", "\uE00E": "PageUp" }[value];
     await appKitKey(keyName);
   } else if (process.platform === "win32") {
     await input("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$shell = New-Object -ComObject WScript.Shell; if (-not $shell.AppActivate(${pid})) { throw 'Owned application could not be activated' }; Start-Sleep -Milliseconds 200; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${mapping[1]}')`]);

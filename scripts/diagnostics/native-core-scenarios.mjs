@@ -59,6 +59,20 @@ export async function revealLatestNativeMessage({ execute, until, command }, tex
   });
 }
 
+export async function revealHistoricalNativeMessage({ execute, until, command, key }, text) {
+  // Virtuoso's real scroller is keyboard-focusable. Native PageUp exercises
+  // normal browser scrolling, rather than mutating its virtual-list state.
+  const log = await command("POST", "/element", { using: "css selector", value: '[role="log"]' });
+  await command("POST", `/element/${log["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
+  await until("historical message visibly rendered after native PageUp", async () => {
+    const visible = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right;", [text]);
+    if (visible) return true;
+    assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native PageUp targets the focused message log");
+    await key("\uE00E");
+    return false;
+  });
+}
+
 export function nativeSettingsTargets(defaultRect, defaultViewport, minimumViewport) {
   for (const rect of [defaultRect, defaultViewport, minimumViewport]) {
     assert.ok(Number.isFinite(rect.width) && Number.isFinite(rect.height) && rect.width >= 760 && rect.height >= 520, "native layout needs a valid minimum-sized desktop viewport");
@@ -196,8 +210,8 @@ async function profileLayout(c) {
 
 export async function restartedCoreScenarios(c, state) {
   await c.click(c.row());
-  for (const text of [state.outbound, state.inbound, ...state.contents]) {
-    await state.rendered(text);
+  for (const text of [state.outbound, state.inbound, ...state.contents].reverse()) {
+    await revealHistoricalNativeMessage(c, text);
     assert.ok((await c.history()).some(h => h.text === text));
   }
   await c.passed("history-process-restart", { actualProcessRestart: true, rendered: true, persisted: true });

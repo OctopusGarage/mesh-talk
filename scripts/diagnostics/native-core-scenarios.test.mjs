@@ -63,6 +63,21 @@ test("native settings use the observed default and minimum client viewports, not
   ]);
 });
 
+test("native historical rendering uses the focusable message log and real PageUp until visible", async () => {
+  const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
+  const commands = [], keys = [];
+  let polls = 0;
+  await revealHistoricalNativeMessage({ execute: async (_script, args) => args ? ++polls === 3 : true, command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async value => keys.push(value), until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("history not visible"); } }, "old message");
+  assert.equal(commands[0].body.value, '[role="log"]');
+  assert.equal(commands[1].path, "/element/log/click");
+  assert.deepEqual(keys, ["\uE00E", "\uE00E"]);
+});
+
+test("native historical rendering does not turn missing history into success", async () => {
+  const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
+  await assert.rejects(revealHistoricalNativeMessage({ execute: async (_script, args) => !args, command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }), key: async () => {}, until: async (_label, poll) => { assert.equal(await poll(), false); throw new Error("history not visible"); } }, "missing message"), /history not visible/);
+});
+
 test("native layout coverage rejects invalid or indistinguishable viewport tiers", async () => {
   const { nativeSettingsTargets } = await import("./native-core-scenarios.mjs");
   for (const viewport of [{ width: NaN, height: 674 }, { width: 760, height: 400 }, { width: 760, height: 520 }]) {
