@@ -54,6 +54,22 @@ test("native attachment rendering still fails if no visible message or jump cont
   await assert.rejects(revealLatestNativeMessage({ execute: async () => ({ visible: false, jump: false }), command: async () => { throw new Error("unexpected action"); }, until: async (_label, poll) => { if (await poll()) return true; throw new Error("not visibly rendered"); } }, "attachment.txt"), /not visibly rendered/);
 });
 
+test("native settings use the observed default and minimum client viewports, not nominal outer dimensions", async () => {
+  const { nativeSettingsTargets } = await import("./native-core-scenarios.mjs");
+  const targets = nativeSettingsTargets({ width: 1024, height: 702 }, { width: 1024, height: 674 }, { width: 760, height: 520 });
+  assert.deepEqual(targets, [
+    { name: "defaultLayout", request: { width: 1024, height: 702 }, viewport: { width: 1024, height: 674 } },
+    { name: "minimumLayout", request: { width: 760, height: 520 }, viewport: { width: 760, height: 520 } },
+  ]);
+});
+
+test("native layout coverage rejects invalid or indistinguishable viewport tiers", async () => {
+  const { nativeSettingsTargets } = await import("./native-core-scenarios.mjs");
+  for (const viewport of [{ width: NaN, height: 674 }, { width: 760, height: 400 }, { width: 760, height: 520 }]) {
+    assert.throws(() => nativeSettingsTargets({ width: 1024, height: 702 }, viewport, { width: 760, height: 520 }), /native layout/);
+  }
+});
+
 test("child command awaits delivery and preserves exact newlines", async () => {
   let received;
   const child = { stdin: new Writable({ write(bytes, _encoding, done) { received = bytes.toString(); done(); } }) };

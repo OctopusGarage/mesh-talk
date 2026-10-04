@@ -59,6 +59,17 @@ export async function revealLatestNativeMessage({ execute, until, command }, tex
   });
 }
 
+export function nativeSettingsTargets(defaultRect, defaultViewport, minimumViewport) {
+  for (const rect of [defaultRect, defaultViewport, minimumViewport]) {
+    assert.ok(Number.isFinite(rect.width) && Number.isFinite(rect.height) && rect.width >= 760 && rect.height >= 520, "native layout needs a valid minimum-sized desktop viewport");
+  }
+  assert.ok(defaultViewport.width > minimumViewport.width || defaultViewport.height > minimumViewport.height, "default and minimum native layout tiers must differ");
+  return [
+    { name: "defaultLayout", request: { width: defaultRect.width, height: defaultRect.height }, viewport: defaultViewport },
+    { name: "minimumLayout", request: { width: 760, height: 520 }, viewport: minimumViewport },
+  ];
+}
+
 export async function coreScenarios(c) {
   const { execute, observe, until, passed, fill, click, peer, account, userId,
     fixture, history, row, privacySettings, key, signOut, login, userName } = c;
@@ -72,16 +83,18 @@ export async function coreScenarios(c) {
   await until("wrong password rejected visibly", () => execute("return !!document.querySelector('[data-testid=login-form] .text-destructive')?.textContent && !document.querySelector('[data-testid=chat-shell]');"));
   await login(userName);
   await passed("auth-logout-wrong-password", { loggedOut: true, wrongPasswordRejected: true, signinRestored: true });
+  const defaultWindow = await c.command("GET", "/window/rect");
   const defaultLayout = await profileLayout(c);
   await c.command("POST", "/window/rect", { width: 760, height: 520 });
   await until("minimum client layout applied", () => execute("return innerWidth<=800 && innerHeight<=580;"));
   const minimumLayout = await profileLayout(c);
+  const settingsTargets = nativeSettingsTargets(defaultWindow, defaultLayout.viewport, minimumLayout.viewport);
   await c.openDialog("open-profile");
   await c.settledDialog("profile-dialog");
   await passed("native-profile-layout", { defaultLayout, minimumLayout, profileDialogVisible: true, profileUsernameVisible: true });
   await key("\uE00C");
   await until("profile evidence dialog dismissed", async () => !await c.exists("profile-dialog"));
-  await c.command("POST", "/window/rect", { width: 1100, height: 760 });
+  await c.command("POST", "/window/rect", settingsTargets[0].request);
   const rawPeer = await signedPeerObservation(c);
   assert.ok(rawPeer);
   assert.match(rawPeer.user_id, /^[0-9a-f]{32}$/);
@@ -140,20 +153,20 @@ export async function coreScenarios(c) {
   await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is outside embedded W3C DOM automation; download not invoked because its default destination is outside the fixture." });
   await privacySettings();
   const settingsLayouts = {};
-  for (const [name, width, height] of [["defaultLayout", 1100, 760], ["minimumLayout", 760, 520]]) {
-    await c.command("POST", "/window/rect", { width, height });
-    await until(`settings ${name} client resize`, () => execute("return innerWidth<=arguments[0]+40 && innerWidth>=arguments[0]-40 && innerHeight<=arguments[1]+60 && innerHeight>=arguments[1]-60;", [width, height]));
+  for (const { name, request, viewport } of settingsTargets) {
+    const returned = await c.command("POST", "/window/rect", request);
+    await until(`settings ${name} client resize`, () => execute("return Math.abs(innerWidth-arguments[0])<=1 && Math.abs(innerHeight-arguments[1])<=1;", [viewport.width, viewport.height]));
     await c.settledDialog("settings-dialog");
     const layout = await execute("const e=document.querySelector('[data-testid=settings-dialog]'),r=e.getBoundingClientRect(),p=document.querySelector('[data-testid=theme-picker]'),q=p.getBoundingClientRect();return {viewport:{width:innerWidth,height:innerHeight},dialog:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},themePickerVisible:q.width>0 && q.height>0};");
     assert.ok(layout.dialog.x >= 0 && layout.dialog.y >= 0 && layout.dialog.right <= layout.viewport.width + 1 && layout.dialog.bottom <= layout.viewport.height + 1);
     assert.equal(layout.themePickerVisible, true);
-    settingsLayouts[name] = { ...layout, dialogContained: true };
+    settingsLayouts[name] = { ...layout, requestedWindow: request, returnedWindow: returned, dialogContained: true };
   }
   await passed("native-settings-layout", { ...settingsLayouts, dialogContained: true, themePickerVisible: true });
   await click("theme-light");
   await until("visible theme selected", () => execute("return document.querySelector('[data-testid=theme-light]')?.getAttribute('aria-pressed')==='true' && localStorage.getItem('mesh-talk-theme')==='light' && !document.documentElement.classList.contains('dark');"));
   await key("\uE00C");
-  await c.command("POST", "/window/rect", { width: 1100, height: 760 });
+  await c.command("POST", "/window/rect", settingsTargets[0].request);
   return { outbound, inbound, contents, selectedTheme: "light", rendered };
 }
 
