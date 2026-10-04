@@ -58,17 +58,23 @@ jobs:
         if: github.event_name == 'pull_request'
         run: git diff "origin/${{ github.base_ref }}"...HEAD > mutants-diff.patch
 
+      # Surviving mutants are advisory, but a broken baseline is not valid evidence.
+      - name: Validate command forwarding and unmutated baseline
+        run: |
+          node --test scripts/diagnostics/mutants-workflow.test.mjs
+          cargo test -p mesh-talk -- --test-threads=2
+
       - name: Mutants (PR diff)
         if: github.event_name == 'pull_request'
         working-directory: src-tauri
         continue-on-error: true
-        run: cargo mutants --no-shuffle -vV --in-diff ../mutants-diff.patch -j 2 -- --test-threads=2
+        run: cargo mutants --no-shuffle -vV --in-diff ../mutants-diff.patch -j 2 -- -- --test-threads=2
 
       - name: Mutants (full sweep)
         if: github.event_name != 'pull_request'
         working-directory: src-tauri
         continue-on-error: true
-        run: cargo mutants --no-shuffle -j 2 -- --test-threads=2
+        run: cargo mutants --no-shuffle -j 2 -- -- --test-threads=2
 
       - name: Upload mutants report
         if: always()
