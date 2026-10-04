@@ -20,6 +20,8 @@ pub(in crate::node) struct PrivacyState {
     pub own: Announce,
     pub visibility: Arc<DiscoveryVisibility>,
     pub routes: super::privacy_routes::RouteCache,
+    pub sent_manifest_scopes: crate::storage::record_log::EncryptedRecordLog<StoredManifestScope>,
+    pub scope_repair_needed: bool,
     pub file_scopes: std::collections::HashMap<crate::eventlog::ConversationId, Vec<ManifestScope>>,
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -27,6 +29,14 @@ pub(in crate::node) struct ManifestScope {
     pub parent: crate::eventlog::ConversationId,
     pub author: crate::eventlog::Author,
     pub event: crate::eventlog::EventId,
+}
+/// Local encrypted metadata only: never included in message history or wire frames.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(in crate::node) struct StoredManifestScope {
+    file: crate::eventlog::ConversationId,
+    parent: crate::eventlog::ConversationId,
+    author: crate::eventlog::Author,
+    event: crate::eventlog::EventId,
 }
 #[derive(Default)]
 pub(in crate::node) struct PrivacyControl {
@@ -62,6 +72,18 @@ impl Node {
         proofs.record_own(own, &self.identity.public())?;
         let routes =
             super::privacy_routes::RouteCache::open(&directory.join("peer-routes"), password)?;
+        let (mut sent_manifest_scopes, stored_scopes) =
+            crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
+                &directory.join("sent-manifest-scopes.log"),
+                password,
+                b"MTFSC1",
+            )
+            .map_err(io::Error::other)?;
+        // The shared record log accepts a torn trailing append. Normalize it before
+        // further writes so later valid scopes cannot land behind the torn bytes.
+        sent_manifest_scopes
+            .rewrite(&stored_scopes)
+            .map_err(io::Error::other)?;
         let mut file_scopes: std::collections::HashMap<_, Vec<ManifestScope>> = Default::default();
         {
             let records = self
@@ -80,6 +102,23 @@ impl Node {
                         .collect::<Vec<_>>()
                 })
                 .collect();
+            for scope in stored_scopes {
+                if scope.file != scope.parent
+                    && events.get(&scope.event).is_some_and(|event| {
+                        event.conversation_id == scope.parent && event.author == scope.author
+                    })
+                {
+                    let scopes = file_scopes.entry(scope.file).or_default();
+                    let restored = ManifestScope {
+                        parent: scope.parent,
+                        author: scope.author,
+                        event: scope.event,
+                    };
+                    if !scopes.contains(&restored) {
+                        scopes.push(restored);
+                    }
+                }
+            }
             for conversation in records.conversations() {
                 for record in records.entries(&conversation) {
                     if let (Some(manifest), Some(event)) = (
@@ -104,6 +143,8 @@ impl Node {
             own: own.clone(),
             visibility,
             routes,
+            sent_manifest_scopes,
+            scope_repair_needed: false,
             file_scopes,
         };
         let mut state = self.privacy.state.write().map_err(|_| denied())?;
@@ -113,6 +154,7 @@ impl Node {
         *state = Some(next);
         Ok(())
     }
+    /// Return current local policy; unconfigured SDK nodes report the public default.
     pub fn privacy_snapshot(&self) -> PrivacySnapshot {
         self.privacy
             .state
@@ -126,9 +168,12 @@ impl Node {
                 allowed_accounts: Vec::new(),
             })
     }
+    /// Persist visibility and synchronize disclosure boundaries on a configured node.
     pub async fn set_invisible(&self, invisible: bool) -> io::Result<()> {
         self.set_invisible_if(invisible, || Ok(())).await
     }
+    /// Recheck authorization after acquiring the policy gate, before durable mutation.
+    /// Enabling invisibility first drains public announcements; failures restore visibility.
     pub async fn set_invisible_if(
         &self,
         invisible: bool,
@@ -168,9 +213,12 @@ impl Node {
         }
         Ok(())
     }
+    /// Persist a manual grant/revocation; a grant also publishes private return presence.
     pub async fn set_allowed(&self, account: &str, allowed: bool) -> io::Result<()> {
         self.set_allowed_if(account, allowed, || Ok(())).await
     }
+    /// Invoke authorization under the serialized policy gate before changing permission.
+    /// Revocation invalidates prior channels without deleting local history.
     pub async fn set_allowed_if(
         &self,
         account: &str,
@@ -184,9 +232,13 @@ impl Node {
         }
         Ok(())
     }
+    /// Explicitly grant reply permission durably before publishing private presence.
+    /// Background operations must not call this user-intent boundary.
     pub async fn initiate_contact(&self, account: &str) -> io::Result<()> {
         self.initiate_contact_if(account, || Ok(())).await
     }
+    /// Recheck the active owner under the policy gate before committing an initiated grant.
+    /// A prior manual grant is retained rather than demoted to initiated permission.
     pub async fn initiate_contact_if(
         &self,
         account: &str,
@@ -417,6 +469,63 @@ impl Node {
                 scopes.push(scope);
             }
         }
+    }
+    /// Keep all fanout scopes durable without duplicating the account history bubble.
+    pub(in crate::node) fn remember_sent_manifest_scope(
+        &self,
+        file: crate::eventlog::ConversationId,
+        parent: crate::eventlog::ConversationId,
+        author: crate::eventlog::Author,
+        event: crate::eventlog::EventId,
+    ) -> Result<(), crate::eventlog::LogError> {
+        if file == parent {
+            return Ok(());
+        }
+        let mut state = self
+            .privacy
+            .state
+            .write()
+            .map_err(|_| crate::eventlog::LogError::Io(denied()))?;
+        if let Some(state) = state.as_mut() {
+            let scope = ManifestScope {
+                parent,
+                author,
+                event,
+            };
+            if !state
+                .file_scopes
+                .get(&file)
+                .is_some_and(|scopes| scopes.contains(&scope))
+            {
+                if state.scope_repair_needed {
+                    let valid = state
+                        .file_scopes
+                        .iter()
+                        .flat_map(|(file, scopes)| {
+                            scopes.iter().map(|scope| StoredManifestScope {
+                                file: *file,
+                                parent: scope.parent,
+                                author: scope.author,
+                                event: scope.event,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    state.sent_manifest_scopes.rewrite(&valid)?;
+                    state.scope_repair_needed = false;
+                }
+                if let Err(error) = state.sent_manifest_scopes.append(&StoredManifestScope {
+                    file,
+                    parent,
+                    author,
+                    event,
+                }) {
+                    state.scope_repair_needed = true;
+                    return Err(error);
+                }
+                state.file_scopes.entry(file).or_default().push(scope);
+            }
+        }
+        Ok(())
     }
     pub(in crate::node) fn update_presence(&self, own: &Announce) -> io::Result<()> {
         if !own.verify()

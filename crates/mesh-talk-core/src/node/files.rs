@@ -61,7 +61,7 @@ impl Node {
             .map_err(NodeError::Seal)?;
         let dm_conv = dm_conversation_id(&self.identity.public(), &peer.public);
         let seq = self.append_event(dm_conv, EventKind::FileManifest, sealed)?;
-        self.record_sent_manifest(dm_conv, dm_conv, seq, &manifest);
+        self.record_sent_manifest(dm_conv, dm_conv, seq, &manifest)?;
 
         self.deliver_direct(&peer, file_conv).await.ok();
         self.replicate_to_post_office(file_conv).await.ok();
@@ -137,15 +137,16 @@ impl Node {
                 })
                 .map(|e| e.id);
             if let Some(event) = event {
-                self.remember_manifest_scope(
+                self.remember_sent_manifest_scope(
                     file_conv,
                     dm_conv,
                     Author::from_ed25519(self.identity.public().ed25519_pub),
                     event,
-                );
+                )
+                .map_err(NodeError::Log)?;
             }
             if !recorded {
-                self.record_sent_manifest(account_conv, dm_conv, seq, &manifest);
+                self.record_sent_manifest(account_conv, dm_conv, seq, &manifest)?;
                 recorded = true;
             }
             self.deliver_direct(peer, file_conv).await.ok();
@@ -201,7 +202,7 @@ impl Node {
         // Persist our advanced sending chain (see `send_channel_message_reply`).
         self.persist_my_senders(channel);
         let seq = self.append_event(channel, EventKind::FileManifest, sealed)?;
-        self.record_sent_manifest(channel, channel, seq, &manifest);
+        self.record_sent_manifest(channel, channel, seq, &manifest)?;
         self.distribute_channel(file_conv, &members).await;
         self.distribute_channel(channel, &members).await;
         Ok(file_conv)
@@ -320,7 +321,7 @@ impl Node {
         event_conv: ConversationId,
         seq: u64,
         manifest: &FileManifestV3,
-    ) {
+    ) -> Result<(), NodeError> {
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         // Resolve the just-appended manifest event's content-addressed id + wall-clock.
         let appended = {
@@ -333,9 +334,10 @@ impl Node {
                 .map(|e| (e.id, e.wall_clock))
         };
         let Some((event_id, wall_clock)) = appended else {
-            return;
+            return Err(NodeError::File("sent manifest event unavailable".into()));
         };
-        self.remember_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id);
+        self.remember_sent_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id)
+            .map_err(NodeError::Log)?;
         let plaintext = manifest.encode();
         let _ = self
             .received_files
@@ -351,6 +353,7 @@ impl Node {
         let mut files = self.files.lock().expect("files mutex not poisoned");
         files.mark_emitted(event_id);
         files.record(AnyManifest::V3(manifest.clone()));
+        Ok(())
     }
 
     /// Read durable chat-media bytes for `file_conv` from the media store, for inline

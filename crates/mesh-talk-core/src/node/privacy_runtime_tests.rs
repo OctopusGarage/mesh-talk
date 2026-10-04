@@ -9,6 +9,233 @@ use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
 #[tokio::test]
+async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("alice");
+    let (alice, _) = node(&base);
+    alice
+        .configure_privacy(
+            &base,
+            "pw",
+            &alice.signed_announce("Alice", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let account = crate::identity::account::Account::generate();
+    let devices = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+    for device in &devices {
+        alice.roster.lock().unwrap().update(
+            &Announce::new_with_account(device, &account, "Bob", 1),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &alice.user_id(),
+        );
+    }
+    alice.set_invisible(true).await.unwrap();
+    let path = dir.path().join("attachment.txt");
+    std::fs::write(&path, b"resumable private attachment").unwrap();
+    let file = alice
+        .send_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let expected = alice
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .iter()
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    assert!(!expected.is_empty());
+    for device in &devices {
+        assert_eq!(
+            alice
+                .sync_store(&device.public())
+                .lock()
+                .unwrap()
+                .event_ids(&file),
+            expected
+        );
+    }
+    assert_eq!(
+        alice.account_history(&account.account_id(), 100).len(),
+        1,
+        "one UI bubble, not one per destination"
+    );
+    let keys = alice.identity.secret_bytes();
+    let own = crate::identity::account::Account::from_secret_bytes(alice.account.secret_bytes());
+    drop(alice);
+    // Simulate a crash during an append, then verify future scopes remain replayable.
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(base.join("sent-manifest-scopes.log"))
+        .unwrap()
+        .write_all(&[0, 0, 0, 50, 1, 2])
+        .unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let (ctx, _) = mpsc::unbounded_channel();
+    let (ftx, _) = mpsc::unbounded_channel();
+    let reopened = Node::open_with_account(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        own,
+        Arc::new(Mutex::new(crate::discovery::Roster::default())),
+        tx,
+        ctx,
+        ftx,
+        &base.join("messages.log"),
+        &base.join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    reopened
+        .configure_privacy(
+            &base,
+            "pw",
+            &reopened.signed_announce("Alice", addr.port()),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    for device in &devices {
+        assert_eq!(
+            reopened
+                .sync_store(&device.public())
+                .lock()
+                .unwrap()
+                .event_ids(&file),
+            expected,
+            "every recipient must retain its own manifest scope after sender restart"
+        );
+    }
+    assert_eq!(
+        reopened.account_history(&account.account_id(), 100).len(),
+        1
+    );
+    let server = tokio::spawn(reopened.clone().run_accept_loop(listener));
+    for device in &devices {
+        let store = Mutex::new(crate::eventlog::EventLog::default());
+        tokio::time::timeout(DEADLINE, async {
+            let mut channel = dial(addr, device, Some(&reopened.identity.public()))
+                .await
+                .unwrap();
+            crate::node::session::request_round(&mut channel, &store, file)
+                .await
+                .unwrap();
+        })
+        .await
+        .expect("restarted sender must actually serve chunks to every device");
+        assert_eq!(store.lock().unwrap().event_ids(&file), expected);
+    }
+    let second = reopened
+        .send_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
+        &base.join("sent-manifest-scopes.log"),
+        "pw",
+        b"MTFSC1",
+    )
+    .unwrap();
+    assert_eq!(scopes.iter().filter(|scope| scope.file == file).count(), 2);
+    assert_eq!(
+        scopes.iter().filter(|scope| scope.file == second).count(),
+        2,
+        "new scopes must remain readable after repairing a torn tail"
+    );
+    reopened
+        .set_allowed(&account.account_id(), false)
+        .await
+        .unwrap();
+    for device in &devices {
+        assert!(
+            reopened
+                .sync_store(&device.public())
+                .lock()
+                .unwrap()
+                .event_ids(&file)
+                .is_empty(),
+            "durable file scope must not bypass account revocation"
+        );
+    }
+    assert_eq!(
+        reopened.account_history(&account.account_id(), 100).len(),
+        2
+    );
+    server.abort();
+}
+
+#[test]
+fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(dir.path());
+    alice
+        .configure_privacy(
+            dir.path(),
+            "pw",
+            &alice.signed_announce("Alice", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let path = dir.path().join("sent-manifest-scopes.log");
+    let backup = dir.path().join("scopes-backup");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    alice
+        .privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .scope_repair_needed = true;
+    let file = crate::eventlog::ConversationId::new([31; 32]);
+    let parent = crate::eventlog::ConversationId::new([32; 32]);
+    let author = crate::eventlog::Author::from_ed25519(alice.identity.public().ed25519_pub);
+    let event = crate::eventlog::EventId::new([33; 32]);
+    assert!(alice
+        .remember_sent_manifest_scope(file, parent, author, event)
+        .is_err());
+    assert!(!alice
+        .privacy
+        .state
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .file_scopes
+        .contains_key(&file));
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    alice
+        .remember_sent_manifest_scope(file, parent, author, event)
+        .unwrap();
+    alice
+        .remember_sent_manifest_scope(file, parent, author, event)
+        .unwrap();
+    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
+        &path, "pw", b"MTFSC1",
+    )
+    .unwrap();
+    assert_eq!(
+        scopes.len(),
+        1,
+        "retries must repair the journal and remain idempotent"
+    );
+    assert!(
+        !alice
+            .privacy
+            .state
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .scope_repair_needed
+    );
+}
+
+#[tokio::test]
 async fn ipv4_mapped_authenticated_route_is_canonical_and_can_reply() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));

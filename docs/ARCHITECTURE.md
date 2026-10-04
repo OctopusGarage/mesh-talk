@@ -132,6 +132,12 @@ each principal and conversation, including event authors and dependency closure.
 Existing joined groups confer only group scope, not DM/call/pairing permissions;
 file chunks inherit only a verified, authorized manifest's scope. Revocation
 stops new disclosure and append but does not delete persisted local history.
+Outgoing manifest scopes for every account-fanout device are recorded in a separate
+encrypted `sent-manifest-scopes.log`, without duplicating the account's history entry.
+Startup replays only references to matching signed manifest events and normalizes torn
+trailing records before new appends. A failed append cannot install an in-memory scope;
+subsequent retries repair the journal from verified local state. Restored scopes still
+undergo current principal/permission checks, so restart does not bypass revocation.
 
 Verified account proofs never store IP addresses. A separate bounded encrypted
 route cache stores hints only; every reconnect pins the complete verified device
