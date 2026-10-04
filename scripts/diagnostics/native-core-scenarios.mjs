@@ -74,6 +74,12 @@ export async function revealHistoricalNativeMessage({ execute, until, command, k
   });
 }
 
+export function nativeMinimumWindowRequest(defaultRect, defaultViewport) {
+  const width = defaultRect.width - defaultViewport.width, height = defaultRect.height - defaultViewport.height;
+  assert.ok(Number.isFinite(width) && Number.isFinite(height) && width >= 0 && height >= 0, "native window chrome must be measured from valid outer/client dimensions");
+  return { width: 760 + width, height: 520 + height };
+}
+
 export function nativeSettingsTargets(defaultRect, defaultViewport, minimumViewport) {
   for (const rect of [defaultRect, defaultViewport, minimumViewport]) {
     assert.ok(Number.isFinite(rect.width) && Number.isFinite(rect.height) && rect.width >= 760 && rect.height >= 520, "native layout needs a valid minimum-sized desktop viewport");
@@ -81,7 +87,7 @@ export function nativeSettingsTargets(defaultRect, defaultViewport, minimumViewp
   assert.ok(defaultViewport.width > minimumViewport.width || defaultViewport.height > minimumViewport.height, "default and minimum native layout tiers must differ");
   return [
     { name: "defaultLayout", request: { width: defaultRect.width, height: defaultRect.height }, viewport: defaultViewport },
-    { name: "minimumLayout", request: { width: 760, height: 520 }, viewport: minimumViewport },
+    { name: "minimumLayout", request: nativeMinimumWindowRequest(defaultRect, defaultViewport), viewport: minimumViewport },
   ];
 }
 
@@ -100,8 +106,8 @@ export async function coreScenarios(c) {
   await passed("auth-logout-wrong-password", { loggedOut: true, wrongPasswordRejected: true, signinRestored: true });
   const defaultWindow = await c.command("GET", "/window/rect");
   const defaultLayout = await profileLayout(c);
-  await c.command("POST", "/window/rect", { width: 760, height: 520 });
-  await until("minimum client layout applied", () => execute("return innerWidth<=800 && innerHeight<=580;"));
+  await c.command("POST", "/window/rect", nativeMinimumWindowRequest(defaultWindow, defaultLayout.viewport));
+  await until("minimum client layout applied", () => execute("return Math.abs(innerWidth-760)<=1 && Math.abs(innerHeight-520)<=1;"));
   const minimumLayout = await profileLayout(c);
   const settingsTargets = nativeSettingsTargets(defaultWindow, defaultLayout.viewport, minimumLayout.viewport);
   await c.openDialog("open-profile");
@@ -182,7 +188,7 @@ export async function coreScenarios(c) {
   await until("visible theme selected", () => execute("return document.querySelector('[data-testid=theme-light]')?.getAttribute('aria-pressed')==='true' && localStorage.getItem('mesh-talk-theme')==='light' && !document.documentElement.classList.contains('dark');"));
   await key("\uE00C");
   await c.command("POST", "/window/rect", settingsTargets[0].request);
-  return { outbound, inbound, contents, selectedTheme: "light", rendered };
+  return { outbound, inbound, contents, selectedTheme: "light", rendered, minimumWindow: settingsTargets[1].request };
 }
 
 async function profileLayout(c) {

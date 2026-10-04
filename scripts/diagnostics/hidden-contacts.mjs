@@ -419,12 +419,12 @@ try {
   await until("real offline peer expires from roster", async () => !(await observe("list_peers")).some(p => p.name === peerName), 180000);
   await manage();
   await fill("hidden-contacts-search", peerName);
-  const nativeRect = await command("POST", "/window/rect", { width: 760, height: 520 });
+  const nativeRect = await command("POST", "/window/rect", coreState.minimumWindow);
   report.narrowWindow = { returned: nativeRect, client: await execute("return {width:innerWidth,height:innerHeight,scale:devicePixelRatio};") };
-  // WebDriver sizes the outer window; the app enforces minimum inner size.
-  // Measure actual client geometry instead of assuming decorations are zero.
+  // WebDriver sizes the outer window; include its measured native decorations
+  // to exercise the configured 760x520 client minimum, not a smaller viewport.
   assert.ok(nativeRect.width >= 760 && nativeRect.width <= 800 && nativeRect.height >= 520 && nativeRect.height <= 580, `owned native window reached its minimum-size range: ${JSON.stringify(report.narrowWindow)}`);
-  await until("native narrow viewport applied", () => execute("return innerWidth>0 && innerWidth<=arguments[0]+1 && innerHeight>0 && innerHeight<=arguments[1]+1;", [nativeRect.width, nativeRect.height]));
+  await until("native narrow viewport applied", () => execute("return Math.abs(innerWidth-760)<=1 && Math.abs(innerHeight-520)<=1;"));
   await settledDialog("hidden-contacts-dialog");
   await element(`restore-contact-${account}`);
   const layout = await execute("const d=document.querySelector('[data-testid=hidden-contacts-dialog]'); const b=document.querySelector(arguments[0]); const r=d.getBoundingClientRect(), q=b.getBoundingClientRect(); return {role:d.getAttribute('role'), label:d.getAttribute('aria-labelledby'), buttonLabel:b.getAttribute('aria-label'), dialog:{x:r.x,y:r.y,right:r.right,bottom:r.bottom}, button:{x:q.x,y:q.y,right:q.right,bottom:q.bottom}, viewport:{width:innerWidth,height:innerHeight}};", [selector(`restore-contact-${account}`)]);

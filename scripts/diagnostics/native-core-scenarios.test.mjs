@@ -59,8 +59,15 @@ test("native settings use the observed default and minimum client viewports, not
   const targets = nativeSettingsTargets({ width: 1024, height: 702 }, { width: 1024, height: 674 }, { width: 760, height: 520 });
   assert.deepEqual(targets, [
     { name: "defaultLayout", request: { width: 1024, height: 702 }, viewport: { width: 1024, height: 674 } },
-    { name: "minimumLayout", request: { width: 760, height: 520 }, viewport: { width: 760, height: 520 } },
+    { name: "minimumLayout", request: { width: 760, height: 548 }, viewport: { width: 760, height: 520 } },
   ]);
+});
+
+test("native minimum client dimensions include the measured Windows non-client border", async () => {
+  const { nativeMinimumWindowRequest } = await import("./native-core-scenarios.mjs");
+  assert.deepEqual(nativeMinimumWindowRequest({ width: 1056, height: 728 }, { width: 1040, height: 720 }), { width: 776, height: 528 });
+  assert.deepEqual(nativeMinimumWindowRequest({ width: 1040, height: 720 }, { width: 1040, height: 720 }), { width: 760, height: 520 });
+  assert.throws(() => nativeMinimumWindowRequest({ width: 1000, height: 700 }, { width: 1040, height: 720 }), /native window chrome/);
 });
 
 test("native historical rendering uses the focusable message log and real PageUp until visible", async () => {
