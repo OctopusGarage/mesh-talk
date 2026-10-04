@@ -201,6 +201,30 @@ class ReleaseAssetsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "architecture"):
             native_metadata(path, "AppImage", "0.1.5")
 
+    def test_appimage_uses_native_squashfs_without_executing_runtime(self):
+        import struct
+        from unittest.mock import patch
+        runtime = bytearray(128)
+        runtime[:6] = b"\x7fELF\x02\x01"
+        runtime[8:11] = b"AI\x02"
+        runtime[18:20] = b"\x3e\0"
+        struct.pack_into("<Q", runtime, 40, 64)
+        struct.pack_into("<HH", runtime, 58, 64, 1)
+        # Runtime may end after its section table; mirror the official runtime.
+        struct.pack_into("<QQ", runtime, 64 + 24, 128, 16)
+        path = self.root / "fixture.AppImage"
+        path.write_bytes(runtime + b"runtime padding!" + b"hsqs" + bytes(92))
+        executable = self.elf_fixture()
+        with patch("verify_assets.subprocess.check_output", return_value=executable) as command:
+            self.assertEqual(native_metadata(path, "AppImage", "0.1.5"), {"elf": elf_fingerprint(executable)})
+            command.assert_called_once_with(["unsquashfs", "-cat", "-no-wildcards", "-o", "144", str(path), "usr/bin/mesh-talk"], timeout=60)
+        for bad in [runtime[:64], runtime + b"not squashfs" + bytes(96)]:
+            path.write_bytes(bad)
+            with patch("verify_assets.subprocess.check_output") as command:
+                with self.assertRaisesRegex(ValueError, "AppImage"):
+                    native_metadata(path, "AppImage", "0.1.5")
+                command.assert_not_called()
+
     def test_bundle_normalization_only_ignores_tauri_package_markers(self):
         prefix = b"version=0.1.5;"
         self.assertEqual(normalize_bundle_markers(prefix + b"__TAURI_BUNDLE_TYPE_VAR_DEB"), normalize_bundle_markers(prefix + b"__TAURI_BUNDLE_TYPE_VAR_APP"))

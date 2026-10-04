@@ -50,6 +50,27 @@ def normalize_bundle_markers(section):
     return re.sub(rb"__TAURI_BUNDLE_TYPE_VAR_(?:DEB|RPM|APP)", b"__TAURI_BUNDLE_TYPE_VAR_UNK", section)
 
 
+def appimage_executable(path):
+    # Follow AppImage/type2-runtime's read_elf64 offset calculation without
+    # executing the runtime. Ubuntu's 7-Zip lacks some SquashFS compression codecs.
+    total = path.stat().st_size
+    with path.open("rb") as image:
+        header = image.read(64)
+        require(len(header) == 64, "truncated AppImage header")
+        section_offset = struct.unpack_from("<Q", header, 40)[0]
+        size, count = struct.unpack_from("<HH", header, 58)
+        table_end = section_offset + size * count
+        require(section_offset >= 64 and size >= 64 and count > 0 and table_end <= total, "AppImage runtime section bounds")
+        image.seek(section_offset + size * (count - 1))
+        last_section = image.read(64)
+        offset, length = struct.unpack_from("<QQ", last_section, 24)
+        payload_offset = max(table_end, offset + length)
+        require(payload_offset + 96 <= total, "AppImage filesystem bounds")
+        image.seek(payload_offset)
+        require(image.read(4) == b"hsqs", "AppImage SquashFS signature")
+    return subprocess.check_output(["unsquashfs", "-cat", "-no-wildcards", "-o", str(payload_offset), str(path), "usr/bin/mesh-talk"], timeout=60)
+
+
 def elf_fingerprint(binary):
     """Match executable code/constants across linuxdeploy's RPATH rewriting."""
     require(len(binary) >= 64 and binary[:6] == b"\x7fELF\x02\x01" and binary[18:20] == b"\x3e\x00", "embedded Linux application architecture")
@@ -113,10 +134,10 @@ def native_metadata(path, extension, version, platform=None):
         with path.open("rb") as binary:
             header = binary.read(20)
         require(header[:6] == b"\x7fELF\x02\x01" and header[18:20] == b"\x3e\x00", "AppImage architecture")
-        require(header[8:11] in (b"AI\x01", b"AI\x02"), "AppImage format")
+        require(header[8:11] == b"AI\x02", "AppImage Type 2 format")
         # AppImage has no application-version field. Bind its actual executable
         # code/constants to the independently versioned Debian package below.
-        return {"elf": elf_fingerprint(archive_member(path, "usr/bin/mesh-talk"))}
+        return {"elf": elf_fingerprint(appimage_executable(path))}
     elif extension == "dmg":
         require(path.stat().st_size >= 512, "invalid DMG size")
         with path.open("rb") as image:

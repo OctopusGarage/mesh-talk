@@ -300,7 +300,7 @@ jobs:
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
       - uses: sigstore/cosign-installer@v4.1.2
       - uses: actions/download-artifact@v8
         with:

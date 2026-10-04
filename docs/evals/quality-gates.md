@@ -92,6 +92,9 @@ Metadata inspection never executes or installs application binaries:
 - Windows: inspect PE version and bootstrapper architecture, MSI ProductVersion and
   x64 Template. An x86 NSIS bootstrapper installing an x64 app is valid.
 - Linux: inspect Debian/RPM version and architecture, AppImage format and embedded ELF.
+  Use `unsquashfs -cat` at the runtime's validated ELF-derived filesystem offset,
+  without executing AppImage; 7-Zip codec support differs across operating systems.
+  The offset calculation follows the [official Type 2 runtime](https://github.com/AppImage/type2-runtime/blob/main/src/runtime/runtime.c).
   AppImage has no application-version metadata; bind its `.text` and `.rodata` to the
   versioned Debian executable, normalizing only Tauri's fixed-width bundle-type markers.
   Any other code/constants difference fails.
