@@ -50,13 +50,12 @@ impl Node {
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
         let peer = self
-            .roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .get(recipient)
-            .cloned()
+            .routing_peer(recipient)
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
 
+        self.initiate_device(&peer.public)
+            .await
+            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         let sealed = crate::dm::seal(&self.identity, &peer.public.x25519_pub, &manifest.encode())
             .map_err(NodeError::Seal)?;
@@ -99,6 +98,9 @@ impl Node {
         {
             return Err(NodeError::UnknownPeer(target_account_id.to_string()));
         }
+        self.initiate_contact(target_account_id)
+            .await
+            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
 
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         let manifest_bytes = manifest.encode();
@@ -123,6 +125,25 @@ impl Node {
                 Ok(seq) => seq,
                 Err(_) => continue,
             };
+            let event = self
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .events(&dm_conv)
+                .into_iter()
+                .find(|e| {
+                    e.author == Author::from_ed25519(self.identity.public().ed25519_pub)
+                        && e.seq == seq
+                })
+                .map(|e| e.id);
+            if let Some(event) = event {
+                self.remember_manifest_scope(
+                    file_conv,
+                    dm_conv,
+                    Author::from_ed25519(self.identity.public().ed25519_pub),
+                    event,
+                );
+            }
             if !recorded {
                 self.record_sent_manifest(account_conv, dm_conv, seq, &manifest);
                 recorded = true;
@@ -314,6 +335,7 @@ impl Node {
         let Some((event_id, wall_clock)) = appended else {
             return;
         };
+        self.remember_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id);
         let plaintext = manifest.encode();
         let _ = self
             .received_files

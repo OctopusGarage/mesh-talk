@@ -9,6 +9,14 @@ const complete = () => ({
   schema: 1, platform: process.platform, native: true, mocked: false,
   scenarios: Object.fromEntries(REQUIRED_SCENARIOS.map(name => [name, { passed: true, elapsedMs: 1, evidence: [`${name}.json`, `${name}.png`] }])),
 });
+test("requires native invisible-mode, reply and restart evidence", () => {
+  for (const name of ["privacy-mode", "privacy-reply", "privacy-restart"]) {
+    assert.ok(REQUIRED_SCENARIOS.includes(name), `missing ${name}`);
+    const report = complete();
+    delete report.scenarios[name];
+    assert.ok(validateReport(report).some(error => error.includes(name)));
+  }
+});
 test("rejects absent screenshots, path traversal and malformed timings", () => {
   for (const patch of [{ evidence: ["hide.json"] }, { evidence: ["../hide.json", "hide.png"] }, { elapsedMs: undefined }, { elapsedMs: -1 }]) {
     const report = complete();

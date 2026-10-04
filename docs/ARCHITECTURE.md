@@ -106,7 +106,7 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
 
-**Privacy SDK prerequisites (not yet enabled in the desktop runtime):**
+**Invisible mode and account permissions:**
 `node::PrivacyPolicy` stores a bounded, encrypted, atomically replaced local
 allowlist and visibility preference. It requires one serialized owner per file
 and a trusted parent directory; corrupt policy files return errors, not a public
@@ -114,10 +114,45 @@ fallback. `spawn_discovery_with_visibility` shares a `DiscoveryVisibility` gate
 across startup/periodic/manual announcements, listener replies and every scan
 target. Disabling waits for in-flight announcement sends; passive discovery and
 multicast membership remain active, and already queued packets cannot be retracted.
-Existing discovery entry points retain their public default. Discovery suppression
-and handshake admission alone do not implement invisible mode: the runtime still
-needs verified account/device bindings, event-author and per-round admission,
-explicit-action grants, relay handling and settings integration before enabling it.
+Existing discovery entry points and unconfigured SDK constructors retain their
+public default. Desktop startup loads the policy, verified device-signed account
+announcements and routing hints before spawning network tasks. Invisible mode
+suppresses local UDP presence while continuing passive discovery. Account-aware
+Noise authentication checks the exact Ed25519/X25519 identity and signed presence;
+a certificate alone is not an account proof. This is not traffic anonymity:
+Noise XX exposes its static key and previously transmitted presence remains known.
+
+Explicit DM/file/contact actions durably grant the verified destination account;
+background profiles, file pulls, calls and relay retries never grant permission.
+Manual permission publishes signed listening presence inside a pinned encrypted
+connection, without requiring a message or a UDP announcement. Policy changes
+invalidate existing channels; bounded per-send/handshake operation guards finish
+before revocation acknowledges. The actual event log is projected separately for
+each principal and conversation, including event authors and dependency closure.
+Existing joined groups confer only group scope, not DM/call/pairing permissions;
+file chunks inherit only a verified, authorized manifest's scope. Revocation
+stops new disclosure and append but does not delete persisted local history.
+
+Verified account proofs never store IP addresses. A separate bounded encrypted
+route cache stores hints only; every reconnect pins the complete verified device
+identity. A private listening-port preference lets permitted invisible peers
+reconnect after both restart, subject to port availability and network changes.
+Loaded routes never create online roster entries. Delivery can use eligible
+verified cached routes after discovery expires; tracked, bounded authenticated
+probes refresh online presence only when the pinned peer actually responds.
+Failed probes leave normal offline expiry intact and never create permissions.
+Conflicting passive remote device/account proofs fail closed. An explicit user
+contact/grant may accept a newly device-signed account binding for the same full
+Ed25519/X25519 identity, with an independent new-account permission; old account
+permissions are not transferred. This invalidates existing channels. Trusted
+local keystore adoption may likewise update this node's own exact binding.
+
+In invisible mode, an elected post office has no automatic exemption: its account
+must be manually permitted. Relayed DM authors must have cached verified signed
+device/account proofs. A newly added device that has never been discovered or
+authenticated directly cannot deliver offline through a relay; unknown proofs
+are denied rather than learned from legacy relay event payloads. No new relay
+proof protocol or event format is introduced.
 
 ## 5. Frontend (`frontend/`)
 

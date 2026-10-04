@@ -9,6 +9,59 @@ use tokio::net::{TcpListener, TcpStream};
 
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[tokio::test]
+async fn queued_send_rechecks_generation_after_policy_write_gate() {
+    let (a, b) = tokio::io::duplex(4096);
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let server = tokio::spawn(async move { SecureChannel::accept(b, &bob).await.unwrap() });
+    let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+    let mut receiver = server.await.unwrap();
+    let gate = Arc::new(tokio::sync::RwLock::new(()));
+    let generation = Arc::new(AtomicUsize::new(0));
+    let current = generation.clone();
+    channel.set_io_admission(
+        gate.clone(),
+        Arc::new(move || current.load(Ordering::SeqCst) == 0),
+    );
+    let policy_write = gate.write().await;
+    let send = channel.send(b"prepared before revoke");
+    tokio::pin!(send);
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut send)
+        .await
+        .is_err());
+    generation.store(1, Ordering::SeqCst);
+    drop(policy_write);
+    assert!(matches!(
+        tokio::time::timeout(DEADLINE, &mut send).await.unwrap(),
+        Err(TransportError::AdmissionDenied)
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), receiver.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn stalled_gated_frame_write_has_deadline_and_releases_revocation_guard() {
+    let (a, b) = tokio::io::duplex(4096);
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let server = tokio::spawn(async move { SecureChannel::accept(b, &bob).await.unwrap() });
+    let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+    let _non_reading_peer = server.await.unwrap();
+    let gate = Arc::new(tokio::sync::RwLock::new(()));
+    channel.set_io_admission(gate.clone(), Arc::new(|| true));
+    let result = tokio::time::timeout(Duration::from_secs(12), channel.send(&vec![0; 60_000]))
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(TransportError::Noise(_))));
+    let _guard = tokio::time::timeout(DEADLINE, gate.write())
+        .await
+        .expect("stalled peer retained policy guard");
+}
+
 async fn raw_initiator(stream: &mut DuplexStream, identity: &DeviceIdentity) -> HandshakeOutput {
     let mut hs = Handshake::initiator(&identity.secret_bytes().1).unwrap();
     write_frame(stream, &hs.write_message().unwrap())

@@ -6,7 +6,6 @@ use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
 use crate::file::decode_manifest;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 use crate::node::session::{request_round, serve_one, serve_wire_bytes, Served, SessionError};
-use crate::node::transport::{dial, secure_accept};
 use crate::transport::SecureChannel;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,12 +29,12 @@ impl Node {
         peer: &PeerRecord,
         conv: ConversationId,
     ) -> Result<(), SessionError> {
-        let mut channel = dial(peer.addr, &self.identity, Some(&peer.public))
+        let mut channel = self
+            .privacy_dial(peer.addr, &peer.public)
             .await
             .map_err(SessionError::Transport)?;
-        request_round(&mut channel, &self.log, conv)
-            .await
-            .map(|_| ())
+        let store = self.sync_store(channel.peer_identity());
+        request_round(&mut channel, &store, conv).await.map(|_| ())
     }
 
     /// Replicate `conv` to the elected post office, if one is known. Returns
@@ -52,10 +51,15 @@ impl Node {
         let Some(po) = po else {
             return Ok(false);
         };
-        let mut channel = dial(po.addr, &self.identity, Some(&po.public))
+        if !self.relay_allowed(&po.public) {
+            return Ok(false);
+        }
+        let mut channel = self
+            .privacy_dial(po.addr, &po.public)
             .await
             .map_err(SessionError::Transport)?;
-        request_round(&mut channel, &self.log, conv).await?;
+        let store = self.sync_store(channel.peer_identity());
+        request_round(&mut channel, &store, conv).await?;
         Ok(true)
     }
 
@@ -94,7 +98,7 @@ impl Node {
             let node = Arc::clone(&self);
             tokio::spawn(async move {
                 let _permit = permit; // held for the connection's lifetime, freed on drop
-                if let Ok(channel) = secure_accept(stream, &node.identity).await {
+                if let Ok(channel) = node.privacy_accept(stream).await {
                     node.serve_connection(channel).await;
                 }
             });
@@ -106,6 +110,7 @@ impl Node {
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
     pub async fn serve_connection(&self, mut channel: SecureChannel<TcpStream>) {
+        let store = self.sync_store(channel.peer_identity());
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
         let first = match tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {
@@ -113,12 +118,22 @@ impl Node {
             _ => return, // peer error or idle past the timeout
         };
         if let Some(req) = PairingRequest::decode(&first) {
+            if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
+                return;
+            }
             self.serve_pairing(&mut channel, req).await;
             return;
         }
         // A call signal (SDP/bye): surface it live (bound to the authenticated peer) and
         // close — it is ephemeral and never enters the sync/event-log path.
         if let Some(signal) = crate::node::call::CallSignal::decode(&first) {
+            let _operation = self.privacy.gate.read().await;
+            if !channel.io_admitted() {
+                return;
+            }
+            if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
+                return;
+            }
             self.serve_call_signal(&channel, signal);
             return;
         }
@@ -127,7 +142,7 @@ impl Node {
         // sends one Request then stalls would pin this task (and its connection permit) forever.
         match tokio::time::timeout(
             SERVE_IDLE_TIMEOUT,
-            serve_wire_bytes(&mut channel, &self.log, &first),
+            serve_wire_bytes(&mut channel, &store, &first),
         )
         .await
         {
@@ -140,8 +155,7 @@ impl Node {
             _ => return,
         }
         for _ in 0..MAX_SERVE_ROUNDS {
-            match tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &self.log)).await
-            {
+            match tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
                 Ok(Ok(Served::Handled(conv))) => {
                     self.emit_new_messages(conv);
                     self.process_channel(conv);
@@ -200,8 +214,7 @@ impl Node {
             } else {
                 let author_uid = event.author.user_id();
                 let sender_x25519 = {
-                    let roster = self.roster.lock().expect("roster mutex not poisoned");
-                    match roster.get(&author_uid) {
+                    match self.routing_peer(&author_uid) {
                         Some(p) => p.public.x25519_pub,
                         None => continue, // author unknown → can't open yet
                     }
@@ -214,6 +227,7 @@ impl Node {
             let Some(manifest) = decode_manifest(&plaintext) else {
                 continue;
             };
+            self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
             let received = ReceivedFile {
                 conv,
                 from: event.author.user_id(),
@@ -234,10 +248,7 @@ impl Node {
                 conv
             } else {
                 let author_uid = event.author.user_id();
-                let peer_account = {
-                    let roster = self.roster.lock().expect("roster mutex not poisoned");
-                    roster.get(&author_uid).and_then(|p| p.account_id.clone())
-                };
+                let peer_account = { self.routing_peer(&author_uid).and_then(|p| p.account_id) };
                 let my_account = self.account.account_id();
                 match peer_account {
                     Some(acct) if acct != my_account => account_conversation_id(&my_account, &acct),
@@ -306,9 +317,7 @@ impl Node {
             return;
         }
         let peers: Vec<PeerRecord> = {
-            let roster = self.roster.lock().expect("roster mutex not poisoned");
-            roster
-                .peers()
+            self.routing_peers()
                 .into_iter()
                 .filter(|p| !p.post_office)
                 .collect()
@@ -326,8 +335,9 @@ impl Node {
                 continue;
             }
             for peer in &peers {
-                if let Ok(mut channel) = dial(peer.addr, &self.identity, Some(&peer.public)).await {
-                    let _ = request_round(&mut channel, &self.log, fc).await;
+                if let Ok(mut channel) = self.privacy_dial(peer.addr, &peer.public).await {
+                    let store = self.sync_store(channel.peer_identity());
+                    let _ = request_round(&mut channel, &store, fc).await;
                 }
                 // Stop dialing more peers the moment this file is whole. Persist media into
                 // the durable store (which also prunes its chunks + clears it from pending);
@@ -387,14 +397,18 @@ impl Node {
         let Some(po) = post_office else {
             return;
         };
-        let mut channel = match dial(po.addr, &self.identity, Some(&po.public)).await {
+        if !self.relay_allowed(&po.public) {
+            return;
+        }
+        let mut channel = match self.privacy_dial(po.addr, &po.public).await {
             Ok(c) => c,
             Err(_) => return,
         };
+        let store = self.sync_store(channel.peer_identity());
         // Drain a DM conversation per non-PO peer (we never DM a post office).
         for peer in peers.iter().filter(|p| !p.post_office) {
             let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-            if request_round(&mut channel, &self.log, conv).await.is_err() {
+            if request_round(&mut channel, &store, conv).await.is_err() {
                 return; // channel broke; the next drain re-dials
             }
             self.emit_new_messages(conv);
@@ -407,7 +421,7 @@ impl Node {
             book.channel_ids()
         };
         for cid in channel_ids {
-            if request_round(&mut channel, &self.log, cid).await.is_err() {
+            if request_round(&mut channel, &store, cid).await.is_err() {
                 return;
             }
             self.process_channel(cid);
@@ -420,7 +434,7 @@ impl Node {
             book.file_convs()
         };
         for fc in file_convs {
-            if request_round(&mut channel, &self.log, fc).await.is_err() {
+            if request_round(&mut channel, &store, fc).await.is_err() {
                 return;
             }
             // Drained all chunks for a media file from the PO? Persist it durably + prune.
@@ -452,9 +466,8 @@ impl Node {
             // Resolve the author's public identity + display name from the roster.
             let author_uid = event.author.user_id();
             let (peer_public, peer_name, peer_account) = {
-                let roster = self.roster.lock().expect("roster mutex not poisoned");
-                match roster.get(&author_uid) {
-                    Some(p) => (p.public.clone(), p.name.clone(), p.account_id.clone()),
+                match self.routing_peer(&author_uid) {
+                    Some(p) => (p.public, p.name, p.account_id),
                     None => continue, // unknown author yet; retry later (NOT marked emitted)
                 }
             };

@@ -13,9 +13,11 @@ pub mod handshake;
 /// TCP listener) shared by discovery and the node runtime. Dependency-free of the
 /// higher layers, so it sits at the bottom of the stack.
 pub mod net;
+mod presence_auth;
 pub mod session;
 
 pub use channel::SecureChannel;
+pub use presence_auth::VerifiedPeer;
 pub use session::Session;
 
 /// Noise pattern: XX (mutual static-key auth), X25519 DH, ChaChaPoly AEAD,

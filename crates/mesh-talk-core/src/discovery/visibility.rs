@@ -24,6 +24,17 @@ impl DiscoveryVisibility {
         *self.public.write().await = public;
     }
 
+    /// Initialize only before discovery tasks start. A live send means the host
+    /// violated startup ordering; fail rather than expose persisted private mode.
+    pub(crate) fn initialize_public(&self, public: bool) -> io::Result<()> {
+        let mut current = self
+            .public
+            .try_write()
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "discovery already active"))?;
+        *current = public;
+        Ok(())
+    }
+
     pub(crate) async fn send_announce(
         &self,
         socket: &UdpSocket,

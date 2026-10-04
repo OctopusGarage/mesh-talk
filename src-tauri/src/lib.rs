@@ -24,6 +24,7 @@ pub mod events;
 pub mod favorites;
 pub mod logger;
 pub mod perf;
+pub mod privacy_commands;
 pub mod services;
 pub mod session_store;
 pub mod settings;
@@ -234,7 +235,10 @@ pub fn run_tauri_configured(
             }
 
             #[cfg(debug_assertions)]
-            {
+            if configured_data_root().is_none() {
+                // Native evaluation uses a dedicated data root. Opening then
+                // closing debug tools can leave WKWebView's split-pane size
+                // behind, making viewport and window geometry disagree.
                 let window = app.get_webview_window("main").unwrap();
                 window.open_devtools();
                 window.close_devtools();
@@ -269,6 +273,10 @@ pub fn run_tauri_configured(
             commands::login,
             crate::contact_policy::get_hidden_contacts,
             crate::contact_policy::set_contact_hidden,
+            crate::privacy_commands::get_privacy,
+            crate::privacy_commands::set_invisible,
+            crate::privacy_commands::set_privacy_allowed,
+            crate::privacy_commands::initiate_privacy_contact,
             commands::logout,
             commands::register,
             commands::rename_account,

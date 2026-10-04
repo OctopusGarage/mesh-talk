@@ -148,6 +148,7 @@ where
 async fn recv_have<IO>(
     channel: &mut SecureChannel<IO>,
     want_req: bool,
+    conversation: ConversationId,
 ) -> Result<Vec<EventId>, SessionError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -159,6 +160,9 @@ where
             SyncWire::RespHave(c) if !want_req => c,
             _ => return Err(SessionError::UnexpectedMessage),
         };
+        if chunk.conversation != conversation {
+            return Err(SessionError::UnexpectedMessage);
+        }
         // A well-behaved sender chunks at HAVE_IDS_PER_CHUNK; reject an over-stuffed chunk so
         // a peer can't pack a frame full of ids to amplify the accumulated `have` (bounds the
         // total at HAVE_IDS_PER_CHUNK * MAX_HAVE_CHUNKS).
@@ -254,11 +258,23 @@ where
             SyncWire::Response(r) => r,
             _ => return Err(SessionError::UnexpectedMessage),
         };
-        response.have = recv_have(channel, false).await?;
+        if response.conversation != conversation
+            || response
+                .events
+                .iter()
+                .any(|event| event.conversation_id != conversation)
+        {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        response.have = recv_have(channel, false, conversation).await?;
 
         let (report, followup) = {
             let mut store = store.lock().expect("store mutex not poisoned");
-            handle_response_bounded(&mut *store, &response, MAX_PLAINTEXT)
+            let result = handle_response_bounded(&mut *store, &response, MAX_PLAINTEXT);
+            if store.admission_denied() {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            result
         };
         let made_progress = report.applied > 0;
         let more_to_push = !followup.events.is_empty();
@@ -345,7 +361,7 @@ where
             let conversation = request.conversation;
             // The Request's inline have is empty on the networked path; read the
             // requester's streamed have, then answer.
-            let have = recv_have(channel, true).await?;
+            let have = recv_have(channel, true, conversation).await?;
             let full = SyncRequest { conversation, have };
             let response = {
                 let store = store.lock().expect("store mutex not poisoned");
@@ -364,9 +380,19 @@ where
         }
         SyncWire::Followup(followup) => {
             let conversation = followup.conversation;
+            if followup
+                .events
+                .iter()
+                .any(|event| event.conversation_id != conversation)
+            {
+                return Err(SessionError::UnexpectedMessage);
+            }
             {
                 let mut store = store.lock().expect("store mutex not poisoned");
                 handle_followup(&mut *store, &followup);
+                if store.admission_denied() {
+                    return Err(SessionError::UnexpectedMessage);
+                }
             }
             Ok(Served::Handled(conversation))
         }
@@ -400,6 +426,182 @@ mod tests {
 
     fn conv() -> ConversationId {
         ConversationId::new([1u8; 32])
+    }
+
+    #[tokio::test]
+    async fn responder_rejects_events_outside_the_followup_conversation() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let injected = Event::new(
+                &alice,
+                ConversationId::new([2; 32]),
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                b"unrelated".to_vec(),
+            );
+            let id = injected.id;
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                let store = Mutex::new(EventLog::default());
+                let result = serve_one(&mut channel, &store).await;
+                assert!(matches!(result, Err(SessionError::UnexpectedMessage)));
+                assert!(!store.lock().unwrap().has(&id));
+            });
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            channel
+                .send(
+                    &encode(&SyncWire::Followup(SyncFollowup {
+                        conversation: conv(),
+                        events: vec![injected],
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("malformed followup exchange timed out");
+    }
+
+    #[tokio::test]
+    async fn requester_rejects_response_conversation_switch() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                assert!(matches!(
+                    decode(&channel.recv().await.unwrap()).unwrap(),
+                    SyncWire::FpRequest(_)
+                ));
+                channel
+                    .send(&encode(&SyncWire::FpResponse(FpResponse { matched: false })).unwrap())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    decode(&channel.recv().await.unwrap()).unwrap(),
+                    SyncWire::Request(_)
+                ));
+                assert!(matches!(
+                    decode(&channel.recv().await.unwrap()).unwrap(),
+                    SyncWire::ReqHave(_)
+                ));
+                let other = ConversationId::new([2; 32]);
+                channel
+                    .send(
+                        &encode(&SyncWire::Response(SyncResponse {
+                            conversation: other,
+                            events: vec![],
+                            have: vec![],
+                        }))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let _ = send_have(&mut channel, other, &[], SyncWire::RespHave).await;
+            });
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            assert!(matches!(
+                request_round(&mut channel, &Mutex::new(EventLog::default()), conv()).await,
+                Err(SessionError::UnexpectedMessage)
+            ));
+            server.await.unwrap();
+        })
+        .await
+        .expect("malformed response exchange timed out");
+    }
+
+    #[tokio::test]
+    async fn streamed_have_rejects_a_different_conversation() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            for want_req in [true, false] {
+                let alice = DeviceIdentity::generate();
+                let bob = DeviceIdentity::generate();
+                let (a, b) = tokio::io::duplex(65536);
+                let server = tokio::spawn(async move {
+                    let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                    assert!(matches!(
+                        recv_have(&mut channel, want_req, conv()).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ));
+                });
+                let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+                send_have(
+                    &mut channel,
+                    ConversationId::new([2; 32]),
+                    &[],
+                    if want_req {
+                        SyncWire::ReqHave
+                    } else {
+                        SyncWire::RespHave
+                    },
+                )
+                .await
+                .unwrap();
+                server.await.unwrap();
+            }
+        })
+        .await
+        .expect("malformed have exchange timed out");
+    }
+
+    #[tokio::test]
+    async fn requester_rejects_foreign_event_in_matching_response() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let injected = Event::new(
+                &bob,
+                ConversationId::new([2; 32]),
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                b"unrelated".to_vec(),
+            );
+            let id = injected.id;
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                let _ = channel.recv().await.unwrap();
+                channel
+                    .send(&encode(&SyncWire::FpResponse(FpResponse { matched: false })).unwrap())
+                    .await
+                    .unwrap();
+                let _ = channel.recv().await.unwrap();
+                let _ = channel.recv().await.unwrap();
+                channel
+                    .send(
+                        &encode(&SyncWire::Response(SyncResponse {
+                            conversation: conv(),
+                            events: vec![injected],
+                            have: vec![],
+                        }))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let _ = send_have(&mut channel, conv(), &[], SyncWire::RespHave).await;
+            });
+            let store = Mutex::new(EventLog::default());
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            assert!(matches!(
+                request_round(&mut channel, &store, conv()).await,
+                Err(SessionError::UnexpectedMessage)
+            ));
+            assert!(!store.lock().unwrap().has(&id));
+            server.await.unwrap();
+        })
+        .await
+        .expect("foreign event exchange timed out");
     }
 
     #[tokio::test]

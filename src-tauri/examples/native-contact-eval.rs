@@ -47,14 +47,26 @@ fn dispatch_native_key(key: &str) -> Result<(), String> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
     use objc2_foundation::{NSPoint, NSString};
+    let main = MainThreadMarker::new().ok_or("Native input must run on the main thread")?;
+    let application = NSApplication::sharedApplication(main);
+    if key == "Focus" {
+        // SAFETY: AppKit's main thread, and only this application's own windows.
+        let window = unsafe { application.mainWindow() }
+            .or_else(|| application.keyWindow())
+            .or_else(|| application.windows().firstObject())
+            .ok_or("Owned app has no window")?;
+        // This dev-only driver also supports macOS versions before activate().
+        #[allow(deprecated)]
+        application.activateIgnoringOtherApps(true);
+        window.makeKeyAndOrderFront(None);
+        return Ok(());
+    }
     let (code, characters) = match key {
         "Tab" => (48, "\t"),
         "Enter" => (36, "\r"),
         "Escape" => (53, "\u{1b}"),
         _ => return Err("Unsupported evaluation key".into()),
     };
-    let main = MainThreadMarker::new().ok_or("Native input must run on the main thread")?;
-    let application = NSApplication::sharedApplication(main);
     let window = application
         .keyWindow()
         .ok_or("Owned app has no key window")?;

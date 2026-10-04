@@ -4,7 +4,7 @@
 //! `on_dm` callback, so this is unit-testable without a GUI.
 
 use crate::discovery::service::{
-    shared_announce, spawn_discovery_with_trigger, swap_announce, SharedAnnounce,
+    shared_announce, spawn_discovery_with_visibility, swap_announce, SharedAnnounce,
 };
 use crate::discovery::{Announce, PeerRecord, Roster};
 use crate::eventlog::LogError;
@@ -166,7 +166,7 @@ impl NodeRuntime {
 
         // Dual-stack TCP listener (IPv6 + IPv4-mapped, falling back to IPv4) so the node is
         // reachable over IPv6/link-local too; OS-assigned port (0).
-        let listener = crate::transport::net::bind_dual_stack_listener(0u16).await?;
+        let listener = super::privacy_routes::stable_listener(&dir).await?;
         let tcp_port = listener.local_addr()?.port();
 
         // Build the announce BEFORE the identity is moved into the node, and wrap it in a
@@ -213,6 +213,27 @@ impl NodeRuntime {
             .await
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
         };
+        // Load policy and verified account proofs before discovery or accept/drain tasks.
+        let visibility = Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(
+            false,
+        ));
+        {
+            let node = node.clone();
+            let directory = dir.clone();
+            let password = password.to_string();
+            let own = node.signed_announce(display_name, tcp_port);
+            let visibility = visibility.clone();
+            tokio::task::spawn_blocking(move || {
+                node.configure_privacy(&directory, &password, &own, visibility)
+            })
+            .await
+            .map_err(|_| {
+                RuntimeError::Io(std::io::Error::other("privacy initialization failed"))
+            })??;
+        }
+        visibility
+            .set_public(!node.privacy_snapshot().invisible)
+            .await;
         let names = Arc::new(Mutex::new(names_handle.await.map_err(|e| {
             RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
         })??));
@@ -221,15 +242,25 @@ impl NodeRuntime {
 
         let discovery_trigger = Arc::new(Notify::new());
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-        tasks.extend(spawn_discovery_with_trigger(
+        tasks.extend(spawn_discovery_with_visibility(
             Arc::clone(&socket),
             Arc::clone(&roster),
             Arc::clone(&announce),
             self_uid.clone(),
             discovery_port,
             Some(Arc::clone(&discovery_trigger)),
+            visibility,
         ));
         tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
+        {
+            let node = Arc::clone(&node);
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    node.probe_private_routes().await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }));
+        }
         {
             let node = Arc::clone(&node);
             tasks.push(tokio::spawn(async move {
@@ -351,6 +382,10 @@ impl NodeRuntime {
     /// `account_id`/`user_id` are unchanged — only the human-readable name moves.
     pub fn set_display_name(&mut self, display_name: &str) {
         let announce = self.node.signed_announce(display_name, self.tcp_port);
+        if self.node.update_presence(&announce).is_err() {
+            log::warn!("Unable to update node presence");
+            return;
+        }
         swap_announce(&self.announce, &announce);
         self.display_name = display_name.to_string();
         // Keep our own name in the durable directory too (it otherwise only tracks peers),
@@ -377,6 +412,41 @@ impl NodeRuntime {
     /// Local host account namespace used for this runtime's persistent stores.
     pub fn host_account_id(&self) -> Option<&str> {
         self.account_path.parent()?.file_name()?.to_str()
+    }
+
+    pub fn privacy_snapshot(&self) -> crate::node::PrivacySnapshot {
+        self.node.privacy_snapshot()
+    }
+    pub async fn set_invisible(&self, invisible: bool) -> std::io::Result<()> {
+        self.node.set_invisible(invisible).await
+    }
+    pub async fn set_allowed(&self, account: &str, allowed: bool) -> std::io::Result<()> {
+        self.node.set_allowed(account, allowed).await
+    }
+    pub async fn initiate_contact(&self, account: &str) -> std::io::Result<()> {
+        self.node.initiate_contact(account).await
+    }
+    pub async fn set_invisible_if(
+        &self,
+        invisible: bool,
+        authorize: impl FnOnce() -> std::io::Result<()> + Send,
+    ) -> std::io::Result<()> {
+        self.node.set_invisible_if(invisible, authorize).await
+    }
+    pub async fn set_allowed_if(
+        &self,
+        account: &str,
+        allowed: bool,
+        authorize: impl FnOnce() -> std::io::Result<()> + Send,
+    ) -> std::io::Result<()> {
+        self.node.set_allowed_if(account, allowed, authorize).await
+    }
+    pub async fn initiate_contact_if(
+        &self,
+        account: &str,
+        authorize: impl FnOnce() -> std::io::Result<()> + Send,
+    ) -> std::io::Result<()> {
+        self.node.initiate_contact_if(account, authorize).await
     }
 
     /// Force an immediate re-announce + /24 rescan, on top of the periodic timers.
@@ -416,11 +486,7 @@ impl NodeRuntime {
 
     /// The public identity of a known peer (to derive its DM conversation), if known.
     pub fn peer_public(&self, user_id: &str) -> Option<PublicIdentity> {
-        self.roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .get(user_id)
-            .map(|p| p.public.clone())
+        self.node.routing_peer(user_id).map(|p| p.public)
     }
 
     /// Send a DM to a known peer by user-id.
@@ -659,6 +725,10 @@ impl Drop for NodeRuntime {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_privacy_tests.rs"]
+mod privacy_tests;
 
 #[cfg(test)]
 mod tests {

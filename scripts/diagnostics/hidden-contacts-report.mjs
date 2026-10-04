@@ -1,4 +1,4 @@
-export const REQUIRED_SCENARIOS = ["hide-cancel", "hide", "restart", "settings-search", "offline-restore", "hidden-inbound", "history-retained", "raw-peer-retained", "local-user-isolation", "narrow-keyboard-layout"];
+export const REQUIRED_SCENARIOS = ["hide-cancel", "hide", "restart", "settings-search", "offline-restore", "hidden-inbound", "history-retained", "raw-peer-retained", "local-user-isolation", "narrow-keyboard-layout", "privacy-mode", "privacy-reply", "privacy-restart"];
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 

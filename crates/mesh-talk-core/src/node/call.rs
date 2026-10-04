@@ -16,7 +16,6 @@
 use super::*;
 use crate::discovery::roster::UserId;
 use crate::node::session::SessionError;
-use crate::node::transport::dial;
 use crate::node::wire::{frame, unframe};
 use crate::transport::SecureChannel;
 use serde::{Deserialize, Serialize};
@@ -63,17 +62,19 @@ impl Node {
         payload: &[u8],
     ) -> Result<(), NodeError> {
         let peer = self
-            .roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .get(target_user_id)
-            .cloned()
+            .routing_peer(target_user_id)
             .ok_or_else(|| NodeError::UnknownPeer(target_user_id.to_string()))?;
+        if !self.known_account_allowed(&peer.public) {
+            return Err(NodeError::Session(SessionError::Transport(
+                crate::transport::TransportError::AdmissionDenied,
+            )));
+        }
         let frame = CallSignal {
             payload: payload.to_vec(),
         }
         .encode();
-        let mut channel = dial(peer.addr, &self.identity, Some(&peer.public))
+        let mut channel = self
+            .privacy_dial(peer.addr, &peer.public)
             .await
             .map_err(SessionError::Transport)
             .map_err(NodeError::Session)?;

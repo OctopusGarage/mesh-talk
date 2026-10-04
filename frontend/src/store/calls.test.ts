@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { useCalls } from "./calls";
 import { useSettings } from "./settings";
+import { useAuth } from "./auth";
 
 // --- Minimal WebRTC + media stubs (test env is "node", so no DOM/WebRTC). ---
 
@@ -50,6 +51,9 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 let getUserMedia: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  useAuth.setState({
+    user: { id: "alice", username: "alice", display_name: "Alice" },
+  });
   invoke.mockReset();
   invoke.mockResolvedValue(undefined);
   vi.stubGlobal(
@@ -176,6 +180,83 @@ describe("local actions send the right signal", () => {
 });
 
 describe("outgoing call (engine happy path)", () => {
+  it("a cancelled call's late permission failure cannot end a newer call", async () => {
+    let rejectGrant!: (reason: Error) => void;
+    const pending = new Promise((_, reject) => {
+      rejectGrant = reject;
+    });
+    invoke.mockImplementation((command, args) =>
+      command === "initiate_privacy_contact" && args.account === "b".repeat(32)
+        ? pending
+        : Promise.resolve(undefined),
+    );
+    const first = useCalls
+      .getState()
+      .startCall(
+        { name: "Bob", accountId: "b".repeat(32), deviceIds: ["bob"] },
+        false,
+      );
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("initiate_privacy_contact", {
+      owner: "alice",
+      account: "b".repeat(32),
+    });
+    useCalls.getState().hangup();
+    const stop = vi.fn();
+    getUserMedia.mockResolvedValueOnce({
+      getTracks: () => [{ stop, enabled: true }],
+      getVideoTracks: () => [],
+      getAudioTracks: () => [],
+    });
+    await useCalls
+      .getState()
+      .startCall(
+        { name: "Carol", accountId: "c".repeat(32), deviceIds: ["carol"] },
+        false,
+      );
+    const secondId = useCalls.getState().callId;
+    rejectGrant(new Error("late disk error"));
+    await first;
+    expect(useCalls.getState().callId).toBe(secondId);
+    expect(useCalls.getState().phase).toBe("outgoing");
+    expect(useCalls.getState().error).toBeNull();
+    expect(stop).not.toHaveBeenCalled();
+  });
+  it("grants reply permission for an explicit outgoing call before sending any signal", async () => {
+    await useCalls
+      .getState()
+      .startCall(
+        { name: "Bob", accountId: "b".repeat(32), deviceIds: ["bob"] },
+        true,
+      );
+    expect(invoke).toHaveBeenCalledWith("initiate_privacy_contact", {
+      owner: "alice",
+      account: "b".repeat(32),
+    });
+    const grant = invoke.mock.calls.findIndex(
+      (c) => c[0] === "initiate_privacy_contact",
+    );
+    const signal = invoke.mock.calls.findIndex(
+      (c) => c[0] === "send_call_signal",
+    );
+    expect(grant).toBeGreaterThanOrEqual(0);
+    expect(signal).toBeGreaterThan(grant);
+  });
+  it("does not disclose an offer if the durable permission grant fails", async () => {
+    invoke.mockImplementation(async (command) => {
+      if (command === "initiate_privacy_contact") throw new Error("disk full");
+    });
+    await useCalls
+      .getState()
+      .startCall(
+        { name: "Bob", accountId: "b".repeat(32), deviceIds: ["bob"] },
+        true,
+      );
+    expect(invoke.mock.calls.some((c) => c[0] === "send_call_signal")).toBe(
+      false,
+    );
+    expect(useCalls.getState().phase).toBe("idle");
+  });
   it("startCall captures media, sends an offer, and goes outgoing", async () => {
     await useCalls
       .getState()

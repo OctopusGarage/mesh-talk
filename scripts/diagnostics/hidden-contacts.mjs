@@ -71,7 +71,7 @@ async function freePort() {
 async function request(method, path, body) {
   const response = await fetch(`${endpoint}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15000) });
   const result = await response.json();
-  if (!response.ok || result.value?.error) throw new Error(`WebDriver ${method} ${path}: ${redact(result.value?.message ?? response.status)}`);
+  if (!response.ok || result.value?.error) throw new Error(`WebDriver ${method} ${path}: ${redact(result.value?.message ?? result.value?.error ?? response.status)}`);
   return result.value;
 }
 const command = (method, path, body) => request(method, `/session/${session}${path}`, body);
@@ -89,7 +89,21 @@ async function element(id) {
   return value["element-6066-11e4-a52e-4f735466cecf"];
 }
 async function settledDialog(id) {
+  await focusOwnedWindow();
   await until(`settled open ${id}`, () => execute("const e=document.querySelector(arguments[0]); return !!e && e.getAttribute('data-state')==='open' && getComputedStyle(e).opacity==='1' && !e.getAnimations({subtree:true}).some(a=>a.playState==='running');", [selector(id)]));
+}
+async function appKitKey(keyName) {
+  assert.ok(owned.has(app), "AppKit input targets the owned native application");
+  const nonce = randomBytes(8).toString("hex");
+  const result = await command("POST", "/execute/async", { script: "const key=arguments[0],nonce=arguments[1],done=arguments[arguments.length-1]; window.__TAURI__.event.listen('native-contact-key-result',e=>{if(e.payload.nonce===nonce){unlisten();done(e.payload);}}).then(fn=>{unlisten=fn; return window.__TAURI__.event.emit('native-contact-key',{key,nonce});}).catch(e=>done({error:String(e)})); let unlisten=()=>{};", args: [keyName, nonce] });
+  assert.equal(result.error, null, `native AppKit input failed: ${result.error}`);
+}
+async function focusOwnedWindow() {
+  if (process.platform !== "darwin") return;
+  // Background WKWebViews can suspend modal animations. Activate only the
+  // fixture process before waiting for animations or delivering native keys.
+  await appKitKey("Focus");
+  await until("owned native application focus", () => execute("return document.hasFocus();"), 10000);
 }
 async function click(id) { await command("POST", `/element/${await element(id)}/click`, {}); }
 async function openDialog(id) {
@@ -116,10 +130,9 @@ async function key(value) {
     return child.output.trim();
   }
   if (process.platform === "darwin") {
-    const nonce = randomBytes(8).toString("hex");
+    await focusOwnedWindow();
     const keyName = { "\uE004": "Tab", "\uE007": "Enter", "\uE00C": "Escape" }[value];
-    const result = await command("POST", "/execute/async", { script: "const key=arguments[0],nonce=arguments[1],done=arguments[arguments.length-1]; window.__TAURI__.event.listen('native-contact-key-result',e=>{if(e.payload.nonce===nonce){unlisten();done(e.payload);}}).then(fn=>{unlisten=fn; return window.__TAURI__.event.emit('native-contact-key',{key,nonce});}).catch(e=>done({error:String(e)})); let unlisten=()=>{};", args: [keyName, nonce] });
-    assert.equal(result.error, null, `native AppKit input failed: ${result.error}`);
+    await appKitKey(keyName);
   } else if (process.platform === "win32") {
     await input("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$shell = New-Object -ComObject WScript.Shell; if (-not $shell.AppActivate(${pid})) { throw 'Owned application could not be activated' }; Start-Sleep -Milliseconds 200; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${mapping[1]}')`]);
   } else {
@@ -217,6 +230,13 @@ async function closeDialogs() {
 }
 const row = () => `conversation-row-${account}`;
 const history = () => observe("account_history", { account, limit: 500 });
+const privacyPolicy = () => observe("get_privacy", { owner: signedInUser });
+async function privacySettings() {
+  await ensureOverflowOpen();
+  await openDialog("sidebar-action-settings");
+  await settledDialog("settings-dialog");
+  await until("privacy controls loaded", () => execute("return document.querySelector('[data-testid=invisible-switch]')?.disabled === false;"));
+}
 async function signOut() {
   await ensureOverflowOpen();
   await click("sidebar-sign-out");
@@ -245,6 +265,53 @@ try {
   await until("CLI receives UI DM", () => peer.output.includes(beforeText));
   const originalHistory = await history();
   assert.ok(originalHistory.some(h => h.text === beforeText));
+
+  // Real native controls + production IPC + the actual CLI. Browser-mocked
+  // privacy.spec.ts is not accepted as evidence for these runtime scenarios.
+  await privacySettings();
+  assert.equal((await privacyPolicy()).invisible, false);
+  await openDialog("invisible-switch");
+  await until("invisible cancel default focus", () => execute("return document.activeElement?.getAttribute('data-testid')==='invisible-cancel';"));
+  await key("\uE007");
+  await until("invisible cancellation dismissed", async () => !await exists("invisible-confirm"));
+  assert.equal((await privacyPolicy()).invisible, false);
+  await openDialog("invisible-switch");
+  await click("invisible-confirm");
+  await until("durable invisible mode", async () => (await privacyPolicy()).invisible);
+  assert.ok((await observe("list_accounts")).some(a => a.account_id === account), "passive roster remains available");
+  await passed("privacy-mode", { cancelledBeforeCommit: true, durable: await privacyPolicy(), passivePeerRetained: true });
+  await openDialog("manage-privacy");
+  await settledDialog("privacy-dialog");
+  await fill("privacy-search", peerName);
+  await openDialog(`privacy-revoke-${account}`);
+  await click("privacy-revoke-confirm");
+  await until("reply permission revoked", async () => !(await privacyPolicy()).allowed_accounts.some(a => a.id === account));
+  await until("revoke confirmation dismissed", async () => !await exists("privacy-revoke-confirm"));
+  await click(`privacy-allow-${account}`);
+  await until("manual reply permission saved", async () => (await privacyPolicy()).allowed_accounts.some(a => a.id === account && a.source === "Manual"));
+  const privateReply = `native-private-${randomBytes(4).toString("hex")}`;
+  const ownAccount = await observe("account_id");
+  peer.stdin.write(`/account-msg ${ownAccount} ${privateReply}\n`);
+  await until("authorized private reply delivered", async () => (await history()).some(h => h.text === privateReply));
+  await passed("privacy-reply", { manualGrantAfterRevocation: true, realCliReplyStored: true, policy: await privacyPolicy() });
+  await stop(app);
+  await startApp();
+  await login(userName);
+  const restoredPrivacy = await privacyPolicy();
+  assert.equal(restoredPrivacy.invisible, true);
+  assert.ok(restoredPrivacy.allowed_accounts.some(a => a.id === account && a.source === "Manual"));
+  assert.ok((await history()).some(h => h.text === privateReply));
+  const restartReply = `native-private-restart-${randomBytes(4).toString("hex")}`;
+  peer.stdin.write(`/account-msg ${ownAccount} ${restartReply}\n`);
+  await until("private reply delivered after actual app restart", async () => (await history()).some(h => h.text === restartReply));
+  await passed("privacy-restart", { restored: restoredPrivacy, realCliReplyAfterRestart: true, historyRetained: true });
+  // Restore public mode before evaluating independent contact-list hiding.
+  await privacySettings();
+  await click("invisible-switch");
+  await until("public mode restored", async () => !(await privacyPolicy()).invisible);
+  await key("\uE00C");
+  await until("privacy settings dismissed", async () => !await exists("settings-dialog"));
+  await element(row());
 
   await contextMenu(row());
   await click(`hide-contact-menu-${account}`);
@@ -301,7 +368,11 @@ try {
   await until("second user's real discovered peer", () => exists(row()));
   const otherHidden = await hiddenContacts();
   assert.equal(otherHidden.some(h => h.account_id === account), false);
-  await passed("local-user-isolation", { secondUserContactVisible: true, secondUserHasNoHiddenEntry: true });
+  const otherPrivacy = await privacyPolicy();
+  assert.equal(otherPrivacy.owner, signedInUser);
+  assert.equal(otherPrivacy.invisible, false);
+  assert.deepEqual(otherPrivacy.allowed_accounts, []);
+  await passed("local-user-isolation", { secondUserContactVisible: true, secondUserHasNoHiddenEntry: true, secondUserPrivacy: otherPrivacy });
   await signOut();
   await login(userName);
   await until("first user's hidden policy restored", async () => (await hiddenContacts()).some(h => h.account_id === account));
@@ -325,9 +396,10 @@ try {
   await manage();
   await fill("hidden-contacts-search", peerName);
   const nativeRect = await command("POST", "/window/rect", { width: 760, height: 520 });
+  report.narrowWindow = { returned: nativeRect, client: await execute("return {width:innerWidth,height:innerHeight,scale:devicePixelRatio};") };
   // WebDriver sizes the outer window; the app enforces minimum inner size.
   // Measure actual client geometry instead of assuming decorations are zero.
-  assert.ok(nativeRect.width >= 760 && nativeRect.width <= 800 && nativeRect.height >= 520 && nativeRect.height <= 580, "owned native window reached its minimum-size range");
+  assert.ok(nativeRect.width >= 760 && nativeRect.width <= 800 && nativeRect.height >= 520 && nativeRect.height <= 580, `owned native window reached its minimum-size range: ${JSON.stringify(report.narrowWindow)}`);
   await until("native narrow viewport applied", () => execute("return innerWidth>0 && innerWidth<=arguments[0]+1 && innerHeight>0 && innerHeight<=arguments[1]+1;", [nativeRect.width, nativeRect.height]));
   await settledDialog("hidden-contacts-dialog");
   await element(`restore-contact-${account}`);

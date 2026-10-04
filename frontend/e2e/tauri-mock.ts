@@ -573,6 +573,33 @@ export const test = base.extend({
             return null;
           },
 
+          // Privacy has dedicated canonical-account scenarios in privacy.spec.ts.
+          // Legacy roster fixtures use synthetic IDs, so keep this default empty.
+          get_privacy: (a) => ({
+            owner: String(a.owner),
+            version: 1,
+            invisible: false,
+            allowed_accounts: [],
+          }),
+          initiate_privacy_contact: (a) => ({
+            owner: String(a.owner),
+            version: 1,
+            invisible: false,
+            allowed_accounts: [],
+          }),
+          set_invisible: (a) => ({
+            owner: String(a.owner),
+            version: 1,
+            invisible: Boolean(a.invisible),
+            allowed_accounts: [],
+          }),
+          set_privacy_allowed: (a) => ({
+            owner: String(a.owner),
+            version: 1,
+            invisible: false,
+            allowed_accounts: [],
+          }),
+
           // presence
           get_presence: () => presenceMap,
 

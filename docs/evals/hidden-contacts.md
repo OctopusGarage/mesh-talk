@@ -1,8 +1,11 @@
-# Hidden contacts: native and usability evaluation
+# Contact privacy: native and usability evaluation
 
 This evaluates issue #134's **local contact visibility**, not communication blocking.
 Hiding must not remove raw discovery records, alter encrypted delivery, erase history,
 or change existing shared groups. Policy is per signed-in local user on this device.
+The same native harness also evaluates issue #135's separate **invisible mode**:
+public presence suppression and account-scoped communication permissions. It restores
+public mode before testing #134, so list hiding is never mistaken for blocking.
 
 ## Reproducible layers
 
@@ -10,7 +13,10 @@ or change existing shared groups. Policy is per signed-in local user on this dev
 | --- | --- | --- |
 | Policy and state regressions | `cargo test -p mesh-talk --lib contact_policy` | Authorization, atomic persistence, corrupted storage, concurrent writes, lifecycle races and real registered IPC |
 | Real mesh regression | `cargo test -p mesh-talk --lib contact_policy::native_mesh_tests` | Signed UDP discovery, encrypted TCP delivery in both directions, another device of the hidden account, unchanged existing history/roster, restart and offline restore |
+| Invisible-mode core and runtime | `cargo test -p mesh-talk-core --lib node::privacy --features fast-test-kdf`; `cargo test -p mesh-talk-core --lib node::runtime::privacy_tests --features fast-test-kdf` | Admission, author/conversation projection, revocation, group/file scope, both-invisible restart and expired discovery routes; cached offline peers must not appear freshly online |
+| Invisible-mode owner IPC | `cargo test -p mesh-talk --lib privacy_commands` | Real registered commands, durable policy and stale queued requests after logout |
 | Browser interaction regressions | `cd frontend && npx playwright test e2e/hidden-contacts.spec.ts --workers=1 --retries=0` | Cancellation, disclosure, failure/retry, search/group projections, account isolation, keyboard and narrow/long-name layout; this layer intentionally mocks IPC |
+| Invisible-mode browser interactions | `cd frontend && npx playwright test e2e/privacy.spec.ts --workers=1 --retries=0` | Mode confirmation, permission search/revocation, failure/retry, focus restoration and offline-account narrow layout; intentionally mocked IPC |
 | Native WebView evaluation | `node scripts/diagnostics/hidden-contacts.mjs` after builds below | Actual registration/login, CLI peer discovery, GUI sending, inbound delivery while hidden, process restart, settings management, another local user and offline keyboard restore |
 | Evidence gate | `node --test scripts/diagnostics/hidden-contacts-report.test.mjs` | Incomplete or failing native evaluations cannot be reported as passing |
 
@@ -29,11 +35,22 @@ On Linux, install the same WebKitGTK dependencies as CI and run the last command
 The `Hidden contacts native evaluation` Actions workflow
 runs on Linux, Windows and macOS and uploads screenshots and JSON evidence even on failure.
 `NATIVE_CONTACT_APP`, `NATIVE_CONTACT_NODE` and `NATIVE_CONTACT_OUTPUT` can select explicit
-binary/output paths, including a shared local Cargo target directory.
+binary/output paths, including a shared local Cargo target directory. The native evidence
+gate additionally requires `privacy-mode`, `privacy-reply` and `privacy-restart`:
+actual mode confirmation/cancellation, manual permission after revocation, encrypted CLI
+replies and delivery after a real application restart. Rejected traffic and both-private
+restart and delivery after roster expiration are checked separately in core runtime
+regressions, not inferred from screenshots. Cached routes are only connection hints:
+fresh online presence requires a successful pinned authentication. Explicitly accepting
+a known device's new account requires its signed binding and a separate new-account
+permission; passive traffic must not transfer its old permission.
 
 The example attaches a dev-only embedded WebDriver to the same desktop builder. Normal
 release applications do not include the driver or enable its server. Test accounts and
 configuration use isolated fixture roots; neither `HOME` nor `USERPROFILE` is reassigned.
+The macOS driver activates only its own fixture window before animation and native
+keyboard checks, then verifies actual document focus; it does not grant TCC permissions
+or send global keyboard input. Run native desktop evaluations without competing GUI tests.
 GitHub's macOS runner does not return same-host multicast with its default routing,
 as independently measured by `native-multicast-probe.mjs` without product code.
 Only the disposable macOS runner routes the single fixture group `224.0.0.167`
@@ -54,7 +71,7 @@ from synthetic key events. The harness therefore dispatches the actual UI's `con
 event through standard WebDriver execute, and tests default keyboard behavior separately.
 The same driver's `click_element` implementation (`src/platform/executor.rs`, version
 1.4.0, lines 688–701) calls `click()` before `focus()`. For the two dialog-opening
-triggers only, the harness uses standard execute to focus before clicking, matching
+triggers, including privacy confirmations, the harness uses standard execute to focus before clicking, matching
 native mouse ordering and preventing focus from returning outside a newly opened modal.
 The utility popover can remain open after its nested dialogs close. The harness checks
 its actual `data-state` before opening it again, rather than toggling an already-open
@@ -98,6 +115,14 @@ permanent regression case.
 Inspect native screenshots as well as the automated results. Reports distinguish native
 WebViews from browser mocks. A run is complete only when every required scenario and the
 three-platform matrix pass; a build, empty report or skipped platform is not equivalent.
+
+Invisible mode is not IP anonymity: a TCP port scan and Noise XX static keys remain
+observable. Manually allowed trusted relays can carry only verified cached authors;
+a new device without prior verified discovery/direct contact cannot deliver offline
+through a legacy relay. Unknown sender proofs fail closed. Permissions are local to
+the signed-in user/device, not synced to other devices. A commit already authorized
+before logout may finish only in the old user's locked runtime namespace; queued
+operations are rejected when the session generation changes.
 
 This is a repeatable scenario evaluation plus visual inspection, **not a human participant
 study**, screen-reader certification, exhaustive hardware/network compatibility claim, or

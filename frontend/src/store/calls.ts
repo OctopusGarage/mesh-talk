@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { calls } from "@/lib/api";
+import { calls, privacy } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { useAuth } from "@/store/auth";
 import { useSettings } from "@/store/settings";
@@ -205,6 +205,8 @@ export const useCalls = create<CallState>((set, get) => {
     startCall: async (target, video) => {
       if (get().phase !== "idle") return; // one call at a time
       if (target.deviceIds.length === 0) return;
+      const owner = useAuth.getState().user?.id;
+      if (!owner) return;
       const callId = crypto.randomUUID();
       ringingPeers = [...target.deviceIds];
       set({
@@ -222,8 +224,9 @@ export const useCalls = create<CallState>((set, get) => {
         // The user may have hung up / logged out while the camera was opening. If so the
         // call was already torn down; release the capture we just acquired and bail, or it
         // leaks (camera light stays on) and we'd dial peers we abandoned.
-        if (get().callId !== callId) {
+        if (get().callId !== callId || useAuth.getState().user?.id !== owner) {
           stopStream(stream);
+          if (get().callId === callId) end("failed");
           return;
         }
         set({ localStream: stream, hasVideo, camOn: hasVideo });
@@ -236,6 +239,18 @@ export const useCalls = create<CallState>((set, get) => {
         await conn.setLocalDescription(offer);
         await gatherComplete(conn);
         if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
+        if (useAuth.getState().user?.id !== owner) {
+          end("failed");
+          return;
+        }
+        // Only an explicit outgoing call grants permission. Answer/ICE/bye and
+        // background signals never reach this path. Persist before any offer.
+        await privacy.initiateContact(owner, target.accountId);
+        if (get().callId !== callId) return;
+        if (useAuth.getState().user?.id !== owner) {
+          end("failed");
+          return;
+        }
         const myName = useAuth.getState().user?.display_name ?? "";
         const payload = JSON.stringify({
           callId,
@@ -257,6 +272,13 @@ export const useCalls = create<CallState>((set, get) => {
         }
         armConnectTimeout();
       } catch (e) {
+        // A cancelled operation can fail after another call owns the shared
+        // media/connection. Never tear down that newer call with a stale error.
+        if (get().callId !== callId) return;
+        if (useAuth.getState().user?.id !== owner) {
+          end("failed");
+          return;
+        }
         set({ error: errorMessage(e) });
         end("failed");
       }

@@ -3,7 +3,7 @@ name: Hidden contacts native evaluation
 on:
   workflow_dispatch:
   push:
-    branches: [dev, feat/hidden-contacts]
+    branches: [dev, feat/hidden-contacts, feat/invisible-mode]
     paths:
       - "frontend/**"
       - "src-tauri/**"

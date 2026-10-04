@@ -248,3 +248,13 @@ export interface CallSignalEvent {
   from: string; // authenticated sender device user_id (bound to the Noise channel)
   payload: string; // opaque signaling JSON (call id, kind, SDP) — see store/calls.ts
 }
+export interface PrivacySnapshot {
+  owner: string;
+  version: number;
+  invisible: boolean;
+  allowed_accounts: {
+    id: string;
+    name: string;
+    source: "Manual" | "Initiated";
+  }[];
+}
