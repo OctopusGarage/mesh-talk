@@ -1,5 +1,6 @@
 use crate::services::auth_service::AuthService;
 use crate::services::user::User;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
@@ -18,11 +19,16 @@ pub struct SessionInfo {
 #[derive(Clone, Default)]
 pub struct SessionState {
     inner: Arc<Mutex<Option<SessionInfo>>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl SessionState {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
     pub fn set(&self, token: String, user: User, password: String) {
         let mut guard = self.inner.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::AcqRel);
         *guard = Some(SessionInfo {
             token,
             user,
@@ -32,6 +38,7 @@ impl SessionState {
 
     pub fn clear(&self) {
         let mut guard = self.inner.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::AcqRel);
         *guard = None;
     }
 
@@ -46,6 +53,45 @@ impl SessionState {
 
     pub fn get(&self) -> Option<SessionInfo> {
         self.inner.lock().unwrap().clone()
+    }
+
+    /// Run an owner-authorized operation while retaining the live session guard.
+    /// Callers see only the local user id; password and session token stay private.
+    pub(crate) fn with_owner<T>(
+        &self,
+        operation: impl FnOnce(Option<&str>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self.inner.lock().map_err(|_| "Session lock unavailable")?;
+        operation(guard.as_ref().map(|session| session.user.user_id.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod session_generation_tests {
+    use super::*;
+    #[test]
+    fn owner_replacement_and_logout_invalidate_queued_operations_but_rename_does_not() {
+        let session = SessionState::default();
+        let initial = session.generation();
+        let user = User {
+            user_id: "alice".into(),
+            name: "alice".into(),
+            display_name: "Alice".into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        session.set("token".into(), user.clone(), "pw".into());
+        let signed_in = session.generation();
+        assert_ne!(initial, signed_in);
+        session.set_display_name("Renamed".into());
+        assert_eq!(signed_in, session.generation());
+        session.clear();
+        assert_ne!(signed_in, session.generation());
+        let signed_out = session.generation();
+        session.set("new token".into(), user, "pw".into());
+        assert_ne!(signed_out, session.generation());
     }
 }
 

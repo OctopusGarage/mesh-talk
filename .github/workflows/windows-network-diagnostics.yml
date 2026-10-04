@@ -1,0 +1,132 @@
+name: Windows network console diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/windows-network-diagnostics.yml
+      - scripts/diagnostics/network-console*.mjs
+      - scripts/diagnostics/windows-console-observer.ps1
+      - scripts/diagnostics/console-fixture.rs
+      - src-tauri/src/chat_commands.rs
+      - src-tauri/src/main.rs
+      - src-tauri/build.rs
+      - src-tauri/windows.manifest
+      - frontend/src/features/chat/Sidebar.tsx
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set runner-local diagnostic directories
+        shell: pwsh
+        run: |
+          "NATIVE_NETWORK_ARTIFACT_DIR=$(Join-Path $env:RUNNER_TEMP 'network-console-artifacts')" >> $env:GITHUB_ENV
+          "NATIVE_CONSOLE_CONTROL_DIR=$(Join-Path $env:RUNNER_TEMP 'console-controls')" >> $env:GITHUB_ENV
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-window-diagnostics
+          cache-on-failure: true
+      - name: Validate diagnostic classifiers and native fixture formatting
+        run: |
+          node --test scripts/diagnostics/network-console-report.test.mjs
+          rustfmt --edition 2021 --check scripts/diagnostics/console-fixture.rs
+      - name: Install driver matching the actual WebView2 runtime
+        shell: pwsh
+        run: |
+          $runtimeRoot = "${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application"
+          $runtime = Get-ChildItem -LiteralPath $runtimeRoot -Filter msedgewebview2.exe -Recurse |
+            Sort-Object { [version]$_.VersionInfo.ProductVersion } -Descending |
+            Select-Object -First 1
+          if (-not $runtime) { throw 'WebView2 runtime not found' }
+          $version = $runtime.VersionInfo.ProductVersion
+          "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=$($runtime.DirectoryName)" >> $env:GITHUB_ENV
+          $destination = Join-Path $env:RUNNER_TEMP 'edge-driver'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          $archive = Join-Path $destination 'driver.zip'
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile $archive
+          Expand-Archive $archive -DestinationPath $destination
+          $destination >> $env:GITHUB_PATH
+          Write-Output "WebView2 runtime version: $version"
+      - name: Install native Tauri driver
+        run: cargo install tauri-driver --version 2.0.6 --locked
+      - name: Build production frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Build observer controls
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path $env:NATIVE_CONSOLE_CONTROL_DIR -Force | Out-Null
+          rustc --edition 2021 --check-cfg 'cfg(console_child)' --cfg console_child -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-child.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Console child fixture build failed' }
+          rustc --edition 2021 --check-cfg 'cfg(console_child)' -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-launcher.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'GUI parent fixture build failed' }
+      - name: Verify baseline and fixed production application on the same native runner
+        shell: pwsh
+        run: |
+          $source = 'src-tauri/src/chat_commands.rs'
+          $original = [System.IO.File]::ReadAllBytes((Resolve-Path $source))
+          $text = [System.Text.Encoding]::UTF8.GetString($original)
+          $needle = 'const CREATE_NO_WINDOW: u32 = 0x0800_0000;'
+          if ([regex]::Matches($text, [regex]::Escape($needle)).Count -ne 1) { throw 'Expected unique production flag declaration' }
+          $artifactRoot = $env:NATIVE_NETWORK_ARTIFACT_DIR
+          try {
+            foreach ($variant in @('baseline', 'fixed')) {
+              if ($variant -eq 'baseline') {
+                [System.IO.File]::WriteAllText((Resolve-Path $source), $text.Replace($needle, 'const CREATE_NO_WINDOW: u32 = 0x0000_0000;'), [System.Text.UTF8Encoding]::new($false))
+                $env:NATIVE_NETWORK_EXPECTED = 'observed'
+              } else {
+                [System.IO.File]::WriteAllBytes((Resolve-Path $source), $original)
+                $env:NATIVE_NETWORK_EXPECTED = 'hidden'
+              }
+              # Rebuild the application package, retaining cached dependencies.
+              cargo clean --release -p mesh-talk
+              if ($LASTEXITCODE -ne 0) { throw 'Application clean failed' }
+              cargo build --locked --release -p mesh-talk --bin mesh-talk
+              if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+              $env:NATIVE_NETWORK_ARTIFACT_DIR = Join-Path $artifactRoot $variant
+              node scripts/diagnostics/network-console.mjs target/release/mesh-talk.exe
+              if ($LASTEXITCODE -ne 0) { throw "$variant native verification failed" }
+            }
+          } finally {
+            [System.IO.File]::WriteAllBytes((Resolve-Path $source), $original)
+            $env:NATIVE_NETWORK_ARTIFACT_DIR = $artifactRoot
+          }
+      - name: Publish observation without claiming whole-screen flicker reproduction
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($variant in @('baseline', 'fixed')) {
+            $reportPath = Join-Path $env:NATIVE_NETWORK_ARTIFACT_DIR "$variant/report.json"
+            if (-not (Test-Path -LiteralPath $reportPath)) { continue }
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            "## Issue #138 native Windows: $variant" >> $env:GITHUB_STEP_SUMMARY
+            if ($report.analysis) {
+              $report.analysis | ConvertTo-Json | Out-String >> $env:GITHUB_STEP_SUMMARY
+            } else {
+              'Environment/harness failure; not accepted as reproduction evidence.' >> $env:GITHUB_STEP_SUMMARY
+            }
+          }
+      - name: Upload native desktop and process/window evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-network-console-${{ github.sha }}
+          path: ${{ env.NATIVE_NETWORK_ARTIFACT_DIR }}
+          retention-days: 7

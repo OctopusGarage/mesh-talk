@@ -1,10 +1,7 @@
 import type { Locator } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm } from "./helpers/session";
-import {
-  prepareForScreenshot,
-  snapshotName,
-} from "./helpers/visual-snapshot";
+import { prepareForScreenshot, snapshotName } from "./helpers/visual-snapshot";
 import {
   expectDialogFitsViewport,
   expectMinTargetSize,
@@ -77,9 +74,10 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
       surface: "settings-dialog",
       hasDialogClose: true,
       ready: async () => {
-        await expect(
-          page.getByTestId("settings-dialog"),
-        ).toContainText("/home/tester/Downloads");
+        await expect(page.getByTestId("invisible-switch")).toBeEnabled();
+        await expect(page.getByTestId("settings-dialog")).toContainText(
+          "/home/tester/Downloads",
+        );
       },
     },
     {

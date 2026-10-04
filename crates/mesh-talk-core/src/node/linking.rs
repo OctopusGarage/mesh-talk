@@ -7,7 +7,6 @@ use crate::identity::account::Account;
 use crate::identity::device::PublicIdentity;
 use crate::node::pairing::PendingLink;
 use crate::node::session::SessionError;
-use crate::node::transport::dial;
 use crate::transport::SecureChannel;
 use tokio::net::TcpStream;
 
@@ -54,7 +53,11 @@ impl Node {
     ) -> Result<LinkedAccount, NodeError> {
         let code = PairingCode::from_hex(code_hex)
             .ok_or_else(|| NodeError::Channel("invalid pairing code".into()))?;
-        let mut channel = dial(addr, &self.identity, Some(peer_public))
+        self.initiate_device(peer_public)
+            .await
+            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
+        let mut channel = self
+            .privacy_dial(addr, peer_public)
             .await
             .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
         let tag = code.authenticator(
@@ -124,13 +127,19 @@ impl Node {
         req: PairingRequest,
     ) {
         // Bind the proof to the Noise-authenticated peer.
-        if req.joiner.ed25519_pub != channel.peer_identity().ed25519_pub {
+        if req.joiner != *channel.peer_identity() {
             return;
         }
         let my_ed = self.identity.public().ed25519_pub;
         // Decide under the lock: reject if there's no pending code, it has expired, or the
         // proof is wrong (counting the attempt and burning the code after too many).
         {
+            let _operation = self.privacy.gate.read().await;
+            if !channel.io_admitted()
+                || !self.account_allowed(channel.peer_identity(), channel.peer_announcement())
+            {
+                return;
+            }
             let mut guard = self.pending_link.lock().expect("pending_link mutex");
             let Some(pl) = guard.as_mut() else {
                 return;
@@ -156,10 +165,16 @@ impl Node {
         if channel.send(&resp.encode()).await.is_err() {
             return;
         }
-        self.stop_linking(); // single-use
-                             // Backfill: stream our account history so the new device starts populated,
-                             // then an empty frame as terminator. Best-effort — failures just mean the
-                             // joiner backfills nothing.
+        {
+            let _operation = self.privacy.gate.read().await;
+            if !channel.io_admitted() {
+                return;
+            }
+            self.stop_linking(); // single-use
+        }
+        // Backfill: stream our account history so the new device starts populated,
+        // then an empty frame as terminator. Best-effort — failures just mean the
+        // joiner backfills nothing.
         for rec in self.export_account_backfill() {
             if channel.send(&rec.encode()).await.is_err() {
                 return;

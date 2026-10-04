@@ -937,8 +937,13 @@ fn current_ssid() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn current_ssid() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    // Piped output alone does not suppress a console in a Windows GUI process.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = std::process::Command::new("netsh")
         .args(["wlan", "show", "interfaces"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -992,11 +997,11 @@ pub async fn capture_screen(
     app: tauri::AppHandle,
     hide_window: bool,
 ) -> Result<Vec<u8>, CommandError> {
-    let window = app.get_webview_window("main");
+    let window = app.get_webview_window("main").map(|w| w.as_ref().window());
 
     if hide_window {
         if let Some(w) = &window {
-            let _ = w.hide();
+            let _ = crate::window_visibility::hide(w);
         }
         // Give the compositor a moment to actually remove the window from the screen before
         // we capture, otherwise it can still be in the shot.
@@ -1007,7 +1012,7 @@ pub async fn capture_screen(
 
     if hide_window {
         if let Some(w) = &window {
-            let _ = w.show();
+            let _ = crate::window_visibility::show(w);
             let _ = w.set_focus();
         }
     }
@@ -1360,6 +1365,7 @@ pub async fn clear_conversation(
 #[derive(Serialize)]
 pub struct SearchHitInfo {
     pub is_channel: bool,
+    pub account_id: Option<String>,
     pub target: String,
     pub label: String,
     pub from_me: bool,
@@ -1388,6 +1394,7 @@ pub async fn search(
         .into_iter()
         .map(|h| SearchHitInfo {
             is_channel: h.is_channel,
+            account_id: h.account_id,
             target: h.target,
             label: h.label,
             from_me: h.from_me,

@@ -86,10 +86,8 @@ impl Node {
     /// know so any contact can render it.
     fn profile_fanout_targets(&self) -> Vec<PeerRecord> {
         let me = self.identity.public().user_id();
-        let roster = self.roster.lock().expect("roster mutex not poisoned");
         let mut seen = std::collections::HashSet::new();
-        roster
-            .peers()
+        self.routing_peers()
             .into_iter()
             .filter(|p| !p.post_office) // a post office relays, it doesn't render avatars
             .filter(|p| p.public.user_id() != me)
@@ -102,6 +100,9 @@ impl Node {
     /// (direct, then post office). Best-effort: transport failures are swallowed (the
     /// event is durably logged and syncs later).
     async fn deliver_profile(&self, peer: &PeerRecord, wire: &[u8]) {
+        if !self.known_account_allowed(&peer.public) {
+            return;
+        }
         let conv = dm_conversation_id(&self.identity.public(), &peer.public);
         let sealed = match crate::dm::seal(&self.identity, &peer.public.x25519_pub, wire) {
             Ok(s) => s,
@@ -143,8 +144,7 @@ impl Node {
             // bind the profile's claimed account — a device can't forge another account's
             // avatar). Unknown author → retry later (NOT marked emitted).
             let (sender_x25519, peer_account) = {
-                let roster = self.roster.lock().expect("roster mutex not poisoned");
-                match roster.get(&author_uid) {
+                match self.routing_peer(&author_uid) {
                     Some(p) => (p.public.x25519_pub, p.account_id.clone()),
                     None => continue,
                 }

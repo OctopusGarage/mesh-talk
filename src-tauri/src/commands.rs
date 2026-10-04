@@ -538,7 +538,7 @@ pub(crate) fn spawn_node_runtime(
             &account_id,
             &display_name,
             &password,
-            mesh_talk_core::node::DEFAULT_DISCOVERY_PORT,
+            crate::configured_discovery_port(),
             move |dm| {
                 crate::events::emit_dm_received(
                     &app_handle_for_dm,

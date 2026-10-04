@@ -273,6 +273,7 @@ impl Node {
                 hits.push(SearchHit {
                     is_channel: false,
                     target: peer.public.user_id(),
+                    account_id: peer.account_id.clone(),
                     label: peer.name.clone(),
                     from_me: m.from_me,
                     who: m.who,
@@ -297,6 +298,7 @@ impl Node {
                 hits.push(SearchHit {
                     is_channel: false,
                     target: acct.clone(),
+                    account_id: Some(acct.clone()),
                     label: peer.name.clone(),
                     from_me: m.from_me,
                     who: m.who,
@@ -309,6 +311,7 @@ impl Node {
             for m in self.scan_conversation(ch.id, &q, PER_CONV, false) {
                 hits.push(SearchHit {
                     is_channel: true,
+                    account_id: None,
                     target: hex::encode(ch.id.as_bytes()),
                     label: ch.name.clone(),
                     from_me: m.from_me,

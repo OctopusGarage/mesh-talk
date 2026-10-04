@@ -16,6 +16,8 @@ import { fadeSlideUp, listStagger, useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
 import { displayName, useChat } from "@/store/chat";
 import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
+import { useContactPolicy } from "@/store/contactPolicy";
+import { visiblePeers } from "@/lib/contactVisibility";
 
 // We are always reachable to ourselves, and we never appear in our own discovery roster
 // (so no peer/presence entry exists for us) — show the self member as online.
@@ -27,6 +29,8 @@ export function MembersDialog() {
   const members = useChat((s) => s.members);
   const channelOwner = useChat((s) => s.channelOwner);
   const peers = useChat((s) => s.peers);
+  const hiddenContacts = useContactPolicy((s) => s.contacts);
+  const policyLoaded = useContactPolicy((s) => s.loaded);
   const favorites = useChat((s) => s.favorites);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
@@ -42,7 +46,11 @@ export function MembersDialog() {
     presenceStatus((accountId ? presenceMap[accountId] : undefined) ?? OFFLINE);
 
   const memberIds = new Set(members.map((m) => m.user_id));
-  const addable = peers.filter((p) => !memberIds.has(p.user_id));
+  const addable = policyLoaded
+    ? visiblePeers(peers, hiddenContacts).filter(
+        (p) => !memberIds.has(p.user_id),
+      )
+    : [];
   // Only the channel owner may change membership — the core enforces this (a non-owner's
   // add/remove is rejected by every node), so a non-owner only ever sees a read-only list.
   const isOwner = channelOwner !== "" && channelOwner === myId;

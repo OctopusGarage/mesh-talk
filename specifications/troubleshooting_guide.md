@@ -255,6 +255,44 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
    - Install the application using the .deb package for better integration
    - Or manually create a desktop entry
 
+#### Blank or white window on Linux
+
+WebKitGTK graphics-driver incompatibilities can leave a visible window blank even
+when the frontend is running. This is a possible cause of #133 (VMware/Xorg), not a
+confirmed diagnosis. Hosted Actions use Xvfb/software rendering, not VMware's GPU.
+
+Fully quit Mesh-Talk first, including its tray instance; closing the window normally
+only hides it. Then try the opt-in compatibility mode on a build containing this flag:
+
+```bash
+env -u WEBKIT_DISABLE_DMABUF_RENDERER mesh-talk --linux-renderer-compat
+# AppImage: use your actual downloaded filename.
+env -u WEBKIT_DISABLE_DMABUF_RENDERER ./mesh-talk.AppImage --linux-renderer-compat
+```
+
+The Linux-only flag sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` **before** WebKit starts,
+only when that variable is absent. Explicit values (including `0` or an empty value)
+take precedence. It does not change `GDK_BACKEND`, disable all accelerated compositing,
+or persist settings. No flag means unchanged default rendering; restarting normally
+without the environment override restores the default. A second launch cannot change
+the renderer of an existing instance. Autostart does not automatically inherit the flag.
+
+For older releases without the flag, the equivalent test is:
+
+```bash
+WEBKIT_DISABLE_DMABUF_RENDERER=1 mesh-talk
+```
+
+This workaround can reduce rendering performance and is not guaranteed to resolve every
+blank window. Do not disable accelerated compositing globally. See the
+[official Tauri graphics troubleshooting guidance](https://v2.tauri.app/develop/debug/linux-graphics/).
+New builds log allowlisted classifications of the session/backend and the two WebKit
+overrides under `~/.mesh-talk/logs/`; these are configuration hints, not GPU detection or
+proof of the selected display backend. Unknown values are recorded as `custom`, not raw text.
+When reporting persistent problems, include the app/WebKitGTK versions, Xorg versus Wayland,
+VMware version and 3D setting, and whether this mode changes the result. Account/chat data is
+not needed.
+
 ## Build and Installation Issues
 
 ### Rust Compilation Errors

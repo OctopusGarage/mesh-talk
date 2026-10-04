@@ -22,13 +22,13 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             MENU_QUIT => app.exit(0),
             MENU_HIDE => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
+                if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
+                    let _ = crate::window_visibility::hide(&window);
                 }
             }
             MENU_SHOW => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
+                if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
+                    let _ = crate::window_visibility::show(&window);
                     let _ = window.set_focus();
                 }
             }
@@ -55,13 +55,13 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
 
 /// Toggle the main window's visibility.
 fn toggle_window_visibility(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
         match window.is_visible() {
             Ok(true) => {
-                let _ = window.hide();
+                let _ = crate::window_visibility::hide(&window);
             }
             _ => {
-                let _ = window.show();
+                let _ = crate::window_visibility::show(&window);
                 let _ = window.set_focus();
             }
         }

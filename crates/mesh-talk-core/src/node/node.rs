@@ -77,6 +77,9 @@ pub struct ChannelSummary {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub is_channel: bool,
+    /// Verified account binding from the same roster snapshot as this hit.
+    /// UI filtering/navigation must not depend on a later, possibly evicted roster.
+    pub account_id: Option<String>,
     /// The peer user-id (DM) or channel id hex (channel) — the navigation target.
     pub target: String,
     /// The peer or channel display name.
@@ -166,6 +169,7 @@ type MyReactions = HashMap<(ConversationId, EventId, String), (u64, ReactionPayl
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
     // private to the `node` module (no wider exposure).
@@ -413,6 +417,7 @@ impl Node {
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
         Ok(Arc::new(Self {
+            privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
             account,
             profiles: Mutex::new(profiles),

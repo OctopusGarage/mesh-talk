@@ -89,6 +89,38 @@ jobs:
         working-directory: src-tauri
         run: cargo test --workspace
 
+      # Capture loader evidence when Windows cannot even start the test harness.
+      # This diagnostic never turns a failed test step into a successful check.
+      - name: Diagnose Windows test loader
+        if: failure() && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $test = $null
+          foreach ($candidate in Get-ChildItem target/debug/deps/mesh_talk-*.exe) {
+            Write-Host "Checking test harness: $($candidate.Name)"
+            & $candidate.FullName --list
+            Write-Host "Harness exit code: $LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) { $test = $candidate; break }
+          }
+          if (-not $test) { throw 'No application test executable found' }
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $dumpbin.FullName /imports $test.FullName | Select-String 'COMCTL32|TaskDialogIndirect' -Context 2,2
+          $mt = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/mt.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $mt.FullName "-inputresource:$($test.FullName);#1" "-out:$env:RUNNER_TEMP/test-original.manifest"
+          if (Test-Path "$env:RUNNER_TEMP/test-original.manifest") { Get-Content "$env:RUNNER_TEMP/test-original.manifest" }
+          $copy = Join-Path $test.DirectoryName 'mesh-talk-loader-diagnostic.exe'
+          Copy-Item $test.FullName $copy
+          $manifest = Join-Path $env:RUNNER_TEMP 'common-controls.manifest'
+          '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" /></dependentAssembly></dependency></assembly>' | Set-Content $manifest -Encoding utf8
+          & $mt.FullName -manifest $manifest "-outputresource:$copy;#1"
+          if ($LASTEXITCODE -ne 0) { throw 'Manifest embedding failed' }
+          & $copy --list
+          if ($LASTEXITCODE -ne 0) { throw 'Test harness still cannot load with Common Controls v6' }
+          & $copy contact_policy::tests --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Native contact policy tests failed' }
+
       # On Linux, run the tests through llvm-cov so we get coverage in the same
       # pass (avoids compiling/running the suite twice).
       - name: Install cargo-llvm-cov

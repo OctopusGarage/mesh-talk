@@ -18,10 +18,8 @@ impl Node {
     ) -> Vec<PeerRecord> {
         let my_account = self.account.account_id();
         let me = self.identity.public().user_id();
-        let roster = self.roster.lock().expect("roster mutex not poisoned");
         let mut seen = std::collections::HashSet::new();
-        roster
-            .peers()
+        self.routing_peers()
             .into_iter()
             .filter(|p| {
                 let a = p.account_id.as_deref();
@@ -50,13 +48,12 @@ impl Node {
         reply_to: Option<EventId>,
     ) -> Result<(), NodeError> {
         let peer = self
-            .roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .get(recipient)
-            .cloned()
+            .routing_peer(recipient)
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
 
+        self.initiate_device(&peer.public)
+            .await
+            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
         let wrapped = MessageBody::new(text.to_vec(), reply_to).encode();
         let conv = dm_conversation_id(&self.identity.public(), &peer.public);
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
@@ -179,6 +176,9 @@ impl Node {
         {
             return Err(NodeError::UnknownPeer(target_account_id.to_string()));
         }
+        self.initiate_contact(target_account_id)
+            .await
+            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
 
         // Record one plaintext copy for our own account history (the from_me side).
         let conv_account = account_conversation_id(&my_account, target_account_id);

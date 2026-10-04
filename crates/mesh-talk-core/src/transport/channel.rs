@@ -4,28 +4,51 @@
 //! Noise blob. The same framing carries handshake messages, the encrypted auth
 //! exchange, and application messages.
 
+use crate::discovery::Announce;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
-use crate::transport::auth::{build_auth, verify_auth, AuthMessage};
+#[cfg(test)]
+use crate::transport::auth::build_auth;
 use crate::transport::handshake::{Handshake, HandshakeOutput};
+use crate::transport::presence_auth;
 use crate::transport::session::Session;
-use crate::transport::{TransportError, MAX_FRAME};
+use crate::transport::{TransportError, VerifiedPeer, MAX_FRAME};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// An established, authenticated, encrypted channel to one peer.
 pub struct SecureChannel<S> {
     stream: S,
     session: Session,
-    peer: PublicIdentity,
+    peer: VerifiedPeer,
+    io_admission: Option<IoAdmission>,
+}
+
+#[derive(Clone)]
+struct IoAdmission {
+    gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+    check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     /// Dial: perform the XX handshake as initiator, then authenticate.
     /// If `expected_peer` is set, the authenticated identity must match it.
     pub async fn connect(
-        mut stream: S,
+        stream: S,
         identity: &DeviceIdentity,
         expected_peer: Option<&PublicIdentity>,
     ) -> Result<Self, TransportError> {
+        Self::connect_with_presence(stream, identity, expected_peer, None).await
+    }
+
+    /// Dial with an optional device-signed account announcement bound to this
+    /// Noise session. Without a presence proof the emitted auth bytes are legacy.
+    /// Supplied own proofs are validated before any handshake traffic is sent.
+    pub async fn connect_with_presence(
+        mut stream: S,
+        identity: &DeviceIdentity,
+        expected_peer: Option<&PublicIdentity>,
+        presence: Option<&Announce>,
+    ) -> Result<Self, TransportError> {
+        presence_auth::validate_own(identity, presence)?;
         let x_secret = identity.secret_bytes().1;
         let mut hs = Handshake::initiator(&x_secret)?;
 
@@ -34,16 +57,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         write_frame(&mut stream, &m1).await?;
         let m2 = read_frame(&mut stream).await?;
         hs.read_message(&m2)?;
+        // Pin the Noise-authenticated static key before disclosing our static
+        // key or Ed25519 auth to an endpoint reached through a stale/spoofed
+        // discovery address. The full identity is still checked below.
+        if let Some(expected) = expected_peer {
+            if hs.remote_static()? != expected.x25519_pub {
+                return Err(TransportError::UnexpectedPeer);
+            }
+        }
         let m3 = hs.write_message()?;
         write_frame(&mut stream, &m3).await?;
 
         let out = hs.into_session()?;
         // Initiator authenticates first, then reads the peer's auth.
-        let (session, peer) =
-            auth_exchange(&mut stream, identity, out, AuthOrder::SendFirst).await?;
+        let (session, peer) = auth_exchange(
+            &mut stream,
+            identity,
+            presence,
+            out,
+            AuthOrder::SendFirst,
+            |_| true,
+        )
+        .await?;
 
         if let Some(expected) = expected_peer {
-            if expected != &peer {
+            if expected != peer.public_identity() {
                 return Err(TransportError::UnexpectedPeer);
             }
         }
@@ -51,6 +89,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             stream,
             session,
             peer,
+            io_admission: None,
         })
     }
 
@@ -60,7 +99,46 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     /// authenticates successfully — the responder does not know the caller in
     /// advance. Callers that care which peer connected must inspect
     /// [`peer_identity`](Self::peer_identity) after this returns.
-    pub async fn accept(mut stream: S, identity: &DeviceIdentity) -> Result<Self, TransportError> {
+    pub async fn accept(stream: S, identity: &DeviceIdentity) -> Result<Self, TransportError> {
+        Self::accept_with_admission(stream, identity, |_| true).await
+    }
+
+    /// Authenticate the caller, then consult `admit` before sending our own
+    /// identity auth or returning an application channel. The predicate sees
+    /// only a cryptographically verified device identity, not an account ID;
+    /// the host must bind it to a verified device-signed announcement matching
+    /// this exact identity, not an account certificate alone.
+    ///
+    /// Denial closes the stream. Noise XX still exposes the responder's static
+    /// X25519 key during the handshake: this is not network anonymity. The
+    /// predicate is a connection gate, not revocation or event-author filtering;
+    /// hosts must enforce their policy on subsequent application traffic too.
+    pub async fn accept_with_admission<F>(
+        stream: S,
+        identity: &DeviceIdentity,
+        admit: F,
+    ) -> Result<Self, TransportError>
+    where
+        F: FnOnce(&PublicIdentity) -> bool,
+    {
+        Self::accept_with_presence(stream, identity, None, |peer| admit(peer.public_identity()))
+            .await
+    }
+
+    /// Authenticate the caller's device and optional signed account proof before
+    /// consulting admission and sending our own identity/presence auth.
+    /// Noise XX still exposes the responder's static key; this is not anonymity.
+    /// Hosts must enforce revocation and author admission on application traffic.
+    pub async fn accept_with_presence<F>(
+        mut stream: S,
+        identity: &DeviceIdentity,
+        presence: Option<&Announce>,
+        admit: F,
+    ) -> Result<Self, TransportError>
+    where
+        F: FnOnce(&VerifiedPeer) -> bool,
+    {
+        presence_auth::validate_own(identity, presence)?;
         let x_secret = identity.secret_bytes().1;
         let mut hs = Handshake::responder(&x_secret)?;
 
@@ -73,30 +151,77 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
 
         let out = hs.into_session()?;
         // Responder reads the peer's auth first, then sends its own.
-        let (session, peer) =
-            auth_exchange(&mut stream, identity, out, AuthOrder::ReceiveFirst).await?;
+        let (session, peer) = auth_exchange(
+            &mut stream,
+            identity,
+            presence,
+            out,
+            AuthOrder::ReceiveFirst,
+            admit,
+        )
+        .await?;
 
         Ok(Self {
             stream,
             session,
             peer,
+            io_admission: None,
         })
     }
 
     /// The cryptographically authenticated identity of the peer.
     pub fn peer_identity(&self) -> &PublicIdentity {
-        &self.peer
+        self.peer.public_identity()
+    }
+
+    /// Session-verified account announcement, when the peer supplied one.
+    /// The announcement contains no observed IP address or endpoint freshness.
+    pub fn peer_announcement(&self) -> Option<&Announce> {
+        self.peer.announcement()
+    }
+
+    /// Install a host policy gate. Sends hold the shared read gate across the
+    /// bounded frame write; reads recheck admission after awaiting peer traffic.
+    /// Hosts may capture a policy generation to invalidate old prepared frames.
+    pub fn set_io_admission(
+        &mut self,
+        gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+        check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
+        self.io_admission = Some(IoAdmission { gate, check });
+    }
+    /// Recheck a host-installed admission predicate after an external await.
+    pub fn io_admitted(&self) -> bool {
+        self.io_admission.as_ref().is_none_or(|a| (a.check)())
     }
 
     /// Encrypt and send one application message.
     pub async fn send(&mut self, plaintext: &[u8]) -> Result<(), TransportError> {
+        if let Some(admission) = self.io_admission.clone() {
+            return tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let _guard = admission.gate.read().await;
+                if !(admission.check)() {
+                    return Err(TransportError::AdmissionDenied);
+                }
+                let ct = self.session.encrypt(plaintext)?;
+                write_frame(&mut self.stream, &ct).await
+            })
+            .await
+            .map_err(|_| TransportError::Noise("policy-gated send timed out".into()))?;
+        }
         let ct = self.session.encrypt(plaintext)?;
         write_frame(&mut self.stream, &ct).await
     }
 
     /// Receive and decrypt one application message.
     pub async fn recv(&mut self) -> Result<Vec<u8>, TransportError> {
+        if self.io_admission.as_ref().is_some_and(|a| !(a.check)()) {
+            return Err(TransportError::AdmissionDenied);
+        }
         let ct = read_frame(&mut self.stream).await?;
+        if self.io_admission.as_ref().is_some_and(|a| !(a.check)()) {
+            return Err(TransportError::AdmissionDenied);
+        }
         self.session.decrypt(&ct)
     }
 }
@@ -117,21 +242,26 @@ fn encrypt_auth(
     session: &mut Session,
     identity: &DeviceIdentity,
     handshake_hash: &[u8; 32],
+    presence: Option<&Announce>,
 ) -> Result<Vec<u8>, TransportError> {
-    let auth = build_auth(identity, handshake_hash);
-    let bytes =
-        bincode::serialize(&auth).map_err(|e| TransportError::Serialization(e.to_string()))?;
+    let bytes = presence_auth::build(identity, handshake_hash, presence)?;
     session.encrypt(&bytes)
 }
 
 /// Exchange and verify identity-auth messages over the freshly-established
 /// session. Returns the session and the verified peer identity.
-async fn auth_exchange<S: AsyncRead + AsyncWrite + Unpin>(
+async fn auth_exchange<S, F>(
     stream: &mut S,
     identity: &DeviceIdentity,
+    presence: Option<&Announce>,
     out: HandshakeOutput,
     order: AuthOrder,
-) -> Result<(Session, PublicIdentity), TransportError> {
+    admit: F,
+) -> Result<(Session, VerifiedPeer), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(&VerifiedPeer) -> bool,
+{
     let HandshakeOutput {
         mut session,
         remote_static,
@@ -140,7 +270,7 @@ async fn auth_exchange<S: AsyncRead + AsyncWrite + Unpin>(
 
     let peer = match order {
         AuthOrder::SendFirst => {
-            let ct = encrypt_auth(&mut session, identity, &handshake_hash)?;
+            let ct = encrypt_auth(&mut session, identity, &handshake_hash, presence)?;
             write_frame(stream, &ct).await?;
             let peer_ct = read_frame(stream).await?;
             verify_peer(&mut session, &peer_ct, &handshake_hash, &remote_static)?
@@ -148,7 +278,10 @@ async fn auth_exchange<S: AsyncRead + AsyncWrite + Unpin>(
         AuthOrder::ReceiveFirst => {
             let peer_ct = read_frame(stream).await?;
             let peer = verify_peer(&mut session, &peer_ct, &handshake_hash, &remote_static)?;
-            let ct = encrypt_auth(&mut session, identity, &handshake_hash)?;
+            if !admit(&peer) {
+                return Err(TransportError::AdmissionDenied);
+            }
+            let ct = encrypt_auth(&mut session, identity, &handshake_hash, presence)?;
             write_frame(stream, &ct).await?;
             peer
         }
@@ -161,11 +294,9 @@ fn verify_peer(
     peer_ct: &[u8],
     handshake_hash: &[u8; 32],
     remote_static: &[u8; 32],
-) -> Result<PublicIdentity, TransportError> {
+) -> Result<VerifiedPeer, TransportError> {
     let bytes = session.decrypt(peer_ct)?;
-    let auth: AuthMessage =
-        bincode::deserialize(&bytes).map_err(|e| TransportError::Serialization(e.to_string()))?;
-    verify_auth(&auth, handshake_hash, remote_static)
+    presence_auth::verify(&bytes, handshake_hash, remote_static)
 }
 
 /// Write a length-prefixed frame (4-byte big-endian length + blob) and flush.
@@ -192,6 +323,14 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8
     r.read_exact(&mut buf).await?;
     Ok(buf)
 }
+
+#[cfg(test)]
+#[path = "admission_tests.rs"]
+mod admission_tests;
+
+#[cfg(test)]
+#[path = "presence_tests.rs"]
+mod presence_tests;
 
 #[cfg(test)]
 mod tests {
@@ -242,6 +381,54 @@ mod tests {
         let result = SecureChannel::connect(client_io, &a, Some(&wrong)).await;
         assert!(matches!(result, Err(TransportError::UnexpectedPeer)));
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn unexpected_peer_never_receives_our_authenticated_identity() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let caller = DeviceIdentity::generate();
+        let responder = DeviceIdentity::generate();
+        let expected = DeviceIdentity::generate().public();
+        let server =
+            tokio::spawn(async move { SecureChannel::accept(server_io, &responder).await.is_ok() });
+        let _ = SecureChannel::connect(client_io, &caller, Some(&expected)).await;
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .expect("server terminates")
+                .unwrap(),
+            "an unexpected peer must not obtain the caller's authenticated identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_peer_gets_no_responder_identity_or_channel() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let caller = DeviceIdentity::generate();
+        let caller_public = caller.public();
+        let responder = DeviceIdentity::generate();
+        let responder_public = responder.public();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let server = tokio::spawn(async move {
+            SecureChannel::accept_with_admission(server_io, &responder, |peer| {
+                assert_eq!(peer, &caller_public);
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                false
+            })
+            .await
+            .is_ok()
+        });
+        let client = SecureChannel::connect(client_io, &caller, Some(&responder_public)).await;
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .expect("denied server terminates")
+                .unwrap(),
+            "denied peer must not receive a channel"
+        );
+        assert!(matches!(client, Err(TransportError::Io(_))));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

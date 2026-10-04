@@ -5,8 +5,11 @@
 //! handshake can't wedge the loop). Both return a [`SecureChannel`] keyed by the
 //! cryptographically-verified peer.
 
-use crate::identity::device::{DeviceIdentity, PublicIdentity};
+use crate::identity::device::DeviceIdentity;
+#[cfg(test)]
+use crate::identity::device::PublicIdentity;
 use crate::transport::{SecureChannel, TransportError};
+#[cfg(test)]
 use std::net::SocketAddr;
 use std::time::Duration;
 #[cfg(test)]
@@ -22,6 +25,7 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Dial `addr`, perform the Noise XX handshake + identity auth as the initiator.
 /// If `expected_peer` is `Some`, the authenticated identity must match it
 /// (`TransportError::UnexpectedPeer` otherwise).
+#[cfg(test)]
 pub async fn dial(
     addr: SocketAddr,
     identity: &DeviceIdentity,

@@ -4,6 +4,7 @@
 
 use crate::discovery::announce::{decode, encode, Announce};
 use crate::discovery::roster::{Roster, UpdateOutcome};
+use crate::discovery::DiscoveryVisibility;
 use crate::transport::net::{ipv4_interface_addrs, join_discovery_group_all_ifaces};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -77,6 +78,25 @@ pub async fn run_listen(
     self_announce: SharedAnnounce,
     discovery_port: u16,
 ) {
+    run_listen_with_visibility(
+        socket,
+        roster,
+        self_user_id,
+        self_announce,
+        discovery_port,
+        Arc::new(DiscoveryVisibility::default()),
+    )
+    .await;
+}
+
+async fn run_listen_with_visibility(
+    socket: Arc<UdpSocket>,
+    roster: Arc<Mutex<Roster>>,
+    self_user_id: String,
+    self_announce: SharedAnnounce,
+    discovery_port: u16,
+    visibility: Arc<DiscoveryVisibility>,
+) {
     let mut buf = vec![0u8; 2048];
     loop {
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
@@ -87,7 +107,9 @@ pub async fn run_listen(
                     // discovery port so the link is recorded symmetrically.
                     let reply_target = SocketAddr::new(source.ip(), discovery_port);
                     let bytes = current_announce(&self_announce);
-                    let _ = socket.send_to(&bytes, reply_target).await;
+                    let _ = visibility
+                        .send_announce(&socket, &bytes, reply_target)
+                        .await;
                 }
             }
             Ok(Err(_)) => break, // socket error — end the loop (shutdown)
@@ -126,11 +148,30 @@ pub async fn run_broadcast(
     interval: Duration,
     trigger: Option<Arc<Notify>>,
 ) {
+    run_broadcast_with_visibility(
+        socket,
+        announce,
+        target,
+        interval,
+        trigger,
+        Arc::new(DiscoveryVisibility::default()),
+    )
+    .await;
+}
+
+async fn run_broadcast_with_visibility(
+    socket: Arc<UdpSocket>,
+    announce: SharedAnnounce,
+    target: SocketAddr,
+    interval: Duration,
+    trigger: Option<Arc<Notify>>,
+    visibility: Arc<DiscoveryVisibility>,
+) {
     // Startup burst: a few staggered announces to beat early UDP loss.
     for offset_ms in BROADCAST_STARTUP_BURST_MS {
         tokio::time::sleep(Duration::from_millis(offset_ms)).await;
         let bytes = current_announce(&announce);
-        let _ = socket.send_to(&bytes, target).await;
+        let _ = visibility.send_announce(&socket, &bytes, target).await;
     }
     let mut tick = tokio::time::interval(interval);
     tick.tick().await; // consume the immediate first tick (the burst just sent)
@@ -148,7 +189,7 @@ pub async fn run_broadcast(
         // Read the current announce each send so a runtime rename takes effect here.
         // Ignore send errors: the network may be transiently down. Retry next tick.
         let bytes = current_announce(&announce);
-        let _ = socket.send_to(&bytes, target).await;
+        let _ = visibility.send_announce(&socket, &bytes, target).await;
     }
 }
 
@@ -171,10 +212,27 @@ pub async fn run_scan(
     discovery_port: u16,
     trigger: Option<Arc<Notify>>,
 ) {
+    run_scan_with_visibility(
+        socket,
+        announce,
+        discovery_port,
+        trigger,
+        Arc::new(DiscoveryVisibility::default()),
+    )
+    .await;
+}
+
+async fn run_scan_with_visibility(
+    socket: Arc<UdpSocket>,
+    announce: SharedAnnounce,
+    discovery_port: u16,
+    trigger: Option<Arc<Notify>>,
+    visibility: Arc<DiscoveryVisibility>,
+) {
     for delay in SCAN_STARTUP_DELAYS_SECS {
         tokio::time::sleep(Duration::from_secs(delay)).await;
         let bytes = current_announce(&announce);
-        scan_once(&socket, &bytes, discovery_port).await;
+        scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility).await;
     }
     let mut tick = tokio::time::interval(SCAN_STEADY_INTERVAL);
     tick.tick().await; // consume the immediate first tick (we just scanned)
@@ -191,7 +249,7 @@ pub async fn run_scan(
         }
         // Re-read the current announce each sweep so a runtime rename takes effect.
         let bytes = current_announce(&announce);
-        scan_once(&socket, &bytes, discovery_port).await;
+        scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility).await;
     }
 }
 
@@ -208,14 +266,48 @@ fn scan_targets(own: Ipv4Addr) -> Vec<Ipv4Addr> {
 
 /// One sweep: enumerate interfaces fresh (they may change) and unicast `bytes` to
 /// every host in each /24 except our own address. Fire-and-forget; errors ignored.
+#[cfg(test)]
 async fn scan_once(socket: &UdpSocket, bytes: &[u8], discovery_port: u16) {
+    scan_once_with_visibility(
+        socket,
+        bytes,
+        discovery_port,
+        &DiscoveryVisibility::default(),
+    )
+    .await;
+}
+
+async fn scan_once_with_visibility(
+    socket: &UdpSocket,
+    bytes: &[u8],
+    discovery_port: u16,
+    visibility: &DiscoveryVisibility,
+) {
     for own in ipv4_interface_addrs() {
-        for target in scan_targets(own) {
-            let _ = socket
-                .send_to(bytes, SocketAddr::new(IpAddr::V4(target), discovery_port))
-                .await;
+        let targets = scan_targets(own)
+            .into_iter()
+            .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port));
+        if !scan_addresses(socket, bytes, targets, visibility).await {
+            return;
         }
     }
+}
+
+async fn scan_addresses(
+    socket: &UdpSocket,
+    bytes: &[u8],
+    targets: impl IntoIterator<Item = SocketAddr>,
+    visibility: &DiscoveryVisibility,
+) -> bool {
+    for target in targets {
+        if matches!(
+            visibility.send_announce(socket, bytes, target).await,
+            Ok(false)
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Periodic multicast re-join: every `REJOIN_INTERVAL`, re-enumerate interfaces and
@@ -269,35 +361,67 @@ pub fn spawn_discovery_with_trigger(
     discovery_port: u16,
     trigger: Option<Arc<Notify>>,
 ) -> Vec<JoinHandle<()>> {
+    spawn_discovery_with_visibility(
+        socket,
+        roster,
+        announce,
+        self_user_id,
+        discovery_port,
+        trigger,
+        Arc::new(DiscoveryVisibility::default()),
+    )
+}
+
+/// Spawn discovery with a shared disclosure gate. Private visibility suppresses
+/// all UDP identity advertisements, including replies and triggered scans, but
+/// retains passive discovery and multicast membership. This is NOT application
+/// admission: the host must enforce account/author permissions separately.
+/// Set the initial state before spawning to avoid a public startup burst.
+pub fn spawn_discovery_with_visibility(
+    socket: Arc<UdpSocket>,
+    roster: Arc<Mutex<Roster>>,
+    announce: SharedAnnounce,
+    self_user_id: String,
+    discovery_port: u16,
+    trigger: Option<Arc<Notify>>,
+    visibility: Arc<DiscoveryVisibility>,
+) -> Vec<JoinHandle<()>> {
     let target: SocketAddr = (
         crate::transport::net::DISCOVERY_MULTICAST_GROUP,
         discovery_port,
     )
         .into();
     vec![
-        tokio::spawn(run_listen(
+        tokio::spawn(run_listen_with_visibility(
             Arc::clone(&socket),
             roster,
             self_user_id,
             Arc::clone(&announce),
             discovery_port,
+            Arc::clone(&visibility),
         )),
-        tokio::spawn(run_broadcast(
+        tokio::spawn(run_broadcast_with_visibility(
             Arc::clone(&socket),
             Arc::clone(&announce),
             target,
             Duration::from_secs(2),
             trigger.clone(),
+            Arc::clone(&visibility),
         )),
-        tokio::spawn(run_scan(
+        tokio::spawn(run_scan_with_visibility(
             Arc::clone(&socket),
             announce,
             discovery_port,
             trigger,
+            visibility,
         )),
         tokio::spawn(run_rejoin(socket)),
     ]
 }
+
+#[cfg(test)]
+#[path = "privacy_tests.rs"]
+mod privacy_tests;
 
 #[cfg(test)]
 mod tests {

@@ -41,6 +41,8 @@ import { DiagnosticsDialog } from "./DiagnosticsDialog";
 import { WebRtcTestDialog } from "./WebRtcTestDialog";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { SettingsDialog } from "./SettingsDialog";
+import { ContactContextMenu } from "./HiddenContactsDialog";
+import { useContactPolicy } from "@/store/contactPolicy";
 import { ProfileDialog } from "./ProfileDialog";
 import { AboutDialog } from "./AboutDialog";
 import { useAuth } from "@/store/auth";
@@ -92,7 +94,7 @@ function Row({
   const presence = usePresenceFor(conv.id);
   const status = presenceStatus(presence);
 
-  return (
+  const row = (
     <div
       role="listitem"
       className={cn(
@@ -177,6 +179,13 @@ function Row({
         )}
       </button>
     </div>
+  );
+  return channel ? (
+    row
+  ) : (
+    <ContactContextMenu account={conv.id} name={conv.name}>
+      {row}
+    </ContactContextMenu>
   );
 }
 
@@ -342,7 +351,18 @@ function UtilityMenu() {
 
 export function Sidebar() {
   const { t } = useTranslation();
-  const accounts = useChat((s) => s.accounts);
+  const rawAccounts = useChat((s) => s.accounts);
+  const hiddenContacts = useContactPolicy((s) => s.contacts);
+  const policyLoaded = useContactPolicy((s) => s.loaded);
+  const policyError = useContactPolicy((s) => s.error);
+  const owner = useAuth((s) => s.user?.id);
+  const accounts = useMemo(
+    () =>
+      policyLoaded
+        ? rawAccounts.filter((a) => !hiddenContacts[a.account_id])
+        : [],
+    [rawAccounts, hiddenContacts, policyLoaded],
+  );
   const channels = useChat((s) => s.channels);
   const peers = useChat((s) => s.peers);
   const favorites = useChat((s) => s.favorites);
@@ -361,7 +381,7 @@ export function Sidebar() {
   // ignores roster entries that are merely lingering (seen, but past the online window) so the
   // number doesn't drift from what's actually online.
   const presenceMap = usePresence((s) => s.map);
-  const onlinePeople = useMemo(() => {
+  const networkPeople = useMemo(() => {
     const online = new Set<string>();
     for (const p of peers) {
       if (p.post_office) continue;
@@ -371,6 +391,21 @@ export function Sidebar() {
     }
     return online.size;
   }, [peers, presenceMap, myAccountId]);
+  const onlinePeople = useMemo(() => {
+    if (!policyLoaded) return 0;
+    const online = new Set<string>();
+    for (const p of peers) {
+      const account = p.account_id ?? p.user_id;
+      if (
+        !p.post_office &&
+        account !== myAccountId &&
+        !hiddenContacts[account] &&
+        presenceMap[account]?.online
+      )
+        online.add(account);
+    }
+    return online.size;
+  }, [peers, presenceMap, myAccountId, hiddenContacts, policyLoaded]);
   const bootFailed = useChat((s) => s.bootFailed);
   const retryBoot = useChat((s) => s.retryBoot);
   const username = useAuth((s) => s.user?.username ?? "");
@@ -425,7 +460,7 @@ export function Sidebar() {
     return () => clearTimeout(id);
   }, [ready]);
   const stranded =
-    ready && graceElapsed && onlinePeople === 0 && !strandedDismissed;
+    ready && graceElapsed && networkPeople === 0 && !strandedDismissed;
 
   // Roving keyboard navigation across the conversation rows. Arrow Up/Down moves focus
   // between the option buttons within the list (Enter/Space already open via the native
@@ -648,9 +683,32 @@ export function Sidebar() {
         )}
 
         <SectionLabel>{t("sidebar.directMessages")}</SectionLabel>
-        {accounts.length === 0 && (
+        {!policyLoaded && (
+          <div
+            className="px-2.5 py-2 text-xs text-muted-foreground"
+            role={policyError ? "alert" : "status"}
+          >
+            {t(policyError ? "contactVisibility.loadError" : "common.loading")}
+            {policyError && (
+              <button
+                type="button"
+                className="ml-2 underline"
+                onClick={() => {
+                  if (owner) void useContactPolicy.getState().load(owner);
+                }}
+              >
+                {t("contactVisibility.retry")}
+              </button>
+            )}
+          </div>
+        )}
+        {policyLoaded && accounts.length === 0 && (
           <p className="px-2.5 py-2 text-xs text-muted-foreground">
-            {t("sidebar.noContacts")}
+            {t(
+              rawAccounts.length > 0
+                ? "contactVisibility.allHidden"
+                : "sidebar.noContacts",
+            )}
           </p>
         )}
         {unpinnedAccounts.map((r) => (
