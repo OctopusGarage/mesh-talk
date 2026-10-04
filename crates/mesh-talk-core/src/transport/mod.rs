@@ -13,9 +13,11 @@ pub mod handshake;
 /// TCP listener) shared by discovery and the node runtime. Dependency-free of the
 /// higher layers, so it sits at the bottom of the stack.
 pub mod net;
+mod presence_auth;
 pub mod session;
 
 pub use channel::SecureChannel;
+pub use presence_auth::VerifiedPeer;
 pub use session::Session;
 
 /// Noise pattern: XX (mutual static-key auth), X25519 DH, ChaChaPoly AEAD,
@@ -45,6 +47,8 @@ pub enum TransportError {
     IdentityMismatch,
     /// Authenticated peer was not the one the caller expected.
     UnexpectedPeer,
+    /// The host's admission policy rejected the verified caller.
+    AdmissionDenied,
     /// (De)serialization of the auth payload failed.
     Serialization(String),
 }
@@ -63,6 +67,7 @@ impl std::fmt::Display for TransportError {
             TransportError::UnexpectedPeer => {
                 write!(f, "authenticated peer was not the expected one")
             }
+            TransportError::AdmissionDenied => write!(f, "peer admission denied"),
             TransportError::Serialization(m) => write!(f, "serialization error: {m}"),
         }
     }

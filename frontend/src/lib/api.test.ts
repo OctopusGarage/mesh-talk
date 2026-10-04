@@ -5,11 +5,27 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { auth, chat } from "./api";
+import { auth, chat, contactPolicy } from "./api";
 
 beforeEach(() => {
   invoke.mockReset();
   invoke.mockResolvedValue(undefined);
+});
+
+describe("contact visibility command mapping", () => {
+  it("binds reads and writes to the expected local owner", async () => {
+    await contactPolicy.get("owner");
+    expect(invoke).toHaveBeenCalledWith("get_hidden_contacts", {
+      owner: "owner",
+    });
+    await contactPolicy.set("owner", "account", true, "Name");
+    expect(invoke).toHaveBeenCalledWith("set_contact_hidden", {
+      owner: "owner",
+      account: "account",
+      hidden: true,
+      name: "Name",
+    });
+  });
 });
 
 describe("auth command mapping", () => {

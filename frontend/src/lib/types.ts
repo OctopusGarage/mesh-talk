@@ -78,6 +78,16 @@ export interface AccountInfo {
   names: string[];
 }
 
+export interface HiddenContact {
+  account_id: string;
+  name: string;
+}
+
+export interface HiddenContactsSnapshot {
+  owner: string;
+  contacts: HiddenContact[];
+}
+
 export interface ChannelInfo {
   channel_id: string;
   name: string;
@@ -89,6 +99,8 @@ export interface ChannelInfo {
 
 export interface SearchHitInfo {
   is_channel: boolean;
+  /** Account binding at search time, retained even if the live device leaves. */
+  account_id?: string | null;
   target: string;
   label: string;
   from_me: boolean;
@@ -235,4 +247,14 @@ export interface ProfileReceivedEvent {
 export interface CallSignalEvent {
   from: string; // authenticated sender device user_id (bound to the Noise channel)
   payload: string; // opaque signaling JSON (call id, kind, SDP) — see store/calls.ts
+}
+export interface PrivacySnapshot {
+  owner: string;
+  version: number;
+  invisible: boolean;
+  allowed_accounts: {
+    id: string;
+    name: string;
+    source: "Manual" | "Initiated";
+  }[];
 }

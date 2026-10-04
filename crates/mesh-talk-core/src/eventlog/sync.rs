@@ -121,6 +121,11 @@ pub struct ApplyReport {
 /// The data operations sync needs from an event store. Implemented by both the
 /// in-memory [`EventLog`] and the durable `PersistentEventLog`.
 pub trait SyncStore {
+    /// A host admission denial stops the wire session before further disclosure.
+    /// Ordinary stores preserve the protocol's existing validation behavior.
+    fn admission_denied(&self) -> bool {
+        false
+    }
     /// All event ids this store holds for the conversation.
     fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId>;
     /// The conversation's events whose id is NOT in `have`, cloned, in

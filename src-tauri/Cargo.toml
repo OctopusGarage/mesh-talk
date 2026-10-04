@@ -41,6 +41,7 @@ rand = "0.10" # session-token generation; already in the tree via tauri-plugin-n
 hex = { workspace = true }
 lazy_static = { workspace = true }
 serde_json = "1" # persist app settings as JSON in the app config dir
+tempfile = { workspace = true } # atomic replacement of per-account contact policy
 # "Stay signed in": store the login password in the OS keychain (macOS Keychain,
 # Windows Credential Manager, Linux Secret Service) — never on plaintext disk.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
@@ -52,8 +53,13 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 
+# Inspect the real display backend; do not infer X11 from environment variables.
+[target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6"
+
 [dev-dependencies]
-tempfile = { workspace = true }
+tauri-plugin-wdio-webdriver = "=1.4.0"
+tauri = { version = "2", features = ["test"] }
 serde_json = "1"
 # Collapse the password KDFs (Argon2 + PBKDF2) to a trivial cost FOR TESTS ONLY. Cargo activates
 # a dev-dependency feature only when building test/example/bench targets, never for `cargo build`
@@ -61,6 +67,10 @@ serde_json = "1"
 # auth_service tests pay ~12s per derivation (≈200s total) because it links mesh-talk-core as a
 # normal (non-test) dependency and so doesn't inherit the core crate's own `cfg(test)` cheap path.
 mesh-talk-core = { path = "../crates/mesh-talk-core", features = ["fast-test-kdf"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry"] }
 
 [lints]
 workspace = true

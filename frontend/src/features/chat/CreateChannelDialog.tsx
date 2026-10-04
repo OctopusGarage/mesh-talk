@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Check, Plus, Loader2, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -16,11 +16,19 @@ import { IdentityCrest } from "@/components/identity";
 import { cn } from "@/lib/utils";
 import { fadeSlideUp, listStagger, useMotionOK } from "@/lib/motion";
 import { useChat } from "@/store/chat";
+import { useContactPolicy } from "@/store/contactPolicy";
+import { visiblePeers } from "@/lib/contactVisibility";
 
 export function CreateChannelDialog() {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
-  const peers = useChat((s) => s.peers);
+  const rawPeers = useChat((s) => s.peers);
+  const contacts = useContactPolicy((s) => s.contacts);
+  const loaded = useContactPolicy((s) => s.loaded);
+  const peers = useMemo(
+    () => (loaded ? visiblePeers(rawPeers, contacts) : []),
+    [rawPeers, contacts, loaded],
+  );
   const createChannel = useChat((s) => s.createChannel);
 
   const [open, setOpen] = useState(false);
@@ -29,10 +37,10 @@ export function CreateChannelDialog() {
   const [busy, setBusy] = useState(false);
 
   const toggle = (id: string) => setSelected((s) => ({ ...s, [id]: !s[id] }));
-  const selectedCount = Object.values(selected).filter(Boolean).length;
+  const selectedCount = peers.filter((p) => selected[p.user_id]).length;
 
   const submit = async () => {
-    const ids = Object.keys(selected).filter((k) => selected[k]);
+    const ids = peers.filter((p) => selected[p.user_id]).map((p) => p.user_id);
     if (!name.trim()) return;
     setBusy(true);
     try {

@@ -17,6 +17,8 @@ import { formatDay } from "@/lib/format";
 import { fadeSlideUp, listStagger, useMotionOK } from "@/lib/motion";
 import { useChat, type Conversation } from "@/store/chat";
 import type { SearchHitInfo } from "@/lib/types";
+import { useContactPolicy } from "@/store/contactPolicy";
+import { visibleSearchHits } from "@/lib/contactVisibility";
 
 /** Highlight every case-insensitive occurrence of `term` in `text` with the signal hue. */
 function Highlighted({ text, term }: { text: string; term: string }) {
@@ -55,7 +57,13 @@ export function SearchDialog() {
   const ready = useChat((s) => s.ready);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [hits, setHits] = useState<SearchHitInfo[]>([]);
+  const [results, setHits] = useState<SearchHitInfo[]>([]);
+  const contacts = useContactPolicy((s) => s.contacts);
+  const policyLoaded = useContactPolicy((s) => s.loaded);
+  const hits = useMemo(
+    () => visibleSearchHits(results, peers, contacts, policyLoaded),
+    [results, contacts, peers, policyLoaded],
+  );
   const [searching, setSearching] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -101,7 +109,7 @@ export function SearchDialog() {
       const peer = peers.find((p) => p.user_id === h.target);
       conv = {
         kind: "account",
-        id: peer?.account_id ?? h.target,
+        id: h.account_id ?? peer?.account_id ?? h.target,
         name: h.label,
       };
     }

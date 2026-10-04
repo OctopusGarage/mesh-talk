@@ -2580,6 +2580,13 @@ async fn search_finds_a_sent_dm_by_keyword() {
     let peer = DeviceIdentity::generate();
     let dir = tempfile::tempdir().unwrap();
     let roster = seed_roster(&peer, "Peer", 1, &me.public().user_id());
+    let account = crate::identity::account::Account::generate();
+    roster.lock().unwrap().update(
+        &Announce::new_with_account(&peer, &account, "Peer", 1),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &me.public().user_id(),
+    );
+    let original_roster = roster.clone();
     let (dm, _a) = mpsc::unbounded_channel();
     let (ch, _b) = mpsc::unbounded_channel();
     let (f, _c) = mpsc::unbounded_channel();
@@ -2603,6 +2610,15 @@ async fn search_finds_a_sent_dm_by_keyword() {
     assert!(hits[0].from_me);
     assert_eq!(hits[0].label, "Peer");
     assert_eq!(hits[0].target, peer_uid);
+    assert_eq!(
+        hits[0].account_id.as_deref(),
+        Some(account.account_id().as_str())
+    );
+    *original_roster.lock().unwrap() = Roster::default();
+    assert_eq!(
+        hits[0].account_id.as_deref(),
+        Some(account.account_id().as_str())
+    );
     assert!(node.search("   ").is_empty());
     assert!(node.search("absent-keyword").is_empty());
 }

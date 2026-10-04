@@ -1,0 +1,156 @@
+name: Native window diagnostics
+
+on:
+  workflow_dispatch:
+  # Bootstrap on dev without publishing the diagnostic workflow to main.
+  push:
+    branches: [dev]
+    paths:
+      - .github/workflows/native-window-diagnostics.yml
+      - scripts/diagnostics/window-controls.mjs
+      - scripts/diagnostics/assert-window-capabilities.mjs
+      - src-tauri/capabilities/default.json
+
+permissions:
+  contents: read
+
+jobs:
+  window-controls:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-window-diagnostics
+          cache-on-failure: true
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb openbox dbus-x11
+      - name: Install driver matching the actual WebView2 runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtimeRoot = "${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application"
+          $runtime = Get-ChildItem -LiteralPath $runtimeRoot -Filter msedgewebview2.exe -Recurse |
+            Sort-Object { [version]$_.VersionInfo.ProductVersion } -Descending |
+            Select-Object -First 1
+          if (-not $runtime) { throw 'WebView2 runtime not found' }
+          $version = $runtime.VersionInfo.ProductVersion
+          # Edge browser and WebView2 can have different versions on hosted runners.
+          "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=$($runtime.DirectoryName)" >> $env:GITHUB_ENV
+          $destination = Join-Path $env:RUNNER_TEMP 'edge-driver'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          $archive = Join-Path $destination 'driver.zip'
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_win64.zip" -OutFile $archive
+          Expand-Archive $archive -DestinationPath $destination
+          $destination >> $env:GITHUB_PATH
+          Write-Output "WebView2 runtime version: $version"
+      - name: Install native Tauri driver
+        run: cargo install tauri-driver --version 2.0.6 --locked
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Build permission-negative baseline
+        shell: bash
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            const source = "src-tauri/capabilities/default.json";
+            fs.copyFileSync(source, path.join(process.env.RUNNER_TEMP, "window-capability.json"));
+            const capability = JSON.parse(fs.readFileSync(source, "utf8"));
+            const controls = ["core:window:allow-minimize", "core:window:allow-toggle-maximize", "core:window:allow-close"];
+            capability.permissions = capability.permissions.filter(p => !controls.includes(p));
+            fs.writeFileSync(source, JSON.stringify(capability, null, 2));
+          '
+          # Invalidate only the app package, not its dependency cache, for each ACL variant.
+          cargo clean --release -p mesh-talk
+          cargo build --locked --release -p mesh-talk --bin mesh-talk
+          node scripts/diagnostics/assert-window-capabilities.mjs
+      - name: Reproduce ACL denial (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        env:
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+          NATIVE_WINDOW_ARTIFACT_DIR: native-window-baseline-artifacts
+        run: |
+          # RUNNER_TEMP is intentionally expanded by the inner bash.
+          # shellcheck disable=SC2016
+          xvfb-run -a -s '-screen 0 1280x1024x24' dbus-run-session -- bash -e -c '
+            openbox > "$RUNNER_TEMP/openbox-baseline.log" 2>&1 &
+            node scripts/diagnostics/window-controls.mjs target/release/mesh-talk
+          '
+      - name: Reproduce ACL denial (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        env:
+          NATIVE_WINDOW_ARTIFACT_DIR: native-window-baseline-artifacts
+        run: node scripts/diagnostics/window-controls.mjs target/release/mesh-talk.exe
+      - name: Require exact baseline failure evidence
+        shell: bash
+        run: |
+          # Template interpolation belongs to JavaScript, not this shell.
+          # shellcheck disable=SC2016
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import fs from "node:fs";
+            const report = JSON.parse(fs.readFileSync("native-window-baseline-artifacts/report.json", "utf8"));
+            const commands = { Minimize: "minimize", Maximize: "toggle_maximize", Close: "close" };
+            assert.deepEqual(report.checks.map(c => c.label), Object.keys(commands));
+            for (const check of report.checks) {
+              assert.equal(check.passed, false);
+              assert.deepEqual(check.rejections, [`Command plugin:window|${commands[check.label]} not allowed by ACL`]);
+            }
+            console.log("PASS: all three native buttons reproduce the original ACL denial");
+          '
+      - name: Restore committed permissions and build actual release application
+        shell: bash
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            // Write bytes instead of preserving the original Windows file timestamp.
+            fs.writeFileSync("src-tauri/capabilities/default.json", fs.readFileSync(path.join(process.env.RUNNER_TEMP, "window-capability.json")));
+          '
+          cargo clean --release -p mesh-talk
+          cargo build --locked --release -p mesh-talk --bin mesh-talk
+          node scripts/diagnostics/assert-window-capabilities.mjs
+      - name: Native window controls (Linux)
+        if: runner.os == 'Linux'
+        env:
+          # Software-rendered Xvfb isolates ACL/window behavior from GPU compatibility (#133).
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+        run: |
+          # RUNNER_TEMP is intentionally expanded by the inner bash.
+          # shellcheck disable=SC2016
+          xvfb-run -a -s '-screen 0 1280x1024x24' dbus-run-session -- bash -e -c '
+            openbox > "$RUNNER_TEMP/openbox.log" 2>&1 &
+            node scripts/diagnostics/window-controls.mjs target/release/mesh-talk
+          '
+      - name: Native window controls (Windows)
+        if: runner.os == 'Windows'
+        run: node scripts/diagnostics/window-controls.mjs target/release/mesh-talk.exe
+      - name: Upload native diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-window-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            native-window-baseline-artifacts/
+            native-window-artifacts/
+          retention-days: 7

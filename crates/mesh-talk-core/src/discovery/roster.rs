@@ -56,6 +56,7 @@ pub const MAX_PEERS: usize = 1024;
 #[derive(Default)]
 pub struct Roster {
     peers: HashMap<UserId, PeerRecord>,
+    announcements: HashMap<UserId, Announce>,
 }
 
 impl Roster {
@@ -89,8 +90,11 @@ impl Roster {
                 .map(|(id, _)| id.clone())
             {
                 self.peers.remove(&oldest);
+                self.announcements.remove(&oldest);
             }
         }
+        self.announcements
+            .insert(announce.user_id.clone(), announce.clone());
         self.peers.insert(
             announce.user_id.clone(),
             PeerRecord {
@@ -111,6 +115,17 @@ impl Roster {
 
     pub fn get(&self, user_id: &str) -> Option<&PeerRecord> {
         self.peers.get(user_id)
+    }
+
+    /// Signed source proof retained only while the corresponding roster entry is live.
+    pub fn announcement(&self, public: &PublicIdentity) -> Option<&Announce> {
+        self.announcements
+            .get(&public.user_id())
+            .filter(|a| a.public() == *public)
+    }
+
+    pub fn announcements(&self) -> Vec<Announce> {
+        self.announcements.values().cloned().collect()
     }
 
     pub fn peers(&self) -> Vec<PeerRecord> {
@@ -142,6 +157,8 @@ impl Roster {
         let now = Instant::now();
         self.peers
             .retain(|_, r| now.duration_since(r.last_seen) < ttl);
+        self.announcements
+            .retain(|id, _| self.peers.contains_key(id));
     }
 }
 

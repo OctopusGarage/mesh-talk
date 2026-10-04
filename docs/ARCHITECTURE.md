@@ -48,6 +48,11 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   post-handshake identity exchange: each side signs `"mesh-talk-transport-auth-v1" ‖
   handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
   → binds the Ed25519 identity to the channel. 4-byte length framing, MAX_FRAME 65535.
+  Pinned connections check the responder's Noise static key after message two,
+  before disclosing the initiator's static key and identity auth; the complete
+  authenticated identity is still checked afterward. `accept_with_admission`
+  lets an SDK host reject a verified device before sending its own identity auth.
+  Noise XX still reveals the responder's static key, so this is not anonymity.
 - **DM crypto** — **Double Ratchet** (`ratchet/state.rs` + `node/dm_ratchet.rs`):
   `shared_root = HKDF(DH(me,peer))`; init_alice/init_bob; DH ratchet on each inbound →
   forward secrecy + post-compromise recovery; bounded out-of-order (1000/2000); lower
@@ -101,6 +106,60 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
 
+**Invisible mode and account permissions:**
+`node::PrivacyPolicy` stores a bounded, encrypted, atomically replaced local
+allowlist and visibility preference. It requires one serialized owner per file
+and a trusted parent directory; corrupt policy files return errors, not a public
+fallback. `spawn_discovery_with_visibility` shares a `DiscoveryVisibility` gate
+across startup/periodic/manual announcements, listener replies and every scan
+target. Disabling waits for in-flight announcement sends; passive discovery and
+multicast membership remain active, and already queued packets cannot be retracted.
+Existing discovery entry points and unconfigured SDK constructors retain their
+public default. Desktop startup loads the policy, verified device-signed account
+announcements and routing hints before spawning network tasks. Invisible mode
+suppresses local UDP presence while continuing passive discovery. Account-aware
+Noise authentication checks the exact Ed25519/X25519 identity and signed presence;
+a certificate alone is not an account proof. This is not traffic anonymity:
+Noise XX exposes its static key and previously transmitted presence remains known.
+
+Explicit DM/file/contact actions durably grant the verified destination account;
+background profiles, file pulls, calls and relay retries never grant permission.
+Manual permission publishes signed listening presence inside a pinned encrypted
+connection, without requiring a message or a UDP announcement. Policy changes
+invalidate existing channels; bounded per-send/handshake operation guards finish
+before revocation acknowledges. The actual event log is projected separately for
+each principal and conversation, including event authors and dependency closure.
+Existing joined groups confer only group scope, not DM/call/pairing permissions;
+file chunks inherit only a verified, authorized manifest's scope. Revocation
+stops new disclosure and append but does not delete persisted local history.
+Outgoing manifest scopes for every account-fanout device are recorded in a separate
+encrypted `sent-manifest-scopes.log`, without duplicating the account's history entry.
+Startup replays only references to matching signed manifest events and normalizes torn
+trailing records before new appends. A failed append cannot install an in-memory scope;
+subsequent retries repair the journal from verified local state. Restored scopes still
+undergo current principal/permission checks, so restart does not bypass revocation.
+
+Verified account proofs never store IP addresses. A separate bounded encrypted
+route cache stores hints only; every reconnect pins the complete verified device
+identity. A private listening-port preference lets permitted invisible peers
+reconnect after both restart, subject to port availability and network changes.
+Loaded routes never create online roster entries. Delivery can use eligible
+verified cached routes after discovery expires; tracked, bounded authenticated
+probes refresh online presence only when the pinned peer actually responds.
+Failed probes leave normal offline expiry intact and never create permissions.
+Conflicting passive remote device/account proofs fail closed. An explicit user
+contact/grant may accept a newly device-signed account binding for the same full
+Ed25519/X25519 identity, with an independent new-account permission; old account
+permissions are not transferred. This invalidates existing channels. Trusted
+local keystore adoption may likewise update this node's own exact binding.
+
+In invisible mode, an elected post office has no automatic exemption: its account
+must be manually permitted. Relayed DM authors must have cached verified signed
+device/account proofs. A newly added device that has never been discovered or
+authenticated directly cannot deliver offline through a relay; unknown proofs
+are denied rather than learned from legacy relay event payloads. No new relay
+proof protocol or event format is introduced.
+
 ## 5. Frontend (`frontend/`)
 
 **React 18 + TypeScript + Tailwind + shadcn/ui**, state in **zustand**, built with Vite.
@@ -111,6 +170,36 @@ reaction/unread state and routes incoming DMs to the sender's *account* (one con
 per multi-device contact). `features/chat/` is the 3-pane app (sidebar · messages ·
 members) with replies, reactions, @mentions, file send + a received-files tray, search,
 and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
+
+**Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
+the signed-in local user's hidden account IDs and last-known names are stored separately
+in `accounts/<local-user-id>/hidden-contacts.json`. Mutations validate the session owner
+and replace the file atomically; this metadata is local to the device, not synced.
+Settings provides a searchable management dialog and offline restoration; contact rows
+also offer a hide action in their context menu, with an explicit confirmation.
+Visibility filters are projections over the raw roster: contact lists, new-group invite
+choices and DM search omit hidden accounts (including new devices for that account).
+Raw discovery, cryptographic identity lookup, history, pins/aliases, message/file/call
+receipt, notifications, and existing shared groups remain unchanged. This is **not** a
+communication block or a way to become invisible to peers. A failed initial policy load
+offers retry without briefly showing hidden contacts; stale responses from another login
+cannot overwrite the current user's UI policy.
+Atomic replacement is the save commit point. The file is synced before replacement;
+directory synchronization afterward is best effort (a failure is logged without contact
+data and does not falsely report that the committed change failed). A filesystem that
+cannot sync directories cannot guarantee rename durability through a subsequent crash.
+Search hits carry their verified account binding from the scan's own roster snapshot,
+so a device leaving the live roster cannot expose a hidden account's search results.
+Last-known names are display metadata: control characters are removed and names are
+bounded before saving, so an abusive peer name cannot prevent hiding its account.
+The hidden-contact tests also exercise actual registered Tauri command dispatch through
+the headless mock runtime, including persisted hide and restoration after stopping the node.
+An additional real-mesh regression keeps authenticated discovery and encrypted delivery
+running while an account and its newly added device are hidden, then reopens durable history.
+The `native-contact-eval` example uses the same desktop builder with isolated data/config
+roots and a dev-only embedded WebDriver. The normal entry point has no driver plugin or
+storage override. Three-platform native scenarios and the usability rubric are documented
+in [the hidden-contact evaluation runbook](evals/hidden-contacts.md).
 
 ## 6. Binaries
 

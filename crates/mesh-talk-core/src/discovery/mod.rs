@@ -6,6 +6,8 @@
 pub mod announce;
 pub mod roster;
 pub mod service;
+pub mod visibility;
 
 pub use announce::Announce;
 pub use roster::{PeerRecord, Roster, UpdateOutcome, UserId};
+pub use visibility::DiscoveryVisibility;

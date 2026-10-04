@@ -14,10 +14,12 @@ import type {
   EnvInfo,
   FavoriteInfo,
   HistoryItem,
+  HiddenContactsSnapshot,
   LoginResult,
   LogoutResult,
   PeerInfo,
   PresenceMap,
+  PrivacySnapshot,
   ReactionInfo,
   RegisterResult,
   SafetyNumber,
@@ -27,6 +29,16 @@ import type {
 } from "./types";
 
 // Tauri v2 maps camelCase JS arg keys to the Rust commands' snake_case params.
+
+export const privacy = {
+  initiateContact: (owner: string, account: string) =>
+    invoke<PrivacySnapshot>("initiate_privacy_contact", { owner, account }),
+  get: (owner: string) => invoke<PrivacySnapshot>("get_privacy", { owner }),
+  setInvisible: (owner: string, invisible: boolean) =>
+    invoke<PrivacySnapshot>("set_invisible", { owner, invisible }),
+  setAllowed: (owner: string, account: string, allowed: boolean) =>
+    invoke<PrivacySnapshot>("set_privacy_allowed", { owner, account, allowed }),
+};
 
 export const auth = {
   login: (username: string, password: string) =>
@@ -208,6 +220,18 @@ export const obs = {
   logFile: () => invoke<string>("get_log_file"),
   logTail: () => invoke<string>("read_log_tail"),
   saveLogTail: (dest: string) => invoke<void>("save_log_tail", { dest }),
+};
+
+export const contactPolicy = {
+  get: (owner: string) =>
+    invoke<HiddenContactsSnapshot>("get_hidden_contacts", { owner }),
+  set: (owner: string, account: string, hidden: boolean, name: string) =>
+    invoke<HiddenContactsSnapshot>("set_contact_hidden", {
+      owner,
+      account,
+      hidden,
+      name,
+    }),
 };
 
 export const favorites = {

@@ -8,7 +8,6 @@ use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
 use crate::node::session::request_round;
-use crate::node::transport::dial;
 
 /// Members in canonical order: sorted by `user_id` and de-duplicated. `ChannelMeta` encodes
 /// the membership Vec positionally, and the same-epoch convergence tie-break in
@@ -344,16 +343,16 @@ impl Node {
     ) {
         let me = self.identity.public().user_id();
         let targets: Vec<PeerRecord> = {
-            let roster = self.roster.lock().expect("roster mutex not poisoned");
             members
                 .iter()
                 .filter(|m| m.user_id() != me)
-                .filter_map(|m| roster.get(&m.user_id()).cloned())
+                .filter_map(|m| self.routing_peer(&m.user_id()))
                 .collect()
         };
         for peer in targets {
-            if let Ok(mut ch) = dial(peer.addr, &self.identity, Some(&peer.public)).await {
-                let _ = request_round(&mut ch, &self.log, channel).await;
+            if let Ok(mut ch) = self.privacy_dial(peer.addr, &peer.public).await {
+                let store = self.sync_store(ch.peer_identity());
+                let _ = request_round(&mut ch, &store, channel).await;
             }
         }
         let _ = self.replicate_to_post_office(channel).await;

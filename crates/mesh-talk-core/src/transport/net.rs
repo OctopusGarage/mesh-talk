@@ -2,7 +2,7 @@
 //! the desktop runtime both bind the same kind of reuse UDP socket and join the
 //! discovery multicast group on every local interface).
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -84,6 +84,19 @@ pub fn set_tcp_keepalive(stream: &TcpStream) {
     let _ = SockRef::from(stream).set_tcp_keepalive(&keepalive);
 }
 
+/// Dual-stack accepts represent IPv4 sources as `::ffff:a.b.c.d`. Keep return
+/// routes in their actual address family: outgoing IPv6 sockets on Windows are
+/// IPv6-only by default. Genuine IPv6 addresses are never changed.
+pub(crate) fn canonical_peer_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+
 /// Bind the node's inbound TCP listener dual-stack: prefer IPv6 `[::]` with
 /// IPv4-mapped addresses accepted (so a single socket serves both v4 and v6 peers,
 /// including link-local IPv6), and fall back to IPv4 `0.0.0.0` if the v6 bind fails
@@ -115,6 +128,21 @@ fn bind_v6_dual_stack(port: u16) -> std::io::Result<TcpListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_peer_ip_changes_only_ipv4_mapped_addresses() {
+        for ipv4 in [Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 42)] {
+            assert_eq!(canonical_peer_ip(IpAddr::V4(ipv4)), IpAddr::V4(ipv4));
+            assert_eq!(
+                canonical_peer_ip(IpAddr::V6(ipv4.to_ipv6_mapped())),
+                IpAddr::V4(ipv4)
+            );
+        }
+        for ipv6 in ["::1", "fe80::1234", "2001:db8::1234", "::192.168.1.42"] {
+            let ip: IpAddr = ipv6.parse().unwrap();
+            assert_eq!(canonical_peer_ip(ip), ip);
+        }
+    }
 
     #[tokio::test]
     async fn binds_a_reuse_broadcast_socket() {
