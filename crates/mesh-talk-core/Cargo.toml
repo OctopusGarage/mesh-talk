@@ -50,6 +50,7 @@ clap = { workspace = true }
 # Logging facade only (no logger backend in the SDK); the host app's `log` logger captures
 # these. Used for sync-cost telemetry so we can evaluate reconciliation scaling on real data.
 log = { workspace = true }
+tempfile = { workspace = true }
 
 # Unix-only: a `kill(pid, 0)` liveness probe so the CLI's data-dir lockfile can detect a
 # lock left by a crashed/killed node and reclaim it. Already in the build graph transitively
@@ -58,7 +59,6 @@ log = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = { workspace = true }
 rand_chacha = "0.3" # seeded CSPRNG for deterministic property tests (rand_core 0.6 SeedableRng)
 # Self-dev-dependency on our OWN crate, activating `fast-test-kdf`. This is the lever that
 # makes the multi-process integration rigs fast: when Cargo builds the test targets it unifies

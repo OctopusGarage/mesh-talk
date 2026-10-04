@@ -48,6 +48,11 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   post-handshake identity exchange: each side signs `"mesh-talk-transport-auth-v1" ‖
   handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
   → binds the Ed25519 identity to the channel. 4-byte length framing, MAX_FRAME 65535.
+  Pinned connections check the responder's Noise static key after message two,
+  before disclosing the initiator's static key and identity auth; the complete
+  authenticated identity is still checked afterward. `accept_with_admission`
+  lets an SDK host reject a verified device before sending its own identity auth.
+  Noise XX still reveals the responder's static key, so this is not anonymity.
 - **DM crypto** — **Double Ratchet** (`ratchet/state.rs` + `node/dm_ratchet.rs`):
   `shared_root = HKDF(DH(me,peer))`; init_alice/init_bob; DH ratchet on each inbound →
   forward secrecy + post-compromise recovery; bounded out-of-order (1000/2000); lower
@@ -100,6 +105,19 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
+
+**Privacy SDK prerequisites (not yet enabled in the desktop runtime):**
+`node::PrivacyPolicy` stores a bounded, encrypted, atomically replaced local
+allowlist and visibility preference. It requires one serialized owner per file
+and a trusted parent directory; corrupt policy files return errors, not a public
+fallback. `spawn_discovery_with_visibility` shares a `DiscoveryVisibility` gate
+across startup/periodic/manual announcements, listener replies and every scan
+target. Disabling waits for in-flight announcement sends; passive discovery and
+multicast membership remain active, and already queued packets cannot be retracted.
+Existing discovery entry points retain their public default. Discovery suppression
+and handshake admission alone do not implement invisible mode: the runtime still
+needs verified account/device bindings, event-author and per-round admission,
+explicit-action grants, relay handling and settings integration before enabling it.
 
 ## 5. Frontend (`frontend/`)
 

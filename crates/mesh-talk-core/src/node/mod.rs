@@ -24,6 +24,7 @@ pub(crate) mod name_directory;
 pub(crate) mod node;
 pub(crate) mod pairing;
 pub(crate) mod postbox;
+pub(crate) mod privacy;
 pub(crate) mod profile;
 pub(crate) mod profile_io;
 pub(crate) mod profile_store;
@@ -58,6 +59,7 @@ pub use node::{
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
 pub use postbox::{elected_post_office, run_relay_accept_loop};
+pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use profile::{ProfilePayload, MAX_AVATAR_BYTES};
 pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{aggregate, ReactionPayload, ReactionView};

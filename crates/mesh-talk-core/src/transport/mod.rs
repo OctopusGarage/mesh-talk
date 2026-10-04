@@ -45,6 +45,8 @@ pub enum TransportError {
     IdentityMismatch,
     /// Authenticated peer was not the one the caller expected.
     UnexpectedPeer,
+    /// The host's admission policy rejected the verified caller.
+    AdmissionDenied,
     /// (De)serialization of the auth payload failed.
     Serialization(String),
 }
@@ -63,6 +65,7 @@ impl std::fmt::Display for TransportError {
             TransportError::UnexpectedPeer => {
                 write!(f, "authenticated peer was not the expected one")
             }
+            TransportError::AdmissionDenied => write!(f, "peer admission denied"),
             TransportError::Serialization(m) => write!(f, "serialization error: {m}"),
         }
     }

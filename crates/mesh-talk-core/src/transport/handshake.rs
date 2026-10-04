@@ -65,6 +65,17 @@ impl Handshake {
         self.state.is_handshake_finished()
     }
 
+    /// The static key authenticated by the messages received so far. On the
+    /// initiator this is available after message two, before revealing its own
+    /// static key in message three.
+    pub(crate) fn remote_static(&self) -> Result<[u8; 32], TransportError> {
+        self.state
+            .get_remote_static()
+            .ok_or(TransportError::MissingRemoteStatic)?
+            .try_into()
+            .map_err(|_| TransportError::Noise("remote static key is not 32 bytes".into()))
+    }
+
     /// Finish: capture the binding hash and peer static key, then switch to
     /// transport mode.
     pub fn into_session(self) -> Result<HandshakeOutput, TransportError> {
