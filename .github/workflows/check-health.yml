@@ -1,15 +1,19 @@
 name: Code Quality and Health Check
 
-# Deep, cross-platform health check (macOS + Windows) that runs the full
-# scripts/check-health.sh. Per-push/PR gating lives in ci.yml (Linux + macOS);
-# this runs on main, on a weekly schedule, and on demand to avoid duplicating a
-# heavy build on every branch push.
+# Full native health checks run before merging, as well as on main and on demand.
+# Branch pushes use the lighter CI matrix; PRs require complete scanner evidence.
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   schedule:
     - cron: '0 6 * * 1' # Mondays 06:00 UTC
   workflow_dispatch:
+
+concurrency:
+  group: health-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -24,6 +28,7 @@ jobs:
     name: Code Quality and Health Check
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
 

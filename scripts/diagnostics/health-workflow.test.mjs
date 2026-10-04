@@ -26,3 +26,10 @@ test("Windows health and diagnostic gates explicitly execute Bash", () => {
     assert.match(step, /^        shell: bash$/m, "PowerShell must not treat .sh as a file association or pass test globs literally");
   }
 });
+
+test("full health runs before merging and retains independent platform results", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
+  assert.match(workflow, /^  pull_request:\n    branches: \[main\]$/m);
+  assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: true$/m);
+  assert.match(workflow, /^      fail-fast: false$/m);
+});

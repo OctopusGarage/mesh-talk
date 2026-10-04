@@ -39,6 +39,14 @@ Full health requires cargo-deny, cargo-machete, typos, Gitleaks, ShellCheck and
 actionlint; missing tools fail rather than being silently skipped. CI installs them
 explicitly. `--fast` remains a clearly labeled partial local check.
 
+Full macOS/Windows health checks also run on PRs, not only after merging to main.
+Independent matrix results are retained even if another platform fails. Superseded
+CI, health and mutation runs are cancelled automatically. Windows gates explicitly
+use Bash: opening a `.sh` file through PowerShell file associations or passing a
+literal test glob is not execution evidence. Require the native health check names
+alongside `verify` in branch protection to make these PR checks merge-blocking;
+the workflow alone does not change administrator branch-protection settings.
+
 Mutation testing uses pinned cargo-mutants 27.1.0 and examines both Rust workspace
 members. A hard unmutated workspace test runs first; the mutation tool also runs its
 own baseline for nonempty selections. Selected counts, completed outcomes, baseline,

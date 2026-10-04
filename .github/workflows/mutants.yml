@@ -13,6 +13,10 @@ on:
     - cron: '0 4 * * 1' # Mondays 04:00 UTC
   workflow_dispatch:
 
+concurrency:
+  group: mutants-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
