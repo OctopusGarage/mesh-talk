@@ -26,7 +26,7 @@ const userName = `eval-user-${randomBytes(4).toString("hex")}`;
 const otherName = `eval-other-${randomBytes(4).toString("hex")}`;
 const started = Date.now();
 let previousScenario = started;
-const report = { schema: 1, platform: process.platform, native: true, mocked: false, scenarios: {}, startedAt: new Date().toISOString(), input: "embedded W3C DOM automation in actual native webview; contextmenu uses execute; keyboard uses in-process AppKit on macOS, owned-PID OS input on Windows/Linux; no physical keyboard user study", kdf: { example: "fast-test-kdf (existing dev-dependency)", cli: "regular production KDF" } };
+const report = { schema: 1, platform: process.platform, native: true, mocked: false, scenarios: {}, startedAt: new Date().toISOString(), input: "embedded W3C DOM automation in actual native webview; contextmenu and focus-before-click dialog triggers use execute; keyboard uses in-process AppKit on macOS, owned-PID OS input on Windows/Linux; no physical keyboard user study", driver: { crate: "tauri-plugin-wdio-webdriver", version: "1.4.0", clickOrderingSource: "src/platform/executor.rs:688-701 (click_element)" }, kdf: { example: "fast-test-kdf (existing dev-dependency)", cli: "regular production KDF" } };
 const owned = new Set();
 let app, peer, session, endpoint, account, userId, signedInUser;
 const registeredOwners = new Map();
@@ -88,7 +88,16 @@ async function element(id) {
   const value = await command("POST", "/element", { using: "css selector", value: selector(id) });
   return value["element-6066-11e4-a52e-4f735466cecf"];
 }
+async function settledDialog(id) {
+  await until(`settled open ${id}`, () => execute("const e=document.querySelector(arguments[0]); return !!e && e.getAttribute('data-state')==='open' && getComputedStyle(e).opacity==='1' && !e.getAnimations({subtree:true}).some(a=>a.playState==='running');", [selector(id)]));
+}
 async function click(id) { await command("POST", `/element/${await element(id)}/click`, {}); }
+async function openDialog(id) {
+  await element(id);
+  // Driver 1.4 click_element calls click() then focus(), moving focus outside
+  // the newly opened modal. Match native mouse ordering for dialog triggers.
+  await execute("const e=document.querySelector(arguments[0]); e.focus(); e.click();", [selector(id)]);
+}
 async function fill(id, text) {
   const el = await element(id);
   await command("POST", `/element/${el}/clear`, {});
@@ -120,6 +129,9 @@ async function key(value) {
     await input("xdotool", ["windowfocus", "--sync", window]);
     await input("xdotool", ["key", "--window", window, "--clearmodifiers", mapping[2]]);
   }
+  // Delivery acknowledgement means the native event was queued. Wait for the
+  // actual webview to paint before sampling focus or sending the next key.
+  await command("POST", "/execute/async", { script: "const done=arguments[arguments.length-1]; requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));", args: [] });
 }
 async function contextMenu(id) {
   await element(id);
@@ -184,11 +196,18 @@ async function login(username, register = false) {
   signedInUser = registeredOwners.get(username);
 }
 const hiddenContacts = async () => (await observe("get_hidden_contacts", { owner: signedInUser })).contacts;
+async function ensureOverflowOpen() {
+  const open = await execute("return document.querySelector('[data-testid=sidebar-overflow-menu]')?.getAttribute('data-state')==='open';");
+  if (!open) await click("sidebar-overflow");
+  await settledDialog("sidebar-overflow-menu");
+}
 async function manage() {
-  await click("sidebar-overflow");
-  await click("sidebar-action-settings");
-  await click("manage-hidden-contacts");
+  await ensureOverflowOpen();
+  await openDialog("sidebar-action-settings");
+  await settledDialog("settings-dialog");
+  await openDialog("manage-hidden-contacts");
   await element("hidden-contacts-dialog");
+  await settledDialog("hidden-contacts-dialog");
 }
 async function closeDialogs() {
   await key("\uE00C");
@@ -199,7 +218,7 @@ async function closeDialogs() {
 const row = () => `conversation-row-${account}`;
 const history = () => observe("account_history", { account, limit: 500 });
 async function signOut() {
-  await click("sidebar-overflow");
+  await ensureOverflowOpen();
   await click("sidebar-sign-out");
   await element("login-form");
 }
@@ -296,6 +315,8 @@ try {
   await click(`hide-contact-${account}`);
   await click("hide-contact-confirm");
   await until("settings hide saved", async () => (await hiddenContacts()).some(h => h.account_id === account));
+  await until("nested hide confirmation unmounted", async () => !await exists("hide-contact-dialog"));
+  await settledDialog("hidden-contacts-dialog");
   await passed("settings-search", { actualPeerNameFound: true, onlineRestoreWorked: true, searchAddTabHideWorked: true });
   await closeDialogs();
 
@@ -303,7 +324,12 @@ try {
   await until("real offline peer expires from roster", async () => !(await observe("list_peers")).some(p => p.name === peerName), 180000);
   await manage();
   await fill("hidden-contacts-search", peerName);
-  await command("POST", "/window/rect", { width: 760, height: 520 });
+  const nativeRect = await command("POST", "/window/rect", { width: 760, height: 520 });
+  // WebDriver sizes the outer window; the app enforces minimum inner size.
+  // Measure actual client geometry instead of assuming decorations are zero.
+  assert.ok(nativeRect.width >= 760 && nativeRect.width <= 800 && nativeRect.height >= 520 && nativeRect.height <= 580, "owned native window reached its minimum-size range");
+  await until("native narrow viewport applied", () => execute("return innerWidth>0 && innerWidth<=arguments[0]+1 && innerHeight>0 && innerHeight<=arguments[1]+1;", [nativeRect.width, nativeRect.height]));
+  await settledDialog("hidden-contacts-dialog");
   await element(`restore-contact-${account}`);
   const layout = await execute("const d=document.querySelector('[data-testid=hidden-contacts-dialog]'); const b=document.querySelector(arguments[0]); const r=d.getBoundingClientRect(), q=b.getBoundingClientRect(); return {role:d.getAttribute('role'), label:d.getAttribute('aria-labelledby'), buttonLabel:b.getAttribute('aria-label'), dialog:{x:r.x,y:r.y,right:r.right,bottom:r.bottom}, button:{x:q.x,y:q.y,right:q.right,bottom:q.bottom}, viewport:{width:innerWidth,height:innerHeight}};", [selector(`restore-contact-${account}`)]);
   assert.equal(layout.role, "dialog");
@@ -318,9 +344,12 @@ try {
     if (focused) break;
   }
   assert.equal(focused, true, "restore reachable through keyboard focus traversal");
-  await passed("narrow-keyboard-layout", { ...layout, keyboardFocusReachedRestore: true });
+  await passed("narrow-keyboard-layout", { ...layout, nativeRect, keyboardFocusReachedRestore: true });
+  assert.equal(await execute("return document.activeElement?.getAttribute('data-testid');"), `restore-contact-${account}`, "restore focus retained after evidence capture");
+  await settledDialog("hidden-contacts-dialog");
   await key("\uE007");
-  await until("offline contact restored through keyboard", async () => !await exists(`restore-contact-${account}`));
+  await until("offline contact saved through keyboard", async () => !(await hiddenContacts()).some(h => h.account_id === account));
+  await until("offline restored row removed", async () => !await exists(`restore-contact-${account}`));
   assert.equal((await hiddenContacts()).some(h => h.account_id === account), false);
   assert.ok((await history()).some(h => h.text === beforeText));
   assert.ok((await history()).some(h => h.text === hiddenText));
@@ -331,6 +360,9 @@ try {
   report.failure = redact(error.stack ?? error);
   console.error(redact(error.message));
   process.exitCode = 1;
+  try {
+    if (session && owned.has(app)) report.dialogDiagnostics = await execute("return {documentHasFocus:document.hasFocus(),activeElement:{tag:document.activeElement?.tagName,testId:document.activeElement?.getAttribute('data-testid'),connected:document.activeElement?.isConnected},dialogs:Array.from(document.querySelectorAll('[role=dialog]')).map(e=>({testId:e.getAttribute('data-testid'),state:e.getAttribute('data-state'),hidden:e.getAttribute('aria-hidden'),pointerEvents:getComputedStyle(e).pointerEvents}))};");
+  } catch { /* Preserve the original failure if the webview has already exited. */ }
   try { if (session && owned.has(app)) await screenshot("failure"); } catch { /* driver may already have exited */ }
 } finally {
   for (const child of [...owned]) {

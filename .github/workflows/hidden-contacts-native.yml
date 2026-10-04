@@ -26,6 +26,21 @@ permissions:
   contents: read
 
 jobs:
+  multicast-capability:
+    name: Runner multicast diagnostic (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - run: node scripts/diagnostics/native-multicast-probe.mjs
+
   native:
     name: Real native UI (${{ matrix.os }})
     strategy:
@@ -58,8 +73,6 @@ jobs:
           npm run build
       - name: Verify fail-closed evidence validator
         run: node --test scripts/diagnostics/hidden-contacts-report.test.mjs
-      - name: Diagnose runner multicast capability
-        run: node scripts/diagnostics/native-multicast-probe.mjs
       - name: Build production app and CLI with regular KDF
         run: cargo build --release --locked -p mesh-talk --bin mesh-talk -p mesh-talk-core --bin mesh-talk-node
       - name: Build dev-only native driver example

@@ -46,6 +46,16 @@ The embedded driver's element commands operate inside the actual platform WebVie
 Version 1.4 omits the `contextmenu` event from pointer actions and browser default behavior
 from synthetic key events. The harness therefore dispatches the actual UI's `contextmenu`
 event through standard WebDriver execute, and tests default keyboard behavior separately.
+The same driver's `click_element` implementation (`src/platform/executor.rs`, version
+1.4.0, lines 688–701) calls `click()` before `focus()`. For the two dialog-opening
+triggers only, the harness uses standard execute to focus before clicking, matching
+native mouse ordering and preventing focus from returning outside a newly opened modal.
+The utility popover can remain open after its nested dialogs close. The harness checks
+its actual `data-state` before opening it again, rather than toggling an already-open
+parent and unmounting the nested Settings dialog.
+Other element clicks retain the stock W3C command. Dialog animation completion and
+native input presentation are observed before focus/layout checks; restoration requires
+the actual saved backend policy to change, not merely a button disappearing.
 On macOS a plugin present only in the evaluation example sends main-thread AppKit
 `NSEvent` key-down/up events to that process's key window; it requires no Accessibility
 permission changes and does not inject global OS input. Windows uses AppActivate with
