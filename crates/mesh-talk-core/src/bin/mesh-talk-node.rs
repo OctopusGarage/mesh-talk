@@ -1,7 +1,7 @@
 //! `mesh-talk-node`: a thin CLI over the `node` API — loads a
 //! persistent identity, runs signed-announce LAN discovery and a TCP listener,
 //! and drives 1:1 DMs, channels, and file transfers from a line-based REPL
-//! (`/peers`, `/msg <prefix> <text>`, `/history <prefix>`,
+//! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
 //! `/channel-new <name> <member-prefix>`, `/channel-msg <chan-id-prefix> <text>`,
 //! `/sendfile <peer-prefix> <path>`, `/quit`), printing inbound DMs, channel
 //! messages, and files as they arrive.
@@ -47,6 +47,30 @@ struct Args {
     /// the post-office role (no DM REPL — it only relays).
     #[arg(long)]
     post_office: bool,
+}
+
+/// Account addressing is explicit: a full crypto account id, never a local
+/// login UUID or device-id prefix. Preserve spaces inside the message body.
+fn parse_account_message(input: &str) -> Result<(&str, &str), String> {
+    let usage = || "usage: /account-msg <account-id> <text>".to_string();
+    let (account, text) = input.trim().split_once(' ').ok_or_else(usage)?;
+    let text = text.trim_start();
+    if account.len() != 32
+        || !account
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || text.is_empty()
+    {
+        return Err(usage());
+    }
+    Ok((account, text))
+}
+
+async fn send_account_command(node: &Node, input: &str) -> Result<(), String> {
+    let (account, text) = parse_account_message(input)?;
+    node.send_to_account(account, text.as_bytes(), None)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Why a `/msg` prefix did not resolve to exactly one peer.
@@ -329,6 +353,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if let Some(rest) = line.strip_prefix("/msg ") {
             handle_msg(&node, &roster, rest);
+        } else if let Some(rest) = line.strip_prefix("/account-msg ") {
+            let node = node.clone();
+            let rest = rest.to_string();
+            tokio::spawn(async move {
+                match send_account_command(&node, &rest).await {
+                    Ok(()) => emit("account message sent"),
+                    Err(error) => emit(&format!("account send failed: {error}")),
+                }
+            });
+        } else if line == "/account-msg" {
+            emit("usage: /account-msg <account-id> <text>");
         } else if let Some(rest) = line.strip_prefix("/history ") {
             handle_history(&node, &roster, rest);
         } else if line == "/history" {
@@ -340,7 +375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if let Some(rest) = line.strip_prefix("/sendfile ") {
             handle_sendfile(&node, &roster, rest);
         } else if !line.is_empty() {
-            emit("commands: /peers, /msg <user_id-prefix> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /quit");
+            emit("commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /quit");
         }
     }
     Ok(())
@@ -604,6 +639,134 @@ mod tests {
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;
     use std::time::Instant;
+
+    #[test]
+    fn account_message_parser_requires_a_full_account_and_preserves_text() {
+        let account = "a".repeat(32);
+        assert_eq!(
+            parse_account_message(&format!("{account} hello  mesh")),
+            Ok((account.as_str(), "hello  mesh"))
+        );
+        for input in [
+            "",
+            "alice hello",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz hi",
+        ] {
+            assert!(parse_account_message(input).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn account_message_handler_reports_usage_and_unknown_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let discovery_port = socket.local_addr().unwrap().port();
+        drop(socket);
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "cli-test",
+            "CLI test",
+            "test-password",
+            discovery_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(send_account_command(&runtime.handle(), "invalid")
+            .await
+            .unwrap_err()
+            .contains("usage:"));
+        assert!(
+            send_account_command(&runtime.handle(), &format!("{} hello", "a".repeat(32)))
+                .await
+                .unwrap_err()
+                .contains("unknown peer:")
+        );
+    }
+
+    #[tokio::test]
+    async fn account_message_handler_delivers_to_real_account_history() {
+        let root = tempfile::tempdir().unwrap();
+        let a_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let a_port = a_socket.local_addr().unwrap().port();
+        let b_port = b_socket.local_addr().unwrap().port();
+        drop((a_socket, b_socket));
+        let sender = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "sender",
+            "Sender",
+            "test-password",
+            a_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let recipient = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "recipient",
+            "Recipient",
+            "test-password",
+            b_port,
+            move |dm| {
+                let _ = tx.send(dm);
+            },
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        for (runtime, port) in [(&sender, b_port), (&recipient, a_port)] {
+            let announcement = runtime
+                .handle()
+                .signed_announce(runtime.display_name(), runtime.listen_tcp_port());
+            let bytes = mesh_talk_core::discovery::announce::encode(&announcement);
+            std::net::UdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .send_to(&bytes, (std::net::Ipv4Addr::LOCALHOST, port))
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while sender.peer_public(recipient.user_id()).is_none()
+                || recipient.peer_public(sender.user_id()).is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            send_account_command(
+                &sender.handle(),
+                &format!("{} native account delivery", recipient.account_id()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.text, b"native account delivery");
+        assert!(recipient
+            .account_history(sender.account_id(), 20)
+            .iter()
+            .any(|entry| entry.text == b"native account delivery"));
+    }
 
     fn peer(name: &str) -> PeerRecord {
         PeerRecord {

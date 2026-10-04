@@ -53,6 +53,10 @@ the owned application PID and SendKeys; Linux selects the owned PID's visible wi
 with xdotool. These are native automation mechanisms, not physical keyboard participants.
 Input failures remain failed scenarios; the harness does not substitute DOM activation
 and report it as native keyboard behavior.
+The CLI's `/account-msg <account-id> <text>` sends through the same account-addressed
+API as the GUI. The harness reads the GUI's actual cryptographic `account_id` over
+production IPC. Existing `/msg` remains device-addressed and writes a different
+conversation; it cannot validate the GUI's account history.
 
 ## Usability rubric
 

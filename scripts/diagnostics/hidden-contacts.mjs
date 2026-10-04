@@ -251,7 +251,13 @@ try {
   peer.stdin.write("/peers\n");
   await until("CLI discovered GUI identity", () => peer.output.includes(`peer ${userId}`));
   const hiddenText = `native-hidden-${randomBytes(4).toString("hex")}`;
-  peer.stdin.write(`/msg ${userId} ${hiddenText}\n`);
+  const guiAccount = await observe("account_id");
+  assert.match(guiAccount, /^[0-9a-f]{32}$/);
+  peer.stdin.write(`/account-msg ${guiAccount} ${hiddenText}\n`);
+  await until("CLI account command completed", () => {
+    if (peer.output.includes("account send failed:")) throw new Error(peer.output);
+    return peer.output.includes("account message sent");
+  });
   await until("real inbound DM stored while hidden", async () => (await history()).some(h => h.text === hiddenText));
   assert.equal(await exists(row()), false);
   await passed("hidden-inbound", { inboundStored: true, rowAbsent: true });
