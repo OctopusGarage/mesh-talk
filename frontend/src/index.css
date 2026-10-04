@@ -380,17 +380,6 @@
     background: transparent;
   }
 
-  /* macOS overlay title bar (tauri `titleBarStyle: "Overlay"`): the native traffic-lights
-     float over the top-left of our content (~x 12–76, y ~8–28). `data-os="macos"` is set on
-     <html> only inside the Tauri webview on a Mac (see lib/platform.ts), so
-     Windows/Linux/browser get nothing. A single top offset drops the header content BELOW
-     the traffic-light row, which clears them — so no left inset is needed (an extra left pad
-     just leaves an odd blank gap before the avatar). Applies to the sidebar + conversation
-     headers alike. */
-  html[data-os="macos"] [data-titlebar-inset] {
-    padding-top: 1.75rem;
-  }
-
   /* Frameless chrome (Windows/Linux: native title bar dropped, custom controls top-right —
      see lib/platform.ts + WindowControls). Reserve room on the right of the top header bar
      (the conversation header, which spans to the window's right edge) so its actions don't
@@ -414,6 +403,15 @@
       scroll-behavior: auto !important;
     }
   }
+}
+
+/* macOS overlay title bar: reserve the 28px native traffic-light / drag-strip band
+   above both headers. Keep this override UNLAYERED: a base-layer rule loses to
+   Tailwind's utility-layer `py-3`, regardless of selector specificity, putting
+   the avatar's top edge back underneath the native buttons and drag region.
+   Only Tauri on macOS sets this marker; other platforms retain their spacing. */
+html[data-os="macos"] [data-titlebar-inset] {
+  padding-top: 1.75rem;
 }
 
 /* Tailwind v4 leaves `ring-2` transparent unless a ring color is also present.
