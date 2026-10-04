@@ -110,6 +110,11 @@ changes. Run `make smoke-full` for release-critical changes or broad workflow ch
 
 ## Testing Best Practices
 
+See [quality gates and release evidence](../docs/evals/quality-gates.md) for the
+required scenario matrix, failing-baseline evidence, mutation-result semantics and
+native platform limitations. Record applicable gaps in the PR; line coverage alone
+does not establish correctness.
+
 1. **Rust Tests**:
    - Use module-level tests for unit testing individual functions
    - Use integration tests (`crates/mesh-talk-core/tests/`) for cross-module functionality
