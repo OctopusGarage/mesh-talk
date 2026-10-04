@@ -2,8 +2,9 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(new URL("..", import.meta.url).pathname);
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DEFAULT_SUITE = "docs/evals/ai-eval-suite.json";
 const DEFAULT_REPORT = "target/ai-eval/report.json";
 
