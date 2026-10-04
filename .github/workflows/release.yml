@@ -4,19 +4,51 @@ on:
   push:
     tags:
       - "v*"  # Triggered when pushing tags
-  workflow_dispatch: {}  # Manual run: builds all platforms + uploads artifacts (no GitHub Release)
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the verified draft (select a version tag, not a branch)
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  id-token: write       # OIDC for cosign keyless signing + SLSA attestation
-  attestations: write   # actions/attest-build-provenance writes signed provenance
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.inputs.outputs.tag }}
+      version: ${{ steps.inputs.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Validate source, version and draft state
+        id: inputs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PUBLICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+        run: node scripts/release/preflight.mjs
+
   build-release:
+    needs: preflight
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos
@@ -48,10 +80,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      # 3.5️⃣ Install Tauri CLI
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli
 
       # 3.6️⃣ Install protoc
       - name: Install protoc (macOS)
@@ -99,14 +127,14 @@ jobs:
       - name: Build Tauri app
         run: |
           cd src-tauri
-          cargo tauri build --target ${{ matrix.target }}
+          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }}
 
       # 7️⃣ Collect artifacts
       - name: Collect build artifacts
         shell: bash
         run: |
           mkdir -p release
-          TAG="${GITHUB_REF_NAME}"
+          TAG="$ARTIFACT_TAG"
 
           for pattern in \
             target/*/release/bundle/nsis/*.exe \
@@ -168,7 +196,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="$ARTIFACT_TAG"
           mkdir -p release_zips
 
           OS_NAME=""
@@ -244,22 +272,99 @@ jobs:
           path: release_zips/*
           if-no-files-found: error
 
-      # 1️⃣2️⃣ On a version tag only: build the release body (verification + usage notes, with
-      # the tag substituted in) and publish the artifacts to the GitHub Release.
+  # Re-download what was actually uploaded; a green build is not release evidence.
+  verify-release:
+    needs: [preflight, build-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_REPO: ${{ github.repository }}
+      SOURCE_REF: ${{ github.ref }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Install installer metadata tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
+      - uses: sigstore/cosign-installer@v4.1.2
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mesh-talk-*
+          merge-multiple: true
+          path: workflow-assets
+      - name: Verify workflow artifacts
+        run: bash scripts/release/verify-release.sh workflow-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA"
+      - name: Recheck draft state immediately before the single upload
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node scripts/release/release-state.mjs guard "$ARTIFACT_TAG"
       - name: Prepare release notes
         if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: sed "s/__TAG__/${GITHUB_REF_NAME}/g" .github/release-notes.md > release_notes.md
-
-      - name: Upload zipped artifacts and signature bundle to GitHub Release
+        run: sed "s/__TAG__/$ARTIFACT_TAG/g" .github/release-notes.md > release_notes.md
+      - name: Upload all verified platforms to the draft
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
-          # Publish once, only after every platform and its provenance are verified.
           draft: true
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
           body_path: release_notes.md
-          generate_release_notes: true # append an auto changelog under the notes above
-          files: release_zips/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
+          files: workflow-assets/*
+      - name: Verify actual draft release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir draft-assets
+          gh release download "$ARTIFACT_TAG" --repo "$SOURCE_REPO" --dir draft-assets
+          bash scripts/release/verify-release.sh draft-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA"
+          node scripts/release/release-state.mjs record "$ARTIFACT_TAG" draft-assets workflow-assets
+      - name: Record verification evidence
+        run: |
+          printf 'Verified source: %s\nArtifact tag: %s\nVersion: %s\n' "$SOURCE_SHA" "$ARTIFACT_TAG" "$RELEASE_VERSION" > verification.txt
+          sha256sum workflow-assets/* >> verification.txt
+          if [[ -d draft-assets ]]; then sha256sum draft-assets/* >> verification.txt; fi
+          cat verification.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: verified-release-evidence
+          path: |
+            verification.txt
+            verified-draft.json
+          if-no-files-found: error
+
+  publish-release:
+    needs: [preflight, verify-release]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      checks: read
+      security-events: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_REPO: ${{ github.repository }}
+      SOURCE_SHA: ${{ github.sha }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Require successful checks for this exact source
+        run: node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
+      - uses: actions/download-artifact@v8
+        with:
+          name: verified-release-evidence
+          path: .
+      - name: Publish only the verified draft
+        run: node scripts/release/release-state.mjs publish "$RELEASE_TAG"
