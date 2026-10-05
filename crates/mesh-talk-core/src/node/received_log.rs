@@ -37,6 +37,10 @@ pub struct ReceivedLog {
 }
 
 impl ReceivedLog {
+    #[cfg(test)]
+    pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.file.fail_appends_for_test(enabled)
+    }
     pub(crate) fn entry(&self, id: EventId) -> Option<&ReceivedEntry> {
         let (conversation, index) = self.seen.get(&id)?;
         self.by_conversation.get(conversation)?.get(*index)

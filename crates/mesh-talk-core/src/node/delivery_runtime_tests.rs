@@ -475,10 +475,13 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
         let account_keys = account.secret_bytes();
         let (mut a, _) = node(dir.path(), identity, account, &bp);
         let sidecar = dir.path().join("sidecar");
-        let moved = dir.path().join("moved");
         *a.received_files.lock().unwrap() =
             ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
-        std::fs::rename(&sidecar, &moved).unwrap();
+        a.received_files
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(true)
+            .unwrap();
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, []).unwrap();
         let (id, file) = a
@@ -494,7 +497,11 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
         assert_eq!(history[0].id, id);
         assert_eq!(history[0].file.as_ref().unwrap().file_conv, file);
         assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-        std::fs::rename(&moved, &sidecar).unwrap();
+        a.received_files
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(false)
+            .unwrap();
         if reopen {
             drop(a);
             a = node(
@@ -588,14 +595,21 @@ async fn live_receive_recovery_emits_exactly_one_callback_after_durable_install(
         .clone();
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
     let sidecar = bd.path().join("sidecar");
-    let moved = bd.path().join("moved");
     *b.received.lock().unwrap() = ReceivedLog::open(&sidecar.join("received"), "pw").unwrap();
-    std::fs::rename(&sidecar, &moved).unwrap();
+    b.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
     b.emit_new_messages(event.conversation_id);
     assert!(rx.try_recv().is_err());
     assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    std::fs::rename(&moved, &sidecar).unwrap();
+    b.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let task = tokio::spawn(b.clone().run_accept_loop(bl));
     let message = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await;
@@ -652,15 +666,22 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
             .clone();
         b.log.lock().unwrap().append_durable(event.clone()).unwrap();
         let sidecar = bd.path().join("sidecar");
-        let moved = bd.path().join("moved");
         *b.received_files.lock().unwrap() =
             ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
-        std::fs::rename(&sidecar, &moved).unwrap();
+        b.received_files
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(true)
+            .unwrap();
         b.process_file_events(event.conversation_id);
         assert!(files.try_recv().is_err());
         assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
         assert!(b.files.lock().unwrap().manifest(&file).is_none());
-        std::fs::rename(&moved, &sidecar).unwrap();
+        b.received_files
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(false)
+            .unwrap();
         if reopen {
             drop(b);
             let (opened, _, incoming) = node_with_files(
@@ -1147,11 +1168,10 @@ fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
         super::conversation::account_conversation_id(&b.account_id(), &ap.account_id().unwrap());
     let row = b.received_files.lock().unwrap().entries(&host)[0].clone();
     let sidecar = dir.path().join("sidecar");
-    let moved = dir.path().join("moved");
     let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
     files.record_durable(&row).unwrap();
     *b.received_files.lock().unwrap() = files;
-    std::fs::rename(&sidecar, &moved).unwrap();
+    std::fs::create_dir(sidecar.join("files.compact-tmp")).unwrap();
     assert!(b
         .delete_account_message(&ap.account_id().unwrap(), event.id)
         .is_err());
@@ -2734,11 +2754,10 @@ async fn completion_alias_erasure_keeps_other_alias_and_failed_row_cleanup_never
         .unwrap()
         .clone();
     let sidecar = bd.path().join("alternate-sidecar");
-    let moved = bd.path().join("moved-sidecar");
     let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
     files.record_durable(&row).unwrap();
     *b.received_files.lock().unwrap() = files;
-    std::fs::rename(&sidecar, moved).unwrap();
+    std::fs::create_dir(sidecar.join("files.compact-tmp")).unwrap();
     assert!(b.delete_message(host, alias.id, false).is_err());
     assert!(b.received_files.lock().unwrap().entry(alias.id).is_some());
     assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
@@ -3036,10 +3055,13 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
         &proof,
     );
     let sidecar_dir = dir.path().join("sidecar");
-    let moved = dir.path().join("moved");
     *a.sentlog.lock().unwrap() =
         super::sentlog::SentLog::open(&sidecar_dir.join("sent"), "pw").unwrap();
-    std::fs::rename(&sidecar_dir, &moved).unwrap();
+    a.sentlog
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
     let id = a
         .enqueue_to_account(&target, b"accepted once", None)
         .await
@@ -3067,7 +3089,11 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     assert!(!a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    std::fs::rename(&moved, &sidecar_dir).unwrap();
+    a.sentlog
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while !a.delivery.lock().unwrap().pending_transactions().is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3283,14 +3309,21 @@ async fn receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_earl
         .clone();
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
     let sidecar = bd.path().join("sidecar");
-    let moved = bd.path().join("moved");
     *b.received.lock().unwrap() = ReceivedLog::open(&sidecar.join("received"), "pw").unwrap();
-    std::fs::rename(&sidecar, &moved).unwrap();
+    b.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
     b.emit_new_messages(event.conversation_id);
     assert!(rx.try_recv().is_err());
     assert!(b.delivery.lock().unwrap().retry_receipts(10).is_empty());
     assert_eq!(b.delivery.lock().unwrap().pending_transactions().len(), 1);
-    std::fs::rename(&moved, &sidecar).unwrap();
+    b.received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
     drop(b);
     let (b, mut rx) = node(
         bd.path(),

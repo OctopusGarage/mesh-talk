@@ -47,6 +47,10 @@ fn key(entry: &SentEntry) -> SentKey {
 }
 
 impl SentLog {
+    #[cfg(test)]
+    pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.file.fail_appends_for_test(enabled)
+    }
     /// Install an exact transaction record durably, including an already installed
     /// record. A logical account id (or legacy conversation/sequence) cannot be
     /// reused for different history; recovery fails closed on such conflicts.
