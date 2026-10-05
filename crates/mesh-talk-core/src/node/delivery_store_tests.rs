@@ -1,6 +1,336 @@
 use super::*;
 
 #[test]
+fn incoming_file_wal_reserves_completion_and_erase_exactly_once_at_tight_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = DeviceIdentity::generate();
+    let owner = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let conversation =
+        super::super::conversation::dm_conversation_id(&source.public(), &owner.public());
+    let manifest = crate::file::FileManifest {
+        name: "empty.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [3; 32],
+        file_conv: ConversationId::new([73; 32]),
+        chunk_count: 1,
+    };
+    let original = Event::new(
+        &source,
+        conversation,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::FileManifest,
+        crate::dm::seal(&source, &owner.public().x25519_pub, &manifest.encode()).unwrap(),
+    );
+    let card = FileCard {
+        id: original.id,
+        conversation,
+        wall_clock: 1,
+        file_conversation: manifest.file_conv,
+        final_chunk: None,
+        chunk_count: 1,
+        destinations: vec![],
+        completion_binding: Some(FileCompletionBinding {
+            source: source.public(),
+            certificate: Some(account.certify(&source.public().ed25519_pub)),
+            owner_account: account.account_id(),
+        }),
+    };
+    let limits = DeliveryLimits {
+        outbox_bytes: HEADER_BYTES
+            + bincode::serialized_size(&OutboxRecord::FileCard(card.clone())).unwrap()
+            + FRAME_OVERHEAD
+            + 200,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .begin(DeliveryTransaction::IncomingManifest {
+            sender: source.public(),
+            original: Box::new(original.clone()),
+            received: Box::new(ReceivedEntry {
+                event_id: original.id,
+                conversation,
+                from: source.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            }),
+            receipt: None,
+            file: card.clone(),
+        })
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    let mut log = PersistentEventLog::open(&dir.path().join("events"), "pw").unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&dir.path().join("sessions"), "pw").unwrap());
+    let mut sent = SentLog::open(&dir.path().join("sent"), "pw").unwrap();
+    let mut received = ReceivedLog::open(&dir.path().join("received"), "pw").unwrap();
+    let mut files = ReceivedLog::open(&dir.path().join("files"), "pw").unwrap();
+    store
+        .recover_next_with_files(
+            &mut ratchet,
+            &mut log,
+            &mut sent,
+            &mut received,
+            Some(&mut files),
+        )
+        .unwrap();
+    let final_chunk = EventId::new([74; 32]);
+    store.complete_file(card.id, final_chunk).unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert_eq!(
+        store.completed_files(manifest.file_conv, final_chunk).len(),
+        1
+    );
+    store.erase_file(conversation, card.id).unwrap();
+    assert!(store
+        .completed_files(manifest.file_conv, final_chunk)
+        .is_empty());
+}
+
+#[test]
+fn verified_file_completion_spends_reserved_bytes_after_reopen_and_erases_its_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let card = FileCard {
+        id: EventId::new([71; 32]),
+        conversation: ConversationId::new([72; 32]),
+        wall_clock: 1,
+        file_conversation: ConversationId::new([73; 32]),
+        final_chunk: None,
+        chunk_count: 1,
+        destinations: vec![],
+        completion_binding: Some(FileCompletionBinding {
+            source: source.public(),
+            certificate: Some(account.certify(&source.public().ed25519_pub)),
+            owner_account: account.account_id(),
+        }),
+    };
+    let final_chunk = EventId::new([74; 32]);
+    let limits = DeliveryLimits {
+        outbox_bytes: HEADER_BYTES
+            + bincode::serialized_size(&OutboxRecord::FileCard(card.clone())).unwrap()
+            + FRAME_OVERHEAD
+            + 200,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .install_record(OutboxRecord::FileCard(card.clone()))
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store.complete_file(card.id, final_chunk).unwrap();
+    assert!(store
+        .complete_file(card.id, EventId::new([75; 32]))
+        .is_err());
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert_eq!(
+        store
+            .completed_files(card.file_conversation, final_chunk)
+            .len(),
+        1
+    );
+    assert!(store
+        .completed_files(card.file_conversation, EventId::new([75; 32]))
+        .is_empty());
+    store.erase_file(card.conversation, card.id).unwrap();
+    drop(store);
+    let store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert!(store
+        .completed_files(card.file_conversation, final_chunk)
+        .is_empty());
+    assert!(store.manifest_event_erased(card.id));
+}
+
+#[test]
+fn completion_compaction_keeps_live_aliases_and_erased_alias_stays_suppressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let mut card = FileCard {
+        id: EventId::new([71; 32]),
+        conversation: ConversationId::new([72; 32]),
+        wall_clock: 1,
+        file_conversation: ConversationId::new([73; 32]),
+        final_chunk: None,
+        chunk_count: 1,
+        destinations: vec![],
+        completion_binding: Some(FileCompletionBinding {
+            source: source.public(),
+            certificate: Some(account.certify(&source.public().ed25519_pub)),
+            owner_account: account.account_id(),
+        }),
+    };
+    let bytes =
+        bincode::serialized_size(&OutboxRecord::FileCard(card.clone())).unwrap() + FRAME_OVERHEAD;
+    let limits = DeliveryLimits {
+        outbox_bytes: HEADER_BYTES + bytes * 2 + 500,
+        ..DeliveryLimits::default()
+    };
+    let first = card.id;
+    let final_chunk = EventId::new([74; 32]);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .install_record(OutboxRecord::FileCard(card.clone()))
+        .unwrap();
+    store.complete_file(first, final_chunk).unwrap();
+    card.id = EventId::new([75; 32]);
+    let second = card.id;
+    store
+        .install_record(OutboxRecord::FileCard(card.clone()))
+        .unwrap();
+    store.complete_file(second, final_chunk).unwrap();
+    store.erase_file(card.conversation, first).unwrap();
+    card.id = EventId::new([76; 32]);
+    let third = card.id;
+    store
+        .install_record(OutboxRecord::FileCard(card.clone()))
+        .unwrap();
+    assert!(
+        store.outbox_records < 6,
+        "new live alias requires snapshot compaction at this byte cap"
+    );
+    store.complete_file(third, final_chunk).unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert!(store.manifest_event_erased(first));
+    assert_eq!(
+        store
+            .completed_files(card.file_conversation, final_chunk)
+            .len(),
+        2
+    );
+    store.erase_file(card.conversation, second).unwrap();
+    drop(store);
+    let store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert_eq!(
+        store
+            .completed_files(card.file_conversation, final_chunk)
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.completed_files(card.file_conversation, final_chunk)[0].id,
+        third
+    );
+}
+
+#[test]
+fn completion_binding_rejects_certificate_for_other_source_before_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = DeviceIdentity::generate();
+    let other = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let card = FileCard {
+        id: EventId::new([71; 32]),
+        conversation: ConversationId::new([72; 32]),
+        wall_clock: 1,
+        file_conversation: ConversationId::new([73; 32]),
+        final_chunk: None,
+        chunk_count: 1,
+        destinations: vec![],
+        completion_binding: Some(FileCompletionBinding {
+            source: source.public(),
+            certificate: Some(account.certify(&other.public().ed25519_pub)),
+            owner_account: account.account_id(),
+        }),
+    };
+    let mut store =
+        DeliveryStore::open_with_limits(dir.path(), "pw", DeliveryLimits::default()).unwrap();
+    assert!(store
+        .install_record(OutboxRecord::FileCard(card.clone()))
+        .is_err());
+    assert!(store.file_card(card.id).is_none());
+}
+
+#[test]
+fn accepted_file_erasure_uses_reserved_bytes_at_tight_cap_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let card = FileCard {
+        id: EventId::new([81; 32]),
+        conversation: ConversationId::new([82; 32]),
+        wall_clock: 1,
+        file_conversation: ConversationId::new([83; 32]),
+        final_chunk: None,
+        chunk_count: 1,
+        destinations: Vec::new(),
+        completion_binding: None,
+    };
+    let bytes = HEADER_BYTES
+        + bincode::serialized_size(&OutboxRecord::FileCard(card.clone())).unwrap()
+        + FRAME_OVERHEAD
+        + 100;
+    let limits = DeliveryLimits {
+        outbox_bytes: bytes,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .install_record(OutboxRecord::FileCard(card.clone()))
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert!(store.erase_file(card.conversation, card.id).unwrap());
+    drop(store);
+    let store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert!(store.file_erased(card.conversation, card.id));
+    assert!(store.file_card(card.id).is_none());
+}
+
+#[test]
+fn file_retirement_spends_only_its_reserved_slot_and_keeps_erasure_reserve() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = EventId::new([85; 32]);
+    let card = FileCard {
+        id: EventId::new([81; 32]),
+        conversation: ConversationId::new([82; 32]),
+        wall_clock: 1,
+        file_conversation: ConversationId::new([83; 32]),
+        final_chunk: Some(EventId::new([84; 32])),
+        chunk_count: 1,
+        destinations: vec![FileDestination {
+            active: true,
+            binding: DeliveryReference {
+                device: DeviceIdentity::generate().public(),
+                account: None,
+                event_id: original,
+                receipt_eligible: true,
+            },
+        }],
+        completion_binding: None,
+    };
+    let bytes = HEADER_BYTES
+        + bincode::serialized_size(&OutboxRecord::FileCard(card.clone())).unwrap()
+        + FRAME_OVERHEAD
+        + 200;
+    let limits = DeliveryLimits {
+        outbox_bytes: bytes,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .install_record(OutboxRecord::FileCard(card.clone()))
+        .unwrap();
+    store.retire_file_destination(card.id, original).unwrap();
+    assert!(store.next_file_destination(None).is_none());
+    assert_eq!(store.file_card(card.id).unwrap().destinations.len(), 1);
+    assert!(store.erase_file(card.conversation, card.id).unwrap());
+    drop(store);
+    let store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert!(store.file_erased(card.conversation, card.id));
+}
+
+#[test]
 fn tight_receipt_capacity_reserves_full_binding_and_indexed_cancel_before_acceptance() {
     let dir = tempfile::tempdir().unwrap();
     let tx = incoming(dir.path());

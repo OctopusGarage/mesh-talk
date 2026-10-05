@@ -19,6 +19,7 @@ pub(crate) mod delivery_store;
 pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
+mod file_completion;
 pub(crate) mod filebook;
 pub(crate) mod files;
 pub(crate) mod lifecycle;

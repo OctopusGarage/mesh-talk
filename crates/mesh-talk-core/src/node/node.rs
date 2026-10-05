@@ -366,7 +366,7 @@ impl Node {
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
@@ -379,9 +379,17 @@ impl Node {
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
         while delivery
-            .recover_next(&mut dm_ratchet, &mut log, &mut sentlog, &mut received)?
+            .recover_next_with_files(
+                &mut dm_ratchet,
+                &mut log,
+                &mut sentlog,
+                &mut received,
+                Some(&mut received_files),
+            )?
             .is_some()
         {}
+        received_files
+            .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
         let delivery_control_ids = delivery.control_ids();
         // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
         // every id in the log. An event that was ingested durably but never recorded (it
@@ -423,10 +431,21 @@ impl Node {
         let mut files = FileBook::new();
         for c in received_files.conversations() {
             for entry in received_files.entries(&c) {
-                if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
-                    files.record(manifest);
+                if delivery.file_erased(entry.conversation, entry.event_id)
+                    || delivery.manifest_event_erased(entry.event_id)
+                {
+                    continue;
                 }
-                files.mark_emitted(entry.event_id);
+                let decoded = super::files::validated_manifest(&entry.plaintext);
+                let existing = decoded
+                    .as_ref()
+                    .and_then(|m| files.manifest(&m.file_conv()));
+                if let Some(manifest) =
+                    super::files::eligible_manifest_row(&entry, log.get(&entry.event_id), existing)
+                {
+                    files.record_event(entry.event_id, manifest);
+                    files.mark_emitted(entry.event_id);
+                }
             }
         }
         // Durable chat-media store under the per-account dir (sibling to the logs). Plaintext
@@ -605,6 +624,11 @@ impl Node {
             kind,
             ciphertext,
         );
+        if event.kind == EventKind::FileManifest && !super::session::event_fits_frame(&event) {
+            return Err(NodeError::File(
+                "file manifest exceeds transport frame".into(),
+            ));
+        }
         log.append(event).map_err(NodeError::Log)?;
         Ok(seq)
     }

@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn file_card_receipt_authenticates_actual_copy_and_returns_canonical_first_id() {
+    let mut f = Fixture::new(true);
+    let manifest = crate::file::FileManifest {
+        name: "empty.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [3; 32],
+        file_conv: ConversationId::new([4; 32]),
+        chunk_count: 1,
+    };
+    let plain = manifest.encode();
+    let actual = Event::new(
+        &f.alice,
+        dm_conversation_id(&f.alice.public(), &f.bob.public()),
+        1,
+        vec![],
+        1,
+        100,
+        EventKind::FileManifest,
+        crate::dm::seal(&f.alice, &f.bob.public().x25519_pub, &plain).unwrap(),
+    );
+    let own = DeviceIdentity::generate();
+    let first = Event::new(
+        &f.alice,
+        dm_conversation_id(&f.alice.public(), &own.public()),
+        1,
+        vec![],
+        1,
+        100,
+        EventKind::FileManifest,
+        crate::dm::seal(&f.alice, &own.public().x25519_pub, &plain).unwrap(),
+    );
+    f.message.logical_id = first.id;
+    f.message.destinations[0].event = actual.clone();
+    f.message.destinations.insert(
+        0,
+        DeliveryDestination {
+            device: own.public(),
+            account: Some(f.alice_account.account_id()),
+            event: first.clone(),
+            receipt_eligible: false,
+        },
+    );
+    f.received.event_id = actual.id;
+    f.received.from = f.alice.user_id();
+    f.received.plaintext = plain;
+    let payload = ReceiptPayload::prepare(
+        &f.bob.public(),
+        &f.bob_account.account_id(),
+        &f.alice_proof,
+        &actual,
+        &f.received,
+        50,
+    )
+    .expect("valid file card");
+    assert_eq!(payload.logical_id, actual.id);
+    assert_ne!(actual.id, first.id);
+    let receipt = f.event_for(&payload);
+    assert_eq!(f.authenticate(&receipt).unwrap().logical_id(), first.id);
+    let mut forged = payload.clone();
+    forged.original_kind = EventKind::Message;
+    assert!(f.authenticate(&f.event_for(&forged)).is_none());
+    let mut forged = payload;
+    forged.logical_id = first.id;
+    assert!(ReceiptPayload::decode(&bincode::serialize(&forged).unwrap()).is_none());
+}
+
+#[test]
 fn control_ciphertext_is_not_legacy_chat_ciphertext() {
     let f = Fixture::new(true);
     let event = f.event_for(&f.payload());

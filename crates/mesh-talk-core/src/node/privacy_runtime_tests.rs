@@ -576,12 +576,50 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         b"MTFSC1",
     )
     .unwrap();
-    assert_eq!(scopes.iter().filter(|scope| scope.file == file).count(), 2);
-    assert_eq!(
-        scopes.iter().filter(|scope| scope.file == second).count(),
-        2,
-        "new scopes must remain readable after repairing a torn tail"
+    assert!(
+        scopes.is_empty(),
+        "tracked file scopes belong to bounded delivery metadata"
     );
+    {
+        let delivery = reopened.delivery.lock().unwrap();
+        for file_conversation in [file, second] {
+            let card = delivery
+                .file_cards()
+                .find(|card| card.file_conversation == file_conversation)
+                .unwrap();
+            assert_eq!(card.destinations.len(), 2);
+            for device in &devices {
+                let destination = card
+                    .destinations
+                    .iter()
+                    .find(|d| d.binding.device == device.public())
+                    .unwrap();
+                assert_eq!(
+                    destination.binding.account.as_deref(),
+                    Some(account.account_id().as_str())
+                );
+                let log = reopened.log.lock().unwrap();
+                let manifest = log.get(&destination.binding.event_id).unwrap();
+                assert_eq!(manifest.kind, crate::eventlog::EventKind::FileManifest);
+                assert_eq!(
+                    manifest.conversation_id,
+                    crate::node::conversation::dm_conversation_id(
+                        &reopened.identity.public(),
+                        &device.public()
+                    )
+                );
+                assert!(manifest.verify_signature() && manifest.verify_integrity());
+                assert_eq!(
+                    card.final_chunk,
+                    log.events(&file_conversation).last().map(|e| e.id)
+                );
+                for (index, chunk) in log.events(&file_conversation).iter().enumerate() {
+                    assert_eq!(chunk.seq, index as u64 + 1);
+                    assert_eq!(chunk.parents.len(), usize::from(index > 0));
+                }
+            }
+        }
+    }
     reopened
         .set_allowed(&account.account_id(), false)
         .await
@@ -671,6 +709,188 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
             .unwrap()
             .scope_repair_needed
     );
+}
+
+#[tokio::test]
+async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append() {
+    use crate::eventlog::sync::SyncStore;
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(dir.path());
+    alice
+        .configure_privacy(
+            dir.path(),
+            "pw",
+            &alice.signed_announce("Alice", 9),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    alice.set_invisible(true).await.unwrap();
+    let account = crate::identity::account::Account::generate();
+    let devices = [
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+    ];
+    for device in &devices {
+        let proof = Announce::new_with_account(device, &account, "Bob", 9);
+        alice
+            .privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&proof)
+            .unwrap();
+    }
+    alice
+        .initiate_contact_locally(&account.account_id())
+        .await
+        .unwrap();
+    let path = dir.path().join("legacy.txt");
+    std::fs::write(&path, b"legacy scope fixture").unwrap();
+    let (manifest, file) = alice
+        .stage_file(&path, crate::file::FileKind::File, |_| {})
+        .unwrap();
+    let author = crate::eventlog::Author::from_ed25519(alice.identity.public().ed25519_pub);
+    let mut originals = Vec::new();
+    for device in &devices[..2] {
+        let parent = crate::node::conversation::dm_conversation_id(
+            &alice.identity.public(),
+            &device.public(),
+        );
+        alice
+            .append_event(
+                parent,
+                crate::eventlog::EventKind::FileManifest,
+                crate::dm::seal(
+                    &alice.identity,
+                    &device.public().x25519_pub,
+                    &manifest.encode(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let event = alice.log.lock().unwrap().events(&parent)[0].id;
+        alice
+            .remember_sent_manifest_scope(file, parent, author, event)
+            .unwrap();
+        originals.push(event);
+    }
+    let original_wall_clock = alice
+        .log
+        .lock()
+        .unwrap()
+        .get(&originals[0])
+        .unwrap()
+        .wall_clock;
+    alice
+        .received_files
+        .lock()
+        .unwrap()
+        .record_durable(&super::received_log::ReceivedEntry {
+            event_id: originals[0],
+            conversation: crate::node::conversation::account_conversation_id(
+                &alice.account_id(),
+                &account.account_id(),
+            ),
+            from: alice.user_id(),
+            wall_clock: original_wall_clock,
+            plaintext: manifest.encode(),
+        })
+        .unwrap();
+    let expected = alice.log.lock().unwrap().event_ids(&file);
+    let keys = alice.identity.secret_bytes();
+    let own = crate::identity::account::Account::from_secret_bytes(alice.account.secret_bytes());
+    drop(alice);
+    let scope_path = dir.path().join("sent-manifest-scopes.log");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&scope_path)
+        .unwrap()
+        .write_all(&[0, 0, 0, 50, 1, 2])
+        .unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let (ctx, _) = mpsc::unbounded_channel();
+    let (ftx, _) = mpsc::unbounded_channel();
+    let alice = Node::open_with_account(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        own,
+        Arc::new(Mutex::new(crate::discovery::Roster::default())),
+        tx,
+        ctx,
+        ftx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    alice
+        .configure_privacy(
+            dir.path(),
+            "pw",
+            &alice.signed_announce("Alice", addr.port()),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    for device in &devices[..2] {
+        assert_eq!(
+            alice
+                .sync_store(&device.public())
+                .lock()
+                .unwrap()
+                .event_ids(&file),
+            expected
+        );
+    }
+    let parent = crate::node::conversation::dm_conversation_id(
+        &alice.identity.public(),
+        &devices[2].public(),
+    );
+    alice
+        .append_event(
+            parent,
+            crate::eventlog::EventKind::FileManifest,
+            crate::dm::seal(
+                &alice.identity,
+                &devices[2].public().x25519_pub,
+                &manifest.encode(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let event = alice.log.lock().unwrap().events(&parent)[0].id;
+    alice
+        .remember_sent_manifest_scope(file, parent, author, event)
+        .unwrap();
+    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
+        &scope_path,
+        "pw",
+        b"MTFSC1",
+    )
+    .unwrap();
+    assert_eq!(scopes.len(), 3);
+    let server = tokio::spawn(alice.clone().run_accept_loop(listener));
+    for device in &devices {
+        let store = Mutex::new(crate::eventlog::EventLog::default());
+        tokio::time::timeout(DEADLINE, async {
+            let mut channel = dial(addr, device, Some(&alice.identity.public()))
+                .await
+                .unwrap();
+            crate::node::session::request_round(&mut channel, &store, file)
+                .await
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.lock().unwrap().event_ids(&file), expected);
+    }
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]

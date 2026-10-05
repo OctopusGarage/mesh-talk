@@ -22,6 +22,7 @@ pub(in crate::node) struct PrivacyState {
     pub routes: super::privacy_routes::RouteCache,
     pub sent_manifest_scopes: crate::storage::record_log::EncryptedRecordLog<StoredManifestScope>,
     pub scope_repair_needed: bool,
+    pub legacy_scope_ids: std::collections::HashSet<crate::eventlog::EventId>,
     pub file_scopes: std::collections::HashMap<crate::eventlog::ConversationId, Vec<ManifestScope>>,
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -85,6 +86,11 @@ impl Node {
             .rewrite(&stored_scopes)
             .map_err(io::Error::other)?;
         let mut file_scopes: std::collections::HashMap<_, Vec<ManifestScope>> = Default::default();
+        let mut legacy_scope_ids = std::collections::HashSet::new();
+        if stored_scopes.len() > super::delivery_store::DeliveryLimits::default().completed_receipts
+        {
+            return Err(io::Error::other("legacy file scope capacity exhausted"));
+        }
         {
             let records = self
                 .received_files
@@ -115,6 +121,7 @@ impl Node {
                         event: scope.event,
                     };
                     if !scopes.contains(&restored) {
+                        legacy_scope_ids.insert(restored.event);
                         scopes.push(restored);
                     }
                 }
@@ -145,6 +152,7 @@ impl Node {
             routes,
             sent_manifest_scopes,
             scope_repair_needed: false,
+            legacy_scope_ids,
             file_scopes,
         };
         let mut state = self.privacy.state.write().map_err(|_| denied())?;
@@ -152,6 +160,9 @@ impl Node {
             return Err(denied());
         }
         *state = Some(next);
+        drop(state);
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.reseed_live_file_book(&delivery);
         Ok(())
     }
     /// Return current local policy; unconfigured SDK nodes report the public default.
@@ -350,6 +361,19 @@ impl Node {
         .await;
     }
     pub(in crate::node) async fn initiate_device(&self, public: &PublicIdentity) -> io::Result<()> {
+        self.initiate_device_with_presence(public, true).await
+    }
+    pub(in crate::node) async fn initiate_device_locally(
+        &self,
+        public: &PublicIdentity,
+    ) -> io::Result<()> {
+        self.initiate_device_with_presence(public, false).await
+    }
+    async fn initiate_device_with_presence(
+        &self,
+        public: &PublicIdentity,
+        publish: bool,
+    ) -> io::Result<()> {
         if self.privacy.state.read().map_err(|_| denied())?.is_none() {
             return Ok(());
         }
@@ -377,7 +401,11 @@ impl Node {
                 Ok(())
             };
         };
-        self.initiate_contact(&account).await
+        if publish {
+            self.initiate_contact(&account).await
+        } else {
+            self.initiate_contact_locally(&account).await
+        }
     }
     pub(in crate::node) fn account_allowed(
         &self,
@@ -503,6 +531,13 @@ impl Node {
                 .get(&file)
                 .is_some_and(|scopes| scopes.contains(&scope))
             {
+                if state.legacy_scope_ids.len()
+                    >= super::delivery_store::DeliveryLimits::default().completed_receipts
+                {
+                    return Err(crate::eventlog::LogError::CorruptFile(
+                        "legacy file scope capacity exhausted".into(),
+                    ));
+                }
                 if state.scope_repair_needed {
                     let valid = state
                         .file_scopes
@@ -528,6 +563,7 @@ impl Node {
                     state.scope_repair_needed = true;
                     return Err(error);
                 }
+                state.legacy_scope_ids.insert(event);
                 state.file_scopes.entry(file).or_default().push(scope);
             }
         }

@@ -174,6 +174,11 @@ impl Node {
                 EventKind::Message,
                 wire,
             );
+            if !super::session::event_fits_frame(&event) {
+                return Err(NodeError::Log(crate::eventlog::LogError::CorruptFile(
+                    "message exceeds transport frame".into(),
+                )));
+            }
             let eligible =
                 proof_account.is_some() && proof_account.as_deref() != Some(account.as_str());
             destinations.push(DeliveryDestination {

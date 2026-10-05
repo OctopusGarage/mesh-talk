@@ -19,6 +19,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+#[path = "mesh-talk-node/file_saves.rs"]
+mod file_saves;
+
 /// How often a normal node drains held DMs from the elected post office.
 const DRAIN_INTERVAL_SECS: u64 = 3;
 
@@ -235,7 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
     let (channel_tx, mut channel_rx) =
         mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedChannelMessage>();
-    let (file_tx, mut file_rx) = mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedFile>();
+    let (file_tx, file_rx) = mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedFile>();
     // Derive log paths from the keystore path (sibling files, same directory).
     let keystore_path = std::path::Path::new(&args.keystore);
     let data_dir = keystore_path.parent().unwrap_or(std::path::Path::new("."));
@@ -298,24 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let node = Arc::clone(&node);
         let data_dir = data_dir.to_path_buf();
-        tokio::spawn(async move {
-            while let Some(f) = file_rx.recv().await {
-                // Save into a trusted dir; the manifest name is never trusted to escape it.
-                match node.save_file_into_dir(f.file_conv, &data_dir) {
-                    Ok(path) => emit(&format!(
-                        "file from {}: {} ({} bytes) saved {}",
-                        f.from,
-                        f.name,
-                        f.size,
-                        path.display()
-                    )),
-                    Err(e) => emit(&format!(
-                        "file from {}: {} ({} bytes) save failed: {e}",
-                        f.from, f.name, f.size
-                    )),
-                }
-            }
-        });
+        tokio::spawn(file_saves::run(node, data_dir, file_rx, emit));
     }
 
     // Periodically pull DMs held for us by the elected post office (delivered

@@ -101,7 +101,7 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   interface, plus a unicast announce/response reply, a /24 unicast scan fallback, a startup
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
   + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
-- **Legacy/channel/file delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
+- **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
@@ -115,6 +115,59 @@ domain-derived device-pair conversation. These controls never produce chat
 callbacks or receipts of their own. Only a validated receipt from an exact target
 device/account marks a tracked message Delivered; successful sessions, online
 presence, relay custody and own-device copies leave it Awaiting.
+DM file cards use the same authenticated delivery controls, without a ratchet
+transition. FileManifest wire layouts remain unchanged: the receiver confirms its
+exact per-device manifest event, and the sender's bounded original-event index
+resolves that confirmation to the first manifest event's stable canonical card ID.
+An outgoing transaction journals the immutable fanout manifests, canonical local
+file row and bounded destination/scope metadata before publication. Incoming
+transactions install the file row before appending their immutable receipt.
+Live recovery publishes callbacks once after durable installation; startup replay
+only reconstructs history and pending controls. Enqueue APIs perform local durable
+acceptance only; existing send APIs additionally attempt immediate transport.
+
+Card delivery is not file download or read confirmation. Independent immutable
+chunk work survives an early card receipt and sender restart. The worker also
+rotates one file destination, sends its manifest before chunks, and retires chunk
+work only after the exact target confirms the final event in the validated
+dense signed chunk chain. A receiver may instead confirm historical verified
+completion after saving all content and reclaiming chunks: it verifies the entire
+original-author chain, chunk AEAD/hashes and whole-file checksum, synchronizes the
+saved file, rename and Unix parent directory, then durably journals a bounded
+completion record associated with the live file card before pruning. Acceptance
+reserves both completion and future local erasure metadata. Failed persistence
+keeps chunks; active source fanout also keeps the original signed chunks.
+Historical completion is available only to the exact authenticated origin device,
+with its current full identity and certificate/account binding when present, the
+current local owner, retained signed manifest/local row and current permission.
+Legacy public SDK peers without account certificates retain device-only origin
+binding; a later account rebind invalidates it and invisible mode cannot authorize
+an account-less origin. This boolean storage proof does not mark a card Delivered.
+Post offices confirm current events only; past relay custody never retires source
+file work. Chunk ciphertext stays in the event log rather than being duplicated
+in the journal, and staging
+synchronizes the whole log at acceptance rather than synchronizing every chunk.
+Existing manifests and new message/sticker events must fit both bounded single-
+event sync frames before acceptance. MFM3 hash-list size is preflighted before
+staging; files whose manifests cannot fit are rejected despite the nominal 4 GiB
+file-size ceiling. Empty files retain their existing one-empty-chunk encoding.
+
+File progress counts currently held chunks; historical completion does not
+pretend that exported bytes remain on this node. The CLI keeps bounded pending
+and recent-save queues and runs readiness checks and one export at a time on the
+blocking pool. A retained managed-media copy can be exported after pruning;
+every export verifies its size and checksum and synchronizes its output. Group
+and own-device media use retained signed manifest/local-row references only for
+local export, never for a historical network probe or a delivery receipt. Legacy
+v1 exports keep their prior in-memory path and retain chunks rather than creating
+new completion proofs.
+
+Local file erasure reserves permanent bounded metadata before card acceptance.
+The erased immutable manifest ID remains suppressed across restart, sync and
+account adoption, without a wire tombstone or remote recall. File keys and private
+scopes are rebuilt only from remaining durable aliases and validated retained
+fanout references. A full erasure-metadata store refuses legacy-row deletion
+before removing the row; erasure markers are never evicted to make room.
 All local event allocations and own-author sync backfill first recover accepted
 intents under the delivery lock, so generic reactions/manifests cannot consume
 an immutable intent's reserved sequence. Failed recovery blocks competing writes.

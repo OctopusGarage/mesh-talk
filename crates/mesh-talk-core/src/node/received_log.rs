@@ -37,6 +37,10 @@ pub struct ReceivedLog {
 }
 
 impl ReceivedLog {
+    pub(crate) fn entry(&self, id: EventId) -> Option<&ReceivedEntry> {
+        let (conversation, index) = self.seen.get(&id)?;
+        self.by_conversation.get(conversation)?.get(*index)
+    }
     /// Durably install a validated receive transaction. Retry synchronizes even
     /// when the identical record is already indexed; conflicting plaintext or
     /// routing for the same signed event is rejected.

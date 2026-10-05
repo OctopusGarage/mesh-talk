@@ -337,7 +337,10 @@ impl GuardedSyncStore<'_> {
 impl SyncStore for GuardedSyncStore<'_> {
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
         if !self.visible(conversation).iter().any(|e| e.id == *id) {
-            return false;
+            return !self.denied
+                && self
+                    .node
+                    .historical_file_completion(*conversation, *id, &self.peer);
         }
         self.node
             .log

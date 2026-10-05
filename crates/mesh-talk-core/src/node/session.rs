@@ -71,6 +71,24 @@ enum SyncWire {
     },
 }
 
+/// Acceptance preflight for an immutable event which must fit both directions
+/// of ordinary reconciliation. Have sets are streamed separately.
+pub(in crate::node) fn event_fits_frame(event: &crate::eventlog::Event) -> bool {
+    let response = SyncWire::Response(SyncResponse {
+        conversation: event.conversation_id,
+        events: vec![event.clone()],
+        have: vec![],
+    });
+    let followup = SyncWire::Followup(SyncFollowup {
+        conversation: event.conversation_id,
+        events: vec![event.clone()],
+    });
+    [&response, &followup].iter().all(|wire| {
+        bincode::serialized_size(wire)
+            .is_ok_and(|size| size <= crate::transport::MAX_PLAINTEXT as u64)
+    })
+}
+
 /// One chunk of a streamed `have` id-set.
 #[derive(Debug, Serialize, Deserialize)]
 struct HaveChunk {
@@ -483,6 +501,54 @@ mod tests {
     use crate::eventlog::event::{Event, EventKind};
     use crate::eventlog::store::EventLog;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn exact_single_event_transport_boundary_includes_long_parent_frontier() {
+        let signer = DeviceIdentity::generate();
+        for kind in [EventKind::Message, EventKind::FileManifest] {
+            for count in [0, 64] {
+                let parents = (0..count)
+                    .map(|i| EventId::new([i as u8; 32]))
+                    .collect::<Vec<_>>();
+                let empty = Event::new(&signer, conv(), 1, parents.clone(), 1, 1, kind, vec![]);
+                let response = SyncWire::Response(SyncResponse {
+                    conversation: conv(),
+                    events: vec![empty.clone()],
+                    have: vec![],
+                });
+                let followup = SyncWire::Followup(SyncFollowup {
+                    conversation: conv(),
+                    events: vec![empty],
+                });
+                let overhead = bincode::serialized_size(&response)
+                    .unwrap()
+                    .max(bincode::serialized_size(&followup).unwrap())
+                    as usize;
+                let fits = Event::new(
+                    &signer,
+                    conv(),
+                    1,
+                    parents.clone(),
+                    1,
+                    1,
+                    kind,
+                    vec![0; MAX_PLAINTEXT - overhead],
+                );
+                assert!(event_fits_frame(&fits));
+                let exceeds = Event::new(
+                    &signer,
+                    conv(),
+                    1,
+                    parents,
+                    1,
+                    1,
+                    kind,
+                    vec![0; MAX_PLAINTEXT - overhead + 1],
+                );
+                assert!(!event_fits_frame(&exceeds));
+            }
+        }
+    }
 
     fn conv() -> ConversationId {
         ConversationId::new([1u8; 32])

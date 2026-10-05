@@ -111,7 +111,18 @@ impl ReceiptPayload {
         {
             return None;
         }
-        let logical_id = if let Some(body) = accepted.plaintext.strip_prefix(b"MTDE1") {
+        let logical_id = if original.kind == EventKind::FileManifest {
+            let manifest = super::files::validated_manifest(&accepted.plaintext)?;
+            if manifest.file_conv() == original.conversation_id
+                || accepted.from != sender_device.user_id()
+                || (accepted.conversation != original.conversation_id
+                    && accepted.conversation
+                        != account_conversation_id(&sender_account, recipient_account))
+            {
+                return None;
+            }
+            original.id
+        } else if let Some(body) = accepted.plaintext.strip_prefix(b"MTDE1") {
             // A malformed framed envelope must never fall back to legacy routing.
             let envelope: DmEnvelope = bincode::DefaultOptions::new()
                 .with_fixint_encoding()
@@ -195,7 +206,12 @@ impl ReceiptPayload {
     fn valid_structure(&self) -> bool {
         self.version == VERSION
             && self.domain == *DOMAIN
-            && self.original_kind == EventKind::Message
+            && matches!(
+                self.original_kind,
+                EventKind::Message | EventKind::FileManifest
+            )
+            && (self.original_kind != EventKind::FileManifest
+                || self.logical_id == self.original_event_id)
             && valid_account(&self.sender_account)
             && valid_account(&self.recipient_account)
             && self.sender_account != self.recipient_account
@@ -241,11 +257,16 @@ impl OpenedReceipt {
         self.payload.logical_id
     }
 
+    pub(crate) fn original_event_id(&self) -> EventId {
+        self.payload.original_event_id
+    }
+
     pub(crate) fn authenticate(&self, message: &OutgoingDelivery) -> Option<AuthenticatedReceipt> {
         let payload = &self.payload;
         if message.sender_account != payload.sender_account
             || message.recipient_account.as_deref() != Some(payload.recipient_account.as_str())
-            || message.logical_id != payload.logical_id
+            || (payload.original_kind == EventKind::Message
+                && message.logical_id != payload.logical_id)
         {
             return None;
         }
@@ -277,7 +298,7 @@ impl OpenedReceipt {
             return None;
         }
         Some(AuthenticatedReceipt {
-            logical_id: payload.logical_id,
+            logical_id: message.logical_id,
             original_event_id: payload.original_event_id,
             #[cfg(test)]
             confirmed_at: payload.confirmed_at,
@@ -361,7 +382,7 @@ pub(in crate::node) fn valid_sealed_wire(wire: &[u8]) -> bool {
 }
 
 fn valid_signed_message(event: &Event) -> bool {
-    event.kind == EventKind::Message
+    matches!(event.kind, EventKind::Message | EventKind::FileManifest)
         && event.ciphertext.len() <= MAX_DM_PLAINTEXT
         && event.parents.len() <= MAX_PARENTS
         && event.is_canonical()

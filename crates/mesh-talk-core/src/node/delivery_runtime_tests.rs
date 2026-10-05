@@ -1,5 +1,6 @@
 use super::*;
 use crate::discovery::{roster::Roster, Announce};
+use crate::eventlog::{ConversationId, EventId};
 use crate::identity::{account::Account, device::DeviceIdentity};
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -7,6 +8,1411 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{net::TcpListener, sync::mpsc};
+
+#[tokio::test]
+async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let cd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let source_secret = alice.secret_bytes();
+    let source_account = aa.secret_bytes();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let other = DeviceIdentity::generate();
+    let ca = Account::from_secret_bytes(aa.secret_bytes());
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let cp = Announce::new_with_account(&other, &ca, "Own copy", cl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (c, _) = node(cd.path(), other, ca, &ap);
+    let path = ad.path().join("空文件.txt");
+    std::fs::write(&path, []).unwrap();
+    let (manifest, file) = a
+        .stage_file(&path, crate::file::FileKind::File, |_| {})
+        .unwrap();
+    let peers = {
+        let roster = a.roster.lock().unwrap();
+        [cp.public(), bp.public()].map(|public| {
+            roster
+                .peers()
+                .into_iter()
+                .find(|peer| peer.public == public)
+                .unwrap()
+                .clone()
+        })
+    };
+    let id = a
+        .accept_staged_manifest(
+            &peers,
+            super::conversation::account_conversation_id(&a.account_id(), &b.account_id()),
+            Some(b.account_id()),
+            &manifest,
+        )
+        .unwrap();
+    let message = a.delivery.lock().unwrap().message(id).unwrap().clone();
+    assert_eq!(message.destinations[0].device, cp.public());
+    assert_eq!(message.destinations[0].event.id, id);
+    let actual = message
+        .destinations
+        .iter()
+        .find(|d| d.device == bp.public())
+        .unwrap()
+        .event
+        .id;
+    assert_ne!(actual, id);
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let ct = tokio::spawn(c.clone().run_accept_loop(cl));
+    let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while c.file_progress(file).is_none() || c.read_file(file).is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(own_received.is_ok());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert!(c.delivery.lock().unwrap().retry_receipts(1).is_empty());
+    c.save_file(file, &cd.path().join("own-empty.txt")).unwrap();
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(id)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    assert!(c.historical_file_completion(file, final_chunk, &ap.public()));
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered)
+            || a.delivery
+                .lock()
+                .unwrap()
+                .next_file_destination(None)
+                .is_some()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    at.abort();
+    bt.abort();
+    ct.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    let _ = ct.await;
+    assert!(confirmed.is_ok());
+    let history = a.account_history(&b.account_id(), 10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, id);
+    assert_eq!(b.account_history(&a.account_id(), 10)[0].id, actual);
+    assert_eq!(a.delivery_status(actual), None);
+    assert_eq!(b.read_file(file).unwrap(), Vec::<u8>::new());
+    drop(a);
+    let (a, _) = node(
+        ad.path(),
+        DeviceIdentity::from_secret_bytes(source_secret.0, source_secret.1),
+        Account::from_secret_bytes(source_account),
+        &bp,
+    );
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_none());
+}
+
+#[tokio::test]
+async fn file_enqueue_progress_never_waits_for_stalled_contact_tcp() {
+    for account_addressed in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let ba = Account::generate();
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bp = Announce::new_with_account(&bob, &ba, "Bob", stalled.local_addr().unwrap().port());
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let (a, _) = node(dir.path(), alice, aa, &bp);
+        a.configure_privacy(
+            dir.path(),
+            "pw",
+            &ap,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, []).unwrap();
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            if account_addressed {
+                a.enqueue_file_to_account_progress(
+                    &ba.account_id(),
+                    &path,
+                    crate::file::FileKind::File,
+                    |_| {},
+                )
+                .await
+            } else {
+                a.enqueue_file_dm_progress(
+                    &bob.user_id(),
+                    &path,
+                    crate::file::FileKind::File,
+                    |_| {},
+                )
+                .await
+            }
+        })
+        .await;
+        let (id, _) = accepted
+            .expect("enqueue must be local despite stalled contact listener")
+            .unwrap();
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stalled.accept())
+                .await
+                .is_err(),
+            "enqueue must not initiate a contact connection"
+        );
+    }
+}
+
+#[tokio::test]
+async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_restart() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let secret = alice.secret_bytes();
+    let account_secret = aa.secret_bytes();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _) = node(bd.path(), bob, ba, &ap);
+    for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
+        node.configure_privacy(
+            dir,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.set_invisible(true).await.unwrap();
+    }
+    a.set_allowed(&b.account_id(), true).await.unwrap();
+    b.set_allowed(&a.account_id(), true).await.unwrap();
+    let bytes = vec![9; crate::file::CHUNK_SIZE * 2 + 1];
+    let path = ad.path().join("断点续传.bin");
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let ids = a
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .iter()
+        .map(|e| e.id)
+        .collect::<Vec<_>>();
+    // Reproduce missing volatile scope: DM card/control remain authorized, while
+    // chunk disclosure is blocked until durable scope import on reopen.
+    a.privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .file_scopes
+        .remove(&file);
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    assert!(confirmed.is_ok());
+    assert!(
+        b.read_file(file).is_err(),
+        "card delivery is independent of complete download"
+    );
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_some());
+    drop(a);
+    let al = TcpListener::bind(("127.0.0.1", ap.tcp_port)).await.unwrap();
+    let bl = TcpListener::bind(("127.0.0.1", bp.tcp_port)).await.unwrap();
+    let (a, _) = node(
+        ad.path(),
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Account::from_secret_bytes(account_secret),
+        &bp,
+    );
+    a.configure_privacy(
+        ad.path(),
+        "pw",
+        &ap,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert_eq!(
+        a.log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        ids
+    );
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !b
+            .read_file(file)
+            .as_ref()
+            .is_ok_and(|actual| actual == &bytes)
+            || a.delivery
+                .lock()
+                .unwrap()
+                .next_file_destination(None)
+                .is_some()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    assert!(
+        completed.is_ok(),
+        "restart must restore immutable chunk work and private scope"
+    );
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+    let saved = bd.path().join("saved.bin");
+    b.save_file(file, &saved).unwrap();
+    assert_eq!(std::fs::read(saved).unwrap(), bytes);
+    drop(a);
+    let (a, _) = node(
+        ad.path(),
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Account::from_secret_bytes(account_secret),
+        &bp,
+    );
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_none());
+    assert!(a.delivery.lock().unwrap().file_card(id).is_some());
+}
+
+#[test]
+fn erased_static_file_manifest_does_not_resurrect_after_restart_or_sync() {
+    erased_static_manifest_reopen(false);
+}
+
+#[test]
+fn erased_static_file_manifest_stays_erased_after_authorized_account_adoption() {
+    erased_static_manifest_reopen(true);
+}
+
+fn erased_static_manifest_reopen(adopt: bool) {
+    use crate::eventlog::{Event, EventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let secret = bob.secret_bytes();
+    let mut account_secret = ba.secret_bytes();
+    let (b, _) = node(dir.path(), bob, ba, &ap);
+    let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+    let manifest = crate::file::FileManifest {
+        name: "erase.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [3; 32],
+        file_conv: crate::eventlog::ConversationId::new([4; 32]),
+        chunk_count: 1,
+    };
+    let event = Event::new(
+        &alice,
+        conv,
+        1,
+        vec![],
+        1,
+        100,
+        EventKind::FileManifest,
+        crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
+    );
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+    b.process_file_events(conv);
+    assert_eq!(b.account_history(&aa.account_id(), 10).len(), 1);
+    assert_eq!(
+        b.delete_account_message(&aa.account_id(), event.id)
+            .unwrap(),
+        1
+    );
+    if adopt {
+        let account = Account::generate();
+        b.persist_account_adoption(&account.account_id(), || Ok(()))
+            .unwrap();
+        account_secret = account.secret_bytes();
+    }
+    drop(b);
+    let (b, _) = node(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Account::from_secret_bytes(account_secret),
+        &ap,
+    );
+    b.process_file_events(conv);
+    assert!(
+        b.account_history(&aa.account_id(), 10).is_empty(),
+        "static manifest must stay locally erased"
+    );
+    assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
+    assert!(b
+        .files
+        .lock()
+        .unwrap()
+        .manifest(&manifest.file_conv)
+        .is_none());
+}
+
+#[tokio::test]
+async fn automatic_file_card_receipt_and_chunk_resume_without_manual_flush() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let bytes = vec![5; crate::file::CHUNK_SIZE + 1];
+    let path = ad.path().join("boundary.bin");
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_file_dm(&bp.public().user_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        loop {
+            if a.delivery_status(id) == Some(DeliveryStatus::Delivered)
+                && b.read_file(file)
+                    .as_ref()
+                    .is_ok_and(|actual| actual == &bytes)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    assert!(
+        result.is_ok(),
+        "automatic immutable chunks must continue after card confirmation"
+    );
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
+    for reopen in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let bob = DeviceIdentity::generate();
+        let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let keys = identity.secret_bytes();
+        let account_keys = account.secret_bytes();
+        let (mut a, _) = node(dir.path(), identity, account, &bp);
+        let sidecar = dir.path().join("sidecar");
+        let moved = dir.path().join("moved");
+        *a.received_files.lock().unwrap() =
+            ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
+        std::fs::rename(&sidecar, &moved).unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, []).unwrap();
+        let (id, file) = a
+            .enqueue_file_dm(&bob.user_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let history = a.dm_history(&bob.public(), 10);
+        assert_eq!(
+            history.len(),
+            1,
+            "durably accepted pending card remains visible"
+        );
+        assert_eq!(history[0].id, id);
+        assert_eq!(history[0].file.as_ref().unwrap().file_conv, file);
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        std::fs::rename(&moved, &sidecar).unwrap();
+        if reopen {
+            drop(a);
+            a = node(
+                dir.path(),
+                DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                Account::from_secret_bytes(account_keys),
+                &bp,
+            )
+            .0;
+        } else {
+            let mut store = a.delivery.lock().unwrap();
+            a.recover_delivery(&mut store).unwrap();
+        }
+        assert_eq!(a.dm_history(&bob.public(), 10)[0].id, id);
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
+        assert!(a.files.lock().unwrap().manifest(&file).is_some());
+    }
+}
+
+#[tokio::test]
+async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(dir.path(), alice, aa, &bp);
+    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
+    let result = a
+        .enqueue_to_account(&bp.account_id().unwrap(), &vec![b'x'; 128 * 1024], None)
+        .await;
+    assert!(
+        result.is_err(),
+        "oversized transport event cannot be durably accepted"
+    );
+    assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
+    assert!(a.sentlog.lock().unwrap().conversations().is_empty());
+    assert!(a.log.lock().unwrap().conversations().is_empty());
+    assert_eq!(
+        std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
+        sessions
+    );
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"small after rejection", None)
+        .await
+        .unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let received = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await;
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    assert_eq!(received.unwrap().unwrap().text, b"small after rejection");
+    assert!(delivered.is_ok());
+}
+
+#[tokio::test]
+async fn live_receive_recovery_emits_exactly_one_callback_after_durable_install() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"live recovery", None)
+        .await
+        .unwrap();
+    let event = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+    let sidecar = bd.path().join("sidecar");
+    let moved = bd.path().join("moved");
+    *b.received.lock().unwrap() = ReceivedLog::open(&sidecar.join("received"), "pw").unwrap();
+    std::fs::rename(&sidecar, &moved).unwrap();
+    b.emit_new_messages(event.conversation_id);
+    assert!(rx.try_recv().is_err());
+    assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    std::fs::rename(&moved, &sidecar).unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let task = tokio::spawn(b.clone().run_accept_loop(bl));
+    let message = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await;
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    task.abort();
+    at.abort();
+    let _ = task.await;
+    let _ = at.await;
+    assert_eq!(
+        message
+            .expect("worker must surface the recovered receive")
+            .unwrap()
+            .text,
+        b"live recovery"
+    );
+    assert!(
+        delivered.is_ok(),
+        "source must receive the authenticated recovered ACK"
+    );
+    b.emit_new_messages(event.conversation_id);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_and_delivers_ack() {
+    for reopen in [false, true] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let ba = Account::generate();
+        let secret = bob.secret_bytes();
+        let account_secret = ba.secret_bytes();
+        let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let (a, _) = node(ad.path(), alice, aa, &bp);
+        let (mut b, _, mut files) = node_with_files(bd.path(), bob, ba, &ap);
+        let path = ad.path().join("empty.txt");
+        std::fs::write(&path, []).unwrap();
+        let (id, file) = a
+            .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let event = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+            .event
+            .clone();
+        b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+        let sidecar = bd.path().join("sidecar");
+        let moved = bd.path().join("moved");
+        *b.received_files.lock().unwrap() =
+            ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
+        std::fs::rename(&sidecar, &moved).unwrap();
+        b.process_file_events(event.conversation_id);
+        assert!(files.try_recv().is_err());
+        assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
+        assert!(b.files.lock().unwrap().manifest(&file).is_none());
+        std::fs::rename(&moved, &sidecar).unwrap();
+        if reopen {
+            drop(b);
+            let (opened, _, incoming) = node_with_files(
+                bd.path(),
+                DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+                Account::from_secret_bytes(account_secret),
+                &ap,
+            );
+            b = opened;
+            files = incoming;
+            assert!(files.try_recv().is_err(), "startup replay must stay silent");
+        }
+        let at = tokio::spawn(a.clone().run_accept_loop(al));
+        let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        at.abort();
+        bt.abort();
+        let _ = at.await;
+        let _ = bt.await;
+        assert!(delivered.is_ok());
+        if !reopen {
+            assert_eq!(files.try_recv().unwrap().file_conv, file);
+        }
+        assert!(files.try_recv().is_err());
+        b.process_file_events(event.conversation_id);
+        assert!(files.try_recv().is_err());
+        assert_eq!(b.account_history(&a.account_id(), 10).len(), 1);
+        assert!(b.files.lock().unwrap().manifest(&file).is_some());
+    }
+}
+
+#[test]
+fn incomplete_incoming_file_card_durably_schedules_receipt() {
+    use crate::eventlog::{Event, EventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let (b, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &ap,
+    );
+    let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+    let manifest = crate::file::FileManifest {
+        name: "missing.txt".into(),
+        size: 3,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(b"abc"),
+        file_key: [3; 32],
+        file_conv: crate::eventlog::ConversationId::new([4; 32]),
+        chunk_count: 1,
+    };
+    let event = Event::new(
+        &alice,
+        conv,
+        1,
+        vec![],
+        1,
+        100,
+        EventKind::FileManifest,
+        crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
+    );
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+    b.process_file_events(conv);
+    assert!(b.read_file(manifest.file_conv).is_err());
+    let receipts = b.delivery.lock().unwrap().retry_receipts_after(None, 1);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].original_event_id, event.id);
+}
+
+#[test]
+fn incoming_manifest_rejects_malformed_public_conversation_and_live_key_collision() {
+    use crate::eventlog::{ConversationId, Event, EventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let ap = Announce::new_with_account(&alice, &Account::generate(), "Alice", 9);
+    let (b, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &ap,
+    );
+    let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+    let mut manifest = crate::file::FileManifest {
+        name: "live.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [3; 32],
+        file_conv: ConversationId::new([4; 32]),
+        chunk_count: 1,
+    };
+    let seal = |manifest: &crate::file::FileManifest, conversation, seq, parents| {
+        Event::new(
+            &alice,
+            conversation,
+            seq,
+            parents,
+            seq,
+            100,
+            EventKind::FileManifest,
+            crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
+        )
+    };
+    manifest.chunk_count = 2;
+    let malformed = seal(&manifest, conv, 1, vec![]);
+    b.log.lock().unwrap().append_durable(malformed).unwrap();
+    b.process_file_events(conv);
+    assert!(b.received_files.lock().unwrap().conversations().is_empty());
+    manifest.chunk_count = 1;
+    let public = ConversationId::new([5; 32]);
+    let misplaced = seal(&manifest, public, 1, vec![]);
+    b.log.lock().unwrap().append_durable(misplaced).unwrap();
+    b.process_file_events(public);
+    assert!(b.received_files.lock().unwrap().conversations().is_empty());
+    let valid = seal(&manifest, conv, 2, vec![]);
+    b.log.lock().unwrap().append_durable(valid.clone()).unwrap();
+    b.process_file_events(conv);
+    assert_eq!(b.account_history(&ap.account_id().unwrap(), 10).len(), 1);
+    manifest.file_key = [7; 32];
+    let collision = seal(&manifest, conv, 3, vec![valid.id]);
+    b.log.lock().unwrap().append_durable(collision).unwrap();
+    b.process_file_events(conv);
+    assert_eq!(
+        b.account_history(&ap.account_id().unwrap(), 10).len(),
+        1,
+        "conflicting file key must not be accepted"
+    );
+    assert_eq!(b.delivery.lock().unwrap().retry_receipts(10).len(), 1);
+}
+
+#[test]
+fn incoming_manifest_requires_dense_signed_chunk_prefix_before_card_acceptance() {
+    use crate::eventlog::{Event, EventKind};
+    for shape in ["empty", "prefix", "second-root", "two-roots", "gap"] {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let ap = Announce::new_with_account(&alice, &Account::generate(), "Alice", 9);
+        let (b, _, mut callbacks) = node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &ap,
+        );
+        let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+        let count = if shape == "gap" { 3 } else { 2 };
+        let manifest = crate::file::FileManifest {
+            name: "prefix.bin".into(),
+            size: crate::file::CHUNK_SIZE as u64 * u64::from(count - 1) + 1,
+            mime: "application/octet-stream".into(),
+            checksum: [1; 32],
+            file_key: [3; 32],
+            file_conv: ConversationId::new([42; 32]),
+            chunk_count: count,
+        };
+        let chunk = |seq, parents| {
+            Event::new(
+                &alice,
+                manifest.file_conv,
+                seq,
+                parents,
+                seq,
+                99,
+                EventKind::Message,
+                crate::file::seal_chunk(
+                    &crate::file::FileKey::from_bytes(manifest.file_key),
+                    b"valid encrypted chunk",
+                )
+                .unwrap(),
+            )
+        };
+        if shape == "second-root" {
+            b.log
+                .lock()
+                .unwrap()
+                .append_durable(chunk(2, vec![]))
+                .unwrap();
+        } else if shape != "empty" {
+            let first = chunk(1, vec![]);
+            b.log.lock().unwrap().append_durable(first.clone()).unwrap();
+            if shape == "two-roots" {
+                b.log
+                    .lock()
+                    .unwrap()
+                    .append_durable(chunk(2, vec![]))
+                    .unwrap();
+            } else if shape == "gap" {
+                b.log
+                    .lock()
+                    .unwrap()
+                    .append_durable(chunk(3, vec![first.id]))
+                    .unwrap();
+            }
+        }
+        let event = Event::new(
+            &alice,
+            conv,
+            1,
+            vec![],
+            1,
+            100,
+            EventKind::FileManifest,
+            crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
+        );
+        let row = ReceivedEntry {
+            event_id: event.id,
+            conversation: conv,
+            from: alice.user_id(),
+            wall_clock: 100,
+            plaintext: manifest.encode(),
+        };
+        let accepted = b.accept_manifest_event(&event, &ap, row).is_ok();
+        assert_eq!(
+            accepted,
+            matches!(shape, "empty" | "prefix"),
+            "shape {shape}"
+        );
+        assert_eq!(
+            b.files
+                .lock()
+                .unwrap()
+                .manifest(&manifest.file_conv)
+                .is_some(),
+            accepted
+        );
+        assert_eq!(
+            b.delivery.lock().unwrap().retry_receipts(10).len(),
+            usize::from(accepted)
+        );
+        assert_eq!(
+            b.received_files.lock().unwrap().entries(&conv).len(),
+            usize::from(accepted)
+        );
+        assert_eq!(callbacks.try_recv().is_ok(), accepted);
+        assert!(b.delivery.lock().unwrap().pending_transactions().is_empty());
+    }
+}
+
+#[test]
+fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() {
+    use crate::eventlog::{Event, EventKind};
+    for shape in [
+        "valid-account-host",
+        "missing",
+        "message",
+        "wrong-from",
+        "wrong-time",
+        "invalid-metadata",
+        "wire-collision",
+        "host-collision",
+        "conflicting-alias",
+    ] {
+        for reopen in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let alice = DeviceIdentity::generate();
+            let ap = Announce::new_with_account(&alice, &Account::generate(), "Alice", 9);
+            let identity = DeviceIdentity::generate();
+            let secret = identity.secret_bytes();
+            let account = Account::generate();
+            let account_secret = account.secret_bytes();
+            let (b, _, _) = node_with_files(dir.path(), identity, account, &ap);
+            let wire =
+                super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+            let host = super::conversation::account_conversation_id(
+                &b.account_id(),
+                &ap.account_id().unwrap(),
+            );
+            let mut manifest = crate::file::FileManifest {
+                name: "retained.txt".into(),
+                size: 0,
+                mime: "text/plain".into(),
+                checksum: crate::file::file_checksum(&[]),
+                file_key: [3; 32],
+                file_conv: ConversationId::new([43; 32]),
+                chunk_count: 1,
+            };
+            if shape == "invalid-metadata" {
+                manifest.chunk_count = 2;
+            }
+            if shape == "wire-collision" {
+                manifest.file_conv = wire;
+            }
+            if shape == "host-collision" {
+                manifest.file_conv = host;
+            }
+            let event = Event::new(
+                &alice,
+                wire,
+                1,
+                vec![],
+                1,
+                100,
+                if shape == "message" {
+                    EventKind::Message
+                } else {
+                    EventKind::FileManifest
+                },
+                crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode())
+                    .unwrap(),
+            );
+            if shape != "missing" {
+                b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+            }
+            let row = ReceivedEntry {
+                event_id: event.id,
+                conversation: host,
+                from: if shape == "wrong-from" {
+                    b.user_id()
+                } else {
+                    alice.user_id()
+                },
+                wall_clock: if shape == "wrong-time" { 101 } else { 100 },
+                plaintext: manifest.encode(),
+            };
+            b.received_files
+                .lock()
+                .unwrap()
+                .record_durable(&row)
+                .unwrap();
+            let mut conflicting_id = None;
+            if shape == "conflicting-alias" {
+                let mut alias = manifest.clone();
+                alias.file_key = [9; 32];
+                let second = Event::new(
+                    &alice,
+                    wire,
+                    2,
+                    vec![event.id],
+                    2,
+                    101,
+                    EventKind::FileManifest,
+                    crate::dm::seal(&alice, &b.identity.public().x25519_pub, &alias.encode())
+                        .unwrap(),
+                );
+                b.log
+                    .lock()
+                    .unwrap()
+                    .append_durable(second.clone())
+                    .unwrap();
+                b.received_files
+                    .lock()
+                    .unwrap()
+                    .record_durable(&ReceivedEntry {
+                        event_id: second.id,
+                        conversation: host,
+                        from: alice.user_id(),
+                        wall_clock: 101,
+                        plaintext: alias.encode(),
+                    })
+                    .unwrap();
+                conflicting_id = Some(second.id);
+            }
+            let (b, mut callbacks) = if reopen {
+                drop(b);
+                let (b, _, rx) = node_with_files(
+                    dir.path(),
+                    DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+                    Account::from_secret_bytes(account_secret),
+                    &ap,
+                );
+                (b, Some(rx))
+            } else {
+                b.reseed_live_file_book(&b.delivery.lock().unwrap());
+                (b, None)
+            };
+            let book = b.files.lock().unwrap();
+            let expected = matches!(shape, "valid-account-host" | "conflicting-alias");
+            assert_eq!(
+                book.manifest(&manifest.file_conv).is_some(),
+                expected,
+                "{shape}, reopen={reopen}"
+            );
+            assert_eq!(
+                book.is_emitted(&event.id),
+                expected,
+                "{shape}, reopen={reopen}"
+            );
+            if let Some(id) = conflicting_id {
+                assert!(
+                    !book.is_emitted(&id),
+                    "conflicting alias must not suppress reprocessing"
+                );
+                assert!(super::files::same_file_transfer(
+                    book.manifest(&manifest.file_conv).unwrap(),
+                    &crate::file::AnyManifest::V1(manifest.clone())
+                ));
+            }
+            drop(book);
+            if let Some(rx) = callbacks.as_mut() {
+                assert!(rx.try_recv().is_err(), "startup must stay silent");
+            }
+        }
+    }
+}
+
+#[test]
+fn file_book_rebuild_does_not_restore_outgoing_card_scope_from_mismatched_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+    let (a, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let path = dir.path().join("source.txt");
+    std::fs::write(&path, b"source").unwrap();
+    let (manifest, file) = a
+        .stage_file(&path, crate::file::FileKind::File, |_| {})
+        .unwrap();
+    let target = a.roster.lock().unwrap().peers()[0].clone();
+    let host =
+        super::conversation::account_conversation_id(&a.account_id(), &proof.account_id().unwrap());
+    let id = a
+        .accept_staged_manifest(&[target], host, proof.account_id(), &manifest)
+        .unwrap();
+    let mut row = a.received_files.lock().unwrap().entry(id).unwrap().clone();
+    row.wall_clock += 1;
+    let mut rows = ReceivedLog::open(&dir.path().join("corrupted-files.log"), "pw").unwrap();
+    rows.record_durable(&row).unwrap();
+    *a.received_files.lock().unwrap() = rows;
+    a.configure_privacy(
+        dir.path(),
+        "pw",
+        &a.signed_announce("Source", 9),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    assert!(a.files.lock().unwrap().manifest(&file).is_none());
+    assert!(!a
+        .privacy
+        .state
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .file_scopes
+        .contains_key(&file));
+}
+
+#[test]
+fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
+    use crate::eventlog::{ConversationId, Event, EventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let ap = Announce::new_with_account(&alice, &Account::generate(), "Alice", 9);
+    let (b, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &ap,
+    );
+    let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+    let manifest = crate::file::FileManifest {
+        name: "erase.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [3; 32],
+        file_conv: ConversationId::new([4; 32]),
+        chunk_count: 1,
+    };
+    let event = Event::new(
+        &alice,
+        conv,
+        1,
+        vec![],
+        1,
+        100,
+        EventKind::FileManifest,
+        crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
+    );
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+    b.process_file_events(conv);
+    let host =
+        super::conversation::account_conversation_id(&b.account_id(), &ap.account_id().unwrap());
+    let row = b.received_files.lock().unwrap().entries(&host)[0].clone();
+    let sidecar = dir.path().join("sidecar");
+    let moved = dir.path().join("moved");
+    let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
+    files.record_durable(&row).unwrap();
+    *b.received_files.lock().unwrap() = files;
+    std::fs::rename(&sidecar, &moved).unwrap();
+    assert!(b
+        .delete_account_message(&ap.account_id().unwrap(), event.id)
+        .is_err());
+    assert!(b.account_history(&ap.account_id().unwrap(), 10).is_empty());
+    assert!(
+        b.files
+            .lock()
+            .unwrap()
+            .manifest(&manifest.file_conv)
+            .is_none(),
+        "durable erase must remove key despite later sidecar failure"
+    );
+}
+
+#[test]
+fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
+    use super::delivery_store::{DeliveryLimits, DeliveryStore};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let ap = Announce::new_with_account(&alice, &Account::generate(), "Alice", 9);
+    let (b, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &ap,
+    );
+    let host =
+        super::conversation::account_conversation_id(&b.account_id(), &ap.account_id().unwrap());
+    let manifest = crate::file::FileManifest {
+        name: "legacy.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [3; 32],
+        file_conv: crate::eventlog::ConversationId::new([4; 32]),
+        chunk_count: 1,
+    };
+    let wire_conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+    let event = crate::eventlog::Event::new(
+        &alice,
+        wire_conv,
+        1,
+        vec![],
+        1,
+        1,
+        crate::eventlog::EventKind::FileManifest,
+        crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
+    );
+    let id = event.id;
+    b.log.lock().unwrap().append_durable(event).unwrap();
+    b.received_files
+        .lock()
+        .unwrap()
+        .record_durable(&ReceivedEntry {
+            event_id: id,
+            conversation: host,
+            from: alice.user_id(),
+            wall_clock: 1,
+            plaintext: manifest.encode(),
+        })
+        .unwrap();
+    let mut store = DeliveryStore::open_with_limits(
+        &dir.path().join("tight"),
+        "pw",
+        DeliveryLimits {
+            completed_receipts: 0,
+            ..DeliveryLimits::default()
+        },
+    )
+    .unwrap();
+    store
+        .bind_profile(
+            &dir.path().join("events.log"),
+            "pw",
+            &b.identity.public(),
+            &b.account_id(),
+        )
+        .unwrap();
+    b.reseed_live_file_book(&store);
+    *b.delivery.lock().unwrap() = store;
+    assert!(b
+        .delete_account_message(&ap.account_id().unwrap(), id)
+        .is_err());
+    assert_eq!(b.account_history(&ap.account_id().unwrap(), 10)[0].id, id);
+    assert!(b
+        .files
+        .lock()
+        .unwrap()
+        .manifest(&manifest.file_conv)
+        .is_some());
+    assert_eq!(b.received_files.lock().unwrap().entries(&host).len(), 1);
+}
+
+#[tokio::test]
+async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_last_key() {
+    use crate::eventlog::{ConversationId, Event, EventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let carol = DeviceIdentity::generate();
+    let ca = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let cp = Announce::new_with_account(&carol, &ca, "Carol", 9);
+    let (b, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &ap,
+    );
+    let secret = b.identity.secret_bytes();
+    let account_secret = b.account.secret_bytes();
+    b.roster
+        .lock()
+        .unwrap()
+        .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    b.configure_privacy(
+        dir.path(),
+        "pw",
+        &b.signed_announce("Bob", 9),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    b.set_invisible(true).await.unwrap();
+    b.initiate_contact_locally(&aa.account_id()).await.unwrap();
+    b.initiate_contact_locally(&ca.account_id()).await.unwrap();
+    let manifest = crate::file::FileManifest {
+        name: "alias.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [3; 32],
+        file_conv: ConversationId::new([4; 32]),
+        chunk_count: 1,
+    };
+    let mut originals = Vec::new();
+    for signer in [&alice, &carol] {
+        let conv = super::conversation::dm_conversation_id(&signer.public(), &b.identity.public());
+        let event = Event::new(
+            signer,
+            conv,
+            1,
+            vec![],
+            1,
+            100,
+            EventKind::FileManifest,
+            crate::dm::seal(signer, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
+        );
+        b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+        b.process_file_events(conv);
+        originals.push(event);
+    }
+    assert_eq!(b.account_history(&aa.account_id(), 10).len(), 1);
+    assert_eq!(b.account_history(&ca.account_id(), 10).len(), 1);
+    b.delete_account_message(&aa.account_id(), originals[0].id)
+        .unwrap();
+    {
+        let state = b.privacy.state.read().unwrap();
+        let scopes = &state.as_ref().unwrap().file_scopes[&manifest.file_conv];
+        assert!(
+            scopes.iter().all(|scope| scope.event != originals[0].id),
+            "erased alias scope must be removed"
+        );
+        assert!(scopes.iter().any(|scope| scope.event == originals[1].id));
+    }
+    assert!(b
+        .files
+        .lock()
+        .unwrap()
+        .manifest(&manifest.file_conv)
+        .is_some());
+    assert_eq!(b.delivery.lock().unwrap().retry_receipts(10).len(), 1);
+    drop(b);
+    let (b, _) = node(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Account::from_secret_bytes(account_secret),
+        &cp,
+    );
+    b.roster
+        .lock()
+        .unwrap()
+        .update(&ap, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    b.configure_privacy(
+        dir.path(),
+        "pw",
+        &b.signed_announce("Bob", 9),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    b.process_file_events(originals[0].conversation_id);
+    assert!(b.account_history(&aa.account_id(), 10).is_empty());
+    assert_eq!(
+        b.account_history(&ca.account_id(), 10)[0].id,
+        originals[1].id
+    );
+    assert!(b
+        .files
+        .lock()
+        .unwrap()
+        .manifest(&manifest.file_conv)
+        .is_some());
+    assert_eq!(b.prune_older_than(101).unwrap(), 1);
+    assert!(b
+        .files
+        .lock()
+        .unwrap()
+        .manifest(&manifest.file_conv)
+        .is_none());
+    assert!(b.delivery.lock().unwrap().retry_receipts(10).is_empty());
+}
+
+#[tokio::test]
+async fn offline_file_card_has_durable_awaiting_id_and_no_text_history_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let bob = DeviceIdentity::generate();
+    let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
+    let (a, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &bp,
+    );
+    let path = dir.path().join("empty.txt");
+    std::fs::write(&path, []).unwrap();
+    let file_conv = a
+        .send_file_dm(&bob.user_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let history = a.dm_history(&bob.public(), 10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].file.as_ref().unwrap().file_conv, file_conv);
+    assert_eq!(
+        a.delivery_status(history[0].id),
+        Some(DeliveryStatus::Awaiting)
+    );
+    assert!(a.sentlog.lock().unwrap().conversations().is_empty());
+}
+
+#[test]
+fn oversized_manifest_is_rejected_before_staging_ciphertext_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let bob = DeviceIdentity::generate();
+    let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
+    let (a, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &bp,
+    );
+    let path = dir.path().join("oversized.txt");
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(4 * 1024 * 1024 * 1024)
+        .unwrap();
+    let before = a.log.lock().unwrap().conversations();
+    let result = a.stage_file(&path, crate::file::FileKind::File, |_| {
+        panic!("transport-impossible manifests must fail before the first chunk");
+    });
+    assert!(matches!(result, Err(NodeError::File(ref error)) if error.contains("transport frame")));
+    assert_eq!(a.log.lock().unwrap().conversations(), before);
+}
 
 #[test]
 fn pending_accepted_intent_precedes_generic_own_sequence_allocation() {
@@ -101,6 +1507,20 @@ fn node(
     account: Account,
     proof: &Announce,
 ) -> (Arc<Node>, mpsc::UnboundedReceiver<ReceivedDm>) {
+    let (node, messages, _) = node_with_files(dir, identity, account, proof);
+    (node, messages)
+}
+
+fn node_with_files(
+    dir: &Path,
+    identity: DeviceIdentity,
+    account: Account,
+    proof: &Announce,
+) -> (
+    Arc<Node>,
+    mpsc::UnboundedReceiver<ReceivedDm>,
+    mpsc::UnboundedReceiver<ReceivedFile>,
+) {
     let roster = Arc::new(Mutex::new(Roster::default()));
     roster.lock().unwrap().update(
         proof,
@@ -109,7 +1529,7 @@ fn node(
     );
     let (tx, rx) = mpsc::unbounded_channel();
     let (ch, _) = mpsc::unbounded_channel();
-    let (file, _) = mpsc::unbounded_channel();
+    let (file, files) = mpsc::unbounded_channel();
     (
         Node::open_with_account(
             identity,
@@ -124,6 +1544,7 @@ fn node(
         )
         .unwrap(),
         rx,
+        files,
     )
 }
 
@@ -706,6 +2127,740 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     task.abort();
     let _ = task.await;
+}
+
+#[tokio::test]
+async fn file_post_office_final_custody_does_not_retire_target_resume_after_early_card_ack() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bp_port = bl.local_addr().unwrap().port();
+    drop(bl);
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bp_port);
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let path = ad.path().join("resume.bin");
+    let bytes = vec![6; crate::file::CHUNK_SIZE + 1];
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let manifest = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log
+        .lock()
+        .unwrap()
+        .append_durable(manifest.clone())
+        .unwrap();
+    b.process_file_events(manifest.conversation_id);
+    let ack = b.delivery.lock().unwrap().retry_receipts(1)[0]
+        .destination
+        .event
+        .clone();
+    let control_conv = ack.conversation_id;
+    a.log.lock().unwrap().append_durable(ack).unwrap();
+    a.emit_new_messages(control_conv);
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert!(b.read_file(file).is_err());
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(id)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let po = DeviceIdentity::generate();
+    let keys = po.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(&po, "Relay", listener.local_addr().unwrap().port());
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", po).unwrap(),
+    ));
+    let task = tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        listener,
+        relay.clone(),
+    ));
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    a.flush_file_delivery(id).await;
+    assert!(relay.lock().unwrap().has(&final_chunk));
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_some(),
+        "qualified relay custody cannot retire target chunk work"
+    );
+    task.abort();
+    let _ = task.await;
+    drop(relay);
+    let bl = TcpListener::bind(("127.0.0.1", bp_port)).await.unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let resumed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !b
+            .read_file(file)
+            .as_ref()
+            .is_ok_and(|actual| actual == &bytes)
+            || a.delivery
+                .lock()
+                .unwrap()
+                .next_file_destination(None)
+                .is_some()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    assert!(resumed.is_ok());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_residue() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let akeys = alice.secret_bytes();
+    let aaccount = aa.secret_bytes();
+    let bkeys = bob.secret_bytes();
+    let baccount = ba.secret_bytes();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let bytes = vec![6; 1024];
+    let path = ad.path().join("preview.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    let manifest = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log
+        .lock()
+        .unwrap()
+        .append_durable(manifest.clone())
+        .unwrap();
+    b.process_file_events(manifest.conversation_id);
+    // Serve actual authenticated pulls/ACKs, but do not start sender file retries
+    // until the receiver's normal media-save path has durably copied/pruned.
+    let source = a.clone();
+    let at = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = al.accept() => { let (stream, _) = accepted.unwrap(); let source = source.clone();
+                    connections.spawn(async move { if let Ok(channel) = source.privacy_accept(stream).await { source.serve_connection(channel).await; } }); }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let acknowledged = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(acknowledged.is_ok());
+    assert!(b.read_file(file).is_err());
+    b.pull_pending_files().await;
+    assert_eq!(b.read_media(file).unwrap(), bytes);
+    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    assert!(b.file_ready_to_save(file));
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_some());
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(id)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    drop(a);
+    drop(b);
+    let alice = DeviceIdentity::from_secret_bytes(akeys.0, akeys.1);
+    let aa = Account::from_secret_bytes(aaccount);
+    let bob = DeviceIdentity::from_secret_bytes(bkeys.0, bkeys.1);
+    let ba = Account::from_secret_bytes(baccount);
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _) = node(bd.path(), bob, ba, &ap);
+    assert_eq!(b.read_media(file).unwrap(), bytes);
+    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(!b.historical_file_completion(file, EventId::new([1; 32]), &ap.public()));
+    assert!(!b.historical_file_completion(file, final_chunk, &DeviceIdentity::generate().public()));
+    let exported = b.save_file_into_dir(file, bd.path()).unwrap();
+    assert_eq!(std::fs::read(exported).unwrap(), bytes);
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    a.flush_file_delivery(id).await;
+    bt.abort();
+    let _ = bt.await;
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_none());
+    assert!(b.log.lock().unwrap().events(&file).is_empty(), "completed/pruned media must not be retransmitted and retained merely to satisfy exact final custody");
+    std::fs::remove_file(b.media.path(file).unwrap()).unwrap();
+    assert!(!b.file_ready_to_save(file));
+}
+
+async fn completed_file_fixture(
+    ad: &Path,
+    bd: &Path,
+    kind: crate::file::FileKind,
+) -> (
+    Arc<Node>,
+    Arc<Node>,
+    Announce,
+    Announce,
+    EventId,
+    ConversationId,
+    EventId,
+    Vec<u8>,
+) {
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let (a, _) = node(ad, alice, aa, &bp);
+    let (b, _) = node(bd, bob, ba, &ap);
+    let bytes = vec![7; crate::file::CHUNK_SIZE + 11];
+    let path = ad.join("completion.bin");
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_file_to_account(&b.account_id(), &path, kind)
+        .await
+        .unwrap();
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log
+        .lock()
+        .unwrap()
+        .append_durable(original.clone())
+        .unwrap();
+    b.process_file_events(original.conversation_id);
+    let chunks: Vec<_> = a
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .into_iter()
+        .cloned()
+        .collect();
+    let final_chunk = chunks.last().unwrap().id;
+    for chunk in chunks {
+        b.log.lock().unwrap().append_durable(chunk).unwrap();
+    }
+    (a, b, ap, bp, id, file, final_chunk, bytes)
+}
+
+#[tokio::test]
+async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_keeps_source_fanout(
+) {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let (a, b, ap, _, id, file, final_chunk, bytes) =
+        completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
+    let source_copy = ad.path().join("source-export.bin");
+    a.save_file(file, &source_copy).unwrap();
+    assert_eq!(std::fs::read(source_copy).unwrap(), bytes);
+    assert!(!a.log.lock().unwrap().events(&file).is_empty());
+    let exported = b.save_file_into_dir(file, bd.path()).unwrap();
+    assert_eq!(std::fs::read(exported).unwrap(), bytes);
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_with_account(
+        &b.identity,
+        &b.account,
+        "Bob",
+        bl.local_addr().unwrap().port(),
+    );
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let receiver = b.clone();
+    let task = tokio::spawn(async move {
+        let (stream, _) = bl.accept().await.unwrap();
+        let channel = receiver.privacy_accept(stream).await.unwrap();
+        receiver.serve_connection(channel).await;
+    });
+    a.flush_file_delivery(id).await;
+    task.abort();
+    let _ = task.await;
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_none());
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    assert!(!b.file_ready_to_save(file));
+    // Local file-save proofs have no status authority: the queued card ACK is separate.
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    a.save_file(file, &ad.path().join("source-after-retirement.bin"))
+        .unwrap();
+    assert!(
+        a.log.lock().unwrap().events(&file).is_empty(),
+        "source chunks become reclaimable once all immutable fanout retires"
+    );
+}
+
+#[tokio::test]
+async fn save_and_completion_metadata_filesystem_failures_keep_chunks_and_no_historical_truth() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let (_, b, ap, _, _, file, final_chunk, bytes) =
+        completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
+    let blocked = bd.path().join("blocked");
+    std::fs::write(&blocked, []).unwrap();
+    assert!(b.save_file(file, &blocked.join("file.bin")).is_err());
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+    let outbox = bd.path().join("events.log.delivery-outbox");
+    let moved = bd.path().join("outbox-held");
+    std::fs::rename(&outbox, &moved).unwrap();
+    let destination = bd.path().join("saved.bin");
+    b.save_file(file, &destination).unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), bytes);
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+    std::fs::rename(moved, outbox).unwrap();
+    b.save_file(file, &bd.path().join("saved-again.bin"))
+        .unwrap();
+    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+}
+
+#[tokio::test]
+async fn same_ciphertext_signed_by_wrong_chunk_author_cannot_create_completion_or_prune() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let (_, b, ap, _, _, file, final_chunk, bytes) =
+        completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
+    let chunks: Vec<_> = b
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .into_iter()
+        .cloned()
+        .collect();
+    b.log.lock().unwrap().drop_conversation(&file).unwrap();
+    let stranger = DeviceIdentity::generate();
+    let mut previous = None;
+    for chunk in chunks {
+        let forged = crate::eventlog::Event::new(
+            &stranger,
+            file,
+            chunk.seq,
+            previous.into_iter().collect(),
+            chunk.lamport,
+            chunk.wall_clock,
+            chunk.kind,
+            chunk.ciphertext,
+        );
+        previous = Some(forged.id);
+        b.log.lock().unwrap().append_durable(forged).unwrap();
+    }
+    // Chunk AEAD/checksum alone do not establish who originated the signed chain.
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+    b.save_file(file, &bd.path().join("saved.bin")).unwrap();
+    assert!(!b.has_verified_file_completion(file));
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(!b.log.lock().unwrap().events(&file).is_empty());
+}
+
+fn size_mismatch_file_fixture(
+    directory: &Path,
+    declared_size: u64,
+    kind: crate::file::FileKind,
+    version_three: bool,
+) -> (Arc<Node>, Announce, ConversationId, EventId) {
+    use crate::eventlog::{Event, EventKind};
+    let source = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&source, &Account::generate(), "Source", 9);
+    let (receiver, _) = node(
+        directory,
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let bytes = b"ab";
+    let file = ConversationId::new([83; 32]);
+    let manifest = crate::file::FileManifestV3 {
+        v2: crate::file::FileManifestV2 {
+            name: "size-mismatch.png".into(),
+            size: declared_size,
+            mime: "image/png".into(),
+            checksum: crate::file::file_checksum(bytes),
+            file_key: [41; 32],
+            file_nonce: [42; 8],
+            file_conv: file,
+            chunk_size: crate::file::CHUNK_SIZE as u32,
+            chunk_count: 1,
+            chunk_hashes: vec![crate::file::chunk_hash(bytes)],
+        },
+        kind,
+    };
+    let encoded = if version_three {
+        manifest.encode()
+    } else {
+        manifest.v2.encode()
+    };
+    let host =
+        super::conversation::dm_conversation_id(&source.public(), &receiver.identity.public());
+    let original = Event::new(
+        &source,
+        host,
+        1,
+        vec![],
+        1,
+        100,
+        EventKind::FileManifest,
+        crate::dm::seal(&source, &receiver.identity.public().x25519_pub, &encoded).unwrap(),
+    );
+    receiver
+        .accept_manifest_event(
+            &original,
+            &proof,
+            ReceivedEntry {
+                event_id: original.id,
+                conversation: host,
+                from: source.user_id(),
+                wall_clock: original.wall_clock,
+                plaintext: encoded,
+            },
+        )
+        .unwrap();
+    let chunk = Event::new(
+        &source,
+        file,
+        1,
+        vec![],
+        1,
+        101,
+        EventKind::Message,
+        crate::file::seal_chunk_indexed(&manifest.v2.key(), &manifest.v2.file_nonce, 0, bytes)
+            .unwrap(),
+    );
+    let final_chunk = chunk.id;
+    receiver.log.lock().unwrap().append_durable(chunk).unwrap();
+    assert_eq!(receiver.completion_candidates(file).len(), 1);
+    (receiver, proof, file, final_chunk)
+}
+
+#[test]
+fn initial_file_save_rejects_signed_content_shorter_or_longer_than_declared_size() {
+    for declared_size in [1, 3] {
+        for version_three in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (receiver, proof, file, final_chunk) = size_mismatch_file_fixture(
+                directory.path(),
+                declared_size,
+                crate::file::FileKind::File,
+                version_three,
+            );
+            let destination = directory.path().join("saved.bin");
+            assert!(receiver.save_file(file, &destination).is_err());
+            assert!(!destination.exists());
+            assert!(!directory.path().join("saved.bin.part").exists());
+            assert!(receiver.read_file(file).is_err());
+            assert!(!receiver.has_verified_file_completion(file));
+            assert!(!receiver.historical_file_completion(file, final_chunk, &proof.public()));
+            assert_eq!(receiver.log.lock().unwrap().events(&file).len(), 1);
+        }
+    }
+}
+
+#[test]
+fn initial_media_completion_rejects_signed_content_shorter_or_longer_than_declared_size() {
+    for declared_size in [1, 3] {
+        for version_three in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (receiver, proof, file, final_chunk) = size_mismatch_file_fixture(
+                directory.path(),
+                declared_size,
+                crate::file::FileKind::Media,
+                version_three,
+            );
+            assert!(!receiver.persist_media_if_complete(file));
+            assert!(receiver.read_file(file).is_err());
+            assert!(!receiver.media.contains(file));
+            assert!(!receiver.has_verified_file_completion(file));
+            assert!(!receiver.historical_file_completion(file, final_chunk, &proof.public()));
+            assert_eq!(receiver.log.lock().unwrap().events(&file).len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn historical_completion_requires_current_exact_origin_and_owner_and_permission() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let (a, b, ap, bp, _, file, final_chunk, _) =
+        completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
+    b.configure_privacy(
+        bd.path(),
+        "pw",
+        &bp,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    b.set_invisible(true).await.unwrap();
+    b.set_allowed(&ap.account_id().unwrap(), true)
+        .await
+        .unwrap();
+    b.save_file(file, &bd.path().join("saved.bin")).unwrap();
+    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    let mut wrong_x = ap.public();
+    wrong_x.x25519_pub = [9; 32];
+    assert!(!b.historical_file_completion(file, final_chunk, &wrong_x));
+    b.set_allowed(&ap.account_id().unwrap(), false)
+        .await
+        .unwrap();
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    b.set_allowed(&ap.account_id().unwrap(), true)
+        .await
+        .unwrap();
+    let rebound_account = Account::generate();
+    let rebound = Announce::new_with_account(&a.identity, &rebound_account, "Rebound Alice", 9);
+    b.roster
+        .lock()
+        .unwrap()
+        .update(&rebound, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    b.initiate_contact(&rebound_account.account_id())
+        .await
+        .unwrap();
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    let account = Account::generate();
+    let owner = account.account_id();
+    let keys = b.identity.secret_bytes();
+    b.persist_account_adoption(&owner, || Ok(())).unwrap();
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    drop(b);
+    let (b, _) = node(
+        bd.path(),
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        account,
+        &ap,
+    );
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+}
+
+#[tokio::test]
+async fn completion_alias_erasure_keeps_other_alias_and_failed_row_cleanup_never_keeps_proof() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let (a, b, ap, _, id, file, final_chunk, _) =
+        completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    let alias = crate::eventlog::Event::new(
+        &a.identity,
+        original.conversation_id,
+        original.seq + 1,
+        vec![original.id],
+        original.lamport + 1,
+        original.wall_clock + 1,
+        crate::eventlog::EventKind::FileManifest,
+        original.ciphertext.clone(),
+    );
+    b.log.lock().unwrap().append_durable(alias.clone()).unwrap();
+    b.process_file_events(alias.conversation_id);
+    b.save_file(file, &bd.path().join("saved.bin")).unwrap();
+    let host = super::conversation::account_conversation_id(&b.account_id(), &a.account_id());
+    assert_eq!(
+        b.delivery
+            .lock()
+            .unwrap()
+            .completed_files(file, final_chunk)
+            .len(),
+        2
+    );
+    b.delete_message(host, id, false).unwrap();
+    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    let row = b
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(alias.id)
+        .unwrap()
+        .clone();
+    let sidecar = bd.path().join("alternate-sidecar");
+    let moved = bd.path().join("moved-sidecar");
+    let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
+    files.record_durable(&row).unwrap();
+    *b.received_files.lock().unwrap() = files;
+    std::fs::rename(&sidecar, moved).unwrap();
+    assert!(b.delete_message(host, alias.id, false).is_err());
+    assert!(b.received_files.lock().unwrap().entry(alias.id).is_some());
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+}
+
+#[tokio::test]
+async fn legacy_device_only_media_completion_qualifies_exact_origin_without_account_credit() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let ap = Announce::new(&alice, "Alice", 9);
+    let bp = Announce::new(&bob, "Bob", 9);
+    let (a, _) = node(ad.path(), alice, Account::generate(), &bp);
+    let (b, _) = node(bd.path(), bob, Account::generate(), &ap);
+    let path = ad.path().join("legacy.png");
+    let bytes = vec![8; 1024];
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_file_dm(&bp.public().user_id(), &path, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log
+        .lock()
+        .unwrap()
+        .append_durable(original.clone())
+        .unwrap();
+    b.process_file_events(original.conversation_id);
+    let chunks: Vec<_> = a
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .into_iter()
+        .cloned()
+        .collect();
+    let final_chunk = chunks.last().unwrap().id;
+    for chunk in chunks {
+        b.log.lock().unwrap().append_durable(chunk).unwrap();
+    }
+    assert!(b.persist_media_if_complete(file));
+    assert_eq!(b.read_media(file).unwrap(), bytes);
+    assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
+    assert!(!b.historical_file_completion(file, final_chunk, &DeviceIdentity::generate().public()));
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bp = Announce::new(&b.identity, "Bob", bl.local_addr().unwrap().port());
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&bp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let receiver = b.clone();
+    let task = tokio::spawn(async move {
+        let (stream, _) = bl.accept().await.unwrap();
+        let channel = receiver.privacy_accept(stream).await.unwrap();
+        receiver.serve_connection(channel).await;
+    });
+    a.flush_file_delivery(id).await;
+    task.abort();
+    let _ = task.await;
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_none());
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    let rebound = Announce::new_with_account(&a.identity, &Account::generate(), "Alice", 9);
+    b.roster
+        .lock()
+        .unwrap()
+        .update(&rebound, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+    let own = Announce::new_with_account(&b.identity, &b.account, "Bob", 9);
+    b.configure_privacy(
+        bd.path(),
+        "pw",
+        &own,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    b.set_invisible(true).await.unwrap();
+    assert!(!b.historical_file_completion(file, final_chunk, &ap.public()));
+}
+
+#[tokio::test]
+async fn untracked_channel_media_local_export_verifies_retained_row_and_managed_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = DeviceIdentity::generate();
+    let proof = Announce::new(&other, "Other", 9);
+    let (a, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let channel = a.create_channel("local", vec![]).await.unwrap();
+    let bytes = vec![5; 2048];
+    let path = dir.path().join("channel.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let file = a
+        .send_file_channel(channel, &path, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    assert!(a.persist_media_if_complete(file));
+    assert!(a.log.lock().unwrap().events(&file).is_empty());
+    assert_eq!(a.file_progress(file).unwrap().done, 0);
+    assert!(a.file_ready_to_save(file));
+    assert!(!a.has_verified_file_completion(file));
+    let exported = a.save_file_into_dir(file, dir.path()).unwrap();
+    assert_eq!(std::fs::read(exported).unwrap(), bytes);
+    let cached = a.media.path(file).unwrap();
+    std::fs::write(&cached, b"wrong bytes").unwrap();
+    assert!(a.file_ready_to_save(file)); // A present eligible copy is attempted, then verified by save.
+    assert!(a
+        .save_file(file, &dir.path().join("bad-export.png"))
+        .is_err());
+    std::fs::remove_file(cached).unwrap();
+    assert!(!a.file_ready_to_save(file));
 }
 
 #[tokio::test]
@@ -1316,6 +3471,74 @@ async fn private_control_receipt_obeys_current_permission_and_queued_account_bin
     a.flush_delivery(blocked).await;
     assert!(brx.try_recv().is_err());
     assert_eq!(a.delivery_status(blocked), Some(DeliveryStatus::Awaiting));
+    bt.abort();
+    let _ = bt.await;
+}
+
+#[tokio::test]
+async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_rebind() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let keys = bob.secret_bytes();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut files) = node_with_files(bd.path(), bob, ba, &ap);
+    for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
+        node.configure_privacy(
+            dir,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.set_invisible(true).await.unwrap();
+    }
+    b.initiate_contact_locally(&a.account_id()).await.unwrap();
+    let path = ad.path().join("private.txt");
+    std::fs::write(&path, b"private immutable file").unwrap();
+    let (id, file) = a
+        .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    a.set_allowed(&b.account_id(), false).await.unwrap();
+    a.flush_delivery(id).await;
+    a.flush_file_delivery(id).await;
+    assert!(files.try_recv().is_err());
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    a.initiate_contact_locally(&b.account_id()).await.unwrap();
+    let new_account = Account::generate();
+    let new_proof = Announce::new_with_account(
+        &DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        &new_account,
+        "Rebound Bob",
+        bp.tcp_port,
+    );
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&new_proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    a.initiate_contact_locally(&new_account.account_id())
+        .await
+        .unwrap();
+    a.flush_delivery(id).await;
+    a.flush_file_delivery(id).await;
+    assert!(files.try_recv().is_err());
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_some());
     bt.abort();
     let _ = bt.await;
 }

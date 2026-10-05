@@ -3,7 +3,6 @@
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
-use crate::file::decode_manifest;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 use crate::node::session::{request_round, serve_one, serve_wire_bytes, Served, SessionError};
 use crate::transport::SecureChannel;
@@ -215,8 +214,16 @@ impl Node {
             } else {
                 let sender_x25519 = {
                     match self.historical_author(event.author.ed25519_pub()) {
-                        Some(p) => p.x25519_pub,
-                        None => continue, // author unknown → can't open yet
+                        Some(p)
+                            if conv
+                                == super::conversation::dm_conversation_id(
+                                    &self.identity.public(),
+                                    &p.public(),
+                                ) =>
+                        {
+                            p.x25519_pub
+                        }
+                        _ => continue, // unknown author or incorrect device pair
                     }
                 };
                 match crate::dm::open(&self.identity, &sender_x25519, &event.ciphertext) {
@@ -224,10 +231,9 @@ impl Node {
                     Err(_) => continue,
                 }
             };
-            let Some(manifest) = decode_manifest(&plaintext) else {
+            let Some(manifest) = super::files::validated_manifest(&plaintext) else {
                 continue;
             };
-            self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
             let received = ReceivedFile {
                 conv,
                 from: event.author.user_id(),
@@ -256,6 +262,14 @@ impl Node {
                     _ => conv,
                 }
             };
+            if self
+                .delivery
+                .lock()
+                .expect("delivery lock not poisoned")
+                .manifest_event_erased(event.id)
+            {
+                continue;
+            }
             // Persist the surfaced manifest durably so the file book's emitted set + this
             // manifest survive a restart — WITHOUT the old bug of marking never-opened
             // manifests emitted (which lost the file). Best-effort: a failure here at worst
@@ -263,21 +277,35 @@ impl Node {
             // Key by the HOST (DM/channel/account) conversation, not the per-file conv, so
             // `conversation_files` can list a conversation's files in time order for
             // history. Startup FileBook seeding iterates all entries regardless of key.
-            let _ = self
-                .received_files
-                .lock()
-                .expect("received_files mutex not poisoned")
-                .record(
-                    host_conv,
-                    event.author.user_id(),
-                    event.wall_clock,
-                    &plaintext,
-                    event.id,
-                );
+            let entry = super::received_log::ReceivedEntry {
+                event_id: event.id,
+                conversation: host_conv,
+                from: event.author.user_id(),
+                wall_clock: event.wall_clock,
+                plaintext,
+            };
+            let installed = if is_channel {
+                self.received_files
+                    .lock()
+                    .expect("files lock not poisoned")
+                    .record_durable(&entry)
+            } else {
+                match self.historical_author(event.author.ed25519_pub()) {
+                    Some(proof) => self.accept_manifest_event(&event, &proof, entry),
+                    None => continue,
+                }
+            };
+            if installed.is_err() {
+                continue;
+            }
+            if !is_channel {
+                continue;
+            } // live journal recovery owns DM file publication
+            self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
             {
                 let mut files = self.files.lock().expect("files mutex not poisoned");
                 files.mark_emitted(event.id);
-                files.record(manifest);
+                files.record_event(event.id, manifest);
             }
             surfaced.push(received);
         }
@@ -475,13 +503,7 @@ impl Node {
             let Some(proof) = self.historical_author(event.author.ed25519_pub()) else {
                 continue;
             };
-            if let Some(message) = self.accept_dm_event(&event, &proof, &mut delivery) {
-                self.emitted
-                    .lock()
-                    .expect("emitted mutex not poisoned")
-                    .insert(event.id);
-                let _ = self.incoming.send(message);
-            }
+            let _ = self.accept_dm_event(&event, &proof, &mut delivery);
         }
     }
 }

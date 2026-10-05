@@ -72,12 +72,40 @@ impl Node {
             .map_err(NodeError::Log)?;
 
         // File/media messages (their own ReceivedLog) are always keyed by event id.
+        let file_rows = self
+            .received_files
+            .lock()
+            .expect("files lock not poisoned")
+            .entries(&conv)
+            .into_iter()
+            .filter(|e| e.event_id == target)
+            .collect::<Vec<_>>();
+        let erased = (|| -> Result<(), NodeError> {
+            for row in file_rows {
+                if delivery
+                    .erase_file(row.conversation, row.event_id)
+                    .map_err(NodeError::Log)?
+                {
+                    self.privacy
+                        .generation
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    *self
+                        .delivery_control_ids
+                        .lock()
+                        .expect("control ids lock not poisoned") = delivery.control_ids();
+                }
+            }
+            Ok(())
+        })();
+        self.reseed_live_file_book(&delivery);
+        erased?;
         removed += self
             .received_files
             .lock()
             .expect("received_files mutex not poisoned")
             .remove_where(|e| e.conversation == conv && e.event_id == target)
             .map_err(NodeError::Log)?;
+        self.reseed_live_file_book(&delivery);
 
         // Sent plaintext sidecar: account entries carry the msg id in their envelope; plain
         // DM/channel sends are matched via the event log's seq -> id map (built in its own
@@ -160,6 +188,34 @@ impl Node {
             .lock()
             .expect("control ids lock not poisoned") = delivery.control_ids();
         cancelled?;
+        let file_rows = {
+            let files = self.received_files.lock().expect("files lock not poisoned");
+            files
+                .conversations()
+                .iter()
+                .flat_map(|c| files.entries(c))
+                .filter(|e| should_remove(e.conversation, e.wall_clock))
+                .collect::<Vec<_>>()
+        };
+        let erased = (|| -> Result<(), NodeError> {
+            for row in file_rows {
+                if delivery
+                    .erase_file(row.conversation, row.event_id)
+                    .map_err(NodeError::Log)?
+                {
+                    self.privacy
+                        .generation
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    *self
+                        .delivery_control_ids
+                        .lock()
+                        .expect("control ids lock not poisoned") = delivery.control_ids();
+                }
+            }
+            Ok(())
+        })();
+        self.reseed_live_file_book(&delivery);
+        erased?;
         let mut removed = 0;
         removed += self
             .received
@@ -167,12 +223,14 @@ impl Node {
             .expect("received mutex not poisoned")
             .remove_where(|e| should_remove(e.conversation, e.wall_clock))
             .map_err(NodeError::Log)?;
+
         removed += self
             .received_files
             .lock()
             .expect("received_files mutex not poisoned")
             .remove_where(|e| should_remove(e.conversation, e.wall_clock))
             .map_err(NodeError::Log)?;
+        self.reseed_live_file_book(&delivery);
         removed += self
             .sentlog
             .lock()

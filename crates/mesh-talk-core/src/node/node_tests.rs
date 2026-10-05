@@ -889,7 +889,7 @@ async fn reopen_retries_unsurfaced_file_manifest_after_restart() {
         )
         .unwrap();
         rf.record(
-            surfaced_m.file_conv,
+            conv,
             alice.public().user_id(),
             1000,
             &surfaced_m.encode(),
@@ -2268,6 +2268,17 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
         .expect("receiver sees the channel file in history");
     assert!(!bob_file.from_me);
     assert_eq!(bob_file.file.as_ref().unwrap().file_conv, file_conv);
+    assert_eq!(alice_node.delivery_status(alice_file.id), None);
+    assert_eq!(bob_node.delivery_status(bob_file.id), None);
+    assert!(
+        bob_node
+            .delivery
+            .lock()
+            .unwrap()
+            .retry_receipts(1)
+            .is_empty(),
+        "channel file cards must not generate DM delivery receipts"
+    );
 
     let dest = dir.path().join("saved.bin");
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -2281,6 +2292,10 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     .await
     .expect("bob saved the channel file within 5s");
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert!(
+        bob_node.log.lock().unwrap().events(&file_conv).is_empty(),
+        "untracked channel export reclaims completed chunks"
+    );
 
     // Reverse direction: Bob -> Alice. Bob is a non-creator member; his
     // send_file_channel must distribute his own sender key first so Alice can

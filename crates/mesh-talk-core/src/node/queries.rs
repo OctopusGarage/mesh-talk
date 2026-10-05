@@ -21,11 +21,29 @@ impl Node {
         conversation: ConversationId,
     ) -> Vec<HistoryEntry> {
         let me = self.identity.public().user_id();
-        self.received_files
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        let mut entries = self
+            .received_files
             .lock()
             .expect("received_files mutex not poisoned")
-            .entries(&conversation)
+            .entries(&conversation);
+        for transaction in delivery.pending_transactions() {
+            if let super::delivery_store::DeliveryTransaction::OutgoingManifest {
+                received, ..
+            } = transaction
+            {
+                if received.conversation == conversation
+                    && !entries
+                        .iter()
+                        .any(|entry| entry.event_id == received.event_id)
+                {
+                    entries.push((**received).clone());
+                }
+            }
+        }
+        entries
             .into_iter()
+            .filter(|entry| !delivery.file_erased(entry.conversation, entry.event_id))
             .filter_map(|entry| {
                 let manifest = crate::file::decode_manifest(&entry.plaintext)?;
                 let from_me = entry.from == me;

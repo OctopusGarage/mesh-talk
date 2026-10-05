@@ -101,6 +101,32 @@ impl From<&OutgoingDelivery> for CompletedDelivery {
     }
 }
 
+/// Bounded immutable chunk work and retained fanout scopes, without file keys.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileCard {
+    pub(crate) id: EventId,
+    pub(crate) conversation: ConversationId,
+    pub(crate) wall_clock: u64,
+    pub(crate) file_conversation: ConversationId,
+    pub(crate) final_chunk: Option<EventId>,
+    pub(crate) chunk_count: u32,
+    pub(crate) destinations: Vec<FileDestination>,
+    pub(crate) completion_binding: Option<FileCompletionBinding>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileCompletionBinding {
+    pub(crate) source: PublicIdentity,
+    pub(crate) certificate: Option<crate::identity::account::DeviceCertificate>,
+    pub(crate) owner_account: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileDestination {
+    pub(crate) binding: DeliveryReference,
+    pub(crate) active: bool,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CompletedReceipt {
     logical_id: EventId,
@@ -140,13 +166,29 @@ pub(crate) enum DeliveryTransaction {
         received: Box<ReceivedEntry>,
         receipt: Option<Box<ReceiptDelivery>>,
     },
+    OutgoingManifest {
+        message: OutgoingDelivery,
+        received: Box<ReceivedEntry>,
+        file: FileCard,
+    },
+    IncomingManifest {
+        sender: PublicIdentity,
+        original: Box<Event>,
+        received: Box<ReceivedEntry>,
+        receipt: Option<Box<ReceiptDelivery>>,
+        file: FileCard,
+    },
 }
 
 impl DeliveryTransaction {
     pub(crate) fn id(&self) -> EventId {
         match self {
-            Self::Outgoing { message, .. } => message.logical_id,
-            Self::Incoming { original, .. } => original.id,
+            Self::Outgoing { message, .. } | Self::OutgoingManifest { message, .. } => {
+                message.logical_id
+            }
+            Self::Incoming { original, .. } | Self::IncomingManifest { original, .. } => {
+                original.id
+            }
         }
     }
 }
@@ -187,6 +229,12 @@ impl DeliveryLimits {
             .saturating_add(self.receipts.saturating_mul(3))
             .saturating_add(self.completed.saturating_mul(2))
             .saturating_add(self.completed_receipts.saturating_mul(2))
+            .saturating_add(self.completed_receipts.saturating_mul(3))
+            .saturating_add(
+                self.messages
+                    .saturating_mul(self.destinations)
+                    .saturating_mul(2),
+            )
             .max(1)
     }
 }
@@ -200,6 +248,10 @@ enum OutboxRecord {
     Cancel(ConversationId, EventId),
     RetireDestination(EventId, EventId),
     FinishedBoundReceipt(CompletedReceipt, PublicIdentity),
+    FileCard(FileCard),
+    RetireFileDestination(EventId, EventId),
+    ErasedFile(ConversationId, EventId),
+    FileComplete(EventId, EventId),
 }
 
 /// One owner per profile, protected by the Node's delivery transaction guard.
@@ -223,6 +275,13 @@ pub(crate) struct DeliveryStore {
     receipts: BTreeMap<EventId, ReceiptDelivery>,
     receipt_events: BTreeMap<EventId, EventId>,
     receipt_scopes: BTreeMap<([u8; 32], EventId), BTreeSet<EventId>>,
+    files: BTreeMap<EventId, FileCard>,
+    active_files: BTreeSet<(EventId, EventId)>,
+    file_completions: BTreeMap<EventId, EventId>,
+    completion_index: BTreeMap<([u8; 32], EventId), BTreeSet<EventId>>,
+    file_conversations: BTreeMap<[u8; 32], BTreeSet<EventId>>,
+    erased_files: BTreeSet<([u8; 32], EventId)>,
+    erased_manifest_events: BTreeSet<EventId>,
     limits: DeliveryLimits,
     outbox_records: usize,
     needs_sync: bool,
@@ -245,7 +304,10 @@ impl DeliveryStore {
     ) -> Result<(), LogError> {
         let mut path = log_path.as_os_str().to_os_string();
         path.push(".delivery-owner");
-        let accepted = !self.pending.is_empty() || !self.cancellation_rows().is_empty();
+        let accepted = !self.pending.is_empty()
+            || !self.cancellation_rows().is_empty()
+            || !self.files.is_empty()
+            || !self.erased_files.is_empty();
         if !Path::new(&path).try_exists()? && accepted {
             return Err(invalid("missing delivery profile binding"));
         }
@@ -377,7 +439,8 @@ impl DeliveryStore {
         }
         for tx in &self.pending {
             let valid = match tx {
-                DeliveryTransaction::Outgoing { message, .. } => message_ok(message),
+                DeliveryTransaction::Outgoing { message, .. }
+                | DeliveryTransaction::OutgoingManifest { message, .. } => message_ok(message),
                 DeliveryTransaction::Incoming {
                     sender,
                     original,
@@ -397,6 +460,18 @@ impl DeliveryStore {
                     original.conversation_id == super::conversation::dm_conversation_id(own, sender)
                         && sender.ed25519_pub != own.ed25519_pub
                         && route_valid
+                        && receipt.as_ref().is_none_or(|r| receipt_ok(r))
+                }
+                DeliveryTransaction::IncomingManifest {
+                    sender,
+                    original,
+                    received,
+                    receipt,
+                    ..
+                } => {
+                    original.conversation_id == super::conversation::dm_conversation_id(own, sender)
+                        && sender.ed25519_pub != own.ed25519_pub
+                        && received.from == sender.user_id()
                         && receipt.as_ref().is_none_or(|r| receipt_ok(r))
                 }
             };
@@ -469,6 +544,13 @@ impl DeliveryStore {
             receipts: BTreeMap::new(),
             receipt_events: BTreeMap::new(),
             receipt_scopes: BTreeMap::new(),
+            files: BTreeMap::new(),
+            active_files: BTreeSet::new(),
+            file_completions: BTreeMap::new(),
+            completion_index: BTreeMap::new(),
+            file_conversations: BTreeMap::new(),
+            erased_files: BTreeSet::new(),
+            erased_manifest_events: BTreeSet::new(),
             limits,
             outbox_records: records.len(),
             needs_sync: false,
@@ -533,25 +615,43 @@ impl DeliveryStore {
             self.journal.sync()?;
             return Ok(tx.id());
         }
-        if matches!(&tx, DeliveryTransaction::Outgoing { message, .. } if self.messages.contains_key(&message.logical_id) || self.completed.contains_key(&message.logical_id))
+        if matches!(&tx, DeliveryTransaction::Outgoing { message, .. } | DeliveryTransaction::OutgoingManifest { message, .. } if self.messages.contains_key(&message.logical_id) || self.completed.contains_key(&message.logical_id))
         {
             return Err(invalid("delivery message already installed"));
         }
         self.check_counts(Some(&tx))?;
+        if let DeliveryTransaction::OutgoingManifest { file, .. }
+        | DeliveryTransaction::IncomingManifest { file, .. } = &tx
+        {
+            self.check_file_slot(file)?;
+        }
         let bytes = bincode::serialized_size(&tx).map_err(|_| invalid("delivery encoding"))?;
         let destinations = match &tx {
-            DeliveryTransaction::Outgoing { message, .. } => message.destinations.len(),
+            DeliveryTransaction::Outgoing { message, .. }
+            | DeliveryTransaction::OutgoingManifest { message, .. } => message.destinations.len(),
             _ => 1,
         };
         self.check_capacity(destinations, bytes)?;
-        // Reserve outbox capacity for the metadata that recovery must install.
-        if let Some(record) = metadata_for(&tx) {
-            self.record_installed(&record)?;
-            self.ensure_outbox_space(&record)?;
-        }
         let id = tx.id();
-        self.journal.append_durable(&tx)?;
         self.pending.push(tx);
+        // Stage the reservation only under the owner lock. On any pre-WAL
+        // failure remove it again; it is never visible as accepted work.
+        let reservation = (|| {
+            if let Some(record) = metadata_for(self.pending.last().expect("staged reservation")) {
+                self.record_installed(&record)?;
+                self.ensure_outbox_space(&record)?;
+            } else if let DeliveryTransaction::IncomingManifest { file, .. } =
+                self.pending.last().expect("staged reservation")
+            {
+                self.ensure_outbox_space(&OutboxRecord::FileCard(file.clone()))?;
+            }
+            self.journal
+                .append_durable(self.pending.last().expect("staged reservation"))
+        })();
+        if let Err(error) = reservation {
+            self.pending.pop();
+            return Err(error);
+        }
         Ok(id)
     }
 
@@ -564,7 +664,7 @@ impl DeliveryStore {
             return Some(DeliveryStatus::Delivered);
         }
         self.messages.get(&id).map(|_| DeliveryStatus::Awaiting).or_else(|| {
-            self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Outgoing { message, .. } if message.logical_id == id))
+            self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Outgoing { message, .. } | DeliveryTransaction::OutgoingManifest { message, .. } if message.logical_id == id))
                 .then_some(DeliveryStatus::Awaiting)
         })
     }
@@ -576,7 +676,7 @@ impl DeliveryStore {
     ) -> Option<DeliveryStatus> {
         let in_scope = self.messages.get(&id).is_some_and(|m| m.conversation == conversation)
             || self.completed.get(&id).is_some_and(|m| m.conversation == conversation)
-            || self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Outgoing { message, .. } if message.logical_id == id && message.conversation == conversation));
+            || self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Outgoing { message, .. } | DeliveryTransaction::OutgoingManifest { message, .. } if message.logical_id == id && message.conversation == conversation));
         in_scope.then(|| self.status(id)).flatten()
     }
 
@@ -599,18 +699,36 @@ impl DeliveryStore {
                     .values()
                     .map(|m| (m.conversation, m.logical_id, m.wall_clock)),
             )
+            .chain(
+                self.files
+                    .values()
+                    .filter(|file| file.destinations.iter().any(|d| d.active))
+                    .map(|file| (file.conversation, file.id, file.wall_clock)),
+            )
             .collect()
     }
 
     /// Replay strictly in journal order. Ratchets cannot be used for unrelated
     /// operations while an earlier intent is incomplete. Locks are acquired by
     /// the caller in delivery → ratchet → log → received/sent order; no awaits.
+    #[cfg(test)]
     pub(crate) fn recover_next(
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
         sent: &mut SentLog,
         received: &mut ReceivedLog,
+    ) -> Result<Option<EventId>, LogError> {
+        self.recover_next_with_files(ratchet, log, sent, received, None)
+    }
+
+    pub(crate) fn recover_next_with_files(
+        &mut self,
+        ratchet: &mut DmRatchet,
+        log: &mut PersistentEventLog,
+        sent: &mut SentLog,
+        received: &mut ReceivedLog,
+        files: Option<&mut ReceivedLog>,
     ) -> Result<Option<EventId>, LogError> {
         self.sync_replacement()?;
         let Some(tx) = self.pending.first() else {
@@ -649,6 +767,39 @@ impl DeliveryStore {
                     log.append_durable(receipt.destination.event.clone())?;
                 }
             }
+            DeliveryTransaction::OutgoingManifest {
+                message,
+                received,
+                file,
+            } => {
+                self.validate_staged_file(file, log, &message.destinations[0].event.author)?;
+                for destination in &message.destinations {
+                    log.append_durable(destination.event.clone())?;
+                }
+                files
+                    .ok_or_else(|| invalid("file recovery adapter required"))?
+                    .record_durable(received)?;
+            }
+            DeliveryTransaction::IncomingManifest {
+                original, received, ..
+            } => {
+                log.append_durable((**original).clone())?;
+                files
+                    .ok_or_else(|| invalid("file recovery adapter required"))?
+                    .record_durable(received)?;
+            }
+        }
+        if let DeliveryTransaction::OutgoingManifest { file, .. }
+        | DeliveryTransaction::IncomingManifest { file, .. } = &self.pending[0]
+        {
+            self.install_record(OutboxRecord::FileCard(file.clone()))?;
+        }
+        if let DeliveryTransaction::IncomingManifest {
+            receipt: Some(receipt),
+            ..
+        } = &self.pending[0]
+        {
+            log.append_durable(receipt.destination.event.clone())?;
         }
         if let Some(record) = metadata_for(&self.pending[0]) {
             self.install_record(record)?;
@@ -795,11 +946,219 @@ impl DeliveryStore {
     ) -> bool {
         self.completed_receipts.get(&original_event_id).is_some_and(|r| r.conversation == conversation)
             || self.receipt_events.get(&original_event_id).and_then(|id| self.receipts.get(id)).is_some_and(|r| r.conversation == conversation)
-            || self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Incoming { receipt: Some(r), .. } if r.original_event_id == original_event_id && r.conversation == conversation))
+            || self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Incoming { receipt: Some(r), .. } | DeliveryTransaction::IncomingManifest { receipt: Some(r), .. } if r.original_event_id == original_event_id && r.conversation == conversation))
     }
 
     pub(crate) fn message(&self, id: EventId) -> Option<&OutgoingDelivery> {
         self.messages.get(&id)
+    }
+
+    pub(crate) fn logical_for_original(&self, original: EventId) -> Option<EventId> {
+        self.work_events.get(&original).copied()
+    }
+
+    pub(crate) fn file_cards(&self) -> impl Iterator<Item = &FileCard> {
+        self.files.values()
+    }
+
+    pub(crate) fn file_card(&self, id: EventId) -> Option<&FileCard> {
+        self.files.get(&id)
+    }
+
+    pub(crate) fn complete_file(
+        &mut self,
+        card: EventId,
+        final_chunk: EventId,
+    ) -> Result<(), LogError> {
+        self.install_record(OutboxRecord::FileComplete(card, final_chunk))
+    }
+
+    pub(crate) fn completed_files(
+        &self,
+        conversation: ConversationId,
+        final_chunk: EventId,
+    ) -> Vec<FileCard> {
+        self.completion_index
+            .get(&(*conversation.as_bytes(), final_chunk))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.files.get(id))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn file_completed(&self, id: EventId) -> bool {
+        self.file_completions.contains_key(&id)
+    }
+
+    pub(crate) fn cards_for_file(&self, conversation: ConversationId) -> Vec<FileCard> {
+        self.file_conversations
+            .get(conversation.as_bytes())
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.files.get(id))
+            .cloned()
+            .collect()
+    }
+
+    fn remove_file_completion(&mut self, id: EventId) {
+        if let Some(final_chunk) = self.file_completions.remove(&id) {
+            if let Some(file) = self.files.get(&id) {
+                let key = (*file.file_conversation.as_bytes(), final_chunk);
+                if let Some(ids) = self.completion_index.get_mut(&key) {
+                    ids.remove(&id);
+                    if ids.is_empty() {
+                        self.completion_index.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn file_erased(&self, conversation: ConversationId, original: EventId) -> bool {
+        self.erased_files
+            .contains(&(*conversation.as_bytes(), original))
+    }
+
+    /// Signed manifest IDs include their actual wire conversation. UI account
+    /// aliases may change after account adoption, but the erased event cannot.
+    pub(crate) fn manifest_event_erased(&self, original: EventId) -> bool {
+        self.erased_manifest_events.contains(&original)
+    }
+
+    pub(crate) fn erase_file(
+        &mut self,
+        conversation: ConversationId,
+        original: EventId,
+    ) -> Result<bool, LogError> {
+        if self.file_erased(conversation, original) {
+            return Ok(false);
+        }
+        // Legacy imported rows have no reserved slot; fail before deleting them
+        // when permanent suppression cannot fit the bounded metadata store.
+        if !self
+            .files
+            .get(&original)
+            .is_some_and(|file| file.conversation == conversation)
+            && self.files.len().saturating_add(self.erased_files.len())
+                >= self.limits.completed_receipts
+        {
+            return Err(invalid("file erasure capacity exhausted"));
+        }
+        self.install_record(OutboxRecord::ErasedFile(conversation, original))?;
+        Ok(true)
+    }
+
+    pub(crate) fn next_file_destination(
+        &self,
+        cursor: Option<(EventId, EventId)>,
+    ) -> Option<(FileCard, FileDestination)> {
+        if self.needs_sync || !self.pending.is_empty() {
+            return None;
+        }
+        let start = cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        let (id, original) = *self
+            .active_files
+            .range((start, std::ops::Bound::Unbounded))
+            .next()
+            .or_else(|| self.active_files.first())?;
+        let file = self.files.get(&id)?;
+        let destination = file
+            .destinations
+            .iter()
+            .find(|d| d.binding.event_id == original)?
+            .clone();
+        Some((file.clone(), destination))
+    }
+
+    pub(crate) fn contains_file_destination(
+        &self,
+        id: EventId,
+        original: EventId,
+        device: &PublicIdentity,
+        account: &Option<String>,
+    ) -> bool {
+        self.files.get(&id).is_some_and(|file| {
+            file.destinations.iter().any(|d| {
+                d.active
+                    && d.binding.event_id == original
+                    && d.binding.device == *device
+                    && d.binding.account == *account
+            })
+        })
+    }
+
+    pub(crate) fn retire_file_destination(
+        &mut self,
+        id: EventId,
+        original: EventId,
+    ) -> Result<(), LogError> {
+        self.install_record(OutboxRecord::RetireFileDestination(id, original))
+    }
+
+    fn check_file_slot(&self, file: &FileCard) -> Result<(), LogError> {
+        let pending_slots = self
+            .pending
+            .iter()
+            .filter_map(|tx| match tx {
+                DeliveryTransaction::OutgoingManifest { file, .. }
+                | DeliveryTransaction::IncomingManifest { file, .. }
+                    if !self.files.contains_key(&file.id) =>
+                {
+                    Some(file.id)
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if self.file_erased(file.conversation, file.id)
+            || (self
+                .files
+                .get(&file.id)
+                .is_some_and(|existing| existing != file))
+            || (!self.files.contains_key(&file.id)
+                && !pending_slots.contains(&file.id)
+                && self
+                    .files
+                    .len()
+                    .saturating_add(self.erased_files.len())
+                    .saturating_add(pending_slots.len())
+                    >= self.limits.completed_receipts)
+        {
+            return Err(invalid("file card capacity or binding rejected"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_staged_file(
+        &self,
+        file: &FileCard,
+        log: &PersistentEventLog,
+        author: &crate::eventlog::Author,
+    ) -> Result<(), LogError> {
+        let chunks = log.events(&file.file_conversation);
+        if chunks.len() != file.chunk_count as usize
+            || chunks.last().map(|e| e.id) != file.final_chunk
+        {
+            return Err(invalid("invalid immutable file chunk count"));
+        }
+        for (index, event) in chunks.iter().enumerate() {
+            let parents = if index == 0 {
+                vec![]
+            } else {
+                vec![chunks[index - 1].id]
+            };
+            if event.kind != EventKind::Message
+                || event.seq != index as u64 + 1
+                || event.parents != parents
+                || !event.verify_integrity()
+                || !event.verify_signature()
+                || &event.author != author
+                || (index > 0 && event.author != chunks[0].author)
+            {
+                return Err(invalid("invalid immutable file chunk ancestry"));
+            }
+        }
+        Ok(())
     }
 
     /// A single owned destination, selected by a stable two-dimensional cursor.
@@ -956,6 +1315,44 @@ impl DeliveryStore {
 
     fn record_installed(&self, record: &OutboxRecord) -> Result<bool, LogError> {
         match record {
+            OutboxRecord::FileComplete(id, final_chunk) => {
+                if self
+                    .files
+                    .get(id)
+                    .is_none_or(|file| file.completion_binding.is_none())
+                {
+                    return Err(invalid("file completion binding unavailable"));
+                }
+                match self.file_completions.get(id) {
+                    Some(existing) if existing != final_chunk => {
+                        Err(invalid("conflicting file completion"))
+                    }
+                    Some(_) => Ok(true),
+                    None => Ok(false),
+                }
+            }
+            OutboxRecord::FileCard(file) => {
+                if let Some(existing) = self.files.get(&file.id) {
+                    if existing != file {
+                        return Err(invalid("conflicting immutable file card"));
+                    }
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            OutboxRecord::RetireFileDestination(id, original) => {
+                if !self.files.get(id).is_some_and(|file| {
+                    file.destinations
+                        .iter()
+                        .any(|d| d.binding.event_id == *original)
+                }) {
+                    return Err(invalid("unknown file destination"));
+                }
+                Ok(!self.active_files.contains(&(*id, *original)))
+            }
+            OutboxRecord::ErasedFile(conversation, original) => {
+                Ok(self.file_erased(*conversation, *original))
+            }
             OutboxRecord::FinishedBoundReceipt(receipt, device) => {
                 if let Some(existing) = self
                     .completed_receipt_devices
@@ -1041,6 +1438,70 @@ impl DeliveryStore {
             self.active_work.remove(&id);
         }
         match record {
+            OutboxRecord::FileComplete(id, final_chunk) => {
+                let file = self
+                    .files
+                    .get(&id)
+                    .ok_or_else(|| invalid("unknown completed file"))?;
+                self.completion_index
+                    .entry((*file.file_conversation.as_bytes(), final_chunk))
+                    .or_default()
+                    .insert(id);
+                self.file_completions.insert(id, final_chunk);
+            }
+            OutboxRecord::FileCard(file) => {
+                self.check_file_slot(&file)?;
+                self.file_conversations
+                    .entry(*file.file_conversation.as_bytes())
+                    .or_default()
+                    .insert(file.id);
+                for destination in &file.destinations {
+                    if destination.active {
+                        self.active_files
+                            .insert((file.id, destination.binding.event_id));
+                    }
+                }
+                self.files.insert(file.id, file);
+            }
+            OutboxRecord::RetireFileDestination(id, original) => {
+                if let Some(file) = self.files.get_mut(&id) {
+                    if let Some(destination) = file
+                        .destinations
+                        .iter_mut()
+                        .find(|d| d.binding.event_id == original)
+                    {
+                        destination.active = false;
+                    }
+                }
+                self.active_files.remove(&(id, original));
+            }
+            OutboxRecord::ErasedFile(conversation, original) => {
+                self.apply_record(OutboxRecord::Cancel(conversation, original))?;
+                if self
+                    .files
+                    .get(&original)
+                    .is_some_and(|file| file.conversation == conversation)
+                {
+                    let file = self.files.remove(&original).expect("checked file");
+                    if let Some(ids) = self
+                        .file_conversations
+                        .get_mut(file.file_conversation.as_bytes())
+                    {
+                        ids.remove(&original);
+                        if ids.is_empty() {
+                            self.file_conversations
+                                .remove(file.file_conversation.as_bytes());
+                        }
+                    }
+                    for destination in file.destinations {
+                        self.active_files
+                            .remove(&(original, destination.binding.event_id));
+                    }
+                }
+                self.erased_files
+                    .insert((*conversation.as_bytes(), original));
+                self.erased_manifest_events.insert(original);
+            }
             OutboxRecord::Message(message) => {
                 if self.completed.contains_key(&message.logical_id) {
                     return Err(invalid("completed delivery cannot regress"));
@@ -1108,6 +1569,25 @@ impl DeliveryStore {
             }
             OutboxRecord::Cancel(conversation, id) => {
                 if self
+                    .files
+                    .get(&id)
+                    .is_some_and(|file| file.conversation == conversation)
+                {
+                    self.remove_file_completion(id);
+                }
+                if let Some(file) = self
+                    .files
+                    .get_mut(&id)
+                    .filter(|file| file.conversation == conversation)
+                {
+                    file.completion_binding = None;
+                    for destination in &mut file.destinations {
+                        destination.active = false;
+                        self.active_files
+                            .remove(&(id, destination.binding.event_id));
+                    }
+                }
+                if self
                     .messages
                     .get(&id)
                     .is_some_and(|m| m.conversation == conversation)
@@ -1170,6 +1650,8 @@ impl DeliveryStore {
             || self.receipts.len() > self.limits.receipts
             || self.completed.len() > self.limits.completed
             || self.completed_receipts.len() > self.limits.completed_receipts
+            || self.files.len().saturating_add(self.erased_files.len())
+                > self.limits.completed_receipts
         {
             return Err(invalid("delivery capacity exhausted"));
         }
@@ -1215,8 +1697,76 @@ impl DeliveryStore {
                 return Ok(());
             }
         }
+        // A reserved completion consumes its own future slot. Only exact live
+        // bindings qualify: imported legacy rows have no reservation to spend.
+        let erased_card = match record {
+            OutboxRecord::ErasedFile(conversation, id) => self
+                .files
+                .get(id)
+                .filter(|file| file.conversation == *conversation),
+            _ => None,
+        };
+        let retired_work = match record {
+            OutboxRecord::RetireFileDestination(id, original) => {
+                usize::from(self.active_files.contains(&(*id, *original)))
+            }
+            _ => 0,
+        };
+        let file_debt = self
+            .files
+            .len()
+            .saturating_sub(usize::from(erased_card.is_some()));
+        let completion_debt = self
+            .files
+            .values()
+            .filter(|file| {
+                file.completion_binding.is_some()
+                    && !self.file_completions.contains_key(&file.id)
+                    && erased_card.is_none_or(|erased| erased.id != file.id)
+                    && !matches!(record, OutboxRecord::FileComplete(id, _) if *id == file.id)
+            })
+            .count();
+        let work_debt = self
+            .active_files
+            .len()
+            .saturating_sub(retired_work)
+            .saturating_sub(erased_card.map_or(0, |file| {
+                file.destinations.iter().filter(|d| d.active).count()
+            }));
         let mut reserved_records = 1usize;
+        reserved_records = reserved_records
+            .saturating_add(file_debt)
+            .saturating_add(completion_debt)
+            .saturating_add(work_debt);
+        if let OutboxRecord::FileCard(file) = record {
+            reserved_records = reserved_records
+                .saturating_add(file.destinations.len())
+                .saturating_add(1 + usize::from(file.completion_binding.is_some()));
+        }
         for tx in &self.pending {
+            if let DeliveryTransaction::OutgoingManifest { file, .. }
+            | DeliveryTransaction::IncomingManifest { file, .. } = tx
+            {
+                let pending_file = OutboxRecord::FileCard(file.clone());
+                if !self.record_installed(&pending_file)?
+                    && !matches!(record, OutboxRecord::FileCard(current) if current.id == file.id)
+                {
+                    size = size.saturating_add(
+                        bincode::serialized_size(&pending_file)
+                            .map_err(|_| invalid("delivery encoding"))?
+                            .saturating_add(FRAME_OVERHEAD),
+                    );
+                    reserved_records = reserved_records.saturating_add(1);
+                    size = size.saturating_add(
+                        100 + (file.destinations.len() as u64).saturating_mul(100)
+                            + u64::from(file.completion_binding.is_some()) * 100,
+                    );
+                    reserved_records = reserved_records.saturating_add(
+                        1 + file.destinations.len()
+                            + usize::from(file.completion_binding.is_some()),
+                    );
+                }
+            }
             if let Some(pending_record) = metadata_for(tx) {
                 if same_metadata_key(record, &pending_record)
                     || self.record_installed(&pending_record)?
@@ -1284,12 +1834,17 @@ impl DeliveryStore {
             .collect();
         for tx in &self.pending {
             match tx {
-                DeliveryTransaction::Outgoing { message, .. } => {
+                DeliveryTransaction::Outgoing { message, .. }
+                | DeliveryTransaction::OutgoingManifest { message, .. } => {
                     messages
                         .entry(message.logical_id)
                         .or_insert(DeliveryStatus::Awaiting);
                 }
                 DeliveryTransaction::Incoming {
+                    receipt: Some(receipt),
+                    ..
+                }
+                | DeliveryTransaction::IncomingManifest {
                     receipt: Some(receipt),
                     ..
                 } => {
@@ -1340,7 +1895,11 @@ impl DeliveryStore {
                         || (receipt.logical_id != *id && receipt.original_event_id != *id)
                 });
             }
-            OutboxRecord::RetireDestination(_, _) => {}
+            OutboxRecord::RetireDestination(_, _)
+            | OutboxRecord::FileCard(_)
+            | OutboxRecord::RetireFileDestination(_, _)
+            | OutboxRecord::FileComplete(_, _)
+            | OutboxRecord::ErasedFile(_, _) => {}
         }
         let future_bytes = messages
             .values()
@@ -1372,7 +1931,9 @@ impl DeliveryStore {
                 .map(|m| (m.logical_id, (false, m.remaining.clone()))),
         );
         for tx in &self.pending {
-            if let DeliveryTransaction::Outgoing { message, .. } = tx {
+            if let DeliveryTransaction::Outgoing { message, .. }
+            | DeliveryTransaction::OutgoingManifest { message, .. } = tx
+            {
                 work.entry(message.logical_id)
                     .or_insert_with(|| (true, CompletedDelivery::from(message).remaining));
             }
@@ -1416,6 +1977,18 @@ impl DeliveryStore {
         size = size
             .saturating_add(future_bytes)
             .saturating_add(fanout_bytes);
+        // Every live card reserves permanent erasure and each chunk destination
+        // reserves retirement. Tombstones never expire or get evicted.
+        size = size
+            .saturating_add((file_debt as u64).saturating_mul(100))
+            .saturating_add((completion_debt as u64).saturating_mul(100))
+            .saturating_add((work_debt as u64).saturating_mul(100));
+        if let OutboxRecord::FileCard(file) = record {
+            size = size.saturating_add(
+                100 + (file.destinations.len() as u64).saturating_mul(100)
+                    + u64::from(file.completion_binding.is_some()) * 100,
+            );
+        }
         let max_records = self.limits.max_outbox_records();
         if self.outbox_path.metadata()?.len().saturating_add(size) <= self.limits.outbox_bytes
             && self.outbox_records.saturating_add(reserved_records) <= max_records
@@ -1423,6 +1996,17 @@ impl DeliveryStore {
             return Ok(());
         }
         let mut snapshot = Vec::new();
+        snapshot.extend(self.files.values().cloned().map(OutboxRecord::FileCard));
+        snapshot.extend(
+            self.file_completions
+                .iter()
+                .map(|(id, final_chunk)| OutboxRecord::FileComplete(*id, *final_chunk)),
+        );
+        snapshot.extend(
+            self.erased_files
+                .iter()
+                .map(|(conv, id)| OutboxRecord::ErasedFile(ConversationId::new(*conv), *id)),
+        );
         snapshot.extend(self.messages.values().cloned().map(OutboxRecord::Message));
         snapshot.extend(
             self.completed
@@ -1467,12 +2051,27 @@ impl DeliveryStore {
     fn check_counts(&self, additional: Option<&DeliveryTransaction>) -> Result<(), LogError> {
         let mut messages: HashSet<EventId> = self.messages.keys().copied().collect();
         let mut receipts: HashSet<EventId> = self.receipts.keys().copied().collect();
+        let mut file_slots: HashSet<EventId> = self.files.keys().copied().collect();
+        let mut file_work: HashSet<EventId> = self.active_files.iter().map(|(id, _)| *id).collect();
         for tx in self.pending.iter().chain(additional) {
+            if let DeliveryTransaction::OutgoingManifest { file, .. }
+            | DeliveryTransaction::IncomingManifest { file, .. } = tx
+            {
+                file_slots.insert(file.id);
+                if file.destinations.iter().any(|d| d.active) {
+                    file_work.insert(file.id);
+                }
+            }
             match tx {
-                DeliveryTransaction::Outgoing { message, .. } => {
+                DeliveryTransaction::Outgoing { message, .. }
+                | DeliveryTransaction::OutgoingManifest { message, .. } => {
                     messages.insert(message.logical_id);
                 }
                 DeliveryTransaction::Incoming {
+                    receipt: Some(receipt),
+                    ..
+                }
+                | DeliveryTransaction::IncomingManifest {
                     receipt: Some(receipt),
                     ..
                 } => {
@@ -1486,7 +2085,18 @@ impl DeliveryStore {
             .values()
             .filter(|m| !m.remaining.is_empty())
             .count();
+        let mut work_ids = messages.clone();
+        work_ids.extend(
+            self.completed
+                .values()
+                .filter(|m| !m.remaining.is_empty())
+                .map(|m| m.logical_id),
+        );
+        work_ids.extend(file_work);
         if messages.len().saturating_add(completed_work) > self.limits.messages
+            || work_ids.len() > self.limits.messages
+            || file_slots.len().saturating_add(self.erased_files.len())
+                > self.limits.completed_receipts
             || receipts.len() > self.limits.receipts
             || messages.len().saturating_add(self.completed.len()) > self.limits.completed
             || receipts.len().saturating_add(self.completed_receipts.len())
@@ -1500,6 +2110,33 @@ impl DeliveryStore {
 
     fn validate_record(&self, record: &OutboxRecord) -> Result<(), LogError> {
         match record {
+            OutboxRecord::FileCard(file) => {
+                let mut ids = HashSet::new();
+                let mut devices = HashSet::new();
+                if file.file_conversation == file.conversation
+                    || file.completion_binding.as_ref().is_some_and(|binding| {
+                        !valid_account(&binding.owner_account)
+                            || binding.certificate.as_ref().is_some_and(|cert| {
+                                !cert.verify()
+                                    || cert.device_ed25519_pub != binding.source.ed25519_pub
+                            })
+                    })
+                    || file.chunk_count == 0
+                    || file.destinations.len() > self.limits.destinations
+                    || (!file.destinations.is_empty() && file.final_chunk.is_none())
+                    || file.destinations.iter().any(|d| {
+                        !ids.insert(d.binding.event_id)
+                            || !devices.insert(d.binding.device.ed25519_pub)
+                            || d.binding
+                                .account
+                                .as_deref()
+                                .is_some_and(|a| !valid_account(a))
+                    })
+                {
+                    return Err(invalid("invalid immutable file metadata"));
+                }
+                Ok(())
+            }
             OutboxRecord::Message(message) => self.validate_message(message),
             OutboxRecord::Receipt(receipt) => self.validate_destination(&receipt.destination),
             OutboxRecord::Delivered(completed) => {
@@ -1537,8 +2174,10 @@ impl DeliveryStore {
     }
 
     fn validate_destination(&self, destination: &DeliveryDestination) -> Result<(), LogError> {
-        if destination.event.kind != EventKind::Message
-            || destination.event.ciphertext.len() > self.limits.payload_bytes
+        if !matches!(
+            destination.event.kind,
+            EventKind::Message | EventKind::FileManifest
+        ) || destination.event.ciphertext.len() > self.limits.payload_bytes
             || destination.event.parents.len() > 1024
             || !destination.event.verify_integrity()
             || !destination.event.verify_signature()
@@ -1604,12 +2243,115 @@ impl DeliveryStore {
 
     fn validate_transaction(&self, tx: &DeliveryTransaction) -> Result<(), LogError> {
         match tx {
+            DeliveryTransaction::OutgoingManifest {
+                message,
+                received,
+                file,
+            } => {
+                self.validate_message(message)?;
+                self.validate_record(&OutboxRecord::FileCard(file.clone()))?;
+                let manifest = super::files::validated_manifest(&received.plaintext)
+                    .ok_or_else(|| invalid("invalid file manifest"))?;
+                if message.logical_id != message.destinations[0].event.id
+                    || file.completion_binding.is_some()
+                    || file.id != message.logical_id
+                    || file.conversation != message.conversation
+                    || file.wall_clock != message.wall_clock
+                    || file.file_conversation != manifest.file_conv()
+                    || file.chunk_count != manifest.chunk_count()
+                    || file.destinations.len() != message.destinations.len()
+                    || file
+                        .destinations
+                        .iter()
+                        .zip(&message.destinations)
+                        .any(|(f, d)| {
+                            !f.active
+                                || f.binding.event_id != d.event.id
+                                || f.binding.device != d.device
+                                || f.binding.account != d.account
+                                || f.binding.receipt_eligible != d.receipt_eligible
+                        })
+                    || received.event_id != message.logical_id
+                    || received.conversation != message.conversation
+                    || received.wall_clock != message.wall_clock
+                    || received.from != message.destinations[0].event.author.user_id()
+                    || message.destinations.iter().any(|d| {
+                        d.event.kind != EventKind::FileManifest
+                            || !super::session::event_fits_frame(&d.event)
+                    })
+                    || received.plaintext.len() > self.limits.payload_bytes
+                    || super::files::validated_manifest(&received.plaintext).is_none()
+                {
+                    return Err(invalid("invalid outgoing manifest transaction"));
+                }
+                Ok(())
+            }
+            DeliveryTransaction::IncomingManifest {
+                sender,
+                original,
+                received,
+                receipt,
+                file,
+            } => {
+                self.validate_record(&OutboxRecord::FileCard(file.clone()))?;
+                let manifest = super::files::validated_manifest(&received.plaintext)
+                    .ok_or_else(|| invalid("invalid file manifest"))?;
+                if original.kind != EventKind::FileManifest
+                    || file.completion_binding.as_ref().is_none_or(|binding| {
+                        binding.source != *sender
+                            || self
+                                .profile
+                                .as_ref()
+                                .is_some_and(|(_, owner)| binding.owner_account != owner.account)
+                    })
+                    || file.id != original.id
+                    || file.conversation != received.conversation
+                    || file.wall_clock != received.wall_clock
+                    || file.file_conversation != manifest.file_conv()
+                    || file.chunk_count != manifest.chunk_count()
+                    || !file.destinations.is_empty()
+                    || file.final_chunk.is_some()
+                    || !original.verify_integrity()
+                    || !original.verify_signature()
+                    || original.author.ed25519_pub() != &sender.ed25519_pub
+                    || !super::session::event_fits_frame(original)
+                    || received.event_id != original.id
+                    || received.wall_clock != original.wall_clock
+                    || received.from != sender.user_id()
+                    || received.plaintext.len() > self.limits.payload_bytes
+                    || super::files::validated_manifest(&received.plaintext).is_none()
+                {
+                    return Err(invalid("invalid incoming manifest transaction"));
+                }
+                if let Some(receipt) = receipt {
+                    self.validate_destination(&receipt.destination)?;
+                    if receipt.destination.event.kind != EventKind::Message
+                        || receipt.original_event_id != original.id
+                        || receipt.logical_id != original.id
+                        || receipt.destination.device != *sender
+                        || receipt.destination.receipt_eligible
+                        || receipt.destination.account.is_none()
+                        || receipt.conversation != received.conversation
+                        || receipt.wall_clock != received.wall_clock
+                    {
+                        return Err(invalid("invalid manifest receipt binding"));
+                    }
+                }
+                Ok(())
+            }
             DeliveryTransaction::Outgoing {
                 message,
                 sent,
                 ratchets,
             } => {
                 self.validate_message(message)?;
+                if message
+                    .destinations
+                    .iter()
+                    .any(|d| d.event.kind != EventKind::Message)
+                {
+                    return Err(invalid("invalid message transaction kind"));
+                }
                 if sent.conversation != message.conversation
                     || sent.wall_clock != message.wall_clock
                     || sent.plaintext.len() > self.limits.payload_bytes
@@ -1707,10 +2449,14 @@ impl DeliveryStore {
 
 fn metadata_for(tx: &DeliveryTransaction) -> Option<OutboxRecord> {
     match tx {
-        DeliveryTransaction::Outgoing { message, .. } => {
+        DeliveryTransaction::Outgoing { message, .. }
+        | DeliveryTransaction::OutgoingManifest { message, .. } => {
             Some(OutboxRecord::Message(message.clone()))
         }
-        DeliveryTransaction::Incoming { receipt, .. } => receipt.clone().map(OutboxRecord::Receipt),
+        DeliveryTransaction::Incoming { receipt, .. }
+        | DeliveryTransaction::IncomingManifest { receipt, .. } => {
+            receipt.clone().map(OutboxRecord::Receipt)
+        }
     }
 }
 
