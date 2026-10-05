@@ -10,7 +10,7 @@ use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::LogError;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 const MAGIC: &[u8; 6] = b"MTRECV";
@@ -33,21 +33,48 @@ pub struct ReceivedLog {
     /// Event ids already stored, so `record` is idempotent — a re-imported backfill (e.g. a
     /// second `link_device`) or any duplicate write is skipped instead of durably doubling
     /// the conversation's history.
-    seen: HashSet<EventId>,
+    seen: HashMap<EventId, (ConversationId, usize)>,
 }
 
 impl ReceivedLog {
+    /// Durably install a validated receive transaction. Retry synchronizes even
+    /// when the identical record is already indexed; conflicting plaintext or
+    /// routing for the same signed event is rejected.
+    pub fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
+        if let Some((conversation, index)) = self.seen.get(&entry.event_id) {
+            let existing = &self.by_conversation[conversation][*index];
+            if existing != entry {
+                return Err(LogError::CorruptFile(
+                    "conflicting received transaction".into(),
+                ));
+            }
+            return self.file.sync();
+        }
+        self.file.append_durable(entry)?;
+        let entries = self.by_conversation.entry(entry.conversation).or_default();
+        self.seen
+            .insert(entry.event_id, (entry.conversation, entries.len()));
+        entries.push(entry.clone());
+        Ok(())
+    }
     /// Open (or create) the received log at `path`, replaying stored entries.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, entries) = EncryptedRecordLog::<ReceivedEntry>::open(path, password, MAGIC)?;
         let mut by_conversation: HashMap<ConversationId, Vec<ReceivedEntry>> = HashMap::new();
-        let mut seen: HashSet<EventId> = HashSet::new();
+        let mut seen = HashMap::new();
         for entry in entries {
-            seen.insert(entry.event_id);
-            by_conversation
-                .entry(entry.conversation)
-                .or_default()
-                .push(entry);
+            if let Some((conversation, index)) = seen.get(&entry.event_id) {
+                let existing = &by_conversation[conversation][*index];
+                if existing != &entry {
+                    return Err(LogError::CorruptFile(
+                        "conflicting received transaction".into(),
+                    ));
+                }
+                continue;
+            }
+            let entries = by_conversation.entry(entry.conversation).or_default();
+            seen.insert(entry.event_id, (entry.conversation, entries.len()));
+            entries.push(entry);
         }
         Ok(Self {
             file,
@@ -67,7 +94,7 @@ impl ReceivedLog {
     ) -> Result<(), LogError> {
         // Idempotent on event id: skip a duplicate (e.g. a re-imported account backfill) so it
         // can't durably double the conversation's history.
-        if self.seen.contains(&event_id) {
+        if self.seen.contains_key(&event_id) {
             return Ok(());
         }
         let entry = ReceivedEntry {
@@ -78,11 +105,9 @@ impl ReceivedLog {
             plaintext: plaintext.to_vec(),
         };
         self.file.append(&entry)?;
-        self.seen.insert(event_id);
-        self.by_conversation
-            .entry(conversation)
-            .or_default()
-            .push(entry);
+        let entries = self.by_conversation.entry(conversation).or_default();
+        self.seen.insert(event_id, (conversation, entries.len()));
+        entries.push(entry);
         Ok(())
     }
 
@@ -114,11 +139,10 @@ impl ReceivedLog {
         self.by_conversation.clear();
         self.seen.clear();
         for entry in kept {
-            self.seen.insert(entry.event_id);
-            self.by_conversation
-                .entry(entry.conversation)
-                .or_default()
-                .push(entry);
+            let entries = self.by_conversation.entry(entry.conversation).or_default();
+            self.seen
+                .insert(entry.event_id, (entry.conversation, entries.len()));
+            entries.push(entry);
         }
         Ok(removed)
     }
@@ -158,6 +182,84 @@ mod tests {
 
     fn conv(n: u8) -> ConversationId {
         ConversationId::new([n; 32])
+    }
+
+    #[test]
+    fn durable_receive_recovery_rejects_conflicting_event_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recv.log");
+        let entry = ReceivedEntry {
+            event_id: EventId::new([7; 32]),
+            conversation: conv(1),
+            from: "a".into(),
+            wall_clock: 10,
+            plaintext: b"saved".to_vec(),
+        };
+        let mut log = ReceivedLog::open(&path, "pw").unwrap();
+        log.record_durable(&entry).unwrap();
+        log.record_durable(&entry).unwrap();
+        drop(log);
+        let mut log = ReceivedLog::open(&path, "pw").unwrap();
+        log.record_durable(&entry).unwrap();
+        let mut conflict = entry.clone();
+        conflict.plaintext = b"different".to_vec();
+        assert!(log.record_durable(&conflict).is_err());
+        assert_eq!(log.entries(&conv(1)), vec![entry]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_duplicate_retries_sync_even_if_record_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("profile");
+        let moved = dir.path().join("moved");
+        let mut log = ReceivedLog::open(&parent.join("received"), "pw").unwrap();
+        let entry = ReceivedEntry {
+            event_id: EventId::new([7; 32]),
+            conversation: conv(1),
+            from: "a".into(),
+            wall_clock: 10,
+            plaintext: b"saved".to_vec(),
+        };
+        log.record_durable(&entry).unwrap();
+        std::fs::rename(&parent, &moved).unwrap();
+        assert!(
+            log.record_durable(&entry).is_err(),
+            "an existing record must still cross the durable boundary"
+        );
+        std::fs::rename(&moved, &parent).unwrap();
+        log.record_durable(&entry).unwrap();
+        assert_eq!(log.entries(&conv(1)), vec![entry]);
+    }
+
+    #[test]
+    fn replay_rejects_conflicting_received_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recv.log");
+        let entry = ReceivedEntry {
+            event_id: EventId::new([7; 32]),
+            conversation: conv(1),
+            from: "a".into(),
+            wall_clock: 10,
+            plaintext: b"saved".to_vec(),
+        };
+        let (mut file, _) = EncryptedRecordLog::<ReceivedEntry>::open(&path, "pw", MAGIC).unwrap();
+        file.append_durable(&entry).unwrap();
+        file.append_durable(&entry).unwrap();
+        drop(file);
+        assert_eq!(
+            ReceivedLog::open(&path, "pw")
+                .unwrap()
+                .entries(&conv(1))
+                .len(),
+            1
+        );
+        let (mut file, _) = EncryptedRecordLog::<ReceivedEntry>::open(&path, "pw", MAGIC).unwrap();
+        let mut conflict = entry;
+        conflict.from = "b".into();
+        file.append_durable(&conflict).unwrap();
+        drop(file);
+        assert!(ReceivedLog::open(&path, "pw").is_err());
     }
 
     #[test]

@@ -78,6 +78,22 @@ impl PersistentEventLog {
         Ok(AppendOutcome::Appended)
     }
 
+    /// Transaction boundary for delivery: flush all causal parents before writing
+    /// an intent, and synchronize even when recovery finds an existing event.
+    pub fn sync(&self) -> Result<(), LogError> {
+        self.file.sync()
+    }
+
+    pub fn append_durable(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        if !self.log.validate(&event)? {
+            self.file.sync()?;
+            return Ok(AppendOutcome::Duplicate);
+        }
+        self.file.append_durable(&event)?;
+        self.log.index_trusted(event);
+        Ok(AppendOutcome::Appended)
+    }
+
     pub fn has(&self, id: &EventId) -> bool {
         self.log.has(id)
     }
@@ -321,6 +337,40 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn durable_transaction_append_is_idempotent_and_preserves_parent_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let id = DeviceIdentity::generate();
+        let parent = mk(&id, 1, 1, b"parent");
+        let child = Event::new(
+            &id,
+            parent.conversation_id,
+            2,
+            vec![parent.id],
+            2,
+            0,
+            EventKind::Message,
+            b"child".to_vec(),
+        );
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        log.append(parent.clone()).unwrap();
+        log.sync().unwrap();
+        assert_eq!(
+            log.append_durable(child.clone()).unwrap(),
+            AppendOutcome::Appended
+        );
+        assert_eq!(
+            log.append_durable(child.clone()).unwrap(),
+            AppendOutcome::Duplicate
+        );
+        drop(log);
+        let log = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(log.get(&parent.id), Some(&parent));
+        assert_eq!(log.get(&child.id), Some(&child));
+        assert_eq!(log.conversation_len(&parent.conversation_id), 2);
     }
 
     #[test]

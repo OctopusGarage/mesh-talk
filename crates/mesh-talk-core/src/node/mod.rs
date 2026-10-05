@@ -11,6 +11,7 @@ pub(crate) mod channel;
 pub(crate) mod channel_senders;
 pub(crate) mod channels;
 pub(crate) mod conversation;
+pub(crate) mod delivery_store;
 pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
@@ -53,6 +54,7 @@ pub use crate::transport::net::{
 };
 pub use call::{CallSignal, ReceivedCallSignal};
 pub use channel::ReceivedChannelMessage;
+pub use delivery_store::DeliveryStatus;
 pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
