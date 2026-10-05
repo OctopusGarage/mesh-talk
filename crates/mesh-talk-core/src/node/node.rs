@@ -186,6 +186,10 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) remember_peer_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) file_transfer_peak: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(in crate::node) empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     pub(in crate::node) accepted_hook: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
@@ -481,6 +485,10 @@ impl Node {
             peer_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
             remember_peer_hook: Mutex::new(None),
+            #[cfg(test)]
+            file_transfer_peak: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             accepted_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),

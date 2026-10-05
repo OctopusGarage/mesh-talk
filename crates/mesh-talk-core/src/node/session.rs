@@ -71,6 +71,27 @@ enum SyncWire {
     },
 }
 
+#[cfg(test)]
+pub(in crate::node) fn is_round_request(bytes: &[u8], conversation: ConversationId) -> bool {
+    round_request_conversation(bytes) == Some(conversation)
+}
+
+#[cfg(test)]
+pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<ConversationId> {
+    match decode(bytes) {
+        Ok(SyncWire::Request(request)) => Some(request.conversation),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
+    matches!(
+        decode(bytes),
+        Ok(SyncWire::Request(_) | SyncWire::FpRequest(_) | SyncWire::DurableHaveRequest { .. })
+    )
+}
+
 /// Acceptance preflight for an immutable event which must fit both directions
 /// of ordinary reconciliation. Have sets are streamed separately.
 pub(in crate::node) fn event_fits_frame(event: &crate::eventlog::Event) -> bool {
@@ -257,57 +278,95 @@ where
     S: SyncStore,
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
-    // id-set; if the responder's matches, the logs are identical and we skip the O(N)
-    // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
-    // the full reconciliation below. (Correctness: a digest match means equal sets; a
-    // false match is cryptographically negligible and, since ingest re-validates, could
-    // only skip a diff — never corrupt — so this is safe.)
-    {
-        let fp = {
-            let store = store.lock().expect("store mutex not poisoned");
-            fingerprint(store.event_ids(&conversation))
-        };
-        channel
-            .send(&encode(&SyncWire::FpRequest(FpRequest {
-                conversation,
-                fingerprint: fp,
-            }))?)
-            .await?;
-        match decode(&channel.recv().await?)? {
-            SyncWire::FpResponse(FpResponse { matched: true }) => {
-                log::debug!(
-                    target: "mesh_talk::sync",
-                    "sync conv={} fp_match skipped",
-                    hex::encode(&conversation.as_bytes()[..4]),
-                );
-                return Ok(ApplyReport::default());
-            }
-            SyncWire::FpResponse(FpResponse { matched: false }) => {
-                // Diverged — run the full id-set reconciliation below.
-            }
-            _ => return Err(SessionError::UnexpectedMessage),
-        }
-    }
+    let mut progress = SyncProgress::default();
+    while !progress.step(channel, store, conversation).await? {}
+    log::debug!(
+        target: "mesh_talk::sync",
+        "sync conv={} have={} have_kib={} applied={} dup={} pushed={} diff={} rounds={}",
+        hex::encode(&conversation.as_bytes()[..4]),
+        progress.first_have,
+        progress.first_have * EVENT_ID_BYTES / 1024,
+        progress.total.applied,
+        progress.total.duplicates,
+        progress.pushed_total,
+        progress.total.applied + progress.pushed_total,
+        progress.rounds,
+    );
+    Ok(progress.total)
+}
 
-    let mut total = ApplyReport::default();
-    // Sync-cost telemetry (see node/session.rs sync docs): we re-stream the FULL id-set
-    // (`have`) every round in both directions regardless of how small the diff is, so the
-    // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
-    // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
-    let mut rounds = 0u32;
-    let mut first_have = 0usize;
-    let mut pushed_total = 0usize;
-    let mut previous_push = std::collections::HashSet::new();
-    for round in 0..MAX_SYNC_ROUNDS {
+/// Resume only between complete protocol exchanges, never midway through
+/// a Noise frame. A caller timing out a step must discard its channel and state.
+#[derive(Default)]
+pub(in crate::node) struct SyncProgress {
+    started: bool,
+    rounds: usize,
+    previous_push: std::collections::HashSet<EventId>,
+    total: ApplyReport,
+    first_have: usize,
+    pushed_total: usize,
+}
+
+impl SyncProgress {
+    pub(in crate::node) async fn step<S, IO>(
+        &mut self,
+        channel: &mut SecureChannel<IO>,
+        store: &Mutex<S>,
+        conversation: ConversationId,
+    ) -> Result<bool, SessionError>
+    where
+        S: SyncStore,
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
+        // id-set; if the responder's matches, the logs are identical and we skip the O(N)
+        // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
+        // the full reconciliation below. (Correctness: a digest match means equal sets; a
+        // false match is cryptographically negligible and, since ingest re-validates, could
+        // only skip a diff — never corrupt — so this is safe.)
+        if !self.started {
+            self.started = true;
+            let fp = {
+                let store = store.lock().expect("store mutex not poisoned");
+                fingerprint(store.event_ids(&conversation))
+            };
+            channel
+                .send(&encode(&SyncWire::FpRequest(FpRequest {
+                    conversation,
+                    fingerprint: fp,
+                }))?)
+                .await?;
+            match decode(&channel.recv().await?)? {
+                SyncWire::FpResponse(FpResponse { matched: true }) => {
+                    log::debug!(
+                        target: "mesh_talk::sync",
+                        "sync conv={} fp_match skipped",
+                        hex::encode(&conversation.as_bytes()[..4]),
+                    );
+                    return Ok(true);
+                }
+                SyncWire::FpResponse(FpResponse { matched: false }) => {
+                    // A complete exchange is a scheduling boundary for
+                    // bounded callers, even when reconciliation must follow.
+                    return Ok(false);
+                }
+                _ => return Err(SessionError::UnexpectedMessage),
+            }
+        }
+
+        // Sync-cost telemetry (see node/session.rs sync docs): we re-stream the FULL id-set
+        // (`have`) every round in both directions regardless of how small the diff is, so the
+        // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
+        // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
+        let round = self.rounds;
         let have = {
             let store = store.lock().expect("store mutex not poisoned");
             build_request(&*store, conversation).have
         };
         if round == 0 {
-            first_have = have.len();
+            self.first_have = have.len();
         }
-        rounds += 1;
+        self.rounds += 1;
         // Opening Request carries an empty inline have; the real set is streamed.
         channel
             .send(&encode(&SyncWire::Request(SyncRequest {
@@ -344,53 +403,39 @@ where
         // Sending is not progress: projected stores can ingest a duplicate but
         // omit it from their Have set. Require evidence of acceptance before
         // repeating a push, unless this round advanced our own store instead.
-        if !previous_push.is_empty()
+        if !self.previous_push.is_empty()
             && !made_progress
-            && !response.have.iter().any(|id| previous_push.contains(id))
+            && !response
+                .have
+                .iter()
+                .any(|id| self.previous_push.contains(id))
         {
             return Err(SessionError::NoProgress);
         }
         let more_to_push = !followup.events.is_empty();
-        pushed_total += followup.events.len();
-        previous_push = followup.events.iter().map(|event| event.id).collect();
+        self.pushed_total += followup.events.len();
+        self.previous_push = followup.events.iter().map(|event| event.id).collect();
 
         channel
             .send(&encode(&SyncWire::Followup(followup))?)
             .await?;
 
-        total.applied += report.applied;
-        total.duplicates += report.duplicates;
+        self.total.applied += report.applied;
+        self.total.duplicates += report.duplicates;
         // Bound accumulated reject detail across rounds (diagnostics only) so a peer that
         // keeps a multi-round sync alive while interleaving bad events can't grow it.
-        if total.rejected.len() < MAX_REJECTED_DETAIL {
-            total.rejected.extend(report.rejected);
+        if self.total.rejected.len() < MAX_REJECTED_DETAIL {
+            self.total.rejected.extend(report.rejected);
         }
 
         if !made_progress && !more_to_push {
-            break;
+            return Ok(true);
         }
         if round + 1 == MAX_SYNC_ROUNDS {
             return Err(SessionError::NoProgress);
         }
+        Ok(false)
     }
-    // One line per conversation sync. `have` is the id-set size N we streamed (≈32·N bytes
-    // each way, per round); applied/pushed are the actual diff. When `have` ≫ applied+pushed
-    // across many syncs, the O(N) id-set is the dominant waste — the signal that range-based
-    // reconciliation is worth it. Greppable target so the diagnostics log can filter it.
-    let diff = total.applied + pushed_total;
-    log::debug!(
-        target: "mesh_talk::sync",
-        "sync conv={} have={} have_kib={} applied={} dup={} pushed={} diff={} rounds={}",
-        hex::encode(&conversation.as_bytes()[..4]),
-        first_have,
-        first_have * EVENT_ID_BYTES / 1024,
-        total.applied,
-        total.duplicates,
-        pushed_total,
-        diff,
-        rounds,
-    );
-    Ok(total)
 }
 
 /// The outcome of serving one inbound wire message.

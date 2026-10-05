@@ -385,6 +385,336 @@ async fn file_enqueue_progress_never_waits_for_stalled_contact_tcp() {
 
 #[tokio::test]
 async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_restart() {
+    private_file_restart(FilePeerDelay::None).await;
+}
+
+#[tokio::test]
+async fn private_file_restart_progresses_when_protocol_stages_fit_but_total_exceeds_operation_budget(
+) {
+    private_file_restart(FilePeerDelay::Aggregate).await;
+}
+
+#[tokio::test]
+async fn private_file_restart_reconnects_after_a_partial_chunk_round_timeout() {
+    private_file_restart(FilePeerDelay::PartialChunk).await;
+}
+
+#[tokio::test]
+async fn private_file_restart_yields_between_individually_bounded_exchanges() {
+    private_file_restart(FilePeerDelay::Exchange).await;
+}
+
+#[tokio::test]
+async fn private_file_restart_advances_twenty_four_pending_scopes_fairly() {
+    private_file_restart_batch(FilePeerDelay::Aggregate, 24).await;
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FilePeerDelay {
+    None,
+    Aggregate,
+    Exchange,
+    PartialChunk,
+}
+
+#[derive(Default)]
+struct FilePeerObservation {
+    interrupted: std::sync::atomic::AtomicBool,
+    interrupted_connection: std::sync::atomic::AtomicUsize,
+    next_connection: std::sync::atomic::AtomicUsize,
+    fresh_completion: std::sync::atomic::AtomicBool,
+    active_file_channels: std::sync::atomic::AtomicUsize,
+    max_file_channels: std::sync::atomic::AtomicUsize,
+}
+
+struct ObservedFileChannel(Arc<FilePeerObservation>);
+
+#[derive(Default)]
+struct NegativeCustodyObservation {
+    file_connections: std::sync::atomic::AtomicUsize,
+    completed_attempts: std::sync::atomic::AtomicUsize,
+    changed: tokio::sync::Notify,
+}
+
+// Actual guarded event storage, but a peer declining qualified file custody
+// and withholding its receipt controls. Ordinary file fingerprints still match.
+struct NegativeCustodyStore<S> {
+    inner: S,
+    file: ConversationId,
+    dm: ConversationId,
+    probes: std::sync::atomic::AtomicUsize,
+    observation: Arc<NegativeCustodyObservation>,
+}
+
+impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
+    for NegativeCustodyStore<S>
+{
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+        if *conversation != self.file {
+            return self.inner.durable_have(conversation, id);
+        }
+        let probe = self
+            .probes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if probe == 0 {
+            self.observation
+                .file_connections
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        } else if probe == 1 {
+            self.observation
+                .completed_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.observation.changed.notify_waiters();
+        }
+        false
+    }
+    fn admission_denied(&self) -> bool {
+        self.inner.admission_denied()
+    }
+    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+        if *conversation == self.file || *conversation == self.dm {
+            self.inner.event_ids(conversation)
+        } else {
+            Vec::new()
+        }
+    }
+    fn events_excluding(
+        &self,
+        conversation: &ConversationId,
+        have: &std::collections::HashSet<EventId>,
+    ) -> Vec<crate::eventlog::Event> {
+        if *conversation == self.file || *conversation == self.dm {
+            self.inner.events_excluding(conversation, have)
+        } else {
+            Vec::new()
+        }
+    }
+    fn ingest(
+        &mut self,
+        event: crate::eventlog::Event,
+    ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+        self.inner.ingest(event)
+    }
+}
+
+#[tokio::test]
+async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_self_wake() {
+    use crate::eventlog::sync::SyncStore;
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _) = node(bd.path(), bob, ba, &ap);
+    for (node, dir, proof) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
+        node.configure_privacy(
+            dir,
+            "pw",
+            proof,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.set_invisible(true).await.unwrap();
+    }
+    b.initiate_contact_locally(&a.account_id()).await.unwrap();
+    let path = ad.path().join("matching-chunks.bin");
+    let bytes = [7; 32];
+    std::fs::write(&path, bytes).unwrap();
+    let (id, file) = a
+        .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let dm = super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        sync_delivery_test_stage(&a, &b, &bl, dm).await;
+        sync_delivery_test_stage(&a, &b, &bl, file).await;
+    })
+    .await
+    .unwrap();
+    let ids = a.sync_store(&bp.public()).lock().unwrap().event_ids(&file);
+    assert_eq!(
+        b.sync_store(&ap.public()).lock().unwrap().event_ids(&file),
+        ids
+    );
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    let observation = Arc::new(NegativeCustodyObservation::default());
+    let responder = b.clone();
+    let observed = observation.clone();
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = bl.accept().await.unwrap();
+            let node = responder.clone();
+            let observation = observed.clone();
+            connections.spawn(async move {
+                let Ok(mut channel) = node.privacy_accept(stream).await else {
+                    return;
+                };
+                let store = Mutex::new(NegativeCustodyStore {
+                    inner: node
+                        .sync_store(channel.peer_identity())
+                        .into_inner()
+                        .unwrap(),
+                    file,
+                    dm,
+                    probes: std::sync::atomic::AtomicUsize::new(0),
+                    observation,
+                });
+                while matches!(
+                    super::session::serve_one(&mut channel, &store).await,
+                    Ok(super::session::Served::Handled(_))
+                ) {}
+            });
+            while connections.try_join_next().is_some() {}
+        }
+    });
+    workers.spawn(a.clone().run_accept_loop(al));
+    let attempted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let changed = observation.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if observation
+                .completed_attempts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 2
+            {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await;
+    workers.shutdown().await;
+    assert!(
+        attempted.is_ok(),
+        "two actual authenticated negative-custody attempts occur"
+    );
+    assert!(
+        observation
+            .file_connections
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 2
+    );
+    assert_eq!(
+        a.empty_file_cache_self_wakes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "terminal failure removes the last slot, so only normal cadence may readmit it"
+    );
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert!(a
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_some());
+    assert_eq!(
+        a.sync_store(&bp.public()).lock().unwrap().event_ids(&file),
+        ids
+    );
+}
+
+impl Drop for ObservedFileChannel {
+    fn drop(&mut self) {
+        self.0
+            .active_file_channels
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() {
+    for rebind in [false, true] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let bob_keys = bob.secret_bytes();
+        let aa = Account::generate();
+        let ba = Account::generate();
+        let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let (a, _) = node(ad.path(), alice, aa, &bp);
+        let (b, _) = node(bd.path(), bob, ba, &ap);
+        for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
+            node.configure_privacy(
+                dir,
+                "pw",
+                own,
+                Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+            node.set_invisible(true).await.unwrap();
+        }
+        b.initiate_contact_locally(&a.account_id()).await.unwrap();
+        let path = ad.path().join("private.bin");
+        std::fs::write(&path, [9; 32]).unwrap();
+        let (id, file) = a
+            .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(b.clone().run_accept_loop(bl));
+        let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let mut transfers = std::collections::HashMap::new();
+        assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        assert_eq!(
+            transfers.len(),
+            1,
+            "the real authenticated channel is retained between phases"
+        );
+        if rebind {
+            let account = Account::generate();
+            let proof = Announce::new_with_account(
+                &DeviceIdentity::from_secret_bytes(bob_keys.0, bob_keys.1),
+                &account,
+                "Rebound",
+                bp.tcp_port,
+            );
+            a.roster
+                .lock()
+                .unwrap()
+                .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+            a.initiate_contact_locally(&account.account_id())
+                .await
+                .unwrap();
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                a.set_allowed(&b.account_id(), false),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        assert!(
+            transfers.is_empty(),
+            "stale channels cannot advance a later phase"
+        );
+        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+        workers.shutdown().await;
+    }
+}
+
+async fn private_file_restart(delay: FilePeerDelay) {
+    private_file_restart_batch(delay, 1).await;
+}
+
+async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
+    use crate::eventlog::sync::SyncStore;
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
@@ -426,16 +756,19 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
         .iter()
         .map(|e| e.id)
         .collect::<Vec<_>>();
+    let mut originals = vec![(id, file, ids.clone())];
     // Reproduce missing volatile scope: DM card/control remain authorized, while
     // chunk disclosure is blocked until durable scope import on reopen.
-    a.privacy
-        .state
-        .write()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .file_scopes
-        .remove(&file);
+    for (_, file, _) in &originals {
+        a.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .file_scopes
+            .remove(file);
+    }
     let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         // Drive the two authorized conversations independently. A missing chunk
         // scope must not make card acknowledgement depend on a chunk attempt.
@@ -451,10 +784,56 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
         sync_delivery_test_stage(&b, &a, &al, control).await;
     })
     .await;
+    if count > 1 {
+        assert!(confirmed.is_ok());
+        // Prepare independent already-acknowledged cards. The original single
+        // card's five-second setup budget is not an aggregate 24-card budget.
+        for _ in 1..count {
+            let (id, file) = a
+                .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+                .await
+                .unwrap();
+            let ids = a
+                .log
+                .lock()
+                .unwrap()
+                .events(&file)
+                .iter()
+                .map(|e| e.id)
+                .collect();
+            a.privacy
+                .state
+                .write()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .file_scopes
+                .remove(&file);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let manifest_conv = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+                    .event
+                    .conversation_id;
+                sync_delivery_test_stage(&a, &b, &bl, manifest_conv).await;
+                assert!(b.read_file(file).is_err());
+                let control = super::delivery_receipt::delivery_conversation_id(
+                    &a.identity.public(),
+                    &b.identity.public(),
+                );
+                sync_delivery_test_stage(&b, &a, &al, control).await;
+            })
+            .await
+            .expect("each independent card ACK precedes chunk-scope restoration");
+            originals.push((id, file, ids));
+        }
+    }
     drop(al);
     drop(bl);
     assert!(confirmed.is_ok());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    for (id, file, _) in &originals {
+        assert_eq!(a.delivery_status(*id), Some(DeliveryStatus::Delivered));
+        assert!(b.read_file(*file).is_err(), "every card precedes download");
+    }
     assert!(
         !a.privacy
             .state
@@ -492,7 +871,14 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
         Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
     )
     .unwrap();
-    assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    if count == 1 {
+        assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    } else {
+        assert!(a
+            .account_history(&b.account_id(), 100)
+            .iter()
+            .any(|entry| entry.id == id));
+    }
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert_eq!(
         a.log
@@ -504,30 +890,190 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
             .collect::<Vec<_>>(),
         ids
     );
+    assert_eq!(
+        a.sync_store(&bp.public()).lock().unwrap().event_ids(&file),
+        ids,
+        "restart restores the original authorized chunk projection"
+    );
+    for (_, file, ids) in &originals {
+        assert_eq!(
+            a.sync_store(&bp.public()).lock().unwrap().event_ids(file),
+            *ids
+        );
+    }
     let mut workers = tokio::task::JoinSet::new();
     workers.spawn(a.clone().run_accept_loop(al));
-    workers.spawn(b.clone().run_accept_loop(bl));
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !b
-            .read_file(file)
-            .as_ref()
-            .is_ok_and(|actual| actual == &bytes)
-            || a.delivery
-                .lock()
-                .unwrap()
-                .next_file_destination(None)
-                .is_some()
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+    let observation = Arc::new(FilePeerObservation::default());
+    if delay != FilePeerDelay::None {
+        workers.spawn(delayed_private_file_peer(
+            b.clone(),
+            bl,
+            file,
+            delay,
+            observation.clone(),
+        ));
+    } else {
+        workers.spawn(b.clone().run_accept_loop(bl));
+    }
+    let first_progress = if count > 1 {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !originals
+                .iter()
+                .any(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total))
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    } else {
+        true
+    };
+    let mut slowest_poll = std::time::Duration::ZERO;
+    let completed = tokio::time::timeout(
+        std::time::Duration::from_secs(if count == 1 { 5 } else { 60 }),
+        async {
+            if !first_progress {
+                return;
+            }
+            loop {
+                let started = std::time::Instant::now();
+                let exact = originals.iter().all(|(_, file, _)| {
+                    if count == 1 {
+                        b.read_file(*file)
+                            .as_ref()
+                            .is_ok_and(|actual| actual == &bytes)
+                    } else {
+                        // Repeated debug AEAD/checksum reads across 24 files
+                        // measured 534ms and blocked this single-thread
+                        // executor. Verify all original bytes once below.
+                        b.file_progress(*file).is_some_and(|p| p.done == p.total)
+                    }
+                });
+                slowest_poll = slowest_poll.max(started.elapsed());
+                if exact
+                    && a.delivery
+                        .lock()
+                        .unwrap()
+                        .next_file_destination(None)
+                        .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        },
+    )
     .await;
     workers.shutdown().await;
+    if !first_progress {
+        let completed = originals
+            .iter()
+            .filter(|(_, file, _)| b.read_file(*file).is_ok())
+            .count();
+        eprintln!(
+            "file-backlog failure completed={completed}/{count} original-scopes-restored=true"
+        );
+    }
+    assert!(
+        first_progress,
+        "a bounded active set must advance despite the backlog"
+    );
+    if completed.is_err() {
+        eprintln!("file-backlog observer slowest-poll-ms={} completed={}/{} accepted={} max-file-channels={}",
+            slowest_poll.as_millis(), originals.iter().filter(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total)).count(),
+            count, observation.next_connection.load(std::sync::atomic::Ordering::SeqCst), observation.max_file_channels.load(std::sync::atomic::Ordering::SeqCst));
+        let final_chunk = *ids.last().unwrap();
+        let exact_bytes = b
+            .read_file(file)
+            .as_ref()
+            .is_ok_and(|actual| actual == &bytes);
+        let counts = b.file_progress(file).map(|p| (p.done, p.total));
+        let held = b
+            .sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .durable_have(&file, &final_chunk);
+        let pending = a
+            .delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_some();
+        let immutable = a
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>()
+            == ids;
+        eprintln!("file-restart failure chunks={counts:?} exact-bytes={exact_bytes} final-authorized-have={held} pending-work={pending} immutable-ids={immutable}");
+    }
     assert!(
         completed.is_ok(),
         "restart must restore immutable chunk work and private scope"
     );
     assert_eq!(b.read_file(file).unwrap(), bytes);
+    if count > 1 {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while observation
+                .active_file_channels
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned cancelled responders must finish dropping their sockets");
+        assert_eq!(
+            a.file_transfer_peak
+                .load(std::sync::atomic::Ordering::SeqCst),
+            8,
+            "actual client retained cache reaches but never exceeds its eight slots"
+        );
+        assert_eq!(
+            observation
+                .active_file_channels
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "owned responder channels are dropped on shutdown"
+        );
+    }
+    for (_, file, ids) in &originals {
+        assert_eq!(b.read_file(*file).unwrap(), bytes);
+        assert_eq!(
+            a.log
+                .lock()
+                .unwrap()
+                .events(file)
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            *ids
+        );
+        assert!(b
+            .sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .durable_have(file, ids.last().unwrap()));
+    }
+    if delay == FilePeerDelay::PartialChunk {
+        assert!(
+            observation
+                .interrupted
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "actual partial chunk round was interrupted"
+        );
+        assert!(
+            observation
+                .fresh_completion
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "remaining original chunks arrived over a fresh authenticated connection"
+        );
+    }
     let saved = bd.path().join("saved.bin");
     b.save_file(file, &saved).unwrap();
     assert_eq!(std::fs::read(saved).unwrap(), bytes);
@@ -539,7 +1085,14 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
         &bp,
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
-    assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    if count == 1 {
+        assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
+    } else {
+        assert!(a
+            .account_history(&b.account_id(), 100)
+            .iter()
+            .any(|entry| entry.id == id));
+    }
     assert!(a
         .delivery
         .lock()
@@ -547,6 +1100,108 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
         .next_file_destination(None)
         .is_none());
     assert!(a.delivery.lock().unwrap().file_card(id).is_some());
+}
+
+async fn delayed_private_file_peer(
+    node: Arc<Node>,
+    listener: TcpListener,
+    file: ConversationId,
+    delay: FilePeerDelay,
+    observation: Arc<FilePeerObservation>,
+) {
+    let accepts = async {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let node = node.clone();
+            let observation = observation.clone();
+            connections.spawn(async move {
+                // Each protocol phase takes less than the unchanged 400ms
+                // operation budget. Their aggregate deterministically exceeds it.
+                if delay == FilePeerDelay::Aggregate {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
+                let Ok(mut channel) = node.privacy_accept(stream).await else {
+                    return;
+                };
+                let connection = observation
+                    .next_connection
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                let peer = channel.peer_identity().clone();
+                let store = node.sync_store(&peer);
+                let mut file_channel = None;
+                while let Ok(bytes) = channel.recv().await {
+                    if file_channel.is_none()
+                        && super::session::round_request_conversation(&bytes)
+                            .is_some_and(|conv| node.file_progress(conv).is_some())
+                    {
+                        let active = observation
+                            .active_file_channels
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            + 1;
+                        observation
+                            .max_file_channels
+                            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+                        file_channel = Some(ObservedFileChannel(observation.clone()));
+                    }
+                    if delay == FilePeerDelay::Aggregate
+                        || (delay == FilePeerDelay::Exchange
+                            && super::session::requests_response(&bytes))
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            if delay == FilePeerDelay::Exchange {
+                                250
+                            } else {
+                                150
+                            },
+                        ))
+                        .await;
+                    } else if super::session::is_round_request(&bytes, file)
+                        && node
+                            .file_progress(file)
+                            .is_some_and(|progress| progress.done == 1)
+                        && !observation
+                            .interrupted
+                            .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        observation
+                            .interrupted_connection
+                            .store(connection, std::sync::atomic::Ordering::SeqCst);
+                        // One original chunk is already admitted. Force this
+                        // round past 400ms once; retries must abandon its socket.
+                        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                    }
+                    match super::session::serve_wire_bytes(&mut channel, &store, &bytes).await {
+                        Ok(super::session::Served::Handled(conv)) => {
+                            node.emit_new_messages(conv);
+                            node.process_file_events(conv);
+                            if conv == file
+                                && observation
+                                    .interrupted
+                                    .load(std::sync::atomic::Ordering::SeqCst)
+                                && connection
+                                    != observation
+                                        .interrupted_connection
+                                        .load(std::sync::atomic::Ordering::SeqCst)
+                                && node.file_progress(file).is_some_and(|p| p.done == p.total)
+                            {
+                                observation
+                                    .fresh_completion
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            });
+            while connections.try_join_next().is_some() {}
+        }
+    };
+    tokio::select! {
+        _ = accepts => {},
+        _ = node.clone().run_delivery_loop() => {},
+    }
 }
 
 #[test]

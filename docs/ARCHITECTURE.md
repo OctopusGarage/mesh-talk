@@ -213,6 +213,19 @@ loop cancels its worker and the worker's outstanding network operations. Histori
 control pulls use a receive-only reconciliation projection; controls can be pulled
 directly or through the relay while the original sender is offline.
 
+Immutable file retries retain at most eight authenticated connections across
+complete protocol exchanges, with a ten-second idle limit. A rotating admission
+cursor fills available slots; each worker pass runs at most eight round-robin
+file steps before continuing ordinary control work. Clean progress still retained
+at pass end schedules another pass; failed attempts free slots without self-waking.
+Dialing, fingerprinting, reconciliation and custody checking each have their
+own clean exchange boundary under the same 400 ms operation budget. Each step
+rechecks the current private authorization and exact destination binding; a
+timeout discards the connection and any partial frame, resuming from durable
+remote state on a fresh connection. Only final, target-qualified chunk custody
+retires source file work. The SDK's immediate best-effort flush remains a
+disposable, bounded attempt rather than retaining worker-owned state.
+
 An optional, fixed-size exact-event storage probe follows ordinary reconciliation
 on its disposable connection. New durable nodes and post offices synchronize
 their store and check the current authorized projection before confirming custody.

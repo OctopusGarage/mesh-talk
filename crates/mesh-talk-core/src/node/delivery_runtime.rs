@@ -3,8 +3,34 @@
 use super::delivery_store::{DeliveryDestination, ReceiptDelivery};
 use super::delivery_store::{DeliveryStore, DeliveryTransaction, OutgoingDelivery};
 use super::sentlog::SentEntry;
+use super::session::SessionError;
 use super::*;
 use crate::eventlog::{ConversationId, Event, EventId, LogError};
+
+// Owned by the delivery loop: cancellation drops every retained channel. Keep
+// fewer sockets than the accept limit, and discard idle or unauthorized state.
+const MAX_FILE_TRANSFERS: usize = 8;
+const FILE_TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug)]
+enum FilePhase {
+    Dial,
+    Manifest,
+    ManifestCustody,
+    InitialCustody,
+    Chunks,
+    FinalCustody,
+}
+
+pub(in crate::node) struct FileTransfer {
+    file: super::delivery_store::FileCard,
+    destination: super::delivery_store::FileDestination,
+    channel: Option<crate::transport::SecureChannel<tokio::net::TcpStream>>,
+    phase: FilePhase,
+    sync: super::session::SyncProgress,
+    legacy: bool,
+    last_used: std::time::Instant,
+}
 
 #[derive(Default)]
 struct DeliveryDiagnosticThrottle {
@@ -868,12 +894,16 @@ impl Node {
         let mut receipt_cursor = None;
         let mut peer_cursor = None;
         let mut file_cursor = None;
+        let mut active_file_cursor = None;
+        let mut file_transfers = std::collections::HashMap::new();
         let mut diagnostic = DeliveryDiagnosticThrottle::default();
         loop {
             tokio::select! {
                 _ = interval.tick() => {},
                 _ = self.delivery_notify.notified() => {},
             }
+            self.prune_file_transfers(&mut file_transfers);
+            let file_slots = MAX_FILE_TRANSFERS - file_transfers.len();
             let node = self.clone();
             let Some(work) = self.runtime_work.admit() else {
                 return;
@@ -911,14 +941,34 @@ impl Node {
                     .into_iter()
                     .next()
                     .or_else(|| store.retry_receipts_after(None, 1).into_iter().next());
-                let file = store.next_file_destination(file_cursor);
-                Some((destination, receipt, file))
+                let mut files = Vec::with_capacity(file_slots);
+                let mut cursor = file_cursor;
+                for _ in 0..file_slots {
+                    let Some((file, destination)) = store.next_file_destination(cursor) else {
+                        break;
+                    };
+                    let key = (file.id, destination.binding.event_id);
+                    if files.iter().any(
+                        |(previous, reference): &(
+                            super::delivery_store::FileCard,
+                            super::delivery_store::FileDestination,
+                        )| {
+                            (previous.id, reference.binding.event_id) == key
+                        },
+                    ) {
+                        break;
+                    }
+                    cursor = Some(key);
+                    files.push((file, destination));
+                }
+                Some((destination, receipt, files, cursor))
             })
             .await;
-            let Ok(Some((destination, receipt, file))) = snapshot else {
+            let Ok(Some((destination, receipt, files, cursor))) = snapshot else {
                 diagnostic.warn_if_due();
                 continue;
             };
+            file_cursor = cursor;
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
                 let live = self
@@ -948,9 +998,45 @@ impl Node {
                     diagnostic.warn_if_due();
                 }
             }
-            if let Some((file, destination)) = file {
-                file_cursor = Some((file.id, destination.binding.event_id));
-                if self.retry_file_destination(&file, &destination).await
+            self.prune_file_transfers(&mut file_transfers);
+            for (file, destination) in files {
+                let key = (file.id, destination.binding.event_id);
+                if file_transfers.len() < MAX_FILE_TRANSFERS
+                    && self.file_destination_current(&file, &destination)
+                {
+                    file_transfers.entry(key).or_insert_with(|| FileTransfer {
+                        file,
+                        destination,
+                        channel: None,
+                        phase: FilePhase::Dial,
+                        sync: super::session::SyncProgress::default(),
+                        legacy: false,
+                        last_used: std::time::Instant::now(),
+                    });
+                }
+            }
+            // Bound each pass to eight complete exchanges, round-robin across
+            // the active slots, rather than revisiting them via the unbounded
+            // pending-work cursor. Small active sets can use spare exchanges.
+            let mut file_progress = std::collections::HashSet::new();
+            for _ in 0..MAX_FILE_TRANSFERS {
+                let mut keys = file_transfers.keys().copied().collect::<Vec<_>>();
+                keys.sort_unstable();
+                let Some(key) = keys
+                    .iter()
+                    .copied()
+                    .find(|key| active_file_cursor.is_none_or(|cursor| *key > cursor))
+                    .or_else(|| keys.first().copied())
+                else {
+                    break;
+                };
+                active_file_cursor = Some(key);
+                let transfer = file_transfers.get(&key).unwrap();
+                let file = transfer.file.clone();
+                let destination = transfer.destination.clone();
+                if self
+                    .retry_file_step(&file, &destination, &mut file_transfers)
+                    .await
                     && self
                         .delivery
                         .lock()
@@ -960,6 +1046,22 @@ impl Node {
                 {
                     diagnostic.warn_if_due();
                 }
+                // Retained state means this operation reached a clean exchange
+                // boundary. Failed attempts remove state and never self-wake.
+                if file_transfers.contains_key(&key) {
+                    file_progress.insert(key);
+                }
+            }
+            if file_progress
+                .iter()
+                .any(|key| file_transfers.contains_key(key))
+            {
+                #[cfg(test)]
+                if file_transfers.is_empty() {
+                    self.empty_file_cache_self_wakes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                self.delivery_notify.notify_one();
             }
             // Historical identity authorizes a control pull even with its sender
             // offline. The cursor advances before any bounded network await.
@@ -1162,6 +1264,244 @@ impl Node {
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
     ) -> bool {
+        self.retry_file_destination_inner(file, destination, true)
+            .await
+    }
+
+    fn file_destination_current(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+    ) -> bool {
+        let binding = &destination.binding;
+        self.delivery
+            .lock()
+            .expect("delivery lock not poisoned")
+            .contains_file_destination(file.id, binding.event_id, &binding.device, &binding.account)
+            && !self
+                .delivery_suspended
+                .load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .historical_author(&binding.device.ed25519_pub)
+                .is_some_and(|proof| {
+                    proof.public() == binding.device && proof.account_id() == binding.account
+                })
+            && self.known_account_allowed(&binding.device)
+    }
+
+    pub(in crate::node) async fn retry_file_step(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+        transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
+    ) -> bool {
+        self.prune_file_transfers(transfers);
+        let key = (file.id, destination.binding.event_id);
+        if !self.file_destination_current(file, destination) {
+            transfers.remove(&key);
+            return false;
+        }
+        if !transfers.contains_key(&key) {
+            if transfers.len() == MAX_FILE_TRANSFERS {
+                // Existing destinations retain their progress; new destinations
+                // still get the original bounded best-effort attempt this turn.
+                return self.retry_file_destination(file, destination).await;
+            }
+            transfers.insert(
+                key,
+                FileTransfer {
+                    file: file.clone(),
+                    destination: destination.clone(),
+                    channel: None,
+                    phase: FilePhase::Dial,
+                    sync: super::session::SyncProgress::default(),
+                    legacy: false,
+                    last_used: std::time::Instant::now(),
+                },
+            );
+        }
+        #[cfg(test)]
+        self.file_transfer_peak
+            .fetch_max(transfers.len(), std::sync::atomic::Ordering::SeqCst);
+        let transfer = transfers.get_mut(&key).unwrap();
+        transfer.last_used = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            self.advance_file_transfer(transfer),
+        )
+        .await;
+        #[cfg(test)]
+        let phase = transfer.phase;
+        match outcome {
+            Ok(Ok(true)) => {
+                transfers.remove(&key);
+                true
+            }
+            Ok(Ok(false)) => false,
+            _ => {
+                #[cfg(test)]
+                eprintln!(
+                    "file-step failure stage={phase:?} timeout={}",
+                    outcome.is_err()
+                );
+                // A cancelled read/write may have consumed part of a frame.
+                // Close the socket and restart from the remote's durable Have.
+                transfers.remove(&key);
+                self.retry_file_destination_inner(file, destination, false)
+                    .await
+            }
+        }
+    }
+
+    fn prune_file_transfers(
+        &self,
+        transfers: &mut std::collections::HashMap<(EventId, EventId), FileTransfer>,
+    ) {
+        transfers.retain(|_, transfer| {
+            transfer.last_used.elapsed() < FILE_TRANSFER_IDLE
+                && self.file_destination_current(&transfer.file, &transfer.destination)
+                && transfer
+                    .channel
+                    .as_ref()
+                    .is_none_or(|channel| channel.io_admitted())
+        });
+    }
+
+    async fn advance_file_transfer(
+        &self,
+        transfer: &mut FileTransfer,
+    ) -> Result<bool, SessionError> {
+        let file = &transfer.file;
+        let destination = &transfer.destination;
+        let binding = &destination.binding;
+        if !self.file_destination_current(file, destination) {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        if matches!(transfer.phase, FilePhase::Dial) {
+            let peer = self
+                .routing_peer(&binding.device.user_id())
+                .filter(|peer| peer.public == binding.device && peer.account_id == binding.account)
+                .ok_or(SessionError::UnexpectedMessage)?;
+            let channel = self.privacy_dial(peer.addr, &peer.public).await?;
+            if !self.file_destination_current(file, destination)
+                || channel
+                    .peer_announcement()
+                    .is_some_and(|proof| proof.account_id() != binding.account)
+            {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            transfer.channel = Some(channel);
+            transfer.phase = FilePhase::Manifest;
+            return Ok(false);
+        }
+        let channel = transfer
+            .channel
+            .as_mut()
+            .ok_or(SessionError::UnexpectedMessage)?;
+        if !channel.io_admitted() || channel.peer_identity() != &binding.device {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        let store = self.sync_store(&binding.device);
+        let final_chunk = file.final_chunk.ok_or(SessionError::UnexpectedMessage)?;
+        match transfer.phase {
+            FilePhase::Manifest => {
+                let conversation = super::conversation::dm_conversation_id(
+                    &self.identity.public(),
+                    &binding.device,
+                );
+                if transfer.sync.step(channel, &store, conversation).await? {
+                    transfer.sync = super::session::SyncProgress::default();
+                    transfer.phase = if transfer.legacy {
+                        FilePhase::Chunks
+                    } else {
+                        FilePhase::ManifestCustody
+                    };
+                }
+            }
+            FilePhase::ManifestCustody => {
+                let conversation = super::conversation::dm_conversation_id(
+                    &self.identity.public(),
+                    &binding.device,
+                );
+                if !transfer.legacy {
+                    match super::session::request_durable_have(
+                        channel,
+                        conversation,
+                        binding.event_id,
+                    )
+                    .await
+                    {
+                        Ok(true) if self.file_destination_current(file, destination) => {
+                            let mut delivery =
+                                self.delivery.lock().expect("delivery lock not poisoned");
+                            if delivery.completed_work(file.id).is_some() {
+                                delivery
+                                    .retire_destination(file.id, binding.event_id)
+                                    .map_err(|error| {
+                                        SessionError::Serialization(error.to_string())
+                                    })?;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(_) => {
+                            transfer.channel = None;
+                            transfer.legacy = true;
+                            transfer.sync = super::session::SyncProgress::default();
+                            transfer.phase = FilePhase::Dial;
+                            return Ok(false);
+                        }
+                    }
+                }
+                transfer.phase = if transfer.legacy {
+                    FilePhase::Chunks
+                } else {
+                    FilePhase::InitialCustody
+                };
+            }
+            FilePhase::InitialCustody => {
+                if super::session::request_durable_have(
+                    channel,
+                    file.file_conversation,
+                    final_chunk,
+                )
+                .await?
+                {
+                    return Ok(self.file_destination_current(file, destination));
+                }
+                transfer.phase = FilePhase::Chunks;
+            }
+            FilePhase::Chunks => {
+                if transfer
+                    .sync
+                    .step(channel, &store, file.file_conversation)
+                    .await?
+                {
+                    transfer.phase = FilePhase::FinalCustody;
+                }
+            }
+            FilePhase::FinalCustody => {
+                if super::session::request_durable_have(
+                    channel,
+                    file.file_conversation,
+                    final_chunk,
+                )
+                .await?
+                {
+                    return Ok(self.file_destination_current(file, destination));
+                }
+                return Err(SessionError::NoProgress);
+            }
+            FilePhase::Dial => unreachable!(),
+        }
+        Ok(false)
+    }
+
+    async fn retry_file_destination_inner(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+        direct: bool,
+    ) -> bool {
         let binding = &destination.binding;
         let current = || {
             self.delivery
@@ -1188,7 +1528,7 @@ impl Node {
         }
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);
-        for relay in [false, true] {
+        for relay in [false, true].into_iter().filter(|relay| *relay || direct) {
             let peer = if relay {
                 let roster = self.roster.lock().expect("roster lock not poisoned");
                 super::postbox::elected_post_office(&roster)
@@ -1203,10 +1543,14 @@ impl Node {
             {
                 continue;
             }
-            let held = tokio::time::timeout(std::time::Duration::from_millis(400), async {
+            #[cfg(test)]
+            let phase = std::sync::atomic::AtomicU8::new(0);
+            let outcome = tokio::time::timeout(std::time::Duration::from_millis(400), async {
                 let Ok(mut channel) = self.privacy_dial(peer.addr, &peer.public).await else {
                     return false;
                 };
+                #[cfg(test)]
+                phase.store(1, std::sync::atomic::Ordering::Relaxed);
                 if !current()
                     || (relay && !self.relay_allowed(&peer.public))
                     || channel
@@ -1233,6 +1577,8 @@ impl Node {
                 // A target may have verified/saved the file and reclaimed chunks
                 // while its early card receipt was already in flight.
                 if !relay {
+                    #[cfg(test)]
+                    phase.store(2, std::sync::atomic::Ordering::Relaxed);
                     match super::session::request_durable_have(
                         &mut channel,
                         file.file_conversation,
@@ -1243,6 +1589,8 @@ impl Node {
                         Ok(true) => return current(),
                         Ok(false) => {}
                         Err(_) => {
+                            #[cfg(test)]
+                            phase.store(3, std::sync::atomic::Ordering::Relaxed);
                             // Legacy endpoints may close on the optional probe.
                             // Reconnect and preserve manifest-first ordinary transfer.
                             let Ok(reconnected) = self.privacy_dial(peer.addr, &peer.public).await
@@ -1266,12 +1614,16 @@ impl Node {
                         }
                     }
                 }
+                #[cfg(test)]
+                phase.store(4, std::sync::atomic::Ordering::Relaxed);
                 if super::session::request_round(&mut channel, &store, file.file_conversation)
                     .await
                     .is_err()
                 {
                     return false;
                 }
+                #[cfg(test)]
+                phase.store(5, std::sync::atomic::Ordering::Relaxed);
                 let held = super::session::request_durable_have(
                     &mut channel,
                     file.file_conversation,
@@ -1281,8 +1633,23 @@ impl Node {
                 .unwrap_or(false);
                 held && current() && (!relay || self.relay_allowed(&peer.public))
             })
-            .await
-            .unwrap_or(false);
+            .await;
+            #[cfg(test)]
+            if !matches!(outcome, Ok(true)) {
+                let stage = [
+                    "dial",
+                    "manifest",
+                    "initial-custody",
+                    "legacy-reconnect",
+                    "chunks",
+                    "final-custody",
+                ][phase.load(std::sync::atomic::Ordering::Relaxed) as usize];
+                eprintln!(
+                    "file-attempt failure stage={stage} timeout={} relay={relay}",
+                    outcome.is_err()
+                );
+            }
+            let held = outcome.unwrap_or(false);
             if held && !relay {
                 return true;
             }
