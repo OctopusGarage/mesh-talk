@@ -58,6 +58,8 @@ export type SendFailReason =
   | "peer-unknown" // the recipient/peer isn't known / not discovered / offline
   | "relay-unreachable" // the node/relay/network couldn't carry the message
   | "crypto" // encryption / key / session failure
+  | "invalid-input"
+  | "authorization"
   | "unknown";
 
 export function sendFailReason(e: unknown): SendFailReason {
@@ -70,6 +72,13 @@ export function sendFailReason(e: unknown): SendFailReason {
       return "relay-unreachable";
     case "crypto":
       return "crypto";
+    case "invalid-input":
+    case "validation":
+      return "invalid-input";
+    case "authorization":
+    case "auth":
+    case "authentication":
+      return "authorization";
     // `io`, `not-started`, `auth`, `invalid-input`, `internal`, and the legacy
     // catch-all kinds carry no reliable send-cause on their own — fall through to
     // keyword-sniffing the message (covers `internal` file/channel error strings).

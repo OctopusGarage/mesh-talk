@@ -160,11 +160,20 @@
     "offline": "離線"
   },
   "message": {
+    "delivery": {
+      "awaiting": "等待回執",
+      "delivered": "已送達",
+      "help": "目標帳戶的自動回執，不代表已讀。",
+      "fileHelp": "檔案卡片已送達，檔案下載與閱讀另行進行。",
+      "metadataPending": "等待檔案資訊"
+    },
     "sending": "傳送中…",
     "reply": "回覆",
     "react": "回應",
     "retry": "重試",
     "fail": {
+      "invalid-input": "訊息無效",
+      "authorization": "登入工作階段已變更",
       "peer-unknown": "傳送失敗——暫時無法聯絡到接收方",
       "relay-unreachable": "傳送失敗——網路無法連線",
       "crypto": "傳送失敗——加密錯誤",

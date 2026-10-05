@@ -32,8 +32,9 @@ import { fadeSlideUp } from "@/lib/motion";
 import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import type { ReactionInfo } from "@/lib/types";
-import { useChat, type ChatMessage } from "@/store/chat";
+import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
 import { MediaPreview } from "./MediaPreview";
+import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
 
 /** A file/media message body: inline media for images/small videos, else a file card with
@@ -41,21 +42,29 @@ import { fileGlyph, withinInlineCap } from "./mediaFile";
 function FileBubble({
   file,
   mine,
+  metadataPending,
 }: {
   file: NonNullable<ChatMessage["file"]>;
   mine: boolean;
+  metadataPending?: boolean;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
 
   const saveAs = async () => {
+    const lease = captureChatOwnership();
+    if (!lease.current() || metadataPending || !file.fileConv) return;
     try {
+      const defaultPath = await defaultSavePath(file.name);
+      if (!lease.current()) return;
       const dest = await save({
-        defaultPath: await defaultSavePath(file.name),
+        defaultPath,
       });
-      if (typeof dest === "string") await chat.saveFile(file.fileConv, dest);
+      if (lease.current() && typeof dest === "string")
+        await chat.saveFile(file.fileConv, dest);
     } catch (e) {
-      setError(t("files.couldntSave", { error: errorMessage(e) }));
+      if (lease.current())
+        setError(t("files.couldntSave", { error: errorMessage(e) }));
     }
   };
 
@@ -64,7 +73,12 @@ function FileBubble({
   // opens on click (MediaPreview's lightbox) — the chat doesn't need that clutter under
   // every photo. Media that is too large to preview inline falls through to the file card
   // below, so it stays visible and savable instead of rendering an empty bubble.
-  if (file.media && withinInlineCap(file.name, file.size)) {
+  if (
+    !metadataPending &&
+    file.fileConv &&
+    file.media &&
+    withinInlineCap(file.name, file.size)
+  ) {
     return (
       <div className="max-w-xs">
         <MediaPreview
@@ -85,12 +99,15 @@ function FileBubble({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm">{file.name}</div>
           <div className="font-mono text-[10px] opacity-70">
-            {humanSize(file.size)}
+            {metadataPending
+              ? t("message.delivery.metadataPending")
+              : humanSize(file.size)}
           </div>
         </div>
         <button
           type="button"
           onClick={() => void saveAs()}
+          disabled={metadataPending || !file.fileConv}
           title={t("common.save")}
           aria-label={t("common.save")}
           className={cn(
@@ -164,11 +181,12 @@ export function MessageBubble({
   const [pickerOpen, setPickerOpen] = useState(false);
   // Copy the message text to the clipboard. File messages have no text → no-op.
   const copyText = async () => {
+    const lease = captureChatOwnership();
     if (!m.text) return;
     try {
       await navigator.clipboard.writeText(m.text);
     } catch (e) {
-      setError(errorMessage(e));
+      if (lease.current()) setError(errorMessage(e));
     }
   };
   // Prefer the author's display name (resolved from the roster/members); fall back to the
@@ -381,7 +399,11 @@ export function MessageBubble({
                     </span>
                   )
                 ) : isFile ? (
-                  <FileBubble file={m.file!} mine={mine} />
+                  <FileBubble
+                    file={m.file!}
+                    mine={mine}
+                    metadataPending={m.metadataPending}
+                  />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
                     {renderWithMentions(m.text, { ownBubble: mine })}
@@ -477,10 +499,7 @@ export function MessageBubble({
           </div>
         )}
 
-        <span className="mt-0.5 px-1 font-mono text-[10px] text-muted-foreground">
-          {formatTime(m.wallClock)}
-          {m.pending && ` · ${t("message.sending")}`}
-        </span>
+        <DeliveryFooter message={m} isChannel={isChannel} />
 
         {m.failed && (
           <span

@@ -6,6 +6,15 @@ import { notifyInbound } from "@/lib/notify";
 import { useAvatars } from "@/store/avatars";
 import { useCalls } from "@/store/calls";
 import { useTransfers } from "@/store/transfers";
+import { captureOwner, registerRuntimeSnapshot } from "./ownership";
+import {
+  SEND_INTENT_CAP,
+  reconcileMessages,
+  applyProjection,
+  protectIntentDeletion,
+  type SendIntent,
+  type SendPayload,
+} from "./sendModel";
 import type {
   AccountInfo,
   ChannelInfo,
@@ -29,6 +38,19 @@ const HISTORY_LIMIT = 200;
 const CONV_CACHE_LIMIT = 50;
 /** Cap on the received-files tray list, so it stays bounded over a long session. */
 const INCOMING_FILES_CAP = 300;
+
+function boundedConversationMap<T>(
+  previous: Record<string, T>,
+  key: string,
+  value: T,
+): Record<string, T> {
+  return Object.fromEntries([
+    ...Object.entries(previous)
+      .filter(([k]) => k !== key)
+      .slice(-(CONV_CACHE_LIMIT - 1)),
+    [key, value],
+  ]);
+}
 
 /**
  * Evict message/reaction caches for the least-recently-opened conversations, keeping at
@@ -73,6 +95,8 @@ export interface Conversation {
 }
 
 export interface ChatMessage {
+  delivery?: "awaiting" | "delivered";
+  metadataPending?: boolean;
   id: string | null; // hex EventId; null while pending
   fromMe: boolean;
   who: string;
@@ -142,19 +166,25 @@ async function pollUntilReady(
 ): Promise<boolean> {
   for (let i = 0; i < BOOT_POLL_TRIES && !isCancelled(); i++) {
     try {
-      const id = await chat.myId();
-      const acct = await chat.accountId();
-      set({ myId: id, myAccountId: acct, ready: true });
+      const owner = captureOwner().owner;
+      if (!owner) return false;
+      const identity = await chat.ownerIdentity(owner);
+      if (isCancelled()) return false;
+      if (identity.owner !== owner)
+        throw new Error("Node identity is not ready for this owner");
+      const acct = identity.account_id;
+      set({ myId: identity.device_id, myAccountId: acct, ready: true });
       // Tell the avatars store who "we" are (so setting our own avatar publishes it) and
       // pull avatars peers already propagated to us (durable across restart).
       useAvatars.getState().setOwnId(acct);
-      void useAvatars.getState().loadPeers();
+      void useAvatars.getState().loadPeers(() => !isCancelled());
       // Re-publish our own avatar so the node re-holds it and propagates to peers after a
       // restart (otherwise contacts can't pull it until we manually re-set the photo).
-      void useAvatars.getState().reassertOwn();
+      void useAvatars.getState().reassertOwn(() => !isCancelled());
       await get().refreshRoster();
       return true;
     } catch {
+      if (isCancelled()) return false;
       await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
     }
   }
@@ -186,20 +216,15 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
 
 // --- per-conversation API dispatch ----------------------------------------
 
-function historyFor(c: Conversation) {
+function historyFor(c: Conversation, owner: string) {
   return c.kind === "account"
-    ? chat.accountHistory(c.id, HISTORY_LIMIT)
+    ? chat.ownerHistory(owner, c.id, HISTORY_LIMIT)
     : chat.channelHistory(c.id, HISTORY_LIMIT);
 }
 function reactionsFor(c: Conversation) {
   return c.kind === "account"
     ? chat.accountReactions(c.id)
     : chat.channelReactions(c.id);
-}
-function sendTextFor(c: Conversation, text: string, replyTo: string | null) {
-  return c.kind === "account"
-    ? chat.sendToAccount(c.id, text, replyTo)
-    : chat.sendChannelMessage(c.id, text, replyTo);
 }
 function reactFor(
   c: Conversation,
@@ -224,6 +249,18 @@ function sendStickerFor(c: Conversation, stickerId: string, fallback: string) {
 }
 
 interface ChatState {
+  identityEpoch: number;
+  bootBusy: boolean;
+  bootRequest: number;
+  intents: Record<string, SendIntent>;
+  deleted: Record<string, string[]>;
+  statusBusy: boolean;
+  runEpoch: number;
+  historyRequests: Record<string, number>;
+  activeRequest: number;
+  rosterRequest: number;
+  favoritesRequest: number;
+  loadingRequest: number;
   ready: boolean;
   myId: string;
   myAccountId: string;
@@ -261,6 +298,7 @@ interface ChatState {
   refreshRoster: () => Promise<void>;
   open: (c: Conversation) => Promise<void>;
   reload: () => Promise<void>;
+  refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
   retry: (clientId: string) => Promise<void>;
   sendFile: (path: string, media: boolean) => Promise<void>;
@@ -281,7 +319,19 @@ interface ChatState {
   renameChannel: (channelId: string, name: string) => Promise<void>;
 }
 
-export const useChat = create<ChatState>((set, get) => ({
+export const useChat = create<ChatState>((rawSet, get) => ({
+  identityEpoch: 0,
+  bootBusy: false,
+  bootRequest: 0,
+  intents: {},
+  deleted: {},
+  statusBusy: false,
+  runEpoch: 0,
+  historyRequests: {},
+  activeRequest: 0,
+  rosterRequest: 0,
+  favoritesRequest: 0,
+  loadingRequest: 0,
   ready: false,
   myId: "",
   myAccountId: "",
@@ -302,12 +352,18 @@ export const useChat = create<ChatState>((set, get) => ({
   error: null,
   bootFailed: false,
 
-  clearError: () => set({ error: null }),
-  setError: (msg) => set({ error: msg }),
+  clearError: () => rawSet({ error: null }),
+  setError: (msg) => rawSet({ error: msg }),
 
   loadFavorites: async () => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
+    const request = get().favoritesRequest + 1;
+    set({ favoritesRequest: request });
     try {
       const list = await favoritesApi.get();
+      if (!lease.current() || get().favoritesRequest !== request) return;
       const map: Record<string, FavoriteInfo> = {};
       for (const f of list) map[f.id] = f;
       set({ favorites: map });
@@ -319,6 +375,9 @@ export const useChat = create<ChatState>((set, get) => ({
   // Optimistically update the local mirror, persist, then reconcile from disk so the
   // truth on disk (which prunes empty entries) is reflected.
   togglePinned: async (id, pinned) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     set((s) => {
       const prev = s.favorites[id];
       return {
@@ -333,10 +392,13 @@ export const useChat = create<ChatState>((set, get) => ({
     } catch (e) {
       set({ error: `Couldn't update pin: ${errorMessage(e)}` });
     }
-    await get().loadFavorites();
+    if (lease.current()) await get().loadFavorites();
   },
 
   setAlias: async (id, alias) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const trimmed = alias?.trim() ? alias.trim() : null;
     set((s) => {
       const prev = s.favorites[id];
@@ -352,39 +414,60 @@ export const useChat = create<ChatState>((set, get) => ({
     } catch (e) {
       set({ error: `Couldn't rename contact: ${errorMessage(e)}` });
     }
-    await get().loadFavorites();
+    if (lease.current()) await get().loadFavorites();
   },
 
   // Re-attempt the node-id poll after a boot failure (events + roster interval from the
   // original start() are still live, so we only need to re-resolve my_id/account_id).
   retryBoot: () => {
-    set({ bootFailed: false, ready: false });
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
+    if (get().bootBusy) return;
+    const request = get().bootRequest + 1;
+    set({
+      bootFailed: false,
+      ready: false,
+      bootBusy: true,
+      bootRequest: request,
+    });
     void (async () => {
-      // No cancel token here: retryBoot is a one-shot user action with no teardown hook,
-      // so it always runs to completion (matching the prior behavior).
-      const ok = await pollUntilReady(set, get, () => false);
-      if (!ok) set({ bootFailed: true });
+      // Stop UI continuation when the captured owner/run or boot request is superseded.
+      const ok = await pollUntilReady(
+        set,
+        get,
+        () => !lease.current() || get().bootRequest !== request,
+      );
+      if (get().bootRequest === request)
+        set({ bootBusy: false, bootFailed: !ok });
     })();
   },
 
   saveFile: async (fileConv, dest) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     try {
       await chat.saveFile(fileConv, dest);
-      get().dismissFile(fileConv);
+      if (lease.current()) get().dismissFile(fileConv);
     } catch (e) {
       set({ error: `Couldn't save file: ${errorMessage(e)}` });
     }
   },
 
   dismissFile: (fileConv) =>
-    set((s) => ({
+    rawSet((s) => ({
       incomingFiles: s.incomingFiles.filter((f) => f.fileConv !== fileConv),
     })),
 
   start: () => {
+    rawSet((s) => ({ runEpoch: s.runEpoch + 1 }));
+    const lease = captureChat(get, false);
+    const set = guardedSet(rawSet, lease.current);
     // Fresh slate per login (the store survives logout/login of a different account).
     lastUnknownSenderRefresh = 0;
     useTransfers.getState().reset();
+    useCalls.getState().teardown();
     set({
       ready: false,
       error: null,
@@ -404,48 +487,125 @@ export const useChat = create<ChatState>((set, get) => ({
       channelOwner: "",
       incomingFiles: [],
       favorites: NO_FAVORITES,
+      historyRequests: {},
+      activeRequest: 0,
+      rosterRequest: 0,
+      favoritesRequest: 0,
+      loadingRequest: 0,
+      loading: false,
+      identityEpoch: 0,
+      bootBusy: true,
+      bootRequest: 1,
+      intents: {},
+      deleted: {},
+      statusBusy: false,
     });
-    // Favorites are local UI prefs (no node needed) — load them right away.
-    void get().loadFavorites();
+    // Load favorites only after the captured owner's identity boot succeeds.
     // Poll my_id until the node finishes opening (post-login KDF unlock takes a moment).
     let cancelled = false;
+    const bootRequest = get().bootRequest;
     void (async () => {
-      const ok = await pollUntilReady(set, get, () => cancelled);
+      const ok = await pollUntilReady(
+        set,
+        get,
+        () =>
+          cancelled || !lease.current() || get().bootRequest !== bootRequest,
+      );
+      if (ok && lease.current()) void get().loadFavorites();
+      if (lease.current() && get().bootRequest === bootRequest)
+        set({ bootBusy: false });
       // Exhausted the boot window without the node coming up — surface it so the UI can
       // offer a retry instead of sitting on "starting…" forever. (Skip if cancelled by
       // teardown, so a logout mid-boot doesn't flash a spurious failure.)
-      if (!ok && !cancelled) set({ bootFailed: true });
+      if (!ok && !cancelled && get().bootRequest === bootRequest)
+        set({ bootFailed: true });
     })();
 
     const roster = setInterval(() => {
-      if (get().ready) void get().refreshRoster();
+      if (lease.current() && get().ready) {
+        void get().refreshRoster();
+        void get().refreshStatuses();
+      } else if (lease.current() && !get().bootBusy) get().retryBoot();
     }, 4000);
 
     const unlisten = subscribeNodeEvents({
-      onDm: (e) => get_handleDm(set, get, e),
-      onChannelMessage: (e) => get_handleChannel(set, get, e),
-      onFile: (e) => get_handleFile(set, get, e),
-      onFileProgress: (e) => useTransfers.getState().applyProgress(e),
-      onProfile: (e) =>
-        useAvatars.getState().mergeReceived(e.account_id, e.avatar),
-      onCallSignal: (e) => useCalls.getState().onSignal(e),
+      onDm: (e) => {
+        if (lease.current()) get_handleDm(set, get, e);
+      },
+      onChannelMessage: (e) => {
+        if (lease.current()) get_handleChannel(set, get, e);
+      },
+      onFile: (e) => {
+        if (lease.current()) get_handleFile(set, get, e);
+      },
+      onFileProgress: (e) => {
+        if (lease.current()) useTransfers.getState().applyProgress(e);
+      },
+      onProfile: (e) => {
+        if (lease.current())
+          useAvatars.getState().mergeReceived(e.account_id, e.avatar);
+      },
+      onCallSignal: (e) => {
+        if (lease.current()) useCalls.getState().onSignal(e);
+      },
     });
 
     return () => {
       cancelled = true;
       clearInterval(roster);
       unlisten();
-      useCalls.getState().teardown();
+      if (get().runEpoch === lease.run) {
+        useCalls.getState().teardown();
+        rawSet((s) => ({ runEpoch: s.runEpoch + 1, ready: false }));
+      }
     };
   },
 
   refreshRoster: async () => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
+    if (!get().ready) return;
+    const request = get().rosterRequest + 1;
+    set({ rosterRequest: request });
     try {
+      let identity;
+      try {
+        identity = await chat.ownerIdentity(lease.owner!);
+      } catch {
+        if (get().rosterRequest === request) set({ ready: false });
+        return;
+      }
+      if (!lease.current() || get().rosterRequest !== request) return;
+      if (
+        identity.device_id !== get().myId ||
+        identity.account_id !== get().myAccountId
+      ) {
+        // Runtime/account replacement can happen without a host logout. Invalidate
+        // old in-flight conversation work; the run's owned ticker performs fresh boot.
+        rawSet((s) => ({
+          identityEpoch: s.identityEpoch + 1,
+          ready: false,
+          messages: {},
+          reactions: {},
+          intents: {},
+          deleted: {},
+          historyRequests: {},
+          cacheOrder: [],
+          members: [],
+          channelOwner: "",
+          statusBusy: false,
+          loading: false,
+        }));
+        get().retryBoot();
+        return;
+      }
       const [peers, accounts, channels] = await Promise.all([
         chat.listPeers(),
         chat.listAccounts(),
         chat.listChannels(),
       ]);
+      if (!lease.current() || get().rosterRequest !== request) return;
       set({ peers, accounts, channels });
       // Cache each channel's members for the composite group avatar (best-effort per
       // channel; a single failure just leaves that channel's montage on its fallback).
@@ -461,14 +621,19 @@ export const useChat = create<ChatState>((set, get) => ({
           }
         }),
       );
-      set({ channelMembersById: Object.fromEntries(memberEntries) });
+      if (get().rosterRequest === request)
+        set({ channelMembersById: Object.fromEntries(memberEntries) });
     } catch {
       // node may still be starting; ignore
     }
   },
 
   open: async (c) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const key = convKey(c);
+    const request = get().activeRequest + 1;
     set((s) => {
       // Mark this conversation most-recently-opened, then evict the message/reaction
       // caches of the least-recently-opened beyond the cap (never the active one).
@@ -476,18 +641,29 @@ export const useChat = create<ChatState>((set, get) => ({
       const trimmed = evictCaches(s.messages, s.reactions, order, key);
       return {
         active: c,
+        activeRequest: request,
         unread: { ...s.unread, [key]: 0 },
         members: [],
         channelOwner: "",
         messages: trimmed.messages,
         reactions: trimmed.reactions,
         cacheOrder: trimmed.order,
+        historyRequests: Object.fromEntries(
+          Object.entries(s.historyRequests).filter(([k]) =>
+            trimmed.order.includes(k),
+          ),
+        ),
+        deleted: Object.fromEntries(
+          Object.entries(s.deleted).filter(([k]) => trimmed.order.includes(k)),
+        ),
       };
     });
     await get().reload();
+    if (!lease.current() || get().activeRequest !== request) return;
     if (c.kind === "channel") {
       try {
         const info = await chat.channelMembers(c.id);
+        if (!lease.current() || get().activeRequest !== request) return;
         set({ members: info.members, channelOwner: info.owner });
       } catch {
         /* ignore */
@@ -496,58 +672,168 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   reload: async () => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
-    set({ loading: true });
+    const loadingRequest = get().loadingRequest + 1;
+    const request = loadingRequest;
+    set({
+      loading: true,
+      loadingRequest,
+      historyRequests: boundedConversationMap(
+        get().historyRequests,
+        key,
+        request,
+      ),
+    });
     try {
       const [items, reacts] = await Promise.all([
-        historyFor(c),
+        historyFor(c, lease.owner!),
         reactionsFor(c),
       ]);
+      if (
+        !lease.current() ||
+        get().historyRequests[key] !== request ||
+        (!get().cacheOrder.includes(key) &&
+          get().active &&
+          convKey(get().active!) !== key)
+      )
+        return;
       set((s) => ({
-        messages: { ...s.messages, [key]: items.map(fromHistoryItem) },
+        messages: {
+          ...s.messages,
+          [key]: reconcileMessages(
+            items.map(fromHistoryItem),
+            s.messages[key] ?? [],
+            Object.values(s.intents).filter(
+              (i) => convKey(i.conversation) === key,
+            ),
+            s.deleted[key] ?? [],
+          ),
+        },
+        intents: Object.fromEntries(
+          Object.entries(s.intents).filter(
+            ([, intent]) =>
+              convKey(intent.conversation) !== key ||
+              !intent.message.id ||
+              (!intent.acceptanceHistoryOnly &&
+                !items.some((h) => h.id === intent.message.id)),
+          ),
+        ),
         reactions: { ...s.reactions, [key]: reacts },
-        loading: false,
+        ...(s.loadingRequest === loadingRequest ? { loading: false } : {}),
+      }));
+      if (lease.current() && get().active && convKey(get().active!) === key)
+        await get().refreshStatuses();
+    } catch {
+      if (get().loadingRequest === loadingRequest) set({ loading: false });
+    }
+  },
+
+  refreshStatuses: async (conversation) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    const c = conversation ?? get().active;
+    if (!lease.current() || !c || c.kind !== "account" || get().statusBusy)
+      return;
+    const key = convKey(c);
+    set({ statusBusy: true });
+    try {
+      // The shared serial ticker also recovers capacity-fallback accepted intents.
+      // reload's status refresh sees statusBusy and cannot recursively poll.
+      if (
+        get().active &&
+        convKey(get().active!) === key &&
+        Object.values(get().intents).some(
+          (i) =>
+            convKey(i.conversation) === key &&
+            i.acceptanceHistoryOnly &&
+            i.message.id,
+        )
+      ) {
+        await get().reload();
+        if (!lease.current()) return;
+      }
+      const ids = [
+        ...new Set(
+          [
+            ...(get().messages[key] ?? []),
+            ...Object.values(get().intents)
+              .filter((i) => convKey(i.conversation) === key)
+              .map((i) => i.message),
+          ]
+            .filter((m) => m.fromMe && m.id)
+            .map((m) => m.id!),
+        ),
+      ];
+      const projection = new Map<string, "awaiting" | "delivered">();
+      for (let i = 0; i < ids.length; i += 256) {
+        if (!lease.current()) return;
+        const rows = await chat.deliveryStatuses(
+          lease.owner!,
+          c.id,
+          ids.slice(i, i + 256),
+        );
+        if (!lease.current()) return;
+        for (const row of rows)
+          if (ids.includes(row.id)) projection.set(row.id, row.status);
+      }
+      set((s) => ({
+        messages: s.messages[key]
+          ? {
+              ...s.messages,
+              [key]: s.messages[key].map((m) => applyProjection(m, projection)),
+            }
+          : s.messages,
+        intents: Object.fromEntries(
+          Object.entries(s.intents).map(([id, intent]) => [
+            id,
+            convKey(intent.conversation) === key
+              ? {
+                  ...intent,
+                  message: applyProjection(intent.message, projection),
+                }
+              : intent,
+          ]),
+        ),
       }));
     } catch {
-      set({ loading: false });
+      /* A missing projection response is not a delivery claim or send failure. */
+    } finally {
+      set({ statusBusy: false });
     }
   },
 
   send: async (text, replyTo) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
-    if (!c || !text.trim()) return;
-    const key = convKey(c);
-    const clientId = nextClientId();
-    const optimistic: ChatMessage = {
-      id: null,
-      fromMe: true,
-      who: get().myId,
-      text,
-      wallClock: Date.now(),
-      replyTo,
-      pending: true,
-      clientId,
-    };
-    set((s) => ({
-      messages: {
-        ...s.messages,
-        [key]: [...(s.messages[key] ?? []), optimistic],
-      },
-    }));
-    await dispatchSend(set, get, c, key, optimistic);
+    if (!get().ready || !c || !text.trim()) return;
+    await sendIntent(set, get, c, { kind: "text", text, replyTo });
   },
 
   // Re-send a previously-failed optimistic bubble (reusing its clientId/text/replyTo).
   // Clears the failed state, shows pending again, then runs the same dispatch as send().
   retry: async (clientId) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
-    if (!c) return;
+    if (!get().ready || !c) return;
     const key = convKey(c);
-    const arr = get().messages[key] ?? [];
-    const orig = arr.find((m) => m.clientId === clientId);
-    if (!orig || !orig.failed) return;
+    const intent = get().intents[clientId];
+    const orig = intent?.message;
+    if (
+      !intent ||
+      convKey(intent.conversation) !== key ||
+      !orig?.failed ||
+      orig.id
+    )
+      return;
     const pending: ChatMessage = {
       ...orig,
       pending: true,
@@ -556,6 +842,7 @@ export const useChat = create<ChatState>((set, get) => ({
       wallClock: Date.now(),
     };
     set((s) => ({
+      intents: { ...s.intents, [clientId]: { ...intent, message: pending } },
       messages: {
         ...s.messages,
         [key]: (s.messages[key] ?? []).map((m) =>
@@ -563,23 +850,22 @@ export const useChat = create<ChatState>((set, get) => ({
         ),
       },
     }));
-    await dispatchSend(set, get, c, key, pending);
+    await dispatchIntent(set, get, { ...intent, message: pending });
   },
 
   sendFile: async (path, media) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
-    if (!c) return;
-    try {
-      await sendFileFor(c, path, media);
-    } catch (e) {
-      set({ error: `Couldn't send file: ${errorMessage(e)}` });
-      return;
-    }
-    if (get().active && convKey(get().active!) === convKey(c))
-      await get().reload();
+    if (!get().ready || !c) return;
+    await sendIntent(set, get, c, { kind: "file", path, media });
   },
 
   toggleReaction: async (target, emoji) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
@@ -593,18 +879,54 @@ export const useChat = create<ChatState>((set, get) => ({
     try {
       await reactFor(c, target, emoji, Boolean(mine));
       // Only reload if still on this conversation (matches send/sendFile).
-      if (get().active && convKey(get().active!) === key) await get().reload();
+      if (lease.current() && get().active && convKey(get().active!) === key)
+        await get().reload();
     } catch (e) {
       set({ error: `Couldn't update reaction: ${errorMessage(e)}` });
     }
   },
 
   deleteMessage: async (target) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
     try {
       await chat.deleteMessage(c.id, target, isChannelConv(c));
+      if (!lease.current()) return;
+      set((s) => ({
+        deleted: boundedConversationMap(
+          s.deleted,
+          key,
+          [...(s.deleted[key] ?? []), target].slice(-256),
+        ),
+        historyRequests: boundedConversationMap(
+          s.historyRequests,
+          key,
+          (s.historyRequests[key] ?? 0) + 1,
+        ),
+        intents: Object.fromEntries(
+          Object.entries(s.intents)
+            .filter(
+              ([, i]) =>
+                convKey(i.conversation) !== key || i.message.id !== target,
+            )
+            .map(([id, i]) => [
+              id,
+              convKey(i.conversation) === key
+                ? protectIntentDeletion(i, target)
+                : i,
+            ]),
+        ),
+        messages: s.messages[key]
+          ? {
+              ...s.messages,
+              [key]: s.messages[key].filter((m) => m.id !== target),
+            }
+          : s.messages,
+      }));
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't delete message: ${errorMessage(e)}` });
@@ -612,23 +934,54 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   recallMessage: async (target) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
     try {
       await chat.recallMessage(c.id, target, isChannelConv(c));
-      if (get().active && convKey(get().active!) === key) await get().reload();
+      if (lease.current() && get().active && convKey(get().active!) === key)
+        await get().reload();
     } catch (e) {
       set({ error: `Couldn't recall message: ${errorMessage(e)}` });
     }
   },
 
   clearConversation: async () => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
     try {
       await chat.clearConversation(c.id, isChannelConv(c));
+      if (!lease.current()) return;
+      set((s) => ({
+        deleted: boundedConversationMap(
+          s.deleted,
+          key,
+          [
+            ...new Set([
+              ...(s.deleted[key] ?? []),
+              ...(s.messages[key] ?? []).flatMap((m) => (m.id ? [m.id] : [])),
+            ]),
+          ].slice(-256),
+        ),
+        historyRequests: boundedConversationMap(
+          s.historyRequests,
+          key,
+          (s.historyRequests[key] ?? 0) + 1,
+        ),
+        intents: Object.fromEntries(
+          Object.entries(s.intents).filter(
+            ([, i]) => convKey(i.conversation) !== key,
+          ),
+        ),
+        messages: s.messages[key] ? { ...s.messages, [key]: [] } : s.messages,
+      }));
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't clear history: ${errorMessage(e)}` });
@@ -636,57 +989,83 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   sendSticker: async (stickerId, fallback) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
-    if (!c) return;
-    const key = convKey(c);
-    try {
-      await sendStickerFor(c, stickerId, fallback);
-      if (get().active && convKey(get().active!) === key) await get().reload();
-    } catch (e) {
-      set({ error: `Couldn't send sticker: ${errorMessage(e)}` });
-    }
+    if (!get().ready || !c) return;
+    await sendIntent(set, get, c, { kind: "sticker", stickerId, fallback });
   },
 
   createChannel: async (name, memberIds) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
+    const request = get().activeRequest + 1;
+    set({ activeRequest: request });
     try {
       const id = await chat.createChannel(name, memberIds);
+      if (!lease.current() || get().activeRequest !== request) return;
       await get().refreshRoster();
+      if (!lease.current() || get().activeRequest !== request) return;
       await get().open({ kind: "channel", id, name });
     } catch (e) {
-      set({ error: `Couldn't create channel: ${errorMessage(e)}` });
+      if (get().activeRequest === request)
+        set({ error: `Couldn't create channel: ${errorMessage(e)}` });
     }
   },
 
   addMember: async (memberId) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
     if (!c || c.kind !== "channel") return;
+    const request = get().activeRequest + 1;
+    set({ activeRequest: request });
     try {
       await chat.addChannelMember(c.id, memberId);
+      if (!lease.current() || get().activeRequest !== request) return;
       const info = await chat.channelMembers(c.id);
+      if (!lease.current() || get().activeRequest !== request) return;
       set({ members: info.members, channelOwner: info.owner });
       void get().refreshRoster();
     } catch (e) {
-      set({ error: `Couldn't add member: ${errorMessage(e)}` });
+      if (get().activeRequest === request)
+        set({ error: `Couldn't add member: ${errorMessage(e)}` });
     }
   },
 
   removeMember: async (memberId) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     const c = get().active;
     if (!c || c.kind !== "channel") return;
+    const request = get().activeRequest + 1;
+    set({ activeRequest: request });
     try {
       await chat.removeChannelMember(c.id, memberId);
+      if (!lease.current() || get().activeRequest !== request) return;
       const info = await chat.channelMembers(c.id);
+      if (!lease.current() || get().activeRequest !== request) return;
       set({ members: info.members, channelOwner: info.owner });
       void get().refreshRoster();
     } catch (e) {
-      set({ error: `Couldn't remove member: ${errorMessage(e)}` });
+      if (get().activeRequest === request)
+        set({ error: `Couldn't remove member: ${errorMessage(e)}` });
     }
   },
 
   renameChannel: async (channelId, name) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
     try {
       await chat.renameChannel(channelId, name);
+      if (!lease.current()) return;
       await get().refreshRoster();
+      if (!lease.current()) return;
       // Keep the open conversation's header in sync if it's the one we renamed.
       const active = get().active;
       if (active?.kind === "channel" && active.id === channelId) {
@@ -705,49 +1084,235 @@ type Set = (
 ) => void;
 type Get = () => ChatState;
 
+function captureChat(get: Get, identitySensitive = true) {
+  const auth = captureOwner();
+  const run = get().runEpoch;
+  const identityEpoch = get().identityEpoch;
+  return {
+    ...auth,
+    run,
+    current: () =>
+      auth.owner !== null &&
+      auth.current() &&
+      get().runEpoch === run &&
+      (!identitySensitive || get().identityEpoch === identityEpoch),
+  };
+}
+
+registerRuntimeSnapshot(() => ({
+  runEpoch: useChat.getState().runEpoch,
+  identityEpoch: useChat.getState().identityEpoch,
+}));
+
+export function captureChatOwnership() {
+  const lease = captureChat(useChat.getState);
+  return {
+    ...lease,
+    current: () => lease.current() && useChat.getState().ready,
+  };
+}
+
+function guardedSet(set: Set, current: () => boolean): Set {
+  return (partial) => {
+    if (current()) set(partial);
+  };
+}
+
 function bump(set: Set, key: string, active: boolean) {
   if (!active) {
     set((s) => ({ unread: { ...s.unread, [key]: (s.unread[key] ?? 0) + 1 } }));
   }
 }
 
-// Shared optimistic-send dispatch for send() and retry(): fire the per-conversation send;
-// on failure mark the (already-present) bubble failed with a coarse reason; on success
-// re-sync from the log so the message gets its real id. The bubble (matched by clientId)
-// is assumed to already be in `messages[key]` as pending.
-async function dispatchSend(
+/** Bounded local intent storage is independent of the 50-conversation cache. */
+async function sendIntent(
   set: Set,
   get: Get,
   c: Conversation,
-  key: string,
-  bubble: ChatMessage,
+  payload: SendPayload,
 ) {
-  try {
-    await sendTextFor(c, bubble.text, bubble.replyTo);
-  } catch (e) {
-    // Keep the bubble visible, marked failed, instead of silently dropping it. Match by
-    // clientId (not object identity), and re-append if a concurrent reload() already
-    // replaced the array — so an inbound message mid-send can't make the failure vanish.
-    const reason = sendFailReason(e);
-    set((s) => {
-      const arr = s.messages[key] ?? [];
-      const failed: ChatMessage = {
-        ...bubble,
-        pending: false,
-        failed: true,
-        failReason: reason,
-      };
-      const next = arr.some((m) => m.clientId === bubble.clientId)
-        ? arr.map((m) => (m.clientId === bubble.clientId ? failed : m))
-        : [...arr, failed];
-      return { messages: { ...s.messages, [key]: next } };
+  if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
+    set({
+      error:
+        "Too many pending messages. Resolve a failed send before sending more.",
     });
     return;
   }
-  // Success: re-sync from the log so the message gets its real id (needed for reactions).
-  if (get().active && convKey(get().active!) === key) await get().reload();
+  const clientId = nextClientId();
+  const message: ChatMessage = {
+    id: null,
+    clientId,
+    fromMe: true,
+    who: get().myId,
+    text:
+      payload.kind === "text"
+        ? payload.text
+        : payload.kind === "sticker"
+          ? payload.fallback
+          : "",
+    replyTo: payload.kind === "text" ? payload.replyTo : null,
+    wallClock: Date.now(),
+    pending: true,
+    sticker: payload.kind === "sticker" ? payload.stickerId : null,
+    metadataPending: payload.kind === "file",
+    file:
+      payload.kind === "file"
+        ? {
+            name: payload.path.split(/[\\\\/]/).pop() || "File",
+            size: 0,
+            mime: "",
+            fileConv: "",
+            media: payload.media,
+          }
+        : null,
+  };
+  const intent = { conversation: { ...c }, payload, message };
+  const key = convKey(c);
+  set((s) => ({
+    intents: { ...s.intents, [clientId]: intent },
+    messages: { ...s.messages, [key]: [...(s.messages[key] ?? []), message] },
+  }));
+  await dispatchIntent(set, get, intent);
 }
 
+async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
+  const lease = captureChat(get);
+  const guarded = guardedSet(set, lease.current);
+  const { conversation: c, payload, message } = intent;
+  const key = convKey(c);
+  const clientId = message.clientId!;
+  const update = (next: ChatMessage | null) =>
+    guarded((s) => {
+      if (!s.intents[clientId]) return {};
+      const intents = { ...s.intents };
+      const currentIntent = s.intents[clientId];
+      if (
+        next?.id &&
+        (s.deleted[key]?.includes(next.id) ||
+          currentIntent.deletedIds?.includes(next.id))
+      ) {
+        delete intents[clientId];
+        return {
+          intents,
+          messages: s.messages[key]
+            ? {
+                ...s.messages,
+                [key]: s.messages[key].filter(
+                  (m) => m.clientId !== clientId && m.id !== next.id,
+                ),
+              }
+            : s.messages,
+        };
+      }
+      const existing = next?.id
+        ? s.messages[key]?.find((m) => m.id === next.id)
+        : undefined;
+      const resolved = next
+        ? {
+            ...next,
+            delivery:
+              existing?.delivery === "delivered"
+                ? ("delivered" as const)
+                : next.delivery,
+            ...(next.file && existing?.file && !existing.metadataPending
+              ? { file: existing.file, metadataPending: false }
+              : {}),
+          }
+        : null;
+      if (resolved) intents[clientId] = { ...currentIntent, message: resolved };
+      else delete intents[clientId];
+      // Completion must not repopulate an evicted conversation's cache.
+      const messages = { ...s.messages };
+      if (messages[key]) {
+        const rows = messages[key].filter(
+          (m) => m.clientId !== clientId && (!next?.id || m.id !== next.id),
+        );
+        messages[key] =
+          resolved && !(resolved.id && currentIntent.acceptanceHistoryOnly)
+            ? [...rows, resolved]
+            : rows;
+      }
+      return { intents, messages };
+    });
+  try {
+    let accepted: ChatMessage | null = null;
+    if (c.kind === "account") {
+      const owner = lease.owner!;
+      if (payload.kind === "text")
+        accepted = {
+          ...message,
+          id: await chat.enqueueText(
+            owner,
+            c.id,
+            payload.text,
+            payload.replyTo,
+          ),
+          pending: false,
+        };
+      else if (payload.kind === "sticker")
+        accepted = {
+          ...message,
+          id: await chat.enqueueSticker(
+            owner,
+            c.id,
+            payload.stickerId,
+            payload.fallback,
+          ),
+          pending: false,
+        };
+      else {
+        const result = await chat.enqueueFile(
+          owner,
+          c.id,
+          payload.path,
+          payload.media,
+        );
+        accepted = {
+          ...message,
+          id: result.id,
+          pending: false,
+          file: { ...message.file!, fileConv: result.fileConv },
+        };
+      }
+      if (!lease.current()) return;
+      if (!get().intents[clientId]) {
+        if (accepted?.id)
+          guarded((s) => ({
+            deleted: boundedConversationMap(
+              s.deleted,
+              key,
+              [...(s.deleted[key] ?? []), accepted!.id!].slice(-256),
+            ),
+          }));
+        return;
+      }
+      update(accepted);
+    } else {
+      if (payload.kind === "text")
+        await chat.sendChannelMessage(c.id, payload.text, payload.replyTo);
+      else if (payload.kind === "sticker")
+        await sendStickerFor(c, payload.stickerId, payload.fallback);
+      else await sendFileFor(c, payload.path, payload.media);
+      if (!lease.current()) return;
+      update(null); // Legacy void never claims acceptance/receipt for a placeholder.
+    }
+    if (!lease.current()) return;
+    if (get().active && convKey(get().active!) === key) await get().reload();
+    else if (accepted?.id) await get().refreshStatuses(c);
+  } catch (e) {
+    if (!lease.current()) return;
+    // Once a stable ID was accepted, hydration/projection failure is NOT a retryable send.
+    if (get().intents[clientId]?.message.id) return;
+    update({
+      ...message,
+      pending: false,
+      failed: true,
+      failReason: sendFailReason(e),
+    });
+    if (payload.kind === "file")
+      guarded({ error: `Couldn't send file: ${errorMessage(e)}` });
+  }
+}
 let lastUnknownSenderRefresh = 0;
 
 function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {

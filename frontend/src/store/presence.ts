@@ -3,6 +3,7 @@ import type { TFunction } from "i18next";
 import { presence as presenceApi } from "@/lib/api";
 import type { PresenceInfo, PresenceMap } from "@/lib/types";
 import type { PresenceStatus } from "@/components/identity";
+import { captureOwner } from "./ownership";
 
 /**
  * Isolated presence slice. Kept deliberately separate from the chat store so the slow
@@ -53,12 +54,14 @@ function reconcile(prev: PresenceMap, next: PresenceMap): PresenceMap {
 export const usePresence = create<PresenceState>((set, get) => ({
   map: EMPTY,
   start: () => {
+    const lease = captureOwner();
     set({ map: EMPTY });
     let cancelled = false;
     const poll = async () => {
       try {
         const next = await presenceApi.get();
-        if (!cancelled) set({ map: reconcile(get().map, next) });
+        if (!cancelled && lease.current())
+          set({ map: reconcile(get().map, next) });
       } catch {
         // node may still be starting, or got torn down — ignore (next tick retries).
       }
