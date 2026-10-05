@@ -130,7 +130,7 @@ jobs:
       # pass (avoids compiling/running the suite twice).
       - name: Install cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.20
+        uses: taiki-e/install-action@v2.87.22
         with:
           tool: cargo-llvm-cov
 
@@ -157,7 +157,7 @@ jobs:
 
       - name: Install supply-chain tools
         if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.20
+        uses: taiki-e/install-action@v2.87.22
         with:
           tool: cargo-deny,cargo-machete
 
