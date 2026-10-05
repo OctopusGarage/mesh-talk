@@ -1,26 +1,8 @@
-name: Hidden contacts native evaluation
+name: Native core workflow evaluation
 
 on:
+  workflow_call:
   workflow_dispatch:
-  push:
-    branches: [dev, feat/hidden-contacts, feat/invisible-mode]
-    paths:
-      - "frontend/**"
-      - "src-tauri/**"
-      - "crates/mesh-talk-core/**"
-      - "Cargo.lock"
-      - "scripts/diagnostics/hidden-contacts*"
-      - "scripts/diagnostics/native-multicast-probe.mjs"
-      - ".github/workflows/hidden-contacts-native.yml"
-  pull_request:
-    paths:
-      - "frontend/**"
-      - "src-tauri/**"
-      - "crates/mesh-talk-core/**"
-      - "Cargo.lock"
-      - "scripts/diagnostics/hidden-contacts*"
-      - "scripts/diagnostics/native-multicast-probe.mjs"
-      - ".github/workflows/hidden-contacts-native.yml"
 
 permissions:
   contents: read
@@ -76,14 +58,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev xvfb dbus-x11 xdotool
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev xvfb dbus-x11 xdotool fonts-noto-cjk fonts-noto-color-emoji
       - name: Build actual frontend
         working-directory: frontend
         run: |
           npm ci
           npm run build
       - name: Verify fail-closed evidence validator
-        run: node --test scripts/diagnostics/hidden-contacts-report.test.mjs
+        run: node --test scripts/diagnostics/hidden-contacts-report.test.mjs scripts/diagnostics/png-evidence.test.mjs scripts/diagnostics/native-core-scenarios.test.mjs
       - name: Build production app and CLI with regular KDF
         run: cargo build --release --locked -p mesh-talk --bin mesh-talk -p mesh-talk-core --bin mesh-talk-node
       - name: Build dev-only native driver example
@@ -92,21 +74,23 @@ jobs:
         if: runner.os == 'Linux'
         env:
           NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
+          EVAL_SOURCE_SHA: ${{ github.sha }}
         run: xvfb-run -a dbus-run-session -- node scripts/diagnostics/hidden-contacts.mjs
       - name: Run native evaluation (Windows and macOS desktop)
         if: runner.os != 'Linux'
         env:
           NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
+          EVAL_SOURCE_SHA: ${{ github.sha }}
         run: node scripts/diagnostics/hidden-contacts.mjs
       - name: Upload native evidence even on failure
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: hidden-contacts-native-${{ matrix.os }}
+          name: native-core-${{ matrix.os }}-${{ github.run_attempt }}
           # Publish evidence only, never fixture keystores or account data.
           path: |
             ${{ runner.temp }}/hidden-contacts-native/*.json
             ${{ runner.temp }}/hidden-contacts-native/*.png
-            ${{ runner.temp }}/hidden-contacts-native/native-*.log
+            ${{ runner.temp }}/hidden-contacts-native/*.log
           if-no-files-found: error
           retention-days: 14

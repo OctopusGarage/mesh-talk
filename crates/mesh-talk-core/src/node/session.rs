@@ -58,6 +58,56 @@ enum SyncWire {
     // Appended (stable discriminants) for the whole-conversation fingerprint short-circuit.
     FpRequest(FpRequest),
     FpResponse(FpResponse),
+    // Optional final custody probe. Legacy endpoints close this disposable
+    // connection; ordinary reconciliation remains byte-for-byte compatible.
+    DurableHaveRequest {
+        conversation: ConversationId,
+        event_id: EventId,
+    },
+    DurableHaveResponse {
+        conversation: ConversationId,
+        event_id: EventId,
+        stored: bool,
+    },
+}
+
+#[cfg(test)]
+pub(in crate::node) fn is_round_request(bytes: &[u8], conversation: ConversationId) -> bool {
+    round_request_conversation(bytes) == Some(conversation)
+}
+
+#[cfg(test)]
+pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<ConversationId> {
+    match decode(bytes) {
+        Ok(SyncWire::Request(request)) => Some(request.conversation),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
+    matches!(
+        decode(bytes),
+        Ok(SyncWire::Request(_) | SyncWire::FpRequest(_) | SyncWire::DurableHaveRequest { .. })
+    )
+}
+
+/// Acceptance preflight for an immutable event which must fit both directions
+/// of ordinary reconciliation. Have sets are streamed separately.
+pub(in crate::node) fn event_fits_frame(event: &crate::eventlog::Event) -> bool {
+    let response = SyncWire::Response(SyncResponse {
+        conversation: event.conversation_id,
+        events: vec![event.clone()],
+        have: vec![],
+    });
+    let followup = SyncWire::Followup(SyncFollowup {
+        conversation: event.conversation_id,
+        events: vec![event.clone()],
+    });
+    [&response, &followup].iter().all(|wire| {
+        bincode::serialized_size(wire)
+            .is_ok_and(|size| size <= crate::transport::MAX_PLAINTEXT as u64)
+    })
 }
 
 /// One chunk of a streamed `have` id-set.
@@ -78,6 +128,8 @@ pub enum SessionError {
     Serialization(String),
     /// Received a wire message that doesn't fit the protocol state.
     UnexpectedMessage,
+    /// Neither local application nor acceptance of the previous push advanced.
+    NoProgress,
 }
 
 impl std::fmt::Display for SessionError {
@@ -86,6 +138,7 @@ impl std::fmt::Display for SessionError {
             SessionError::Transport(e) => write!(f, "sync transport error: {e}"),
             SessionError::Serialization(m) => write!(f, "sync serialization error: {m}"),
             SessionError::UnexpectedMessage => write!(f, "unexpected sync message"),
+            SessionError::NoProgress => write!(f, "sync made no progress"),
         }
     }
 }
@@ -107,11 +160,42 @@ fn encode(wire: &SyncWire) -> Result<Vec<u8>, SessionError> {
 }
 
 fn decode(bytes: &[u8]) -> Result<SyncWire, SessionError> {
+    if bytes.len() > MAX_PLAINTEXT {
+        return Err(SessionError::Serialization("oversized sync frame".into()));
+    }
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
+        .with_limit(MAX_PLAINTEXT as u64)
         .reject_trailing_bytes()
         .deserialize(bytes)
         .map_err(|e| SessionError::Serialization(e.to_string()))
+}
+
+/// A qualified exact storage claim over the authenticated channel, issued only
+/// after the remote synchronizes its currently authorized durable store.
+/// This is custody, never a recipient delivery receipt.
+pub(crate) async fn request_durable_have<IO>(
+    channel: &mut SecureChannel<IO>,
+    conversation: ConversationId,
+    event_id: EventId,
+) -> Result<bool, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::DurableHaveRequest {
+            conversation,
+            event_id,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::DurableHaveResponse {
+            conversation: c,
+            event_id: id,
+            stored,
+        } if c == conversation && id == event_id => Ok(stored),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
 }
 
 /// Stream a `have` id-set as chunk frames (always ≥1 frame, so the receiver gets an
@@ -194,56 +278,95 @@ where
     S: SyncStore,
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
-    // id-set; if the responder's matches, the logs are identical and we skip the O(N)
-    // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
-    // the full reconciliation below. (Correctness: a digest match means equal sets; a
-    // false match is cryptographically negligible and, since ingest re-validates, could
-    // only skip a diff — never corrupt — so this is safe.)
-    {
-        let fp = {
-            let store = store.lock().expect("store mutex not poisoned");
-            fingerprint(store.event_ids(&conversation))
-        };
-        channel
-            .send(&encode(&SyncWire::FpRequest(FpRequest {
-                conversation,
-                fingerprint: fp,
-            }))?)
-            .await?;
-        match decode(&channel.recv().await?)? {
-            SyncWire::FpResponse(FpResponse { matched: true }) => {
-                log::debug!(
-                    target: "mesh_talk::sync",
-                    "sync conv={} fp_match skipped",
-                    hex::encode(&conversation.as_bytes()[..4]),
-                );
-                return Ok(ApplyReport::default());
-            }
-            SyncWire::FpResponse(FpResponse { matched: false }) => {
-                // Diverged — run the full id-set reconciliation below.
-            }
-            _ => return Err(SessionError::UnexpectedMessage),
-        }
-    }
+    let mut progress = SyncProgress::default();
+    while !progress.step(channel, store, conversation).await? {}
+    log::debug!(
+        target: "mesh_talk::sync",
+        "sync conv={} have={} have_kib={} applied={} dup={} pushed={} diff={} rounds={}",
+        hex::encode(&conversation.as_bytes()[..4]),
+        progress.first_have,
+        progress.first_have * EVENT_ID_BYTES / 1024,
+        progress.total.applied,
+        progress.total.duplicates,
+        progress.pushed_total,
+        progress.total.applied + progress.pushed_total,
+        progress.rounds,
+    );
+    Ok(progress.total)
+}
 
-    let mut total = ApplyReport::default();
-    // Sync-cost telemetry (see node/session.rs sync docs): we re-stream the FULL id-set
-    // (`have`) every round in both directions regardless of how small the diff is, so the
-    // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
-    // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
-    let mut rounds = 0u32;
-    let mut first_have = 0usize;
-    let mut pushed_total = 0usize;
-    for round in 0..MAX_SYNC_ROUNDS {
+/// Resume only between complete protocol exchanges, never midway through
+/// a Noise frame. A caller timing out a step must discard its channel and state.
+#[derive(Default)]
+pub(in crate::node) struct SyncProgress {
+    started: bool,
+    rounds: usize,
+    previous_push: std::collections::HashSet<EventId>,
+    total: ApplyReport,
+    first_have: usize,
+    pushed_total: usize,
+}
+
+impl SyncProgress {
+    pub(in crate::node) async fn step<S, IO>(
+        &mut self,
+        channel: &mut SecureChannel<IO>,
+        store: &Mutex<S>,
+        conversation: ConversationId,
+    ) -> Result<bool, SessionError>
+    where
+        S: SyncStore,
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
+        // id-set; if the responder's matches, the logs are identical and we skip the O(N)
+        // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
+        // the full reconciliation below. (Correctness: a digest match means equal sets; a
+        // false match is cryptographically negligible and, since ingest re-validates, could
+        // only skip a diff — never corrupt — so this is safe.)
+        if !self.started {
+            self.started = true;
+            let fp = {
+                let store = store.lock().expect("store mutex not poisoned");
+                fingerprint(store.event_ids(&conversation))
+            };
+            channel
+                .send(&encode(&SyncWire::FpRequest(FpRequest {
+                    conversation,
+                    fingerprint: fp,
+                }))?)
+                .await?;
+            match decode(&channel.recv().await?)? {
+                SyncWire::FpResponse(FpResponse { matched: true }) => {
+                    log::debug!(
+                        target: "mesh_talk::sync",
+                        "sync conv={} fp_match skipped",
+                        hex::encode(&conversation.as_bytes()[..4]),
+                    );
+                    return Ok(true);
+                }
+                SyncWire::FpResponse(FpResponse { matched: false }) => {
+                    // A complete exchange is a scheduling boundary for
+                    // bounded callers, even when reconciliation must follow.
+                    return Ok(false);
+                }
+                _ => return Err(SessionError::UnexpectedMessage),
+            }
+        }
+
+        // Sync-cost telemetry (see node/session.rs sync docs): we re-stream the FULL id-set
+        // (`have`) every round in both directions regardless of how small the diff is, so the
+        // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
+        // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
+        let round = self.rounds;
         let have = {
             let store = store.lock().expect("store mutex not poisoned");
             build_request(&*store, conversation).have
         };
         if round == 0 {
-            first_have = have.len();
+            self.first_have = have.len();
         }
-        rounds += 1;
+        self.rounds += 1;
         // Opening Request carries an empty inline have; the real set is streamed.
         channel
             .send(&encode(&SyncWire::Request(SyncRequest {
@@ -277,43 +400,42 @@ where
             result
         };
         let made_progress = report.applied > 0;
+        // Sending is not progress: projected stores can ingest a duplicate but
+        // omit it from their Have set. Require evidence of acceptance before
+        // repeating a push, unless this round advanced our own store instead.
+        if !self.previous_push.is_empty()
+            && !made_progress
+            && !response
+                .have
+                .iter()
+                .any(|id| self.previous_push.contains(id))
+        {
+            return Err(SessionError::NoProgress);
+        }
         let more_to_push = !followup.events.is_empty();
-        pushed_total += followup.events.len();
+        self.pushed_total += followup.events.len();
+        self.previous_push = followup.events.iter().map(|event| event.id).collect();
 
         channel
             .send(&encode(&SyncWire::Followup(followup))?)
             .await?;
 
-        total.applied += report.applied;
-        total.duplicates += report.duplicates;
+        self.total.applied += report.applied;
+        self.total.duplicates += report.duplicates;
         // Bound accumulated reject detail across rounds (diagnostics only) so a peer that
         // keeps a multi-round sync alive while interleaving bad events can't grow it.
-        if total.rejected.len() < MAX_REJECTED_DETAIL {
-            total.rejected.extend(report.rejected);
+        if self.total.rejected.len() < MAX_REJECTED_DETAIL {
+            self.total.rejected.extend(report.rejected);
         }
 
         if !made_progress && !more_to_push {
-            break;
+            return Ok(true);
         }
+        if round + 1 == MAX_SYNC_ROUNDS {
+            return Err(SessionError::NoProgress);
+        }
+        Ok(false)
     }
-    // One line per conversation sync. `have` is the id-set size N we streamed (≈32·N bytes
-    // each way, per round); applied/pushed are the actual diff. When `have` ≫ applied+pushed
-    // across many syncs, the O(N) id-set is the dominant waste — the signal that range-based
-    // reconciliation is worth it. Greppable target so the diagnostics log can filter it.
-    let diff = total.applied + pushed_total;
-    log::debug!(
-        target: "mesh_talk::sync",
-        "sync conv={} have={} have_kib={} applied={} dup={} pushed={} diff={} rounds={}",
-        hex::encode(&conversation.as_bytes()[..4]),
-        first_have,
-        first_have * EVENT_ID_BYTES / 1024,
-        total.applied,
-        total.duplicates,
-        pushed_total,
-        diff,
-        rounds,
-    );
-    Ok(total)
 }
 
 /// The outcome of serving one inbound wire message.
@@ -357,6 +479,23 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     match decode(bytes)? {
+        SyncWire::DurableHaveRequest {
+            conversation,
+            event_id,
+        } => {
+            let stored = store
+                .lock()
+                .expect("store mutex not poisoned")
+                .durable_have(&conversation, &event_id);
+            channel
+                .send(&encode(&SyncWire::DurableHaveResponse {
+                    conversation,
+                    event_id,
+                    stored,
+                })?)
+                .await?;
+            Ok(Served::Handled(conversation))
+        }
         SyncWire::Request(request) => {
             let conversation = request.conversation;
             // The Request's inline have is empty on the networked path; read the
@@ -414,6 +553,7 @@ where
         | SyncWire::ReqHave(_)
         | SyncWire::RespHave(_)
         | SyncWire::FpResponse(_) => Err(SessionError::UnexpectedMessage),
+        SyncWire::DurableHaveResponse { .. } => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -424,8 +564,206 @@ mod tests {
     use crate::eventlog::store::EventLog;
     use crate::identity::device::DeviceIdentity;
 
+    #[test]
+    fn exact_single_event_transport_boundary_includes_long_parent_frontier() {
+        let signer = DeviceIdentity::generate();
+        for kind in [EventKind::Message, EventKind::FileManifest] {
+            for count in [0, 64] {
+                let parents = (0..count)
+                    .map(|i| EventId::new([i as u8; 32]))
+                    .collect::<Vec<_>>();
+                let empty = Event::new(&signer, conv(), 1, parents.clone(), 1, 1, kind, vec![]);
+                let response = SyncWire::Response(SyncResponse {
+                    conversation: conv(),
+                    events: vec![empty.clone()],
+                    have: vec![],
+                });
+                let followup = SyncWire::Followup(SyncFollowup {
+                    conversation: conv(),
+                    events: vec![empty],
+                });
+                let overhead = bincode::serialized_size(&response)
+                    .unwrap()
+                    .max(bincode::serialized_size(&followup).unwrap())
+                    as usize;
+                let fits = Event::new(
+                    &signer,
+                    conv(),
+                    1,
+                    parents.clone(),
+                    1,
+                    1,
+                    kind,
+                    vec![0; MAX_PLAINTEXT - overhead],
+                );
+                assert!(event_fits_frame(&fits));
+                let exceeds = Event::new(
+                    &signer,
+                    conv(),
+                    1,
+                    parents,
+                    1,
+                    1,
+                    kind,
+                    vec![0; MAX_PLAINTEXT - overhead + 1],
+                );
+                assert!(!event_fits_frame(&exceeds));
+            }
+        }
+    }
+
     fn conv() -> ConversationId {
         ConversationId::new([1u8; 32])
+    }
+
+    #[derive(Serialize, Deserialize)]
+    enum LegacyWire {
+        Request(SyncRequest),
+        Response(SyncResponse),
+        Followup(SyncFollowup),
+        ReqHave(HaveChunk),
+        RespHave(HaveChunk),
+        FpRequest(FpRequest),
+        FpResponse(FpResponse),
+    }
+
+    #[test]
+    fn optional_storage_probe_preserves_legacy_tags_and_has_fixed_strict_size() {
+        let request = SyncRequest {
+            conversation: conv(),
+            have: vec![],
+        };
+        assert_eq!(
+            encode(&SyncWire::Request(request.clone())).unwrap(),
+            bincode::serialize(&LegacyWire::Request(request)).unwrap()
+        );
+        let fp = FpResponse { matched: true };
+        assert_eq!(
+            encode(&SyncWire::FpResponse(fp)).unwrap(),
+            bincode::serialize(&LegacyWire::FpResponse(FpResponse { matched: true })).unwrap()
+        );
+        let request = encode(&SyncWire::DurableHaveRequest {
+            conversation: conv(),
+            event_id: EventId::new([3; 32]),
+        })
+        .unwrap();
+        assert_eq!(request.len(), 68);
+        assert_eq!(&request[..4], &7u32.to_le_bytes());
+        assert!(bincode::deserialize::<LegacyWire>(&request).is_err());
+        let mut trailing = request.clone();
+        trailing.push(0);
+        assert!(decode(&trailing).is_err());
+        for length in [0, 4, 67] {
+            assert!(decode(&request[..length]).is_err());
+        }
+        let mut response = encode(&SyncWire::DurableHaveResponse {
+            conversation: conv(),
+            event_id: EventId::new([3; 32]),
+            stored: true,
+        })
+        .unwrap();
+        assert_eq!(response.len(), 69);
+        response[68] = 2;
+        assert!(decode(&response).is_err());
+        let oversized = encode(&SyncWire::Response(SyncResponse {
+            conversation: conv(),
+            events: vec![],
+            have: vec![EventId::new([0; 32]); 3000],
+        }))
+        .unwrap();
+        assert!(decode(&oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_have_never_qualifies_as_durable_custody() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let event = Event::new(&alice, conv(), 1, vec![], 1, 0, EventKind::Message, vec![1]);
+        let id = event.id;
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let mut log = EventLog::default();
+            log.append(event).unwrap();
+            serve_one(&mut channel, &Mutex::new(log)).await.unwrap();
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        assert!(!request_durable_have(&mut channel, conv(), id)
+            .await
+            .unwrap());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_storage_probe_rejects_wrong_conversation_or_event() {
+        for wrong_conversation in [true, false] {
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let id = EventId::new([3; 32]);
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                let _ = channel.recv().await.unwrap();
+                channel
+                    .send(
+                        &encode(&SyncWire::DurableHaveResponse {
+                            conversation: if wrong_conversation {
+                                ConversationId::new([2; 32])
+                            } else {
+                                conv()
+                            },
+                            event_id: if wrong_conversation {
+                                id
+                            } else {
+                                EventId::new([4; 32])
+                            },
+                            stored: true,
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            assert!(matches!(
+                request_durable_have(&mut channel, conv(), id).await,
+                Err(SessionError::UnexpectedMessage)
+            ));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_endpoint_syncs_normally_then_rejects_only_optional_probe() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let event = Event::new(&alice, conv(), 1, vec![], 1, 0, EventKind::Message, vec![1]);
+        let id = event.id;
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let store = Mutex::new(EventLog::default());
+            loop {
+                let bytes = channel.recv().await.unwrap();
+                if bincode::deserialize::<LegacyWire>(&bytes).is_err() {
+                    break;
+                }
+                serve_wire_bytes(&mut channel, &store, &bytes)
+                    .await
+                    .unwrap();
+            }
+            assert!(store.lock().unwrap().has(&id));
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        let mut log = EventLog::default();
+        log.append(event).unwrap();
+        request_round(&mut channel, &Mutex::new(log), conv())
+            .await
+            .unwrap();
+        assert!(request_durable_have(&mut channel, conv(), id)
+            .await
+            .is_err());
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -875,6 +1213,44 @@ mod tests {
             log.append(event).unwrap();
         }
         log
+    }
+
+    #[tokio::test]
+    async fn request_round_pushes_multiple_frames_when_remote_acceptance_advances() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let (aio, bio) = tokio::io::duplex(512 * 1024);
+        let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
+        let ids = log.event_ids(&conv());
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
+            let store = Mutex::new(EventLog::default());
+            let mut handled = 0;
+            loop {
+                match serve_one(&mut channel, &store).await.unwrap() {
+                    Served::Closed => break,
+                    Served::Handled(_) => handled += 1,
+                }
+            }
+            (store.into_inner().unwrap(), handled)
+        });
+        let mut channel = SecureChannel::connect(aio, &alice, None).await.unwrap();
+        let store = Mutex::new(log);
+        let report = request_round(&mut channel, &store, conv()).await.unwrap();
+        drop(channel);
+        let (remote, handled) = server.await.unwrap();
+        assert_eq!(
+            report.applied, 0,
+            "progress comes entirely from remote acceptance"
+        );
+        assert!(
+            handled > 9,
+            "transfer requires more rounds than the stall diagnostic cutoff"
+        );
+        assert_eq!(remote.event_ids(&conv()), ids);
+        for event in store.lock().unwrap().events(&conv()) {
+            assert_eq!(remote.get(&event.id), Some(event));
+        }
     }
 
     #[tokio::test]

@@ -16,13 +16,15 @@ export function ChatApp() {
   const { t } = useTranslation();
   const start = useChat((s) => s.start);
   const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
+  const ready = useChat((s) => s.ready);
   useEffect(() => {
     if (owner) void useContactPolicy.getState().load(owner);
     return () => {
       useContactPolicy.getState().reset();
       usePrivacy.getState().reset();
     };
-  }, [owner]);
+  }, [owner, generation]);
   const startPresence = usePresence((s) => s.start);
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
@@ -46,16 +48,18 @@ export function ChatApp() {
   }, [totalUnread]);
 
   useEffect(() => {
+    if (!owner) return;
     const stop = start();
     return stop;
-  }, [start]);
+  }, [start, owner, generation]);
 
   // Presence polls on its own slow interval into an isolated store — kept apart from the
   // chat store so a presence tick never re-renders the virtualized message list.
   useEffect(() => {
+    if (!owner || !ready) return;
     const stop = startPresence();
     return stop;
-  }, [startPresence]);
+  }, [startPresence, owner, generation, ready]);
 
   return (
     <div

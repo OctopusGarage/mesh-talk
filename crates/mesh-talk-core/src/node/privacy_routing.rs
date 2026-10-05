@@ -9,6 +9,75 @@ use std::{
 };
 
 impl Node {
+    /// Identity resolution has no endpoint requirement. Configured nodes use the
+    /// durable signed binding; legacy SDK nodes retain only bounded memory history.
+    pub(in crate::node) fn historical_peer_proofs(&self) -> Vec<crate::discovery::Announce> {
+        let memory = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .historical_announcements();
+        let guard = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned");
+        if let Some(state) = guard.as_ref() {
+            let mut proofs = state.proofs.announcements();
+            if !state.policy.snapshot().invisible {
+                proofs.extend(memory.into_iter().filter(|proof| {
+                    proof.account_id().is_none()
+                        && state.proofs.by_author(&proof.ed25519_pub).is_none()
+                }));
+            }
+            proofs
+        } else {
+            memory
+        }
+    }
+
+    pub(in crate::node) fn historical_author(
+        &self,
+        author: &[u8; 32],
+    ) -> Option<crate::discovery::Announce> {
+        let proof = {
+            let state = self
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned");
+            if let Some(state) = state.as_ref() {
+                state.proofs.by_author(author).or_else(|| {
+                    if state.policy.snapshot().invisible {
+                        return None;
+                    }
+                    self.roster
+                        .lock()
+                        .expect("roster lock not poisoned")
+                        .historical_by_author(author)
+                        .filter(|p| p.account_id().is_none())
+                })
+            } else {
+                self.roster
+                    .lock()
+                    .expect("roster lock not poisoned")
+                    .historical_by_author(author)
+            }
+        };
+        proof.filter(|p| self.known_account_allowed(&p.public()))
+    }
+
+    pub(in crate::node) fn historical_dm_peers(&self) -> Vec<crate::discovery::Announce> {
+        self.historical_peer_proofs()
+            .into_iter()
+            .filter(|p| {
+                !p.post_office
+                    && p.public() != self.identity.public()
+                    && self.known_account_allowed(&p.public())
+            })
+            .collect()
+    }
+
     pub(in crate::node) fn cached_routing_peers(&self) -> Vec<PeerRecord> {
         let guard = self
             .privacy
@@ -28,7 +97,9 @@ impl Node {
                     .by_author(&public.ed25519_pub)
                     .filter(|a| a.public() == public)?;
                 let account = proof.account_id()?;
-                let account_allowed = account == self.account_id() || state.policy.allows(&account);
+                let account_allowed = !state.policy.snapshot().invisible
+                    || account == self.account_id()
+                    || state.policy.allows(&account);
                 Some((
                     account_allowed,
                     PeerRecord {
@@ -85,6 +156,9 @@ impl Node {
         self: &Arc<Self>,
         budget: Duration,
     ) {
+        if self.cached_peer_snapshot_async().await.is_err() {
+            log::warn!("verified discovery cache update failed");
+        }
         let mut peers = self.cached_routing_peers();
         if peers.is_empty() {
             return;
@@ -98,18 +172,22 @@ impl Node {
             % peers.len();
         peers.rotate_left(start);
         peers.truncate(8);
-        let node = self.clone();
-        // JoinSet cancellation in bounded_for_each aborts all child probes.
-        // The runtime owns this awaited probe loop, not detached host tasks.
-        let _ = tokio::time::timeout(
-            budget,
-            crate::util::fanout::bounded_for_each(peers, 8, move |peer| {
-                let node = node.clone();
-                async move {
-                    let _ = node.privacy_dial(peer.addr, &peer.public).await;
-                }
-            }),
-        )
+        // The selected batch is already bounded to eight. Admit each complete
+        // child before spawning: authentication may synchronously persist proof
+        // and route state after the parent has requested child cancellation.
+        let mut probes = tokio::task::JoinSet::new();
+        for peer in peers {
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
+            let node = self.clone();
+            probes.spawn(work.track(async move {
+                let _ = node.privacy_dial(peer.addr, &peer.public).await;
+            }));
+        }
+        let _ = tokio::time::timeout(budget, async {
+            while probes.join_next().await.is_some() {}
+        })
         .await;
     }
 }

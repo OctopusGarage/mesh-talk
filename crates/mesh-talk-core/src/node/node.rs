@@ -132,6 +132,10 @@ pub struct FileHistoryInfo {
 /// Errors from node operations.
 #[derive(Debug)]
 pub enum NodeError {
+    /// Caller-supplied local data cannot be accepted.
+    InvalidInput(String),
+    /// The host rejected a local operation under its owner guard.
+    Authorization(String),
     /// `send_dm` to a `user_id` not in the roster.
     UnknownPeer(UserId),
     /// Sealing the DM payload failed.
@@ -150,6 +154,8 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NodeError::InvalidInput(m) => write!(f, "invalid input: {m}"),
+            NodeError::Authorization(m) => write!(f, "authorization: {m}"),
             NodeError::UnknownPeer(u) => write!(f, "unknown peer: {u}"),
             NodeError::Seal(e) => write!(f, "seal error: {e}"),
             NodeError::Log(e) => write!(f, "log error: {e}"),
@@ -166,9 +172,25 @@ impl std::error::Error for NodeError {}
 /// to the latest action `(wall_clock_ms, payload)`. See the `my_dm_reactions` field.
 type MyReactions = HashMap<(ConversationId, EventId, String), (u64, ReactionPayload)>;
 
+#[cfg(test)]
+type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
+
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
+    #[cfg(test)]
+    pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) peer_snapshot_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) remember_peer_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) file_transfer_peak: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(in crate::node) empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(in crate::node) accepted_hook: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
@@ -210,6 +232,13 @@ pub struct Node {
     pub(in crate::node) media: crate::node::media_store::MediaStore,
     /// Per-peer Double Ratchet sessions (forward-secret DM crypto), encrypted on disk.
     pub(in crate::node) dm_ratchet: Mutex<DmRatchet>,
+    /// Serializes every DM ratchet consumer and ordered recovery.
+    pub(in crate::node) delivery: Mutex<super::delivery_store::DeliveryStore>,
+    pub(in crate::node) delivery_notify: tokio::sync::Notify,
+    pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
+    pub(in crate::node) delivery_control_ids:
+        Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
+    pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
     /// Decrypted received-message plaintext, for serving history after the wire key is gone.
     pub(in crate::node) received: Mutex<ReceivedLog>,
     /// Durable record of file manifests we've SURFACED (reuses the ReceivedLog format),
@@ -354,15 +383,36 @@ impl Node {
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
-        let log = log_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut log = log_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let dm_ratchet = DmRatchet::new(sessions);
+        let mut dm_ratchet = DmRatchet::new(sessions);
+        let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
+        delivery.bind_profile(
+            log_path,
+            password,
+            &identity.public(),
+            &account.account_id(),
+        )?;
+        delivery.validate_owner(&identity.public(), &account.account_id())?;
+        while delivery
+            .recover_next_with_files(
+                &mut dm_ratchet,
+                &mut log,
+                &mut sentlog,
+                &mut received,
+                Some(&mut received_files),
+            )?
+            .is_some()
+        {}
+        received_files
+            .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
+        let delivery_control_ids = delivery.control_ids();
         // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
         // every id in the log. An event that was ingested durably but never recorded (it
         // arrived before we learned its author — the DM-convergence race — or before its
@@ -403,10 +453,21 @@ impl Node {
         let mut files = FileBook::new();
         for c in received_files.conversations() {
             for entry in received_files.entries(&c) {
-                if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
-                    files.record(manifest);
+                if delivery.file_erased(entry.conversation, entry.event_id)
+                    || delivery.manifest_event_erased(entry.event_id)
+                {
+                    continue;
                 }
-                files.mark_emitted(entry.event_id);
+                let decoded = super::files::validated_manifest(&entry.plaintext);
+                let existing = decoded
+                    .as_ref()
+                    .and_then(|m| files.manifest(&m.file_conv()));
+                if let Some(manifest) =
+                    super::files::eligible_manifest_row(&entry, log.get(&entry.event_id), existing)
+                {
+                    files.record_event(entry.event_id, manifest);
+                    files.mark_emitted(entry.event_id);
+                }
             }
         }
         // Durable chat-media store under the per-account dir (sibling to the logs). Plaintext
@@ -417,6 +478,19 @@ impl Node {
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
         Ok(Arc::new(Self {
+            runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
+            #[cfg(test)]
+            delivery_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            peer_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            remember_peer_hook: Mutex::new(None),
+            #[cfg(test)]
+            file_transfer_peak: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            accepted_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
             account,
@@ -442,6 +516,11 @@ impl Node {
             pending_files: Mutex::new(HashSet::new()),
             media,
             dm_ratchet: Mutex::new(dm_ratchet),
+            delivery: Mutex::new(delivery),
+            delivery_notify: tokio::sync::Notify::new(),
+            delivery_status_notify: tokio::sync::Notify::new(),
+            delivery_control_ids: Mutex::new(delivery_control_ids),
+            delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
@@ -547,7 +626,7 @@ impl Node {
             .unwrap_or_default()
     }
 
-    /// Append a channel event, sequencing it from the channel's log position. Returns
+    /// Append a local event, sequencing it from the conversation's log position. Returns
     /// the event's `seq` (its position in our own per-author chain), used to index the
     /// sent sidecar for channel history.
     pub(in crate::node) fn append_event(
@@ -556,6 +635,11 @@ impl Node {
         kind: EventKind,
         ciphertext: Vec<u8>,
     ) -> Result<u64, NodeError> {
+        // Accepted immutable intents reserve their author's sequence even before
+        // installation. Serialize every local allocation with that reservation.
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
         let (parents, lamport) = log.prepare(&channel);
@@ -575,6 +659,11 @@ impl Node {
             kind,
             ciphertext,
         );
+        if event.kind == EventKind::FileManifest && !super::session::event_fits_frame(&event) {
+            return Err(NodeError::File(
+                "file manifest exceeds transport frame".into(),
+            ));
+        }
         log.append(event).map_err(NodeError::Log)?;
         Ok(seq)
     }

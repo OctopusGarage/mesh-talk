@@ -13,6 +13,7 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     node: &'a Node,
     peer: PublicIdentity,
     denied: bool,
+    pull_only: bool,
 }
 impl Node {
     pub(in crate::node) fn sync_store(
@@ -23,6 +24,18 @@ impl Node {
             node: self,
             peer: peer.clone(),
             denied: false,
+            pull_only: false,
+        })
+    }
+    pub(in crate::node) fn pull_sync_store(
+        &self,
+        peer: &PublicIdentity,
+    ) -> std::sync::Mutex<GuardedSyncStore<'_>> {
+        std::sync::Mutex::new(GuardedSyncStore {
+            node: self,
+            peer: peer.clone(),
+            denied: false,
+            pull_only: true,
         })
     }
 }
@@ -57,6 +70,41 @@ impl GuardedSyncStore<'_> {
                 && super::conversation::dm_conversation_id(&me, &a.public()) == *conversation
         });
         let mut allowed = HashSet::new();
+        let control_target = proofs.iter().find(|a| {
+            a.account_id()
+                .is_some_and(|id| id != own_account && state.policy.allows(&id))
+                && super::delivery_receipt::delivery_conversation_id(&me, &a.public())
+                    == *conversation
+        });
+        if let Some(target) = control_target {
+            if self.peer == target.public() || relay {
+                let own_controls = self
+                    .node
+                    .delivery_control_ids
+                    .lock()
+                    .expect("control ids lock not poisoned");
+                for event in events {
+                    let eligible = (event.author.ed25519_pub() == &me.ed25519_pub
+                        && own_controls.get(&event.id).is_some_and(|b| {
+                            b.device == target.public() && b.account == target.account_id()
+                        }))
+                        || super::delivery_receipt::open_receipt(
+                            &self.node.identity,
+                            &own_account,
+                            target,
+                            event,
+                        )
+                        .is_some();
+                    if event.kind == EventKind::Message
+                        && eligible
+                        && event.parents.iter().all(|id| allowed.contains(id))
+                    {
+                        allowed.insert(event.id);
+                    }
+                }
+            }
+            return allowed;
+        }
         if let Some(target) = target {
             if self.peer == target.public() || own_peer || relay {
                 for event in events {
@@ -75,6 +123,42 @@ impl GuardedSyncStore<'_> {
                 }
             }
             return allowed;
+        }
+        // A configured private post office may relay a receipt between two
+        // other explicitly permitted principals. Group membership confers no
+        // permission here; ciphertext remains opaque to the relay.
+        let manual_accounts: HashSet<_> = state
+            .policy
+            .snapshot()
+            .allowed_accounts
+            .into_iter()
+            .filter(|a| a.source == PermissionSource::Manual)
+            .map(|a| a.id)
+            .collect();
+        let manual = |account: &Option<String>| {
+            account
+                .as_ref()
+                .is_some_and(|id| manual_accounts.contains(id))
+        };
+        if state.own.post_office && manual(&peer_account) {
+            if let Some(other) = proofs.iter().find(|a| {
+                a.public() != self.peer
+                    && manual(&a.account_id())
+                    && super::delivery_receipt::delivery_conversation_id(&self.peer, &a.public())
+                        == *conversation
+            }) {
+                for event in events {
+                    let author = event.author.ed25519_pub();
+                    if (*author == self.peer.ed25519_pub || *author == other.ed25519_pub)
+                        && event.kind == EventKind::Message
+                        && super::delivery_receipt::valid_sealed_wire(&event.ciphertext)
+                        && event.parents.iter().all(|id| allowed.contains(id))
+                    {
+                        allowed.insert(event.id);
+                    }
+                }
+                return allowed;
+            }
         }
         // A file conversation inherits its verified manifest's parent scope.
         if let Some(scopes) = state.file_scopes.get(conversation) {
@@ -190,7 +274,7 @@ impl GuardedSyncStore<'_> {
             .state
             .read()
             .expect("privacy lock not poisoned");
-        let events: Vec<_> = self
+        let mut events: Vec<_> = self
             .node
             .log
             .lock()
@@ -199,6 +283,47 @@ impl GuardedSyncStore<'_> {
             .into_iter()
             .cloned()
             .collect();
+        // Local erase cancels receipt retries, while preserving encrypted chat
+        // history's established non-recall semantics. Apply this in public mode
+        // too, so dormant erased controls cannot be advertised again.
+        let controls = self
+            .node
+            .delivery_control_ids
+            .lock()
+            .expect("control ids lock not poisoned");
+        let mut allowed_controls = HashSet::new();
+        events.retain(|event| {
+            if !super::delivery_receipt::valid_sealed_wire(&event.ciphertext) {
+                return true;
+            }
+            let allowed = (event.author.ed25519_pub() != &self.node.identity.public().ed25519_pub
+                || controls.get(&event.id).is_some_and(|binding| {
+                    let proof = if let Some(state) = guard.as_ref() {
+                        state.proofs.by_author(&binding.device.ed25519_pub)
+                    } else {
+                        self.node
+                            .roster
+                            .lock()
+                            .expect("roster lock not poisoned")
+                            .historical_announcement(&binding.device)
+                            .cloned()
+                    };
+                    proof.is_some_and(|p| {
+                        p.public() == binding.device
+                            && p.account_id() == binding.account
+                            && super::delivery_receipt::delivery_conversation_id(
+                                &self.node.identity.public(),
+                                &binding.device,
+                            ) == event.conversation_id
+                    })
+                }))
+                && event.parents.iter().all(|id| allowed_controls.contains(id));
+            if allowed {
+                allowed_controls.insert(event.id);
+            }
+            allowed
+        });
+        drop(controls);
         let Some(state) = guard.as_ref().filter(|s| s.policy.snapshot().invisible) else {
             return events;
         };
@@ -210,6 +335,20 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+        if !self.visible(conversation).iter().any(|e| e.id == *id) {
+            return !self.denied
+                && self
+                    .node
+                    .historical_file_completion(*conversation, *id, &self.peer);
+        }
+        self.node
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .sync()
+            .is_ok()
+    }
     fn admission_denied(&self) -> bool {
         self.denied
     }
@@ -221,12 +360,31 @@ impl SyncStore for GuardedSyncStore<'_> {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
+        if self.pull_only {
+            return Vec::new();
+        }
         self.visible(conversation)
             .into_iter()
             .filter(|e| !have.contains(&e.id))
             .collect()
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        // Own-author backfill may compete with an accepted local reservation.
+        // Delivery precedes privacy/log locks, matching enqueue's lock order.
+        let mut delivery = if event.author.ed25519_pub() == &self.node.identity.public().ed25519_pub
+        {
+            Some(
+                self.node
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned"),
+            )
+        } else {
+            None
+        };
+        if let Some(store) = delivery.as_mut() {
+            self.node.recover_delivery(store)?;
+        }
         let guard = self
             .node
             .privacy
@@ -256,10 +414,11 @@ impl SyncStore for GuardedSyncStore<'_> {
                 )));
             }
         }
-        self.node
-            .log
-            .lock()
-            .expect("log lock not poisoned")
-            .append(event)
+        let mut log = self.node.log.lock().expect("log lock not poisoned");
+        if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
+            log.append_durable(event)
+        } else {
+            log.append(event)
+        }
     }
 }

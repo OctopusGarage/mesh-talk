@@ -23,6 +23,7 @@ pub mod diagnostics;
 pub mod events;
 pub mod favorites;
 pub mod logger;
+pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
 pub mod services;
@@ -270,6 +271,12 @@ pub fn run_tauri_configured(
         .manage(crate::contact_policy::HiddenContactsState::default())
         .manage(crate::chat_commands::NodeState::empty())
         .invoke_handler(tauri::generate_handler![
+            owner_commands::owner_node_identity,
+            owner_commands::owner_enqueue_text,
+            owner_commands::owner_enqueue_sticker,
+            owner_commands::owner_enqueue_file,
+            owner_commands::owner_account_history,
+            owner_commands::owner_delivery_statuses,
             commands::login,
             crate::contact_policy::get_hidden_contacts,
             crate::contact_policy::set_contact_hidden,

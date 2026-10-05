@@ -6,7 +6,7 @@ import { chat } from "@/lib/api";
 import { defaultSavePath } from "@/lib/download";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
-import { useChat } from "@/store/chat";
+import { useChat, captureChatOwnership } from "@/store/chat";
 import {
   blobMime,
   isVideo,
@@ -49,11 +49,17 @@ export function MediaPreview({
   // Save the media to disk. The filename/size/download live here in the detail view (not
   // under every bubble) — the chat shows just the media.
   const saveAs = async () => {
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
     try {
-      const dest = await save({ defaultPath: await defaultSavePath(name) });
-      if (typeof dest === "string") await chat.saveFile(fileConv, dest);
+      const defaultPath = await defaultSavePath(name);
+      if (!lease.current()) return;
+      const dest = await save({ defaultPath });
+      if (lease.current() && typeof dest === "string")
+        await chat.saveFile(fileConv, dest);
     } catch (e) {
-      setError(t("files.couldntSave", { error: errorMessage(e) }));
+      if (lease.current())
+        setError(t("files.couldntSave", { error: errorMessage(e) }));
     }
   };
   // The detail bar shown at the bottom of the lightbox: filename · size · download. Clicks

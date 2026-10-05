@@ -160,11 +160,20 @@
     "offline": "离线"
   },
   "message": {
+    "delivery": {
+      "awaiting": "等待回执",
+      "delivered": "已送达",
+      "help": "目标账户的自动回执，不代表已读。",
+      "fileHelp": "文件卡片已送达，文件下载与阅读另行进行。",
+      "metadataPending": "等待文件信息"
+    },
     "sending": "发送中…",
     "reply": "回复",
     "react": "回应",
     "retry": "重试",
     "fail": {
+      "invalid-input": "消息无效",
+      "authorization": "登录会话已变更",
       "peer-unknown": "发送失败——暂时无法联系到接收方",
       "relay-unreachable": "发送失败——网络不可达",
       "crypto": "发送失败——加密错误",

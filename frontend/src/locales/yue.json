@@ -160,11 +160,20 @@
     "offline": "不在線"
   },
   "message": {
+    "delivery": {
+      "awaiting": "等候收據",
+      "delivered": "已送達",
+      "help": "收件帳戶自動發出嘅收據，唔代表已讀。",
+      "fileHelp": "檔案卡片已送達，唔代表檔案已下載或睇過。",
+      "metadataPending": "等候檔案資料"
+    },
     "sending": "發送中…",
     "reply": "回覆",
     "react": "回應",
     "retry": "重試",
     "fail": {
+      "invalid-input": "訊息無效",
+      "authorization": "登入階段已變更",
       "peer-unreachable": "無法發送——目前找不到對方",
       "relay-unreachable": "無法發送——網絡無法連接",
       "crypto": "無法發送——加密發生錯誤",

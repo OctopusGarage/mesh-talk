@@ -19,6 +19,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+#[path = "mesh-talk-node/file_saves.rs"]
+mod file_saves;
+
 /// How often a normal node drains held DMs from the elected post office.
 const DRAIN_INTERVAL_SECS: u64 = 3;
 
@@ -235,7 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
     let (channel_tx, mut channel_rx) =
         mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedChannelMessage>();
-    let (file_tx, mut file_rx) = mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedFile>();
+    let (file_tx, file_rx) = mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedFile>();
     // Derive log paths from the keystore path (sibling files, same directory).
     let keystore_path = std::path::Path::new(&args.keystore);
     let data_dir = keystore_path.parent().unwrap_or(std::path::Path::new("."));
@@ -252,16 +255,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &sent_path,
         &args.password,
     )?;
+    let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
+    node.configure_privacy(data_dir, &args.password, &announce, visibility.clone())?;
 
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
-    spawn_discovery(
+    mesh_talk_core::discovery::service::spawn_discovery_with_visibility(
         Arc::clone(&socket),
         Arc::clone(&roster),
-        announce,
+        mesh_talk_core::discovery::service::shared_announce(&announce),
         user_id.clone(),
         args.discovery_port,
+        None,
+        visibility,
     );
 
     // Inbound: serve sync rounds on each accepted connection.
@@ -294,24 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let node = Arc::clone(&node);
         let data_dir = data_dir.to_path_buf();
-        tokio::spawn(async move {
-            while let Some(f) = file_rx.recv().await {
-                // Save into a trusted dir; the manifest name is never trusted to escape it.
-                match node.save_file_into_dir(f.file_conv, &data_dir) {
-                    Ok(path) => emit(&format!(
-                        "file from {}: {} ({} bytes) saved {}",
-                        f.from,
-                        f.name,
-                        f.size,
-                        path.display()
-                    )),
-                    Err(e) => emit(&format!(
-                        "file from {}: {} ({} bytes) save failed: {e}",
-                        f.from, f.name, f.size
-                    )),
-                }
-            }
-        });
+        tokio::spawn(file_saves::run(node, data_dir, file_rx, emit));
     }
 
     // Periodically pull DMs held for us by the elected post office (delivered
@@ -338,7 +328,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if line == "/quit" {
             break;
         } else if line == "/peers" {
-            let peers = roster.lock().expect("roster mutex not poisoned").peers();
+            let peers = match node.cached_peer_snapshot_async().await {
+                Ok(peers) => peers,
+                Err(_) => {
+                    emit("peer identity cache failed; retry discovery");
+                    continue;
+                }
+            };
             if peers.is_empty() {
                 emit("(no peers yet)");
             } else {

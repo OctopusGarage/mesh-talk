@@ -13,6 +13,8 @@
 //! Nodes are also started SEQUENTIALLY (start one, await its line, then the next) so a
 //! slow machine never has to run two KDF-heavy cold starts concurrently.
 
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -87,8 +89,7 @@ impl CliNode {
 
 impl Drop for CliNode {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        support::stop_cli(&mut self.child, &mut self.stdin);
     }
 }
 
@@ -155,7 +156,11 @@ fn message_history_survives_restart() {
     // Alice restarts on the same keystore (same identity + same durable files).
     drop(alice);
     let mut alice = CliNode::spawn(&alice_keystore, "Alice", dp);
-    let _ = read_uid(&alice);
+    assert_eq!(
+        read_uid(&alice),
+        alice_uid,
+        "restart preserves device identity"
+    );
     await_peer(&mut alice, &bob_uid, "Alice(restarted)→Bob"); // re-discover Bob to resolve + decrypt
 
     // /history shows BOTH directions, restored from disk.

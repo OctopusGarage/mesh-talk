@@ -160,11 +160,20 @@
     "offline": "Offline"
   },
   "message": {
+    "delivery": {
+      "awaiting": "Awaiting receipt",
+      "delivered": "Delivered",
+      "help": "Automatic receipt from the target account. Not a read receipt.",
+      "fileHelp": "File card delivered. File download and reading are separate.",
+      "metadataPending": "File details pending"
+    },
     "sending": "sending…",
     "reply": "Reply",
     "react": "React",
     "retry": "Retry",
     "fail": {
+      "invalid-input": "Invalid message",
+      "authorization": "Session changed",
       "peer-unknown": "Couldn't send — recipient not reachable yet",
       "relay-unreachable": "Couldn't send — network unreachable",
       "crypto": "Couldn't send — encryption error",
