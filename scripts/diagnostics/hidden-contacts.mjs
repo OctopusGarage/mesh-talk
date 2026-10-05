@@ -337,8 +337,8 @@ try {
   await coreContext.restartPeer();
   await signedPeerObservation(coreContext);
   await until("same account rediscovered after receiver restart", async () => (await observe("list_accounts")).some(a => a.account_id === account && a.names.includes(peerName)));
-  await restartedCoreScenarios(coreContext, coreState);
   await receiptRestartScenario(coreContext, receiptState, coldReceiptCheckpoint);
+  await restartedCoreScenarios(coreContext, coreState);
   const restoredPrivacy = await privacyPolicy();
   assert.equal(restoredPrivacy.invisible, true);
   assert.ok(restoredPrivacy.allowed_accounts.some(a => a.id === account && a.source === "Manual"));
