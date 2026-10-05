@@ -199,8 +199,18 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     let bob_dir = tempfile::tempdir().unwrap();
     let mut alice = start(alice_dir.path()).await;
     let mut bob = start(bob_dir.path()).await;
+    // Isolate this explicit probe from discovery, accept/delivery, and periodic
+    // probes. Join producers and admitted children without closing admission.
+    for task in &alice.tasks {
+        task.abort();
+    }
+    for task in std::mem::take(&mut alice.tasks) {
+        let _ = task.await;
+    }
+    alice.node.runtime_work.drain().await;
     let node = alice.node.clone();
     let public = bob.node.identity.public();
+    bob.set_display_name("new authenticated name");
     let old_presence = bob.node.signed_announce("old name", bob.listen_tcp_port());
     node.remember_peer(
         &public,
@@ -209,7 +219,6 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     )
     .unwrap();
     *node.roster.lock().unwrap() = Roster::default();
-    bob.set_display_name("new authenticated name");
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Mutex::new(release_rx);
@@ -223,10 +232,13 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
             .probe_private_routes_with_budget(Duration::from_secs(5))
             .await;
     }));
-    tokio::time::timeout(Duration::from_secs(3), entered_rx)
-        .await
-        .unwrap()
-        .unwrap();
+    let entered = tokio::time::timeout(Duration::from_secs(3), entered_rx).await;
+    if !matches!(entered, Ok(Ok(()))) {
+        let _ = release_tx.send(());
+        alice.stop().await;
+        bob.stop().await;
+        panic!("authenticated route probe did not enter persistence within its original deadline");
+    }
     let mut retirement = tokio::spawn(alice.stop());
     let finished_early = tokio::time::timeout(Duration::from_millis(150), &mut retirement)
         .await
@@ -238,23 +250,34 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
             .unwrap()
             .unwrap();
     }
+    if finished_early {
+        node.runtime_work.drain().await;
+        bob.stop().await;
+        panic!(
+            "retirement completed while authenticated route probe was paused before persistence"
+        );
+    }
     assert!(
         !finished_early,
         "retirement completed while authenticated route probe was paused before persistence"
     );
+    // Reopening spawns fresh probes immediately. Stop the remote before reopen
+    // so a new authentication cannot mask missing pre-retirement persistence.
+    let bob_port = bob.listen_tcp_port();
+    bob.stop().await;
     let reopened = start(alice_dir.path()).await;
     let proof = reopened
         .node
         .historical_author(&public.ed25519_pub)
         .unwrap();
-    assert_eq!(proof.name, "new authenticated name");
-    assert!(reopened
+    let same_port = reopened
         .node
         .cached_routing_peers()
         .iter()
-        .any(|peer| peer.public == public && peer.addr.port() == bob.listen_tcp_port()));
+        .any(|peer| peer.public == public && peer.addr.port() == bob_port);
     reopened.stop().await;
-    bob.stop().await;
+    assert_eq!(proof.name, "new authenticated name");
+    assert!(same_port);
 }
 
 #[tokio::test]
