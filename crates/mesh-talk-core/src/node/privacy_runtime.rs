@@ -659,6 +659,10 @@ impl Node {
             return Err(TransportError::IdentityMismatch);
         }
         let group_member = self.group_member(public);
+        #[cfg(test)]
+        if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
+            hook();
+        }
         {
             let mut state = self
                 .privacy
@@ -717,9 +721,22 @@ impl Node {
     ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
         let snapshot = self.discovery_snapshot();
         let privacy = self.privacy.clone();
-        tokio::task::spawn_blocking(move || Self::persist_discovery_snapshot(&privacy, snapshot))
-            .await
-            .map_err(|_| io::Error::other("peer cache task failed"))?
+        let work = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| io::Error::other("node runtime retired"))?;
+        #[cfg(test)]
+        let hook = self.peer_snapshot_hook.lock().unwrap().take();
+        tokio::task::spawn_blocking(move || {
+            let _work = work;
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook();
+            }
+            Self::persist_discovery_snapshot(&privacy, snapshot)
+        })
+        .await
+        .map_err(|_| io::Error::other("peer cache task failed"))?
     }
 
     fn persist_discovery_snapshot(

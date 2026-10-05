@@ -172,18 +172,22 @@ impl Node {
             % peers.len();
         peers.rotate_left(start);
         peers.truncate(8);
-        let node = self.clone();
-        // JoinSet cancellation in bounded_for_each aborts all child probes.
-        // The runtime owns this awaited probe loop, not detached host tasks.
-        let _ = tokio::time::timeout(
-            budget,
-            crate::util::fanout::bounded_for_each(peers, 8, move |peer| {
-                let node = node.clone();
-                async move {
-                    let _ = node.privacy_dial(peer.addr, &peer.public).await;
-                }
-            }),
-        )
+        // The selected batch is already bounded to eight. Admit each complete
+        // child before spawning: authentication may synchronously persist proof
+        // and route state after the parent has requested child cancellation.
+        let mut probes = tokio::task::JoinSet::new();
+        for peer in peers {
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
+            let node = self.clone();
+            probes.spawn(work.track(async move {
+                let _ = node.privacy_dial(peer.addr, &peer.public).await;
+            }));
+        }
+        let _ = tokio::time::timeout(budget, async {
+            while probes.join_next().await.is_some() {}
+        })
         .await;
     }
 }

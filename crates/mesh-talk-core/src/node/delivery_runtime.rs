@@ -871,7 +871,15 @@ impl Node {
                 _ = self.delivery_notify.notified() => {},
             }
             let node = self.clone();
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
             let snapshot = tokio::task::spawn_blocking(move || {
+                let _work = work;
+                #[cfg(test)]
+                if let Some(hook) = node.delivery_snapshot_hook.lock().unwrap().take() {
+                    hook();
+                }
                 let mut store = node.delivery.lock().expect("delivery lock not poisoned");
                 if node.recover_delivery(&mut store).is_err() {
                     return None;

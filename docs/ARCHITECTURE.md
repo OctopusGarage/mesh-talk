@@ -90,7 +90,16 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   loop shared by desktop, CLI, and SDK hosts: every 3 seconds it drains at most one
   conversation on the blocking pool, with a 10-second per-conversation cooldown.
   Dropping the accept-loop future stops scheduling maintenance; an already-running
-  blocking rewrite finishes atomically. The log mutex serializes rewrites with appends.
+  blocking rewrite finishes atomically. The log mutex serializes rewrites with appends
+  within one Node, but is not shared with a replacement Node opening the same files.
+  Hosts must await consuming `NodeRuntime::stop` before reopening a runtime profile:
+  it closes producer admission, aborts and joins the runtime tasks, cancels owned
+  accepted connections and private-route probe children and waits for their actual
+  termination, and waits for admitted
+  blocking profile rewrites, delivery recovery and peer-cache writes to finish.
+  Runtime Drop only requests cancellation and cannot provide that retirement barrier.
+  This is in-process runtime ownership; external SDK operations and host file staging
+  require the host's own lifecycle serialization, and no cross-process lease is implied.
 
 ## 4. Networking & delivery (`discovery/`, `node/`, `postoffice/`)
 

@@ -46,6 +46,10 @@ pub struct PersistentEventLog {
 }
 
 impl PersistentEventLog {
+    #[cfg(test)]
+    pub(crate) fn before_rewrite_rename(&mut self, hook: Box<dyn FnOnce() + Send + Sync>) {
+        self.file.before_rewrite_rename = Some(hook);
+    }
     /// Open (or create) the log at `path`, replaying any stored events.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, events) = EncryptedRecordLog::open(path, password, MAGIC)?;

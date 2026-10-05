@@ -40,6 +40,8 @@ pub struct EncryptedRecordLog<R> {
     magic: [u8; 6],
     path: PathBuf,
     poisoned: bool,
+    #[cfg(test)]
+    pub(crate) before_rewrite_rename: Option<Box<dyn FnOnce() + Send + Sync>>,
     _marker: PhantomData<R>,
 }
 
@@ -75,6 +77,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                         magic: *magic,
                         path: path.to_path_buf(),
                         poisoned: false,
+                        #[cfg(test)]
+                        before_rewrite_rename: None,
                         _marker: PhantomData,
                     },
                     Vec::new(),
@@ -115,6 +119,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 magic: *magic,
                 path: path.to_path_buf(),
                 poisoned: false,
+                #[cfg(test)]
+                before_rewrite_rename: None,
                 _marker: PhantomData,
             },
             records,
@@ -253,6 +259,10 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         // Reopen before replacing the live path. If this fails, the original log is
         // untouched and the caller can safely retry the compaction.
         let f = OpenOptions::new().read(true).append(true).open(&tmp)?;
+        #[cfg(test)]
+        if let Some(hook) = self.before_rewrite_rename.take() {
+            hook();
+        }
         std::fs::rename(&tmp, &self.path)?;
         // Keep the already-open handle: it refers to the rewritten inode even after the
         // rename, so there is no post-rename reopen failure that could leave `self.file`

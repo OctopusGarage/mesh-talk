@@ -90,8 +90,8 @@ impl From<std::io::Error> for RuntimeError {
     }
 }
 
-/// A running node plus the background tasks that drive it. Dropping it
-/// aborts every task (clean logout/shutdown).
+/// A running node plus the background tasks that drive it. Use [`Self::stop`]
+/// before reopening its stores. Drop only requests best-effort cancellation.
 pub struct NodeRuntime {
     node: Arc<Node>,
     roster: Arc<Mutex<Roster>>,
@@ -120,6 +120,22 @@ pub struct NodeRuntime {
 }
 
 impl NodeRuntime {
+    /// Retire runtime producers before a host reopens this profile. Admission
+    /// closes first, then task futures are cancelled and joined, and admitted
+    /// blocking operations finish. No timeout permits a live writer to escape.
+    ///
+    /// This does not cancel arbitrary SDK calls through externally held Node
+    /// references; hosts must also serialize their own profile operations.
+    pub async fn stop(mut self) {
+        self.node.runtime_work.close();
+        for task in &self.tasks {
+            task.abort();
+        }
+        for task in std::mem::take(&mut self.tasks) {
+            let _ = task.await;
+        }
+        self.node.runtime_work.drain().await;
+    }
     /// Open the per-account node under `base_dir/accounts/<account_id>/` (keystore +
     /// durable logs encrypted with `password`), advertise `display_name`, and start
     /// discovery + the accept loop + a periodic post-office drain + an inbound
@@ -737,6 +753,7 @@ impl NodeRuntime {
 
 impl Drop for NodeRuntime {
     fn drop(&mut self) {
+        self.node.runtime_work.close();
         for task in &self.tasks {
             task.abort();
         }
@@ -746,6 +763,10 @@ impl Drop for NodeRuntime {
 #[cfg(test)]
 #[path = "runtime_privacy_tests.rs"]
 mod privacy_tests;
+
+#[cfg(test)]
+#[path = "runtime_retirement_tests.rs"]
+mod retirement_tests;
 
 #[cfg(test)]
 mod tests {

@@ -18,7 +18,7 @@ const MAX_SERVE_ROUNDS: usize = 10_000;
 const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Ceiling on concurrently-served inbound connections, so a flood of TCP + Noise handshakes
 /// can't spawn unbounded tasks. Generous for a LAN; excess connections wait for a slot.
-const MAX_CONCURRENT_CONNS: usize = 256;
+pub(super) const MAX_CONCURRENT_CONNS: usize = 256;
 
 impl Node {
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
@@ -75,7 +75,11 @@ impl Node {
 
     async fn accept_connections(self: Arc<Self>, listener: TcpListener) {
         let conns = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS));
+        // Dropping this loop aborts children; their runtime work permits remain
+        // held until Tokio actually destroys each connection future.
+        let mut connections = tokio::task::JoinSet::new();
         loop {
+            while connections.try_join_next().is_some() {}
             // Reserve a connection slot BEFORE accepting, so we never serve more than the cap;
             // excess inbound connections wait in the OS accept queue until a slot frees.
             let permit = match Arc::clone(&conns).acquire_owned().await {
@@ -96,12 +100,19 @@ impl Node {
                 }
             };
             let node = Arc::clone(&self);
-            tokio::spawn(async move {
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
+            connections.spawn(work.track(async move {
                 let _permit = permit; // held for the connection's lifetime, freed on drop
+                #[cfg(test)]
+                if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
+                    let _ = hook.send(());
+                }
                 if let Ok(channel) = node.privacy_accept(stream).await {
                     node.serve_connection(channel).await;
                 }
-            });
+            }));
         }
     }
 

@@ -166,9 +166,21 @@ impl std::error::Error for NodeError {}
 /// to the latest action `(wall_clock_ms, payload)`. See the `my_dm_reactions` field.
 type MyReactions = HashMap<(ConversationId, EventId, String), (u64, ReactionPayload)>;
 
+#[cfg(test)]
+type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
+
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
+    #[cfg(test)]
+    pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) peer_snapshot_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) remember_peer_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) accepted_hook: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
@@ -456,6 +468,15 @@ impl Node {
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
         Ok(Arc::new(Self {
+            runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
+            #[cfg(test)]
+            delivery_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            peer_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            remember_peer_hook: Mutex::new(None),
+            #[cfg(test)]
+            accepted_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
             account,
