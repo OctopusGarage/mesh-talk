@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, signedPeerObservation } from "./native-core-scenarios.mjs";
+import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -148,7 +148,8 @@ async function key(value) {
   assert.ok(Number.isInteger(pid) && owned.has(app), "keyboard targets only the owned native application");
   async function input(binary, args) {
     const child = launch(binary, args);
-    await until("native keyboard helper completion", () => !owned.has(child), 10000);
+    try { await until("native keyboard helper completion", () => !owned.has(child), 10000); }
+    catch (error) { throw new Error(`${error.message}; helper pid=${child.pid}; output=${redact(child.output.slice(-2000))}`); }
     assert.equal(child.exitCode, 0, `native keyboard helper failed: ${child.output}`);
     return child.output.trim();
   }
@@ -157,7 +158,7 @@ async function key(value) {
     const keyName = { "\uE004": "Tab", "\uE007": "Enter", "\uE00C": "Escape", "\uE00E": "PageUp" }[value];
     await appKitKey(keyName);
   } else if (process.platform === "win32") {
-    await input("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$shell = New-Object -ComObject WScript.Shell; if (-not $shell.AppActivate(${pid})) { throw 'Owned application could not be activated' }; Start-Sleep -Milliseconds 200; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${mapping[1]}')`]);
+    await input("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", nativeWindowsKeyboardScript(pid, value)]);
   } else {
     const windows = await input("xdotool", ["search", "--onlyvisible", "--pid", String(pid)]);
     const window = windows.split("\n")[0];
@@ -332,11 +333,12 @@ try {
   await stop(app);
   await startApp();
   await login(userName);
-  await restartedCoreScenarios(coreContext, coreState);
-  await receiptRestartScenario(coreContext, receiptState);
+  const coldReceiptCheckpoint = await receiptColdRestartCheckpoint(coreContext, receiptState);
   await coreContext.restartPeer();
   await signedPeerObservation(coreContext);
   await until("same account rediscovered after receiver restart", async () => (await observe("list_accounts")).some(a => a.account_id === account && a.names.includes(peerName)));
+  await restartedCoreScenarios(coreContext, coreState);
+  await receiptRestartScenario(coreContext, receiptState, coldReceiptCheckpoint);
   const restoredPrivacy = await privacyPolicy();
   assert.equal(restoredPrivacy.invisible, true);
   assert.ok(restoredPrivacy.allowed_accounts.some(a => a.id === account && a.source === "Manual"));

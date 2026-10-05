@@ -27,7 +27,8 @@ test("receipt phases reject changed identity, malformed IDs and false state", as
   for (const patch of [{ owner: "b".repeat(36) }, { account: "e".repeat(32) }, { ids: [...ids].reverse() }]) assert.ok(validateReceiptSequence([observation, { ...observation, ...patch }, observation]).length);
   const durable = { ...observation, statuses: ["delivered", "delivered", "delivered"], sameKeystorePeerRestart: true, actualProcessRestart: true };
   assert.ok(validateObservations("receipt-source-restart-durable", durable).length, "online receiver can hide missing persisted delivery");
-  assert.deepEqual(validateObservations("receipt-source-restart-durable", { ...durable, peerOfflineDuringSourceRestart: true }), []);
+  assert.ok(validateObservations("receipt-source-restart-durable", { ...durable, peerOfflineDuringSourceRestart: true }).length, "offline backend checkpoint is required before online rendering");
+  assert.deepEqual(validateObservations("receipt-source-restart-durable", { ...durable, peerOfflineDuringSourceRestart: true, offlineBackendDurabilityVerified: true, coldIds: ids, coldStatuses: ["delivered", "delivered", "delivered"], uiVerifiedAfterPeerRestart: true }), []);
 });
 test("requires native invisible-mode, reply and restart evidence", () => {
   for (const name of ["privacy-mode", "privacy-reply", "privacy-restart"]) {

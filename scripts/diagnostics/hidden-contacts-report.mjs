@@ -38,6 +38,10 @@ export function validateObservations(name, observations, platform) {
     if (name === "receipt-source-restart-durable") {
       require(observations?.actualProcessRestart === true, "missing app restart");
       require(observations?.peerOfflineDuringSourceRestart === true, "receiver must remain exited throughout source restart");
+      require(observations?.offlineBackendDurabilityVerified === true, "missing offline backend checkpoint");
+      require(JSON.stringify(observations?.coldIds) === JSON.stringify(ids), "cold checkpoint IDs changed");
+      require(Array.isArray(observations?.coldStatuses) && observations.coldStatuses.length === 3 && observations.coldStatuses.every(status => status === "delivered"), "missing cold Delivered projection");
+      require(observations?.uiVerifiedAfterPeerRestart === true, "native cards checked after receiver rediscovery");
     }
   }
   if (name === "incoming-attachment") require(observations?.bytesVerified === true, "missing exact decrypted bytes");

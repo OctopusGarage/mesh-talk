@@ -2,6 +2,33 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Writable } from "node:stream";
 import { writeChildCommand } from "./native-core-scenarios.mjs";
+test("Windows native helper only emits bounded owned-PID control keys with ABI-sized SendInput", async () => {
+  const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
+  for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33]]) {
+    const script = nativeWindowsKeyboardScript(12345, key);
+    assert.ok(script.includes(`[NativeKeyboard]::SendOwned(12345, ${vk})`));
+    for (const text of ["GetForegroundWindow", "GetWindowThreadProcessId", "actualPid != ownedPid", "Marshal.SizeOf(typeof(INPUT))", "SendInput(2", "inserted != 2", "GetLastWin32Error", "LayoutKind.Explicit", "MOUSEINPUT", "KEYEVENTF_KEYUP", "Mark 'start'", "Mark 'activate'", "Mark 'compiled'", "keyboard:owned", "Mark 'sent'", "Out.Flush"]) assert.ok(script.includes(text), text);
+    assert.ok(!script.includes("SendWait") && !script.includes("dispatchEvent"));
+  }
+  for (const pid of [0, -1, NaN, 1.5, "123;evil"]) assert.throws(() => nativeWindowsKeyboardScript(pid, "\uE00C"));
+  for (const key of ["a", "{ESC}", "\uE008"]) assert.throws(() => nativeWindowsKeyboardScript(12345, key));
+  const { readFile } = await import("node:fs/promises");
+  const runner = await readFile(new URL("./hidden-contacts.mjs", import.meta.url), "utf8");
+  assert.ok(runner.includes('until("native keyboard helper completion", () => !owned.has(child), 10000)'));
+  assert.ok(runner.includes("redact(child.output.slice(-2000))"));
+  assert.ok(runner.includes("nativeWindowsKeyboardScript(pid, value)"));
+});
+test("cold receipt checkpoint requires exited peer and durable original IDs before navigation", async () => {
+  const { receiptColdRestartCheckpoint } = await import("./native-core-scenarios.mjs");
+  const ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+  const state = { owner: "owner", ids };
+  const c = { owner: "owner", account: "target", peerExited: () => true, observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "delivered" })) };
+  const checkpoint = await receiptColdRestartCheckpoint(c, state);
+  assert.deepEqual(checkpoint.ids, ids);
+  assert.equal(checkpoint.offlineBackendDurabilityVerified, true);
+  await assert.rejects(receiptColdRestartCheckpoint({ ...c, peerExited: () => false }, state));
+  await assert.rejects(receiptColdRestartCheckpoint({ ...c, observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })) }, state));
+});
 test("receipt evidence rejects sparse missing or changed message IDs", async () => {
   const { orderedReceiptStatuses } = await import("./native-core-scenarios.mjs");
   const ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];

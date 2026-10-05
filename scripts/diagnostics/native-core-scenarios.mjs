@@ -27,6 +27,52 @@ second line
 第三行`, `long-${nonce}-` + "mesh消息🙂 ".repeat(300) + `end-${nonce}`];
 }
 
+// CI-only OS input, never DOM keyboard events. INPUT's union includes MOUSEINPUT
+// so Marshal.SizeOf retains the native x64 40-byte layout (not keyboard-only 32).
+export function nativeWindowsKeyboardScript(pid, key) {
+  const vk = new Map([["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33]]).get(key);
+  assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid <= 0xffffffff, "owned Windows PID");
+  assert.ok(vk, "allowlisted native control key");
+  return `$ErrorActionPreference = 'Stop';
+function Mark($phase) { [Console]::WriteLine('keyboard:' + $phase); [Console]::Out.Flush() }
+Mark 'start';
+$shell = New-Object -ComObject WScript.Shell;
+if (-not $shell.AppActivate(${pid})) { throw 'Owned application could not be activated' }
+Mark 'activate'; Start-Sleep -Milliseconds 200;
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NativeKeyboard {
+  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public UIntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public UIntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public MOUSEINPUT mi; }
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION data; }
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", SetLastError=true)] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+  [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+  public static void SendOwned(uint ownedPid, ushort vk) {
+    if (vk != 9 && vk != 13 && vk != 27 && vk != 33) throw new InvalidOperationException("Unsupported control key");
+    const uint KEYEVENTF_KEYUP = 2;
+    uint extended = vk == 33 ? 1u : 0u;
+    INPUT[] inputs = new INPUT[2];
+    inputs[0].type = inputs[1].type = 1;
+    inputs[0].data.ki.wVk = inputs[1].data.ki.wVk = vk;
+    inputs[0].data.ki.dwFlags = extended;
+    inputs[1].data.ki.dwFlags = extended | KEYEVENTF_KEYUP;
+    uint actualPid;
+    if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) == 0 || actualPid != ownedPid) throw new InvalidOperationException("Foreground window is not owned application");
+    Console.WriteLine("keyboard:owned"); Console.Out.Flush();
+    if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) == 0 || actualPid != ownedPid) throw new InvalidOperationException("Foreground ownership changed before SendInput");
+    uint inserted = SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
+    if (inserted != 2) throw new InvalidOperationException("SendInput inserted=" + inserted + " Win32Error=" + Marshal.GetLastWin32Error());
+  }
+}
+'@
+Mark 'compiled';
+[NativeKeyboard]::SendOwned(${pid}, ${vk});
+Mark 'sent';`;
+}
+
 export function orderedReceiptStatuses(ids, records) {
   assert.equal(records.length, ids.length, "all requested receipt IDs have a projection");
   return ids.map(id => {
@@ -37,9 +83,27 @@ export function orderedReceiptStatuses(ids, records) {
   });
 }
 
-async function receiptPhase(c, state, name, expected, historical = false) {
+export async function receiptColdRestartCheckpoint(c, state) {
+  assert.equal(c.peerExited(), true, "receiver exited before cold backend checkpoint");
+  assert.equal(c.owner, state.owner, "original receipt owner restored");
+  const history = await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 });
+  for (const id of state.ids) assert.equal(history.filter(item => item.id === id && item.from_me).length, 1, "cold history retains original ID exactly once");
+  const statuses = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
+  assert.deepEqual(statuses, ["delivered", "delivered", "delivered"], "Delivered persisted without a live receipt producer");
+  assert.equal(c.peerExited(), true, "receiver remained exited throughout cold backend checkpoint");
+  return { owner: c.owner, account: c.account, ids: [...state.ids], statuses, offlineBackendDurabilityVerified: true, peerOfflineDuringSourceRestart: true };
+}
+
+async function receiptPhase(c, state, name, expected, historical = false, cold = undefined) {
   assert.equal(c.owner, state.owner, "receipt owner unchanged");
-  if (historical) assert.equal(c.peerExited(), true, "receiver remains exited during cold source verification");
+  if (historical) {
+    assert.equal(cold?.offlineBackendDurabilityVerified, true, "cold checkpoint precedes receiver restart/UI navigation");
+    assert.equal(cold.owner, c.owner);
+    assert.equal(cold.account, c.account);
+    assert.deepEqual(cold.ids, state.ids);
+    assert.deepEqual(cold.statuses, ["delivered", "delivered", "delivered"]);
+    assert.equal(c.peerExited(), false, "UI projection verified after receiver rediscovery");
+  }
   const history = await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 });
   for (const id of state.ids) assert.equal(history.filter(item => item.id === id && item.from_me).length, 1, "original accepted history entry retained once");
   const statuses = await c.until(`original IDs become ${expected}`, async () => {
@@ -51,8 +115,7 @@ async function receiptPhase(c, state, name, expected, historical = false) {
     else await revealLatestNativeMessage(c, label);
     await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
   }
-  if (historical) assert.equal(c.peerExited(), true, "receiver still exited after durable receipt verification");
-  await c.passed(name, { owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && c.peerExited(), acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" });
+  await c.passed(name, { owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && cold.peerOfflineDuringSourceRestart, offlineBackendDurabilityVerified: historical && cold.offlineBackendDurabilityVerified, coldIds: cold?.ids, coldStatuses: cold?.statuses, uiVerifiedAfterPeerRestart: historical, acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" });
 }
 
 export async function receiptScenarios(c) {
@@ -78,9 +141,9 @@ export async function receiptScenarios(c) {
   return state;
 }
 
-export async function receiptRestartScenario(c, state) {
+export async function receiptRestartScenario(c, state, cold) {
   await c.click(c.row());
-  await receiptPhase(c, state, "receipt-source-restart-durable", "delivered", true);
+  await receiptPhase(c, state, "receipt-source-restart-durable", "delivered", true, cold);
 }
 
 export async function signedPeerObservation({ peer, userId, peerName, observe, until }) {
