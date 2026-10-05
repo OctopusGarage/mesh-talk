@@ -10,6 +10,126 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 
 #[tokio::test]
+async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claiming_custody() {
+    use crate::eventlog::sync::SyncStore;
+    use crate::transport::SecureChannel;
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let secret = bob.secret_bytes();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", 1);
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"before rekey", None)
+        .await
+        .unwrap();
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log
+        .lock()
+        .unwrap()
+        .append_durable(original.clone())
+        .unwrap();
+    b.emit_new_messages(original.conversation_id);
+    assert_eq!(rx.try_recv().unwrap().text, b"before rekey");
+    let receipt = b.delivery.lock().unwrap().retry_receipts(1)[0]
+        .destination
+        .event
+        .clone();
+    let control = receipt.conversation_id;
+    a.process_delivery_control(&receipt, &bp, &mut a.delivery.lock().unwrap());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    let pending = a
+        .enqueue_to_account(&b.account_id(), b"still awaiting at rekey", None)
+        .await
+        .unwrap();
+    assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
+    let adopted = Account::generate();
+    b.persist_account_adoption(&adopted.account_id(), || Ok(()))
+        .unwrap();
+    drop(b);
+    let bob = DeviceIdentity::from_secret_bytes(secret.0, secret.1);
+    let new_proof = Announce::new_with_account(&bob, &adopted, "Rekeyed Bob", 1);
+    let (b, _) = node(bd.path(), bob, adopted, &ap);
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&new_proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    assert!(super::delivery_receipt::open_receipt(
+        &a.identity,
+        &a.account_id(),
+        &new_proof,
+        &receipt
+    )
+    .is_none());
+    assert!(a.log.lock().unwrap().has(&receipt.id));
+    assert!(b.log.lock().unwrap().has(&receipt.id));
+    assert_eq!(
+        a.sync_store(&new_proof.public())
+            .lock()
+            .unwrap()
+            .event_ids(&control),
+        vec![receipt.id]
+    );
+    assert!(b
+        .sync_store(&ap.public())
+        .lock()
+        .unwrap()
+        .event_ids(&control)
+        .is_empty());
+    assert!(!b
+        .sync_store(&ap.public())
+        .lock()
+        .unwrap()
+        .durable_have(&control, &receipt.id));
+    let (aio, bio) = tokio::io::duplex(65536);
+    let responder = b.clone();
+    let server = tokio::spawn(async move {
+        let mut channel = SecureChannel::accept(bio, &responder.identity)
+            .await
+            .unwrap();
+        let store = responder.sync_store(channel.peer_identity());
+        // Diagnostic cutoff makes the old 10,000-round stall a deterministic failure.
+        let mut handled = 0;
+        while handled < 9 {
+            match super::session::serve_one(&mut channel, &store)
+                .await
+                .unwrap()
+            {
+                super::session::Served::Closed => break,
+                super::session::Served::Handled(_) => handled += 1,
+            }
+        }
+        handled
+    });
+    let mut channel = SecureChannel::connect(aio, &a.identity, Some(&new_proof.public()))
+        .await
+        .unwrap();
+    let peer = channel.peer_identity().clone();
+    let result = super::session::request_round(&mut channel, &a.sync_store(&peer), control).await;
+    drop(channel);
+    let handled = server.await.unwrap();
+    assert!(matches!(
+        result,
+        Err(super::session::SessionError::NoProgress)
+    ));
+    assert!(handled < 9, "sync must stop before the diagnostic cutoff");
+    assert!(!b
+        .sync_store(&ap.public())
+        .lock()
+        .unwrap()
+        .durable_have(&control, &receipt.id));
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
+}
+
+#[tokio::test]
 async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -242,19 +362,36 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
         .unwrap()
         .file_scopes
         .remove(&file);
-    let at = tokio::spawn(a.clone().run_accept_loop(al));
-    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        // Drive the two authorized conversations independently. A missing chunk
+        // scope must not make card acknowledgement depend on a chunk attempt.
+        let manifest_conv = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+            .event
+            .conversation_id;
+        sync_delivery_test_stage(&a, &b, &bl, manifest_conv).await;
+        assert!(b.read_file(file).is_err());
+        let control = super::delivery_receipt::delivery_conversation_id(
+            &a.identity.public(),
+            &b.identity.public(),
+        );
+        sync_delivery_test_stage(&b, &a, &al, control).await;
     })
     .await;
-    at.abort();
-    bt.abort();
-    let _ = at.await;
-    let _ = bt.await;
+    drop(al);
+    drop(bl);
     assert!(confirmed.is_ok());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert!(
+        !a.privacy
+            .state
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .file_scopes
+            .contains_key(&file),
+        "card ACK is installed before the missing chunk scope is restored"
+    );
     assert!(
         b.read_file(file).is_err(),
         "card delivery is independent of complete download"
@@ -293,8 +430,9 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
             .collect::<Vec<_>>(),
         ids
     );
-    let at = tokio::spawn(a.clone().run_accept_loop(al));
-    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(a.clone().run_accept_loop(al));
+    workers.spawn(b.clone().run_accept_loop(bl));
     let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !b
             .read_file(file)
@@ -310,10 +448,7 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
         }
     })
     .await;
-    at.abort();
-    bt.abort();
-    let _ = at.await;
-    let _ = bt.await;
+    workers.shutdown().await;
     assert!(
         completed.is_ok(),
         "restart must restore immutable chunk work and private scope"
@@ -1529,6 +1664,61 @@ fn node(
 ) -> (Arc<Node>, mpsc::UnboundedReceiver<ReceivedDm>) {
     let (node, messages, _) = node_with_files(dir, identity, account, proof);
     (node, messages)
+}
+
+async fn sync_delivery_test_stage(
+    source: &Arc<Node>,
+    destination: &Arc<Node>,
+    listener: &TcpListener,
+    conversation: ConversationId,
+) {
+    // Joining borrowed futures keeps cancellation owned by the enclosing deadline.
+    let accept = async {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Permission publication may have left a closed best-effort dial
+            // queued before this independently driven stage starts accepting.
+            if let Ok(channel) = destination.privacy_accept(stream).await {
+                destination.serve_connection(channel).await;
+                break;
+            }
+        }
+    };
+    let send = async {
+        let mut channel = source
+            .privacy_dial(
+                listener.local_addr().unwrap(),
+                &destination.identity.public(),
+            )
+            .await
+            .unwrap();
+        super::session::request_round(
+            &mut channel,
+            &source.sync_store(&destination.identity.public()),
+            conversation,
+        )
+        .await
+        .unwrap();
+        drop(channel);
+        source.emit_new_messages(conversation);
+    };
+    tokio::join!(accept, send);
+}
+
+async fn wait_for_durable_delivery(node: &Node, id: EventId) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let notified = node.delivery_status_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if node.delivery_status(id) == Some(DeliveryStatus::Delivered) {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("authenticated receipt durably installed within 3s");
 }
 
 fn node_with_files(
@@ -3622,7 +3812,7 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
         .unwrap()
         .unwrap();
     b.flush_delivery_receipts(8).await;
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    wait_for_durable_delivery(&a, first).await;
     assert_eq!(a.delivery_status(first), Some(DeliveryStatus::Delivered));
     b.clear_account_conversation(&a.account_id()).unwrap();
     bt.abort();
@@ -3655,7 +3845,7 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
         .unwrap()
         .unwrap();
     b.flush_delivery_receipts(8).await;
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    wait_for_durable_delivery(&a, second).await;
     assert_eq!(a.delivery_status(second), Some(DeliveryStatus::Delivered));
     let adopted = Account::generate();
     b.persist_account_adoption(&adopted.account_id(), || {
@@ -3698,7 +3888,7 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
         .unwrap()
         .unwrap();
     b.flush_delivery_receipts(8).await;
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    wait_for_durable_delivery(&a, third).await;
     assert_eq!(a.delivery_status(third), Some(DeliveryStatus::Delivered));
     at.abort();
     bt.abort();

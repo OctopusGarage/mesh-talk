@@ -9,6 +9,31 @@ use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
 #[tokio::test]
+async fn accepted_privacy_socket_disables_nagle_after_authenticated_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client_identity = alice.identity.public();
+    let expected = bob.identity.public();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let socket = stream.into_std().unwrap();
+        let monitor = socket.try_clone().unwrap();
+        assert!(!monitor.nodelay().unwrap());
+        let stream = tokio::net::TcpStream::from_std(socket).unwrap();
+        let mut channel = bob.privacy_accept(stream).await.unwrap();
+        assert_eq!(channel.peer_identity(), &client_identity);
+        channel.send(b"accepted").await.unwrap();
+        monitor.nodelay().unwrap()
+    });
+    let mut channel = alice.privacy_dial(addr, &expected).await.unwrap();
+    assert_eq!(channel.recv().await.unwrap(), b"accepted");
+    assert!(server.await.unwrap(), "accepted sockets must disable Nagle");
+}
+
+#[tokio::test]
 async fn configured_public_node_receives_encrypted_accountless_discovery_dm_and_file() {
     let dir = tempfile::tempdir().unwrap();
     let (bob, mut rx) = node(&dir.path().join("bob"));

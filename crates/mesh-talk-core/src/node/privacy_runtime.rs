@@ -847,6 +847,7 @@ impl Node {
         stream: TcpStream,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         let ip = stream.peer_addr()?.ip();
+        stream.set_nodelay(true)?;
         let own = self.own_presence();
         let _operation = self.privacy.gate.read().await;
         let generation = self.privacy.generation.load(Ordering::SeqCst);

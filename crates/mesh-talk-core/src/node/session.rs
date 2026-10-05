@@ -107,6 +107,8 @@ pub enum SessionError {
     Serialization(String),
     /// Received a wire message that doesn't fit the protocol state.
     UnexpectedMessage,
+    /// Neither local application nor acceptance of the previous push advanced.
+    NoProgress,
 }
 
 impl std::fmt::Display for SessionError {
@@ -115,6 +117,7 @@ impl std::fmt::Display for SessionError {
             SessionError::Transport(e) => write!(f, "sync transport error: {e}"),
             SessionError::Serialization(m) => write!(f, "sync serialization error: {m}"),
             SessionError::UnexpectedMessage => write!(f, "unexpected sync message"),
+            SessionError::NoProgress => write!(f, "sync made no progress"),
         }
     }
 }
@@ -295,6 +298,7 @@ where
     let mut rounds = 0u32;
     let mut first_have = 0usize;
     let mut pushed_total = 0usize;
+    let mut previous_push = std::collections::HashSet::new();
     for round in 0..MAX_SYNC_ROUNDS {
         let have = {
             let store = store.lock().expect("store mutex not poisoned");
@@ -337,8 +341,18 @@ where
             result
         };
         let made_progress = report.applied > 0;
+        // Sending is not progress: projected stores can ingest a duplicate but
+        // omit it from their Have set. Require evidence of acceptance before
+        // repeating a push, unless this round advanced our own store instead.
+        if !previous_push.is_empty()
+            && !made_progress
+            && !response.have.iter().any(|id| previous_push.contains(id))
+        {
+            return Err(SessionError::NoProgress);
+        }
         let more_to_push = !followup.events.is_empty();
         pushed_total += followup.events.len();
+        previous_push = followup.events.iter().map(|event| event.id).collect();
 
         channel
             .send(&encode(&SyncWire::Followup(followup))?)
@@ -354,6 +368,9 @@ where
 
         if !made_progress && !more_to_push {
             break;
+        }
+        if round + 1 == MAX_SYNC_ROUNDS {
+            return Err(SessionError::NoProgress);
         }
     }
     // One line per conversation sync. `have` is the id-set size N we streamed (≈32·N bytes
@@ -1151,6 +1168,44 @@ mod tests {
             log.append(event).unwrap();
         }
         log
+    }
+
+    #[tokio::test]
+    async fn request_round_pushes_multiple_frames_when_remote_acceptance_advances() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let (aio, bio) = tokio::io::duplex(512 * 1024);
+        let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
+        let ids = log.event_ids(&conv());
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
+            let store = Mutex::new(EventLog::default());
+            let mut handled = 0;
+            loop {
+                match serve_one(&mut channel, &store).await.unwrap() {
+                    Served::Closed => break,
+                    Served::Handled(_) => handled += 1,
+                }
+            }
+            (store.into_inner().unwrap(), handled)
+        });
+        let mut channel = SecureChannel::connect(aio, &alice, None).await.unwrap();
+        let store = Mutex::new(log);
+        let report = request_round(&mut channel, &store, conv()).await.unwrap();
+        drop(channel);
+        let (remote, handled) = server.await.unwrap();
+        assert_eq!(
+            report.applied, 0,
+            "progress comes entirely from remote acceptance"
+        );
+        assert!(
+            handled > 9,
+            "transfer requires more rounds than the stall diagnostic cutoff"
+        );
+        assert_eq!(remote.event_ids(&conv()), ids);
+        for event in store.lock().unwrap().events(&conv()) {
+            assert_eq!(remote.get(&event.id), Some(event));
+        }
     }
 
     #[tokio::test]
