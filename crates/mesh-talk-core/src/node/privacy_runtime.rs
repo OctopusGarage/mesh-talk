@@ -817,10 +817,16 @@ impl Node {
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        #[cfg(test)]
+        let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
         let mut addr = addr;
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         let own = self.own_presence();
+        #[cfg(test)]
+        timing.phase("dial-privacy-gate");
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        timing.phase("dial-admission");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         let announce = self
             .roster
@@ -832,7 +838,14 @@ impl Node {
             return Err(TransportError::AdmissionDenied);
         }
         let mut channel = tokio::time::timeout(super::transport::HANDSHAKE_TIMEOUT, async {
+            #[cfg(test)]
+            timing.phase("dial-tcp-connect");
             let stream = TcpStream::connect(addr).await?;
+            #[cfg(test)]
+            {
+                timing.socket(&stream);
+                timing.phase("dial-noise-presence");
+            }
             stream.set_nodelay(true)?;
             SecureChannel::connect_with_presence(
                 stream,
@@ -844,6 +857,8 @@ impl Node {
         })
         .await
         .map_err(|_| TransportError::Noise("dial timed out".into()))??;
+        #[cfg(test)]
+        timing.phase("dial-proof-validation");
         if let Some(new) = channel.peer_announcement() {
             let state = self
                 .privacy
@@ -858,22 +873,36 @@ impl Node {
                 }
             }
         }
+        #[cfg(test)]
+        timing.phase("dial-remember-peer");
         self.remember_peer(
             channel.peer_identity(),
             channel.peer_announcement(),
             addr.ip(),
         )?;
         self.guard_channel(&mut channel, generation);
+        #[cfg(test)]
+        timing.finish();
         Ok(channel)
     }
     pub(in crate::node) async fn privacy_accept(
         &self,
         stream: TcpStream,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        #[cfg(test)]
+        let mut timing = super::delivery_runtime::TestTiming::new("accept-tcp-ready");
+        #[cfg(test)]
+        timing.socket(&stream);
         let ip = stream.peer_addr()?.ip();
         stream.set_nodelay(true)?;
+        #[cfg(test)]
+        timing.phase("accept-own-presence");
         let own = self.own_presence();
+        #[cfg(test)]
+        timing.phase("accept-privacy-gate");
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        timing.phase("accept-noise-presence");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         let mut channel = tokio::time::timeout(
             super::transport::HANDSHAKE_TIMEOUT,
@@ -883,8 +912,12 @@ impl Node {
         )
         .await
         .map_err(|_| TransportError::Noise("accept timed out".into()))??;
+        #[cfg(test)]
+        timing.phase("accept-remember-peer");
         self.remember_peer(channel.peer_identity(), channel.peer_announcement(), ip)?;
         self.guard_channel(&mut channel, generation);
+        #[cfg(test)]
+        timing.finish();
         Ok(channel)
     }
 }

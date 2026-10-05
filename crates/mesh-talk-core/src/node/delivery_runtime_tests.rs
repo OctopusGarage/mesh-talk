@@ -905,6 +905,7 @@ async fn private_file_restart(delay: FilePeerDelay) {
 }
 
 async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
+    let mut case = super::delivery_runtime::TestTiming::new("file-restart-case-setup");
     use crate::eventlog::sync::SyncStore;
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
@@ -960,6 +961,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .file_scopes
             .remove(file);
     }
+    case.phase("file-restart-card-ack-preparation");
     let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         // Drive the two authorized conversations independently. A missing chunk
         // scope must not make card acknowledgement depend on a chunk attempt.
@@ -979,7 +981,10 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         assert!(confirmed.is_ok());
         // Prepare independent already-acknowledged cards. The original single
         // card's five-second setup budget is not an aggregate 24-card budget.
-        for _ in 1..count {
+        for card_index in 1..count {
+            if std::env::var("MESH_TALK_TEST_TIMING").as_deref() == Ok("1") {
+                eprintln!("test-timing batch_card_index={card_index} phase=enqueue-and-card-ack");
+            }
             let (id, file) = a
                 .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
                 .await
@@ -1291,6 +1296,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         .next_file_destination(None)
         .is_none());
     assert!(a.delivery.lock().unwrap().file_card(id).is_some());
+    case.finish();
 }
 
 async fn delayed_private_file_peer(
@@ -1307,11 +1313,16 @@ async fn delayed_private_file_peer(
             let node = node.clone();
             let observation = observation.clone();
             connections.spawn(async move {
+                let mut timing =
+                    super::delivery_runtime::TestTiming::new("delayed-peer-tcp-accepted");
+                timing.socket(&stream);
                 // Each protocol phase takes less than the unchanged 400ms
                 // operation budget. Their aggregate deterministically exceeds it.
                 if delay == FilePeerDelay::Aggregate {
+                    timing.phase("delayed-peer-before-accept-150ms");
                     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 }
+                timing.phase("delayed-peer-privacy-accept");
                 let Ok(mut channel) = node.privacy_accept(stream).await else {
                     return;
                 };
@@ -1323,6 +1334,11 @@ async fn delayed_private_file_peer(
                 let store = node.sync_store(&peer);
                 let mut file_channel = None;
                 while let Ok(bytes) = channel.recv().await {
+                    timing.phase(if super::session::requests_response(&bytes) {
+                        "delayed-peer-response-request"
+                    } else {
+                        "delayed-peer-followup"
+                    });
                     if file_channel.is_none()
                         && super::session::round_request_conversation(&bytes)
                             .is_some_and(|conv| node.file_progress(conv).is_some())
@@ -1363,8 +1379,10 @@ async fn delayed_private_file_peer(
                         // round past 400ms once; retries must abandon its socket.
                         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
                     }
+                    timing.phase("delayed-peer-serve-exchange");
                     match super::session::serve_wire_bytes(&mut channel, &store, &bytes).await {
                         Ok(super::session::Served::Handled(conv)) => {
+                            timing.phase("delayed-peer-process-events");
                             node.emit_new_messages(conv);
                             node.process_file_events(conv);
                             if conv == file
@@ -1385,6 +1403,8 @@ async fn delayed_private_file_peer(
                         _ => break,
                     }
                 }
+                timing.phase("delayed-peer-receive-ended");
+                timing.finish();
             });
             while connections.try_join_next().is_some() {}
         }
@@ -2603,6 +2623,7 @@ async fn sync_delivery_test_stage(
     conversation: ConversationId,
 ) {
     // Joining borrowed futures keeps cancellation owned by the enclosing deadline.
+    let mut timing = super::delivery_runtime::TestTiming::new("card-control-stage");
     let accept = async {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
@@ -2615,6 +2636,7 @@ async fn sync_delivery_test_stage(
         }
     };
     let send = async {
+        let mut timing = super::delivery_runtime::TestTiming::new("card-control-dial");
         let mut channel = source
             .privacy_dial(
                 listener.local_addr().unwrap(),
@@ -2622,6 +2644,7 @@ async fn sync_delivery_test_stage(
             )
             .await
             .unwrap();
+        timing.phase("card-control-request-round");
         super::session::request_round(
             &mut channel,
             &source.sync_store(&destination.identity.public()),
@@ -2631,11 +2654,14 @@ async fn sync_delivery_test_stage(
         .unwrap();
         drop(channel);
         source.emit_new_messages(conversation);
+        timing.finish();
     };
     tokio::join!(accept, send);
+    timing.finish();
 }
 
 async fn wait_for_durable_delivery(node: &Node, id: EventId) {
+    let mut timing = super::delivery_runtime::TestTiming::new("receipt-durable-wait-3s");
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             let notified = node.delivery_status_notify.notified();
@@ -2649,6 +2675,7 @@ async fn wait_for_durable_delivery(node: &Node, id: EventId) {
     })
     .await
     .expect("authenticated receipt durably installed within 3s");
+    timing.finish();
 }
 
 fn node_with_files(
@@ -4698,6 +4725,7 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
 
 #[tokio::test]
 async fn private_receipts_remain_projectable_after_clear_restart_and_account_adoption() {
+    let mut case = super::delivery_runtime::TestTiming::new("receipt-case-initial");
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
@@ -4743,6 +4771,7 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
         .unwrap();
     b.flush_delivery_receipts(8).await;
     wait_for_durable_delivery(&a, first).await;
+    case.phase("receipt-case-after-clear-restart");
     assert_eq!(a.delivery_status(first), Some(DeliveryStatus::Delivered));
     b.clear_account_conversation(&a.account_id()).unwrap();
     bt.abort();
@@ -4776,6 +4805,7 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
         .unwrap();
     b.flush_delivery_receipts(8).await;
     wait_for_durable_delivery(&a, second).await;
+    case.phase("receipt-case-after-account-adoption");
     assert_eq!(a.delivery_status(second), Some(DeliveryStatus::Delivered));
     let adopted = Account::generate();
     b.persist_account_adoption(&adopted.account_id(), || {
@@ -4824,4 +4854,5 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     bt.abort();
     let _ = at.await;
     let _ = bt.await;
+    case.finish();
 }

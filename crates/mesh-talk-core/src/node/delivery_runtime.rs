@@ -12,6 +12,101 @@ use crate::eventlog::{ConversationId, Event, EventId, LogError};
 const MAX_FILE_TRANSFERS: usize = 8;
 const FILE_TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
+// Test-only timing: a dropped span records cancellation/early return, not success.
+#[cfg(test)]
+pub(super) struct TestTiming {
+    id: u64,
+    started: std::time::Instant,
+    phase: &'static str,
+    enabled: bool,
+    finished: bool,
+    records: Vec<(&'static str, u128, u128)>,
+    ports: Option<(u16, u16)>,
+    omitted: usize,
+}
+
+#[cfg(test)]
+impl TestTiming {
+    pub(super) fn new(phase: &'static str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut timing = Self {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            started: std::time::Instant::now(),
+            phase,
+            enabled: std::env::var("MESH_TALK_TEST_TIMING").as_deref() == Ok("1"),
+            finished: false,
+            records: Vec::new(),
+            ports: None,
+            omitted: 0,
+        };
+        timing.mark(phase);
+        timing
+    }
+
+    pub(super) fn mark(&mut self, phase: &'static str) {
+        if self.enabled {
+            static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            if self.records.len() == 32 {
+                self.records.remove(0);
+                self.omitted += 1;
+            }
+            self.records.push((
+                phase,
+                self.started.elapsed().as_micros(),
+                EPOCH
+                    .get_or_init(std::time::Instant::now)
+                    .elapsed()
+                    .as_micros(),
+            ));
+        }
+    }
+
+    pub(super) fn phase(&mut self, phase: &'static str) {
+        self.phase = phase;
+        self.mark(phase);
+    }
+
+    pub(super) fn finish(&mut self) {
+        self.mark("complete");
+        self.finished = true;
+    }
+
+    pub(super) fn socket(&mut self, stream: &tokio::net::TcpStream) {
+        if self.enabled {
+            if let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) {
+                self.ports = Some((local.port(), remote.port()));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestTiming {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.mark("dropped");
+        }
+        if self.enabled {
+            use std::fmt::Write;
+            let mut output = String::new();
+            let _ = writeln!(
+                output,
+                "test-timing id={} finished={} last_phase={} omitted={} ports={:?}",
+                self.id, self.finished, self.phase, self.omitted, self.ports
+            );
+            for (phase, elapsed, tick) in &self.records {
+                let _ = writeln!(
+                    output,
+                    "test-timing id={} phase={phase} elapsed_us={elapsed} tick_us={tick}",
+                    self.id
+                );
+            }
+            // One stderr lock per bounded span, never one per protocol phase.
+            eprint!("{output}");
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum FilePhase {
     Dial,
@@ -1325,6 +1420,15 @@ impl Node {
             .fetch_max(transfers.len(), std::sync::atomic::Ordering::SeqCst);
         let transfer = transfers.get_mut(&key).unwrap();
         transfer.last_used = std::time::Instant::now();
+        #[cfg(test)]
+        let mut timing = TestTiming::new(match transfer.phase {
+            FilePhase::Dial => "file-dial",
+            FilePhase::Manifest => "file-manifest-exchange",
+            FilePhase::ManifestCustody => "file-manifest-custody",
+            FilePhase::InitialCustody => "file-initial-custody",
+            FilePhase::Chunks => "file-chunk-exchange",
+            FilePhase::FinalCustody => "file-final-custody",
+        });
         let outcome = tokio::time::timeout(
             std::time::Duration::from_millis(400),
             self.advance_file_transfer(transfer),
@@ -1332,6 +1436,16 @@ impl Node {
         .await;
         #[cfg(test)]
         let phase = transfer.phase;
+        #[cfg(test)]
+        {
+            timing.mark(match &outcome {
+                Ok(Ok(true)) => "file-retirable",
+                Ok(Ok(false)) => "file-clean-boundary",
+                Ok(Err(_)) => "file-error",
+                Err(_) => "file-400ms-cancelled",
+            });
+            timing.finish();
+        }
         match outcome {
             Ok(Ok(true)) => {
                 transfers.remove(&key);
