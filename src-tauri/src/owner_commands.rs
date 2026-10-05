@@ -356,6 +356,9 @@ mod tests {
         node: NodeState,
         webview: tauri::WebviewWindow<tauri::test::MockRuntime>,
         discovery_port: u16,
+        // Held-state probes must not consume Tauri's shared IPC worker threads.
+        // Kept alive until Drop has joined the actual node's retirement barrier.
+        _background: Option<tokio::runtime::Runtime>,
     }
 
     impl Fixture {
@@ -364,6 +367,16 @@ mod tests {
         }
 
         fn create(authenticated: bool) -> Self {
+            // These probes deliberately hold a synchronous privacy-state writer.
+            // Background readers can block indefinitely until the test releases it;
+            // isolate them so low-core runners can still execute registered logout.
+            let background = authenticated.then(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .unwrap()
+            });
             let password = if authenticated {
                 "password-owner"
             } else {
@@ -414,7 +427,7 @@ mod tests {
                 .unwrap();
             let reservation = reserve_discovery_port();
             let discovery_port = reservation.local_addr().unwrap().port();
-            let runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+            let startup = mesh_talk_core::node::NodeRuntime::start(
                 root.path(),
                 &owner,
                 "Alice",
@@ -425,7 +438,11 @@ mod tests {
                 |_| {},
                 |_| {},
                 |_| {},
-            ))
+            );
+            let runtime = match background.as_ref() {
+                Some(background) => background.block_on(startup),
+                None => tauri::async_runtime::block_on(startup),
+            }
             .unwrap();
             drop(reservation);
             *node.0.blocking_lock() = Some(runtime);
@@ -435,6 +452,7 @@ mod tests {
                 node,
                 webview,
                 discovery_port,
+                _background: background,
             }
         }
 
@@ -784,6 +802,11 @@ mod tests {
 
     fn registered_logout_during_local_grant_wait(command: &'static str) {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        // Routing also consults the held state synchronously. Keep only one
+        // deliberate blocker on Tauri's shared IPC pool, leaving logout runnable.
+        // Ordinary tests and product work remain concurrent.
+        static GRANT_WAIT_PROBES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _probe = GRANT_WAIT_PROBES.lock().unwrap();
         let fixture = Fixture::create(true);
         let lease = fixture.app_state.session().capture().unwrap();
         let owner = lease.owner().to_owned();
