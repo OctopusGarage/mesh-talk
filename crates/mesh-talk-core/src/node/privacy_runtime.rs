@@ -254,6 +254,19 @@ impl Node {
         self.change_allowed(account, true, PermissionSource::Initiated, || Ok(()))
             .await
     }
+    /// Await policy serialization without holding the host session. Then enclose
+    /// the complete synchronous local grant in the owner's operation guard.
+    pub(in crate::node) async fn initiate_contact_locally_if(
+        &self,
+        account: &str,
+        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let _operation = self.privacy.gate.write().await;
+        authorize(&mut || {
+            self.change_allowed_locked(account, true, PermissionSource::Initiated, || Ok(()))
+                .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))
+        })
+    }
     /// Recheck the active owner under the policy gate before committing an initiated grant.
     /// A prior manual grant is retained rather than demoted to initiated permission.
     pub async fn initiate_contact_if(
@@ -274,6 +287,17 @@ impl Node {
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
         let _operation = self.privacy.gate.write().await;
+        self.change_allowed_locked(account, allowed, source, authorize)
+    }
+    /// Caller holds the privacy gate. Keep the legacy authorization/validation
+    /// ordering; owner enqueue wraps this entire body before taking state locks.
+    fn change_allowed_locked(
+        &self,
+        account: &str,
+        allowed: bool,
+        source: PermissionSource,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
         let announcements = self
             .roster
             .lock()

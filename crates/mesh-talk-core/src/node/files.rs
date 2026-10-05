@@ -343,9 +343,9 @@ impl Node {
         .await
     }
 
-    /// Calls `authorize` before privacy grant/staging and again at final WAL
-    /// acceptance after staging. For each successful invocation, execute the
-    /// supplied synchronous operation exactly once and propagate its result.
+    /// Calls `authorize` initially, around the synchronous local privacy grant,
+    /// and at final WAL acceptance after staging. For each successful invocation,
+    /// execute the supplied synchronous operation exactly once and propagate its result.
     /// The final WAL operation is single-use and must run under the owner guard.
     pub async fn enqueue_file_to_account_progress_if(
         self: &Arc<Self>,
@@ -363,9 +363,8 @@ impl Node {
         {
             return Err(NodeError::UnknownPeer(target_account_id.to_string()));
         }
-        self.initiate_contact_locally(target_account_id)
-            .await
-            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
+        self.initiate_contact_locally_if(target_account_id, &mut authorize)
+            .await?;
 
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         // Record the outgoing file ONCE under the account conversation (the UI's host

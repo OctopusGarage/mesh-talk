@@ -9,6 +9,197 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
+async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_secret = alice.secret_bytes();
+    let account = Account::generate();
+    let account_secret = account.secret_bytes();
+    let bob = DeviceIdentity::generate();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&bob, &remote, "Bob", 1);
+    let (node, _) = node(dir.path(), alice, account, &proof);
+    let own = node.signed_announce("Alice", 1);
+    node.configure_privacy(
+        dir.path(),
+        "pw",
+        &own,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    let snapshot = |node: &Node| {
+        let state = node.privacy.state.read().unwrap();
+        let state = state.as_ref().unwrap();
+        (
+            state.policy.snapshot(),
+            state.proofs.announcements(),
+            state.proofs.account_for(&proof.public()),
+            state.routes.routes(),
+        )
+    };
+    let persisted = || {
+        ["privacy.policy", "peer-proofs", "peer-routes"]
+            .map(|name| std::fs::read(dir.path().join(name)).unwrap())
+    };
+    let before = snapshot(&node);
+    let before_disk = persisted();
+    let producer_files = || {
+        [
+            "events.log",
+            "sent.log",
+            "ratchet.sessions",
+            "received_files.log",
+            "delivery-transactions.log",
+            "delivery-outbox.log",
+        ]
+        .map(|name| match std::fs::read(dir.path().join(name)) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("producer snapshot read failed: {error}"),
+        })
+    };
+    let before_work = producer_files();
+    let path = dir.path().join("unstaged.txt");
+    std::fs::write(&path, b"must not be staged by an invalid owner").unwrap();
+    let gate = node.privacy.gate.clone().write_owned().await;
+    let owner = Arc::new(Mutex::new(true));
+    let progress = Arc::new(AtomicUsize::new(0));
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let mut entered = Some(entered);
+    let worker = node.clone();
+    let active = owner.clone();
+    let produced = progress.clone();
+    let target = remote.account_id();
+    let kind = kind.to_owned();
+    let pending = tokio::spawn(async move {
+        let authorize = move |operation: &mut dyn FnMut() -> Result<(), NodeError>| {
+            let owner = active.lock().unwrap();
+            if !*owner {
+                return Err(NodeError::Authorization("owner generation changed".into()));
+            }
+            let result = operation();
+            if result.is_ok() {
+                if let Some(entered) = entered.take() {
+                    let _ = entered.send(());
+                }
+            }
+            result
+        };
+        match kind.as_str() {
+            "text" => worker
+                .enqueue_to_account_if(&target, b"pending grant", None, authorize)
+                .await
+                .map(|_| ()),
+            "sticker" => worker
+                .enqueue_sticker_to_account_if(&target, "wave", b"hello", authorize)
+                .await
+                .map(|_| ()),
+            "file" => worker
+                .enqueue_file_to_account_progress_if(
+                    &target,
+                    &path,
+                    crate::file::FileKind::File,
+                    move |_| {
+                        produced.fetch_add(1, Ordering::SeqCst);
+                    },
+                    authorize,
+                )
+                .await
+                .map(|_| ()),
+            _ => unreachable!(),
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    *owner.lock().unwrap() = false;
+    drop(gate);
+    let result = pending.await.unwrap();
+    let unchanged = snapshot(&node) == before;
+    let disk_unchanged = persisted() == before_disk;
+    let work_unchanged = producer_files() == before_work;
+    let staged = progress.load(Ordering::SeqCst);
+    let log_empty = node.log.lock().unwrap().conversations().is_empty();
+    assert!(matches!(result, Err(NodeError::Authorization(_))));
+    assert!(node
+        .delivery
+        .lock()
+        .unwrap()
+        .pending_transactions()
+        .is_empty());
+    assert!(node
+        .delivery
+        .lock()
+        .unwrap()
+        .next_destination(None)
+        .is_none());
+    assert!(node
+        .delivery
+        .lock()
+        .unwrap()
+        .next_file_destination(None)
+        .is_none());
+    assert!(node.account_history(&remote.account_id(), 10).is_empty());
+    assert!(node.sentlog.lock().unwrap().conversations().is_empty());
+    drop(node);
+    let (reopened, _) = self::node(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(alice_secret.0, alice_secret.1),
+        Account::from_secret_bytes(account_secret),
+        &proof,
+    );
+    reopened
+        .configure_privacy(
+            dir.path(),
+            "pw",
+            &own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    eprintln!("denied grant: memory_unchanged={unchanged}, disk_unchanged={disk_unchanged}, staged_callbacks={staged}, log_empty={log_empty}");
+    assert!(
+        unchanged,
+        "invalid owner must not change policy, certified binding or routes"
+    );
+    assert!(
+        disk_unchanged,
+        "invalid owner must not persist local grant metadata"
+    );
+    assert_eq!(snapshot(&reopened), before);
+    assert!(
+        work_unchanged,
+        "invalid owner must not append events, ratchet state, file rows or delivery journals"
+    );
+    assert_eq!(persisted(), before_disk);
+    assert_eq!(
+        staged, 0,
+        "file staging must not start after owner loss before the grant"
+    );
+    assert!(log_empty && reopened.log.lock().unwrap().conversations().is_empty());
+    assert!(reopened.files.lock().unwrap().file_convs().is_empty());
+    assert!(reopened
+        .delivery
+        .lock()
+        .unwrap()
+        .pending_transactions()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn owner_invalidated_at_privacy_gate_cannot_grant_text() {
+    owner_invalidated_while_waiting_for_local_grant("text").await;
+}
+#[tokio::test]
+async fn owner_invalidated_at_privacy_gate_cannot_grant_sticker() {
+    owner_invalidated_while_waiting_for_local_grant("sticker").await;
+}
+#[tokio::test]
+async fn owner_invalidated_at_privacy_gate_cannot_grant_or_stage_file() {
+    owner_invalidated_while_waiting_for_local_grant("file").await;
+}
+
 #[tokio::test]
 async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance() {
     let dir = tempfile::tempdir().unwrap();
@@ -39,7 +230,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     let denied = a
         .enqueue_to_account_if(&ba.account_id(), b"deny WAL", None, |accept| {
             checks += 1;
-            if checks == 1 {
+            if checks <= 2 {
                 accept()
             } else {
                 Err(NodeError::Authorization("host replaced after grant".into()))
@@ -47,7 +238,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
         })
         .await;
     assert!(matches!(denied, Err(NodeError::Authorization(_))));
-    assert_eq!(checks, 2);
+    assert_eq!(checks, 3);
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert!(a.sentlog.lock().unwrap().conversations().is_empty());
     assert!(a.log.lock().unwrap().conversations().is_empty());

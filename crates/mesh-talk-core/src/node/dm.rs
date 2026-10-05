@@ -64,7 +64,8 @@ impl Node {
             .await
     }
 
-    /// Calls `authorize` before privacy grant and again at final WAL acceptance.
+    /// Calls `authorize` initially, around the synchronous local privacy grant,
+    /// and at final WAL acceptance.
     /// For each successful invocation, the callback must execute the supplied
     /// synchronous operation exactly once and propagate its result. The final
     /// operation is single-use; retaining a synchronous owner guard through it
@@ -94,7 +95,8 @@ impl Node {
             .await
     }
 
-    /// Calls `authorize` before privacy grant and again at final WAL acceptance.
+    /// Calls `authorize` initially, around the synchronous local privacy grant,
+    /// and at final WAL acceptance.
     /// For each successful invocation, execute the supplied synchronous operation
     /// exactly once and propagate its result; the final WAL operation is single-use.
     pub async fn enqueue_sticker_to_account_if(
@@ -150,9 +152,8 @@ impl Node {
         {
             return Err(NodeError::UnknownPeer(target.to_string()));
         }
-        self.initiate_contact_locally(target)
-            .await
-            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
+        self.initiate_contact_locally_if(target, &mut authorize)
+            .await?;
         let msg_id = random_msg_id();
         let envelope =
             DmEnvelope::new(self.account_id(), target.to_owned(), msg_id, inner).encode();

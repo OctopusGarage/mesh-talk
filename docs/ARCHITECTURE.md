@@ -113,8 +113,12 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
 
   New `owner_*` delivery IPC captures the lease before waiting for the runtime
   lock. Local text/sticker/file enqueue keeps that lifecycle admission through
-  privacy updates and staging, then holds the matching session guard over the WAL
-  append. Admitted host enqueue tasks retain the lock even if their IPC caller is
+  privacy updates and staging. Waiting for the privacy gate holds no session guard;
+  once admitted, the matching session guard encloses the entire synchronous local
+  grant (including verified bindings and routes), and separately the final WAL
+  append. The grant and later staging/WAL are not one rollback transaction: a
+  legitimately admitted grant can remain if the owner changes during staging.
+  Admitted host enqueue tasks retain the lifecycle lock even if their IPC caller is
   cancelled; this does not extend that guarantee to legacy IPC or arbitrary SDK
   operations. Stable file results include the original card ID and file conversation.
   Owner-sensitive identity queries atomically inspect session plus runtime; status

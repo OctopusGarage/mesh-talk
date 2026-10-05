@@ -51,9 +51,17 @@ fn authorize_accept(
     runtime: &NodeRuntime,
     accept: &mut dyn FnMut() -> Result<(), NodeError>,
 ) -> Result<(), NodeError> {
-    // The session guard encloses the WAL append itself, not just a preceding check.
-    authorized(app, state, lease, runtime, || Ok(accept()))
-        .map_err(|error| NodeError::Authorization(error.to_string()))?
+    // The session guard encloses each synchronous producer (local grant and WAL),
+    // not just a preceding check. No session guard crosses the async policy wait.
+    let result = authorized(app, state, lease, runtime, || Ok(accept()))
+        .map_err(|error| NodeError::Authorization(error.to_string()))?;
+    #[cfg(test)]
+    if result.is_ok() {
+        if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
+            let _ = entered.send("owner-authorized");
+        }
+    }
+    result
 }
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
@@ -352,24 +360,52 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::create(false)
+        }
+
+        fn create(authenticated: bool) -> Self {
+            let password = if authenticated {
+                "password-owner"
+            } else {
+                "pw"
+            };
             let root = tempfile::tempdir().unwrap();
             let app_state = AppState::new(AuthService::new(Arc::new(IdentityManager::new(
                 FileManager::new(root.path().to_owned()),
             ))));
-            app_state
-                .session()
-                .set("a".into(), user("alice"), "pw".into());
+            let owner = if authenticated {
+                app_state
+                    .auth_service()
+                    .register("alice".into(), password.into(), "fixture".into())
+                    .unwrap();
+                let (user, token) = app_state
+                    .auth_service()
+                    .login("alice".into(), password.into())
+                    .unwrap();
+                let owner = user.user_id.clone();
+                app_state.session().publish(token, user, password.into());
+                owner
+            } else {
+                app_state
+                    .session()
+                    .set("a".into(), user("alice"), "pw".into());
+                "alice".into()
+            };
             let node = NodeState::empty();
             let app = tauri::test::mock_builder()
                 .manage(app_state.clone())
                 .manage(node.clone())
+                .manage(crate::settings::SettingsState::isolated(
+                    root.path().join("settings.json"),
+                ))
                 .invoke_handler(tauri::generate_handler![
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_sticker,
                     super::owner_enqueue_file,
                     super::owner_account_history,
-                    super::owner_delivery_statuses
+                    super::owner_delivery_statuses,
+                    crate::commands::logout
                 ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
                 .unwrap();
@@ -380,9 +416,9 @@ mod tests {
             let discovery_port = reservation.local_addr().unwrap().port();
             let runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
                 root.path(),
-                "alice",
+                &owner,
                 "Alice",
-                "pw",
+                password,
                 discovery_port,
                 |_| {},
                 |_| {},
@@ -744,6 +780,172 @@ mod tests {
             assert_eq!(error["kind"], "authorization", "queued {command}");
             *fixture.app_state.owner_command_captured.lock().unwrap() = None;
         }
+    }
+
+    fn registered_logout_during_local_grant_wait(command: &'static str) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fixture = Fixture::create(true);
+        let lease = fixture.app_state.session().capture().unwrap();
+        let owner = lease.owner().to_owned();
+        let account = fixture.offline_peer();
+        let node = fixture.node.0.blocking_lock().as_ref().unwrap().handle();
+        node.cached_peer_snapshot().unwrap();
+        let directory = fixture.root.path().join("accounts").join(&owner);
+        let metadata = || {
+            ["privacy.policy", "peer-proofs", "peer-routes"]
+                .map(|name| std::fs::read(directory.join(name)).unwrap())
+        };
+        let before = metadata();
+        let policy = node.privacy_snapshot();
+        let before_log = std::fs::read(directory.join("messages.log")).unwrap();
+        let work = || {
+            [
+                "sent.log",
+                "ratchet.sessions",
+                "received_files.log",
+                "delivery-transactions.log",
+                "delivery-outbox.log",
+            ]
+            .map(|name| match std::fs::read(directory.join(name)) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("producer snapshot read failed: {error}"),
+            })
+        };
+        let before_work = work();
+        let path = fixture.root.path().join("unstaged.txt");
+        std::fs::write(&path, b"owner already lost before local grant").unwrap();
+        let staged = Arc::new(AtomicUsize::new(0));
+        let produced = staged.clone();
+        *fixture.app_state.owner_file_progress_hook.lock().unwrap() = Some(Box::new(move || {
+            produced.fetch_add(1, Ordering::SeqCst);
+        }));
+        // Public legacy authorization owns the actual privacy gate and state lock.
+        // Its own mutation is rejected when released, isolating the enqueue producer.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder_node = node.clone();
+        let holder_account = account.clone();
+        let holder = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(holder_node.set_allowed_if(
+                &holder_account,
+                false,
+                move || {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "test gate holder performs no mutation",
+                    ))
+                },
+            ))
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let body = match command {
+            "owner_enqueue_text" => {
+                serde_json::json!({"owner":owner,"account":account,"text":"pending grant","replyTo":null})
+            }
+            "owner_enqueue_sticker" => {
+                serde_json::json!({"owner":owner,"account":account,"stickerId":"wave","fallback":"hello"})
+            }
+            "owner_enqueue_file" => {
+                serde_json::json!({"owner":owner,"account":account,"path":path,"media":false})
+            }
+            _ => unreachable!(),
+        };
+        let webview = fixture.webview.clone();
+        let pending = std::thread::spawn(move || invoke(&webview, command, body));
+        let wait_phase = |phase| loop {
+            match entered_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(actual) if actual == phase => return true,
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        };
+        let authorized = wait_phase("owner-authorized");
+        let webview = fixture.webview.clone();
+        let logout = std::thread::spawn(move || invoke(&webview, "logout", serde_json::json!({})));
+        let published = wait_phase("logout-published");
+        let logged_out = fixture.app_state.session().get().is_none();
+        // Real registered logout publication above; direct authenticated re-publication
+        // below models the same host UUID's replacement generation, not runtime startup.
+        let (user, token) = fixture
+            .app_state
+            .auth_service()
+            .login("alice".into(), "password-owner".into())
+            .unwrap();
+        let replacement = fixture
+            .app_state
+            .session()
+            .publish(token, user, "password-owner".into());
+        let replaced = replacement.owner() == owner && replacement != lease;
+        release_tx.send(()).unwrap();
+        let holder_result = holder.join().unwrap();
+        let result = pending.join().unwrap();
+        let logout_result = logout.join().unwrap();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+        let metadata_unchanged = metadata() == before;
+        let policy_unchanged = node.privacy_snapshot() == policy;
+        let log_unchanged = std::fs::read(directory.join("messages.log")).unwrap() == before_log;
+        let staged = staged.load(Ordering::SeqCst);
+        let history_empty = node.account_history(&account, 10).is_empty();
+        let work_unchanged = work() == before_work;
+        drop(node);
+        // The registered logout child has completed its real retirement barrier.
+        // Reopen exactly the same owner profile; no late producer may repair/hide state.
+        let reopened = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+            fixture.root.path(),
+            &owner,
+            "Alice",
+            "password-owner",
+            fixture.discovery_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        ))
+        .unwrap();
+        let reopened_policy = reopened.handle().privacy_snapshot();
+        let reopened_empty = reopened.account_history(&account, 10).is_empty();
+        tauri::async_runtime::block_on(reopened.stop());
+        eprintln!("{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, log_unchanged={log_unchanged}");
+        assert!(authorized && published && logged_out && replaced);
+        assert_eq!(
+            holder_result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(logout_result.unwrap(), serde_json::json!({"success":true}));
+        assert_eq!(result.unwrap_err()["kind"], "authorization");
+        assert!(history_empty);
+        assert!(reopened_empty && reopened_policy == policy);
+        assert!(
+            work_unchanged,
+            "rejected owner command must not append local message/file work"
+        );
+        assert!(
+            metadata_unchanged && policy_unchanged,
+            "rejected registered {command} must not persist a grant after logout publication"
+        );
+        assert_eq!(staged, 0);
+        assert!(log_unchanged);
+    }
+
+    #[test]
+    fn registered_logout_while_grant_waits_rejects_text_without_permission_side_effects() {
+        registered_logout_during_local_grant_wait("owner_enqueue_text");
+    }
+    #[test]
+    fn registered_logout_while_grant_waits_rejects_sticker_without_permission_side_effects() {
+        registered_logout_during_local_grant_wait("owner_enqueue_sticker");
+    }
+    #[test]
+    fn registered_logout_while_grant_waits_rejects_file_without_permission_or_staging() {
+        registered_logout_during_local_grant_wait("owner_enqueue_file");
     }
 
     #[test]
