@@ -624,15 +624,18 @@ impl Node {
                 .write()
                 .expect("privacy lock not poisoned");
             if let Some(state) = state.as_mut() {
-                if announce
-                    .account_id()
-                    .is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
-                    || group_member
-                {
+                if announce.account_id().is_some() {
                     state
                         .proofs
                         .record(announce)
                         .map_err(|_| TransportError::AdmissionDenied)?;
+                }
+                if !state.policy.snapshot().invisible
+                    || announce
+                        .account_id()
+                        .is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
+                    || group_member
+                {
                     state
                         .routes
                         .record(public, ip)
@@ -645,6 +648,79 @@ impl Node {
             .expect("roster lock not poisoned")
             .update(announce, ip, &self.user_id());
         Ok(())
+    }
+
+    /// Persist a verified discovery snapshot outside the roster lock. Historical
+    /// proofs grant no permissions and never restore online presence.
+    pub(in crate::node) fn cache_discovered_peers(&self) -> io::Result<()> {
+        self.cached_peer_snapshot().map(|_| ())
+    }
+
+    fn discovery_snapshot(&self) -> (Vec<Announce>, Vec<crate::discovery::PeerRecord>) {
+        let roster = self.roster.lock().expect("roster lock not poisoned");
+        (roster.announcements(), roster.peers())
+    }
+
+    /// Return the captured peers whose certified identities were durably cached.
+    /// Public accountless legacy peers retain verified in-memory compatibility;
+    /// they are not persisted. Later arrivals belong to the next query.
+    pub fn cached_peer_snapshot(&self) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        Self::persist_discovery_snapshot(&self.privacy, self.discovery_snapshot())
+    }
+
+    /// Async hosts persist the captured snapshot on the blocking pool. No roster
+    /// guard or Node reference is carried into the filesystem operation.
+    pub async fn cached_peer_snapshot_async(
+        &self,
+    ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        let snapshot = self.discovery_snapshot();
+        let privacy = self.privacy.clone();
+        tokio::task::spawn_blocking(move || Self::persist_discovery_snapshot(&privacy, snapshot))
+            .await
+            .map_err(|_| io::Error::other("peer cache task failed"))?
+    }
+
+    fn persist_discovery_snapshot(
+        privacy: &PrivacyControl,
+        (proofs, peers): (Vec<Announce>, Vec<crate::discovery::PeerRecord>),
+    ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        let mut guard = privacy.state.write().map_err(|_| denied())?;
+        let Some(state) = guard.as_mut() else {
+            return Ok(peers);
+        };
+        let mut successful = Vec::new();
+        for proof in proofs {
+            if proof.account_id().is_none() {
+                if !state.policy.snapshot().invisible
+                    && proof.verify()
+                    && proof.tcp_port != 0
+                    && proof.name.len() <= 1024
+                    && state.proofs.by_author(&proof.ed25519_pub).is_none()
+                {
+                    successful.push(proof);
+                }
+                continue;
+            }
+            if state.proofs.record(&proof).is_err() {
+                log::warn!("discovered peer proof was not cached");
+                continue;
+            }
+            if let Some(peer) = peers.iter().find(|p| p.public == proof.public()) {
+                if state.routes.record(&peer.public, peer.addr.ip()).is_err() {
+                    log::warn!("discovered peer route was not cached");
+                    continue;
+                }
+            }
+            successful.push(proof);
+        }
+        Ok(peers
+            .into_iter()
+            .filter(|peer| {
+                successful.iter().any(|proof| {
+                    proof.public() == peer.public && proof.account_id() == peer.account_id
+                })
+            })
+            .collect())
     }
     fn guard_channel(&self, channel: &mut SecureChannel<TcpStream>, generation: u64) {
         let control = self.privacy.clone();

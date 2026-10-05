@@ -212,10 +212,9 @@ impl Node {
                     None => continue,
                 }
             } else {
-                let author_uid = event.author.user_id();
                 let sender_x25519 = {
-                    match self.routing_peer(&author_uid) {
-                        Some(p) => p.public.x25519_pub,
+                    match self.historical_author(event.author.ed25519_pub()) {
+                        Some(p) => p.x25519_pub,
                         None => continue, // author unknown → can't open yet
                     }
                 };
@@ -247,8 +246,9 @@ impl Node {
             let host_conv = if is_channel {
                 conv
             } else {
-                let author_uid = event.author.user_id();
-                let peer_account = { self.routing_peer(&author_uid).and_then(|p| p.account_id) };
+                let peer_account = self
+                    .historical_author(event.author.ed25519_pub())
+                    .and_then(|p| p.account_id());
                 let my_account = self.account.account_id();
                 match peer_account {
                     Some(acct) if acct != my_account => account_conversation_id(&my_account, &acct),
@@ -390,9 +390,12 @@ impl Node {
     /// anything new. A no-op if no post office is known. Best-effort and
     /// fail-soft — a dial/round error just ends this drain; the next one retries.
     pub async fn drain_from_post_office(&self) {
-        let (post_office, peers) = {
+        if self.cached_peer_snapshot_async().await.is_err() {
+            log::warn!("verified discovery cache update failed");
+        }
+        let post_office = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            (elected_post_office(&roster), roster.peers())
+            elected_post_office(&roster)
         };
         let Some(po) = post_office else {
             return;
@@ -406,8 +409,8 @@ impl Node {
         };
         let store = self.sync_store(channel.peer_identity());
         // Drain a DM conversation per non-PO peer (we never DM a post office).
-        for peer in peers.iter().filter(|p| !p.post_office) {
-            let conv = dm_conversation_id(&self.identity.public(), &peer.public);
+        for peer in self.historical_dm_peers() {
+            let conv = dm_conversation_id(&self.identity.public(), &peer.public());
             if request_round(&mut channel, &store, conv).await.is_err() {
                 return; // channel broke; the next drain re-dials
             }
@@ -466,8 +469,8 @@ impl Node {
             // Resolve the author's public identity + display name from the roster.
             let author_uid = event.author.user_id();
             let (peer_public, peer_name, peer_account) = {
-                match self.routing_peer(&author_uid) {
-                    Some(p) => (p.public, p.name, p.account_id),
+                match self.historical_author(event.author.ed25519_pub()) {
+                    Some(p) => (p.public(), p.name.clone(), p.account_id()),
                     None => continue, // unknown author yet; retry later (NOT marked emitted)
                 }
             };

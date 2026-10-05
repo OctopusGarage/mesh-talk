@@ -2,7 +2,7 @@
 
 use crate::discovery::announce::Announce;
 use crate::identity::device::PublicIdentity;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,8 @@ pub const MAX_PEERS: usize = 1024;
 pub struct Roster {
     peers: HashMap<UserId, PeerRecord>,
     announcements: HashMap<UserId, Announce>,
+    historical: HashMap<UserId, Announce>,
+    conflicting_history: HashSet<UserId>,
 }
 
 impl Roster {
@@ -76,6 +78,17 @@ impl Roster {
         }
         if !announce.verify() {
             return UpdateOutcome::Rejected;
+        }
+        if self.historical.get(&announce.user_id).is_some_and(|old| {
+            old.public() != announce.public()
+                || (old.account_id().is_some() && old.account_id() != announce.account_id())
+        }) {
+            self.conflicting_history.insert(announce.user_id.clone());
+        } else if self.historical.len() < MAX_PEERS
+            || self.historical.contains_key(&announce.user_id)
+        {
+            self.historical
+                .insert(announce.user_id.clone(), announce.clone());
         }
         let existed = self.peers.contains_key(&announce.user_id);
         // Cap enforcement: a NEW peer that would push us over MAX_PEERS evicts the
@@ -128,6 +141,15 @@ impl Roster {
         self.announcements.values().cloned().collect()
     }
 
+    /// Bounded signed identity history; never implies online presence or permission.
+    pub(crate) fn historical_announcements(&self) -> Vec<Announce> {
+        self.historical
+            .iter()
+            .filter(|(id, _)| !self.conflicting_history.contains(*id))
+            .map(|(_, proof)| proof.clone())
+            .collect()
+    }
+
     pub fn peers(&self) -> Vec<PeerRecord> {
         self.peers.values().cloned().collect()
     }
@@ -170,6 +192,25 @@ mod tests {
 
     fn ip() -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))
+    }
+
+    #[test]
+    fn historical_identity_survives_expiry_but_conflicting_account_fails_closed() {
+        use crate::identity::account::Account;
+        let device = DeviceIdentity::generate();
+        let mut roster = Roster::default();
+        // An accountless legacy announcement has no binding to conflict with.
+        roster.update(&Announce::new(&device, "Alice", 1), ip(), "self");
+        let account = Account::generate();
+        let first = Announce::new_with_account(&device, &account, "Alice", 1);
+        roster.update(&first, ip(), "self");
+        roster.evict_stale(Duration::ZERO);
+        assert!(roster.peers().is_empty());
+        assert_eq!(roster.historical_announcements(), vec![first]);
+        let changed = Announce::new_with_account(&device, &Account::generate(), "Alice", 1);
+        roster.update(&changed, ip(), "self");
+        assert!(roster.historical_announcements().is_empty());
+        assert_eq!(roster.announcements(), vec![changed]);
     }
 
     #[test]

@@ -9,6 +9,53 @@ use std::{
 };
 
 impl Node {
+    /// Identity resolution has no endpoint requirement. Configured nodes use the
+    /// durable signed binding; legacy SDK nodes retain only bounded memory history.
+    pub(in crate::node) fn historical_peer_proofs(&self) -> Vec<crate::discovery::Announce> {
+        let memory = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .historical_announcements();
+        let guard = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned");
+        if let Some(state) = guard.as_ref() {
+            let mut proofs = state.proofs.announcements();
+            if !state.policy.snapshot().invisible {
+                proofs.extend(memory.into_iter().filter(|proof| {
+                    proof.account_id().is_none()
+                        && state.proofs.by_author(&proof.ed25519_pub).is_none()
+                }));
+            }
+            proofs
+        } else {
+            memory
+        }
+    }
+
+    pub(in crate::node) fn historical_author(
+        &self,
+        author: &[u8; 32],
+    ) -> Option<crate::discovery::Announce> {
+        self.historical_peer_proofs()
+            .into_iter()
+            .find(|p| p.ed25519_pub == *author && self.known_account_allowed(&p.public()))
+    }
+
+    pub(in crate::node) fn historical_dm_peers(&self) -> Vec<crate::discovery::Announce> {
+        self.historical_peer_proofs()
+            .into_iter()
+            .filter(|p| {
+                !p.post_office
+                    && p.public() != self.identity.public()
+                    && self.known_account_allowed(&p.public())
+            })
+            .collect()
+    }
+
     pub(in crate::node) fn cached_routing_peers(&self) -> Vec<PeerRecord> {
         let guard = self
             .privacy
@@ -28,7 +75,9 @@ impl Node {
                     .by_author(&public.ed25519_pub)
                     .filter(|a| a.public() == public)?;
                 let account = proof.account_id()?;
-                let account_allowed = account == self.account_id() || state.policy.allows(&account);
+                let account_allowed = !state.policy.snapshot().invisible
+                    || account == self.account_id()
+                    || state.policy.allows(&account);
                 Some((
                     account_allowed,
                     PeerRecord {
@@ -85,6 +134,9 @@ impl Node {
         self: &Arc<Self>,
         budget: Duration,
     ) {
+        if self.cached_peer_snapshot_async().await.is_err() {
+            log::warn!("verified discovery cache update failed");
+        }
         let mut peers = self.cached_routing_peers();
         if peers.is_empty() {
             return;

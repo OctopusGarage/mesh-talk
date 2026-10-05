@@ -252,16 +252,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &sent_path,
         &args.password,
     )?;
+    let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
+    node.configure_privacy(data_dir, &args.password, &announce, visibility.clone())?;
 
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
-    spawn_discovery(
+    mesh_talk_core::discovery::service::spawn_discovery_with_visibility(
         Arc::clone(&socket),
         Arc::clone(&roster),
-        announce,
+        mesh_talk_core::discovery::service::shared_announce(&announce),
         user_id.clone(),
         args.discovery_port,
+        None,
+        visibility,
     );
 
     // Inbound: serve sync rounds on each accepted connection.
@@ -338,7 +342,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if line == "/quit" {
             break;
         } else if line == "/peers" {
-            let peers = roster.lock().expect("roster mutex not poisoned").peers();
+            let peers = match node.cached_peer_snapshot_async().await {
+                Ok(peers) => peers,
+                Err(_) => {
+                    emit("peer identity cache failed; retry discovery");
+                    continue;
+                }
+            };
             if peers.is_empty() {
                 emit("(no peers yet)");
             } else {

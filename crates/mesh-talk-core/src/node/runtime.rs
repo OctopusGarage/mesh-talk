@@ -459,10 +459,13 @@ impl NodeRuntime {
 
     /// A snapshot of currently-known peers.
     pub fn peers(&self) -> Vec<PeerRecord> {
-        self.roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .peers()
+        match self.node.cached_peer_snapshot() {
+            Ok(peers) => peers,
+            Err(_) => {
+                log::warn!("verified discovery cache update failed");
+                Vec::new()
+            }
+        }
     }
 
     /// The display name for a device `user_id`: the live roster's (freshest) if the peer is
