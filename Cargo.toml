@@ -79,3 +79,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.aes]
 opt-level = 3
+
+# Noise uses curve25519 v4; identity/presence signatures use v5. Optimize both
+# debug-build implementations without changing algorithms, checks, or release builds.
+[profile.dev.package."curve25519-dalek:4.1.3"]
+opt-level = 3
+[profile.dev.package."curve25519-dalek:5.0.0"]
+opt-level = 3

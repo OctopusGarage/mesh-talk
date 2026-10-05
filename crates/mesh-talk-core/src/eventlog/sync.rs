@@ -121,6 +121,11 @@ pub struct ApplyReport {
 /// The data operations sync needs from an event store. Implemented by both the
 /// in-memory [`EventLog`] and the durable `PersistentEventLog`.
 pub trait SyncStore {
+    /// Optional custody qualification. Memory/legacy stores cannot promise
+    /// durability; durable hosts synchronize and check current visibility.
+    fn durable_have(&self, _conversation: &ConversationId, _id: &EventId) -> bool {
+        false
+    }
     /// A host admission denial stops the wire session before further disclosure.
     /// Ordinary stores preserve the protocol's existing validation behavior.
     fn admission_denied(&self) -> bool {

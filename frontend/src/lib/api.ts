@@ -57,6 +57,43 @@ export const auth = {
 };
 
 export const chat = {
+  ownerIdentity: (owner: string) =>
+    invoke<{ owner: string; device_id: string; account_id: string }>(
+      "owner_node_identity",
+      { owner },
+    ),
+  enqueueText: (
+    owner: string,
+    account: string,
+    text: string,
+    replyTo: string | null,
+  ) => invoke<string>("owner_enqueue_text", { owner, account, text, replyTo }),
+  enqueueSticker: (
+    owner: string,
+    account: string,
+    stickerId: string,
+    fallback: string,
+  ) =>
+    invoke<string>("owner_enqueue_sticker", {
+      owner,
+      account,
+      stickerId,
+      fallback,
+    }),
+  enqueueFile: (owner: string, account: string, path: string, media: boolean) =>
+    invoke<{ id: string; fileConv: string }>("owner_enqueue_file", {
+      owner,
+      account,
+      path,
+      media,
+    }),
+  ownerHistory: (owner: string, account: string, limit: number) =>
+    invoke<HistoryItem[]>("owner_account_history", { owner, account, limit }),
+  deliveryStatuses: (owner: string, account: string, ids: string[]) =>
+    invoke<Array<{ id: string; status: "awaiting" | "delivered" }>>(
+      "owner_delivery_statuses",
+      { owner, account, ids },
+    ),
   myId: () => invoke<string>("my_id"),
   accountId: () => invoke<string>("account_id"),
 

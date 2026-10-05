@@ -28,6 +28,7 @@ pub struct ReceivedFile {
 pub struct FileBook {
     manifests: HashMap<ConversationId, AnyManifest>, // keyed by file_conv
     emitted: HashSet<EventId>,
+    manifest_events: HashMap<ConversationId, HashSet<EventId>>,
 }
 
 impl FileBook {
@@ -44,6 +45,23 @@ impl FileBook {
     /// same manifest).
     pub fn record(&mut self, manifest: AnyManifest) {
         self.manifests.insert(manifest.file_conv(), manifest);
+    }
+
+    pub(in crate::node) fn record_event(&mut self, event: EventId, manifest: AnyManifest) {
+        self.manifest_events
+            .entry(manifest.file_conv())
+            .or_default()
+            .insert(event);
+        self.record(manifest);
+    }
+
+    pub(in crate::node) fn manifest_events(&self, conversation: ConversationId) -> Vec<EventId> {
+        self.manifest_events
+            .get(&conversation)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect()
     }
 
     /// Whether a FileManifest event id was already surfaced (or seeded on open).

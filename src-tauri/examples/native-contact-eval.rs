@@ -4,7 +4,7 @@
 
 #[cfg(target_os = "macos")]
 fn native_keyboard_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    use tauri::{Emitter, Listener};
+    use tauri::{Emitter, Listener, Manager};
     #[derive(serde::Deserialize)]
     struct KeyRequest {
         key: String,
@@ -12,6 +12,18 @@ fn native_keyboard_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     }
     tauri::plugin::Builder::new("native-contact-keyboard")
         .setup(|app, _| {
+            let chrome_handle = app.clone();
+            app.listen("native-contact-chrome", move |event| {
+                let nonce = event.payload().to_owned();
+                let result_handle = chrome_handle.clone();
+                let _ = chrome_handle.run_on_main_thread(move || {
+                    let result = native_chrome_bounds();
+                    let _ = result_handle.emit(
+                        "native-contact-chrome-result",
+                        serde_json::json!({"nonce": nonce, "result": result}),
+                    );
+                });
+            });
             let handle = app.clone();
             app.listen("native-contact-key", move |event| {
                 let Ok(request) = serde_json::from_str::<KeyRequest>(event.payload()) else {
@@ -21,10 +33,23 @@ fn native_keyboard_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
                 let nonce = request.nonce.clone();
                 let queue_error_handle = handle.clone();
                 let queued = handle.run_on_main_thread(move || {
-                    let result = dispatch_native_key(&request.key);
+                    let result = dispatch_native_key(&request.key).and_then(|()| {
+                        if request.key == "Focus" {
+                            // Activating NSWindow alone does not make WKWebView
+                            // first responder. Focus the owned production webview
+                            // through Wry's native makeFirstResponder path.
+                            result_handle
+                                .get_webview_window("main")
+                                .ok_or_else(|| "Owned main webview missing".to_string())?
+                                .as_ref()
+                                .set_focus()
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Ok(())
+                    });
                     let _ = result_handle.emit(
                         "native-contact-key-result",
-                        serde_json::json!({ "nonce": request.nonce, "error": result.err() }),
+                        serde_json::json!({ "nonce": request.nonce, "error": result.err(), "focus": native_focus_state() }),
                     );
                 });
                 if let Err(error) = queued {
@@ -37,6 +62,58 @@ fn native_keyboard_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             Ok(())
         })
         .build()
+}
+
+#[cfg(target_os = "macos")]
+fn native_focus_state() -> serde_json::Value {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    let Some(main) = MainThreadMarker::new() else {
+        return serde_json::json!({"error":"not main thread"});
+    };
+    let app = NSApplication::sharedApplication(main);
+    let window = app.keyWindow().or_else(|| unsafe { app.mainWindow() });
+    // SAFETY: observation runs on the AppKit main thread, in the owned app.
+    serde_json::json!({
+        "applicationActive": unsafe { app.isActive() },
+        "keyWindow": window.as_ref().is_some_and(|window| window.isKeyWindow()),
+        "firstResponderClass": window.and_then(|window| window.firstResponder()).map(|responder| responder.class().name().to_string_lossy().into_owned()),
+    })
+}
+
+/// Real AppKit standard-button rectangles in content-view logical coordinates,
+/// with a top-left origin matching the native webview's DOM viewport.
+#[cfg(target_os = "macos")]
+fn native_chrome_bounds() -> Result<serde_json::Value, String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowButton};
+    let main = MainThreadMarker::new().ok_or("Chrome observation requires main thread")?;
+    let app = NSApplication::sharedApplication(main);
+    let window = app.keyWindow().ok_or("Owned app has no key window")?;
+    let content = window
+        .contentView()
+        .ok_or("Owned window has no content view")?;
+    let height = content.bounds().size.height;
+    let mut buttons = Vec::new();
+    for kind in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        let button = window
+            .standardWindowButton(kind)
+            .ok_or("Standard window button missing")?;
+        let rect = button.convertRect_toView(button.bounds(), Some(&content));
+        let top = if content.isFlipped() {
+            rect.origin.y
+        } else {
+            height - rect.origin.y - rect.size.height
+        };
+        buttons.push(serde_json::json!({"x":rect.origin.x,"y":top,"right":rect.origin.x+rect.size.width,"bottom":top+rect.size.height}));
+    }
+    Ok(
+        serde_json::json!({"source":"AppKit standardWindowButton converted to contentView", "buttons":buttons}),
+    )
 }
 
 /// Deliver real AppKit key events to this process's key window. This exercises
@@ -65,6 +142,7 @@ fn dispatch_native_key(key: &str) -> Result<(), String> {
         "Tab" => (48, "\t"),
         "Enter" => (36, "\r"),
         "Escape" => (53, "\u{1b}"),
+        "PageUp" => (116, "\u{f72c}"),
         _ => return Err("Unsupported evaluation key".into()),
     };
     let window = application

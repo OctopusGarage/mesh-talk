@@ -160,11 +160,20 @@
     "offline": "オフライン"
   },
   "message": {
+    "delivery": {
+      "awaiting": "受領確認待ち",
+      "delivered": "配信済み",
+      "help": "宛先アカウントからの自動受領確認です。既読確認ではありません。",
+      "fileHelp": "ファイルカードの配信完了。ダウンロードや閲覧とは別です。",
+      "metadataPending": "ファイル情報を確認中"
+    },
     "sending": "送信中…",
     "reply": "返信",
     "react": "リアクション",
     "retry": "再試行",
     "fail": {
+      "invalid-input": "無効なメッセージ",
+      "authorization": "セッションが変更されました",
       "peer-unknown": "送信できませんでした — 相手にまだ接続できません",
       "relay-unreachable": "送信できませんでした — ネットワークに到達できません",
       "crypto": "送信できませんでした — 暗号化エラー",

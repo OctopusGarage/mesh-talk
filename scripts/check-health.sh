@@ -251,6 +251,15 @@ if ! { cd frontend && npm run lint; }; then
 fi
 cd ..
 
+# Type-check application and E2E sources. Vite and Playwright transpilation alone
+# do not establish that the scenario/helper TypeScript contracts are valid.
+print_status "success" "Checking frontend and E2E TypeScript..."
+if ! { cd frontend && npm run typecheck; }; then
+    print_status "error" "Frontend or E2E TypeScript errors found."
+    exit 1
+fi
+cd ..
+
 # Run frontend unit tests (Vitest)
 print_status "success" "Running frontend tests..."
 if ! { cd frontend && npm test; }; then
@@ -273,8 +282,16 @@ if [ "$FAST" = "1" ]; then
 fi
 if [ "$RUN_UI_E2E" = "1" ]; then
     print_status "success" "Running UI E2E (Playwright)..."
-    ( cd frontend && npx playwright install chromium >/dev/null 2>&1 || true )
-    if ! { cd frontend && npx playwright test --project=chromium; }; then
+    # All scenarios here are headless. Avoid downloading the unused headed
+    # browser, and never hide setup failures behind a successful shell result.
+    if ! ( cd frontend && npx playwright install --only-shell chromium ); then
+        print_status "error" "Chromium runtime installation failed."
+        exit 1
+    fi
+    # Match CI's bounded worker budget; keep failures visible without retries.
+    # Parallel local browsers can exhaust a scenario's total time budget while
+    # competing for rendering resources, rather than exposing a UI regression.
+    if ! { cd frontend && npx playwright test --project=chromium --workers=1 --retries=0; }; then
         print_status "error" "UI E2E failed. Please fix the browser e2e regressions."
         exit 1
     fi

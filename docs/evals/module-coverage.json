@@ -1,5 +1,33 @@
 {
   "version": 1,
+  "matrix_declarations": [
+    {
+      "name": "real backend core",
+      "platforms": ["linux", "win32", "darwin"],
+      "runner": "scripts/evals/backend-runner.mjs",
+      "workflow": ".github/workflows/e2e-backend.yml",
+      "evidence": "source/platform-bound report.json and SHA256 scenario log digests",
+      "boundary": "real native CLI processes; no renderer; declaration is not executed coverage"
+    },
+    {
+      "name": "real native desktop core",
+      "platforms": ["linux", "win32", "darwin"],
+      "runner": "scripts/diagnostics/hidden-contacts.mjs",
+      "scenario_contract": "scripts/diagnostics/hidden-contacts-report.mjs",
+      "workflow": ".github/workflows/hidden-contacts-native.yml",
+      "evidence": "schema 2 source/platform-bound per-scenario JSON, decoded PNG, redacted log and SHA256 digests",
+      "boundary": "actual Tauri webview and real CLI peer; attachment UI is not an OS download test"
+    },
+    {
+      "name": "portable React core and extended",
+      "platforms": ["linux/chromium", "win32/chromium", "darwin/chromium", "darwin/webkit", "linux/firefox (extended only)"],
+      "runner": "frontend/playwright.portable.config.ts",
+      "scenario_contract": "frontend/e2e/portable-core.spec.ts",
+      "workflow": ".github/workflows/e2e-ui.yml",
+      "evidence": "Playwright results plus independently validated source/platform/browser-bound JSON, decoded PNG and trace attachments",
+      "boundary": "mocked IPC; DOM retention smoke is not native memory leak coverage"
+    }
+  ],
   "core_modules": [
     {
       "name": "node",

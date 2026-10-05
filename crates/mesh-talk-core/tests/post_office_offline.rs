@@ -5,10 +5,14 @@
 //! start: two KDFs), and UDP broadcast. Run explicitly:
 //!   nice -n 10 cargo test -p mesh-talk-core --test post_office_offline -- --ignored
 
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+
+use mesh_talk_core::eventlog::{persist::PersistentEventLog, EventKind};
 
 /// A spawned `mesh-talk-node` (normal or `--post-office`) with a line view of stdout.
 struct CliNode {
@@ -97,8 +101,7 @@ impl CliNode {
 
 impl Drop for CliNode {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        support::stop_cli(&mut self.child, &mut self.stdin);
     }
 }
 
@@ -178,14 +181,45 @@ fn offline_dm_delivered_via_post_office() {
 
     // Alice DMs offline Bob: direct dial fails, the event is replicated to the PO.
     alice.send(&format!("/msg {} held-hello", &bob_uid[..8]));
-    // Best-effort wait for Alice's spawned send (direct-fail + PO replication) to
-    // land at the relay. Not synchronised — there is no PO inbox-count command to
-    // poll yet; generous for loopback. Bob's final wait_for is the real backstop.
-    std::thread::sleep(Duration::from_secs(3));
+    // Observe the exact signed event at both ends, without adding test-only IPC
+    // or trusting a fixed sleep/file size. Only load existing fixture logs;
+    // the observer never appends, normalizes or rewrites the live stores.
+    let sender_log = dir.path().join("alice/messages.log");
+    let relay_log = dir.path().join("relay/relay.log");
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut replicated = None;
+    while Instant::now() < deadline {
+        if sender_log.is_file() && relay_log.is_file() {
+            if let (Ok(sender), Ok(relay)) = (
+                PersistentEventLog::open(&sender_log, "pw"),
+                PersistentEventLog::open(&relay_log, "pw"),
+            ) {
+                replicated = sender.all_event_ids().into_iter().find(|id| {
+                    sender.get(id).is_some_and(|event| {
+                        event.kind == EventKind::Message
+                            && event.author.user_id() == alice_uid
+                            && relay.has(id)
+                    })
+                });
+            }
+        }
+        if replicated.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let replicated = replicated.expect("relay durably contains the sender's exact signed DM event");
+
+    // Route isolation: the original sender must be gone before the recipient
+    // returns, otherwise ordinary peer synchronization could fake relay success.
+    drop(alice);
 
     // Bob comes back (same keystore → same identity); his drain pulls from the PO.
     let bob = CliNode::node(&bob_keystore, "Bob", dp);
-    let _ = read_user_id(&bob, "node ", Duration::from_secs(90));
+    assert_eq!(
+        read_user_id(&bob, "node ", Duration::from_secs(90)),
+        bob_uid
+    );
     let got = bob
         .wait_for(
             |l| l.starts_with(&format!("from {alice_uid}")) && l.contains("held-hello"),
@@ -193,7 +227,15 @@ fn offline_dm_delivered_via_post_office() {
         )
         .expect("Bob received the held DM from the post office after coming back online");
     assert!(
-        got.contains("(Alice)"),
-        "expected sender name Alice, got: {got}"
+        got.starts_with(&format!("from {alice_uid}")),
+        "authenticated original sender identity"
+    );
+    drop(bob);
+    drop(po);
+    assert!(
+        PersistentEventLog::open(&relay_log, "pw")
+            .expect("reopen stopped relay store")
+            .has(&replicated),
+        "relay retains the replicated event across process shutdown"
     );
 }

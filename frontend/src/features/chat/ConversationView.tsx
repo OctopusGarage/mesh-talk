@@ -31,13 +31,30 @@ import { mentionsName } from "@/lib/mentions";
 import { formatDay } from "@/lib/format";
 import { useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
-import { convKey, displayName, useChat, type ChatMessage } from "@/store/chat";
+import {
+  convKey,
+  displayName,
+  useChat,
+  captureChatOwnership,
+  type ChatMessage,
+} from "@/store/chat";
 import {
   presenceLabel,
   presenceStatus,
   usePresenceFor,
 } from "@/store/presence";
 import type { ReactionInfo } from "@/lib/types";
+
+function captureComposer() {
+  const lease = captureChatOwnership();
+  const active = useChat.getState().active;
+  const key = active ? convKey(active) : null;
+  return () =>
+    lease.current() &&
+    key !== null &&
+    useChat.getState().active !== null &&
+    convKey(useChat.getState().active!) === key;
+}
 
 function EmptyState() {
   const { t } = useTranslation();
@@ -271,8 +288,15 @@ export function ConversationView() {
       } else if (p.type === "drop") {
         setDragOver(false);
         if (!activeRef.current) return;
+        const lease = captureChatOwnership();
+        const key = convKey(activeRef.current);
+        const current = () =>
+          lease.current() &&
+          useChat.getState().active != null &&
+          convKey(useChat.getState().active!) === key;
         void (async () => {
           for (const path of p.paths) {
+            if (!current()) return;
             try {
               // An image/video dropped here is sent as MEDIA (inline preview) — same as the
               // image button; any other file is a generic attachment. (`isImage`/`isVideo`
@@ -280,9 +304,10 @@ export function ConversationView() {
               const media = isImage(path) || isVideo(path);
               await sendFileRef.current(path, media);
             } catch (e) {
-              setErrorRef.current(
-                t("composer.couldntOpenFile", { error: errorMessage(e) }),
-              );
+              if (current())
+                setErrorRef.current(
+                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
+                );
             }
           }
         })();
@@ -314,7 +339,7 @@ export function ConversationView() {
   // baseline of keys already shown; it's READ in render (pure, StrictMode-safe) and only
   // MUTATED in a post-commit effect. `primed` excludes the very first backlog load.
   const rowKey = (m: ChatMessage, i: number) =>
-    m.id ?? m.clientId ?? `pending-${i}`;
+    m.clientId ?? m.id ?? `pending-${i}`;
   const seenKeys = useRef<Set<string>>(new Set());
   const primed = useRef(false);
   useEffect(() => {
@@ -364,12 +389,16 @@ export function ConversationView() {
     ext: string,
     name?: string,
   ) => {
+    const lease = captureComposer();
+    if (!lease()) return;
     try {
       const path = await chatApi.writeTempFile(Array.from(bytes), ext, name);
+      if (!lease()) return;
       // Image button / paste / screenshot → media intent (inline preview).
       await sendFile(path, true);
     } catch (e) {
-      setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
+      if (lease())
+        setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
     }
   };
 
@@ -549,15 +578,23 @@ export function ConversationView() {
         onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
         onCancelReply={() => setReplyTo(null)}
         onAttach={async () => {
+          const current = captureComposer();
+          if (!current()) return;
           try {
             const path = await openFileDialog({ multiple: false });
             // Attach button → generic attachment (lands in the received-files tray).
-            if (typeof path === "string") await sendFile(path, false);
+            if (current() && typeof path === "string")
+              await sendFile(path, false);
           } catch (e) {
-            setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
+            if (current())
+              setError(
+                t("composer.couldntOpenFile", { error: errorMessage(e) }),
+              );
           }
         }}
         onImage={async () => {
+          const current = captureComposer();
+          if (!current()) return;
           // Image button → the NATIVE file dialog (a JS `<input type=file>` is flaky in
           // WKWebView and silently no-ops), filtered to media, sent with `media: true` so it
           // previews inline. Path-based, so no multi-MB bytes round-trip over IPC.
@@ -571,9 +608,13 @@ export function ConversationView() {
                 },
               ],
             });
-            if (typeof path === "string") await sendFile(path, true);
+            if (current() && typeof path === "string")
+              await sendFile(path, true);
           } catch (e) {
-            setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
+            if (current())
+              setError(
+                t("composer.couldntOpenFile", { error: errorMessage(e) }),
+              );
           }
         }}
         onSend={(t) => {
@@ -582,11 +623,15 @@ export function ConversationView() {
         }}
         onPasteImage={sendImageBytes}
         onScreenshot={async (hideWindow) => {
+          const current = captureComposer();
+          if (!current()) return;
           try {
             const bytes = await chatApi.captureScreen(hideWindow);
             // Empty bytes = the user cancelled the capture: send nothing.
-            if (bytes.length > 0) await sendImageBytes(bytes, "png");
+            if (current() && bytes.length > 0)
+              await sendImageBytes(bytes, "png");
           } catch (e) {
+            if (!current()) return;
             const msg = errorMessage(e);
             // The backend returns this sentinel when macOS Screen Recording isn't granted
             // (otherwise screencapture silently yields only the desktop wallpaper).

@@ -30,6 +30,7 @@ pub struct RatchetSessions {
     /// without compaction it grows per-message forever and `open` decrypts EVERY
     /// record at login (O(total messages) startup).
     on_disk: usize,
+    compaction_warned: bool,
 }
 
 impl RatchetSessions {
@@ -45,6 +46,7 @@ impl RatchetSessions {
             file,
             latest,
             on_disk,
+            compaction_warned: false,
         })
     }
 
@@ -57,15 +59,38 @@ impl RatchetSessions {
     /// compacts the file down to one record per peer so it does not grow per-message
     /// without bound (which would make `open` O(total messages)).
     pub fn put(&mut self, peer: &str, state: &RatchetState) -> Result<(), LogError> {
+        self.put_durable(peer, state)
+    }
+
+    pub(crate) fn put_durable(&mut self, peer: &str, state: &RatchetState) -> Result<(), LogError> {
+        self.put_with(peer, state, |file, record| file.append_durable(record))
+    }
+
+    fn put_with(
+        &mut self,
+        peer: &str,
+        state: &RatchetState,
+        append: impl FnOnce(
+            &mut EncryptedRecordLog<SessionRecord>,
+            &SessionRecord,
+        ) -> Result<(), LogError>,
+    ) -> Result<(), LogError> {
+        if self.on_disk >= (self.latest.len() * 4 + 16) * 2 {
+            self.maybe_compact()?;
+        }
         let state_bytes = state.serialize();
         let record = SessionRecord {
             peer: peer.to_string(),
             state: state_bytes.clone(),
         };
-        self.file.append(&record)?;
+        append(&mut self.file, &record)?;
         self.on_disk += 1;
         self.latest.insert(peer.to_string(), state_bytes);
-        self.maybe_compact()?;
+        // The synced append is authoritative even if maintenance fails.
+        if self.maybe_compact().is_err() && !self.compaction_warned {
+            log::warn!("ratchet session compaction deferred");
+            self.compaction_warned = true;
+        }
         Ok(())
     }
 
@@ -87,7 +112,12 @@ impl RatchetSessions {
             .collect();
         self.file.rewrite(&records)?;
         self.on_disk = records.len();
+        self.compaction_warned = false;
         Ok(())
+    }
+
+    pub(crate) fn sync(&self) -> Result<(), LogError> {
+        self.file.sync()
     }
 
     /// Returns `true` if there is a stored session for `peer` that actually decodes.
@@ -113,6 +143,48 @@ mod tests {
         let alice = init_alice(&shared, &bob_pub);
         let bob = init_bob(&shared, bob_secret);
         (alice, bob)
+    }
+
+    #[test]
+    fn failed_persistence_does_not_install_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let mut store = RatchetSessions::open(&path, "pw").unwrap();
+        let (alice, _) = make_pair();
+        assert!(store
+            .put_with("peer", &alice, |_, _| Err(LogError::Io(
+                std::io::Error::other("injected append failure")
+            )))
+            .is_err());
+        assert!(!store.has("peer"));
+        let reopened = RatchetSessions::open(&path, "pw").unwrap();
+        assert!(!reopened.has("peer"));
+    }
+
+    #[test]
+    fn failed_compaction_preserves_commit_and_bounds_future_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        let mut store = RatchetSessions::open(&path, "pw").unwrap();
+        std::fs::create_dir(path.with_extension("compact-tmp")).unwrap();
+        let (alice, _) = make_pair();
+        for _ in 0..40 {
+            store.put("peer", &alice).unwrap();
+        }
+        assert!(store.put("peer", &alice).is_err());
+        assert!(RatchetSessions::open(&path, "pw").unwrap().has("peer"));
+        std::fs::remove_dir(path.with_extension("compact-tmp")).unwrap();
+        let (mut advanced, mut bob) = make_pair();
+        let (header, ciphertext) = advanced.ratchet_encrypt(b"first").unwrap();
+        bob.ratchet_decrypt(&header, &ciphertext).unwrap();
+        store.put("peer", &advanced).unwrap();
+        let reopened = RatchetSessions::open(&path, "pw").unwrap();
+        let mut restored = reopened.get("peer").unwrap();
+        let (header, ciphertext) = restored.ratchet_encrypt(b"after recovery").unwrap();
+        assert_eq!(
+            bob.ratchet_decrypt(&header, &ciphertext).unwrap(),
+            b"after recovery"
+        );
     }
 
     #[test]

@@ -6,8 +6,29 @@ import { join } from "node:path";
 import { validateReport, validateEvidence, REQUIRED_SCENARIOS } from "./hidden-contacts-report.mjs";
 
 const complete = () => ({
-  schema: 1, platform: process.platform, native: true, mocked: false,
-  scenarios: Object.fromEntries(REQUIRED_SCENARIOS.map(name => [name, { passed: true, elapsedMs: 1, evidence: [`${name}.json`, `${name}.png`] }])),
+  schema: 2, sourceSha: "a".repeat(40), platform: process.platform, native: true, mocked: false,
+  scenarios: Object.fromEntries(REQUIRED_SCENARIOS.map(name => [name, { passed: true, elapsedMs: 1, evidence: [`${name}.json`, `${name}.png`, `${name}.log`], evidenceDigests: Object.fromEntries(["json", "png", "log"].map(extension => [`${name}.${extension}`, "b".repeat(64)])) }])),
+});
+test("requires three real receipt phases with exact stable identities", async () => {
+  const { validateObservations } = await import("./hidden-contacts-report.mjs");
+  for (const name of ["receipt-offline-awaiting", "receipt-peer-restart-delivered", "receipt-source-restart-durable"]) {
+    assert.ok(REQUIRED_SCENARIOS.includes(name));
+    assert.ok(validateObservations(name, {}).length);
+  }
+});
+test("receipt phases reject changed identity, malformed IDs and false state", async () => {
+  const { validateObservations, validateReceiptSequence } = await import("./hidden-contacts-report.mjs");
+  const ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+  const observation = { owner: "a".repeat(36), account: "d".repeat(32), ids, originalIds: ids, statuses: ["awaiting", "awaiting", "awaiting"], cardsVerified: true, actualPeerExit: true };
+  assert.deepEqual(validateObservations("receipt-offline-awaiting", observation), []);
+  for (const patch of [{ statuses: ["delivered", "awaiting", "awaiting"] }, { actualPeerExit: false }, { ids: ["bad"] }, { originalIds: [...ids].reverse() }]) assert.ok(validateObservations("receipt-offline-awaiting", { ...observation, ...patch }).length);
+  const phases = [observation, { ...observation }, { ...observation }];
+  assert.deepEqual(validateReceiptSequence(phases), []);
+  for (const patch of [{ owner: "b".repeat(36) }, { account: "e".repeat(32) }, { ids: [...ids].reverse() }]) assert.ok(validateReceiptSequence([observation, { ...observation, ...patch }, observation]).length);
+  const durable = { ...observation, statuses: ["delivered", "delivered", "delivered"], sameKeystorePeerRestart: true, actualProcessRestart: true };
+  assert.ok(validateObservations("receipt-source-restart-durable", durable).length, "online receiver can hide missing persisted delivery");
+  assert.ok(validateObservations("receipt-source-restart-durable", { ...durable, peerOfflineDuringSourceRestart: true }).length, "offline backend checkpoint is required before online rendering");
+  assert.deepEqual(validateObservations("receipt-source-restart-durable", { ...durable, peerOfflineDuringSourceRestart: true, offlineBackendDurabilityVerified: true, coldIds: ids, coldStatuses: ["delivered", "delivered", "delivered"], uiVerifiedAfterPeerRestart: true }), []);
 });
 test("requires native invisible-mode, reply and restart evidence", () => {
   for (const name of ["privacy-mode", "privacy-reply", "privacy-restart"]) {
@@ -35,6 +56,22 @@ test("requires evidence files to exist and contain valid JSON and PNG data", asy
   assert.ok((await validateEvidence(report, root)).length);
 });
 test("accepts a complete native evaluation", () => assert.deepEqual(validateReport(complete()), []));
+test("requires expanded core scenarios, exact source revision and evidence hashes", () => {
+  for (const name of ["auth-register-signin", "direct-messages", "incoming-attachment", "native-profile-layout", "history-process-restart"]) assert.ok(REQUIRED_SCENARIOS.includes(name));
+  for (const sourceSha of [undefined, "main", "0".repeat(39)]) assert.ok(validateReport({ ...complete(), sourceSha }).length);
+  assert.ok(validateReport(complete(), { sourceSha: "c".repeat(40) }).length);
+  assert.ok(validateReport(complete(), { platform: "invalid" }).length);
+  const report = complete(); report.scenarios.hide.evidenceDigests["hide.png"] = "invalid";
+  assert.ok(validateReport(report).length);
+});
+test("typed observations reject missing checks and preserve explicit download limitations", async () => {
+  const { validateObservations } = await import("./hidden-contacts-report.mjs");
+  assert.deepEqual(validateObservations("direct-messages", { uiToCliRendered: true, uiToCliPersisted: true, cliToUiRendered: true, cliToUiPersisted: true }), []);
+  for (const observations of [{}, { uiToCliRendered: "true" }, { uiToCliRendered: false }]) assert.ok(validateObservations("direct-messages", observations).length);
+  assert.deepEqual(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, bytesVerified: true, downloadVerified: false, limitation: "OS save picker is not automated" }), []);
+  assert.ok(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is not automated" }).length);
+  assert.ok(validateObservations("incoming-attachment", { manifestPersisted: true, genericFileRendered: true, downloadVerified: false }).length);
+});
 test("rejects missing, failed and evidence-free scenarios", () => {
   for (const value of [undefined, { passed: false, evidence: ["x"] }, { passed: true, evidence: [] }]) {
     const report = complete();

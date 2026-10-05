@@ -234,7 +234,9 @@ impl Node {
         }
         let new_name = new_name.trim();
         if new_name.is_empty() {
-            return Err(NodeError::Channel("channel name cannot be empty".into()));
+            return Err(NodeError::InvalidInput(
+                "channel name cannot be empty".into(),
+            ));
         }
         // Unchanged name → no-op (don't post a redundant event).
         if new_name == current_name {

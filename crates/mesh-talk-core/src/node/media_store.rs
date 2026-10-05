@@ -70,7 +70,7 @@ impl MediaStore {
     }
 
     /// The on-disk path a `file_conv` of media `name` is stored at: `<dir>/<hex>.<ext>`.
-    fn path_for(&self, file_conv: ConversationId, name: &str) -> PathBuf {
+    pub(in crate::node) fn path_for(&self, file_conv: ConversationId, name: &str) -> PathBuf {
         let hex = hex::encode(file_conv.as_bytes());
         match ext_of(name) {
             Some(ext) => self.dir.join(format!("{hex}.{ext}")),
@@ -123,8 +123,10 @@ impl MediaStore {
                 writer.write_all(&buf[..n])?;
             }
             writer.flush()?;
+            writer.get_ref().sync_all()?;
         }
         std::fs::rename(&part, &dest)?;
+        sync_parent(&dest)?;
         Ok(dest)
     }
 
@@ -139,8 +141,11 @@ impl MediaStore {
     ) -> std::io::Result<PathBuf> {
         let dest = self.path_for(file_conv, name);
         let part = part_path(&dest);
-        std::fs::write(&part, bytes)?;
+        let mut file = std::fs::File::create(&part)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
         std::fs::rename(&part, &dest)?;
+        sync_parent(&dest)?;
         Ok(dest)
     }
 
@@ -156,6 +161,19 @@ impl MediaStore {
         }
         std::fs::read(path).ok()
     }
+}
+
+pub(in crate::node) fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
+    #[cfg(unix)]
+    std::fs::File::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?
+    .sync_all()?;
+    Ok(())
 }
 
 /// Upper bound on a whole-file in-memory read for inline preview (OOM guard). Comfortably

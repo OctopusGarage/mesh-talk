@@ -199,7 +199,7 @@ async fn offline_cached_route_is_not_fresh_online_presence_after_restart() {
 #[tokio::test]
 async fn pinned_private_probe_refreshes_only_live_peers_without_new_grants_or_events() {
     let dir = tempfile::tempdir().unwrap();
-    let (alice, _) = start(dir.path(), "alice", 0).await;
+    let (mut alice, _) = start(dir.path(), "alice", 0).await;
     let (bob, _) = start(dir.path(), "bob", 0).await;
     let proof = bob.node.signed_announce("Bob", bob.listen_tcp_port());
     alice.roster.lock().unwrap().update(
@@ -211,27 +211,36 @@ async fn pinned_private_probe_refreshes_only_live_peers_without_new_grants_or_ev
     bob.set_allowed(alice.account_id(), true).await.unwrap();
     alice.set_invisible(true).await.unwrap();
     bob.set_invisible(true).await.unwrap();
+    // Isolate this explicit probe from discovery, accept/delivery, and periodic
+    // probes. Join producers and admitted children without closing admission.
+    for task in &alice.tasks {
+        task.abort();
+    }
+    for task in std::mem::take(&mut alice.tasks) {
+        let _ = task.await;
+    }
+    alice.node.runtime_work.drain().await;
     let policy = alice.privacy_snapshot();
     let conversations = alice.node.log.lock().unwrap().conversations();
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
     alice.node.probe_private_routes().await;
-    assert!(alice
+    let live = alice
         .peers()
         .iter()
-        .any(|p| p.public.user_id() == bob.user_id()));
-    assert_eq!(alice.privacy_snapshot(), policy);
-    assert_eq!(
-        alice.node.log.lock().unwrap().conversations(),
-        conversations
-    );
-    drop(bob);
-    tokio::task::yield_now().await;
+        .any(|p| p.public.user_id() == bob.user_id());
+    let after_probe_policy = alice.privacy_snapshot();
+    let after_probe_conversations = alice.node.log.lock().unwrap().conversations();
+    bob.stop().await;
+    alice.node.runtime_work.drain().await;
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
     alice.node.probe_private_routes().await;
-    assert!(
-        alice.peers().is_empty(),
-        "failed probes must not refresh cached presence"
-    );
+    alice.node.runtime_work.drain().await;
+    let absent = alice.peers().is_empty();
+    alice.stop().await;
+    assert!(live);
+    assert_eq!(after_probe_policy, policy);
+    assert_eq!(after_probe_conversations, conversations);
+    assert!(absent, "failed probes must not refresh cached presence");
 }
 
 #[tokio::test]

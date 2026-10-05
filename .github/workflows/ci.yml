@@ -4,6 +4,12 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      diagnostic_timing:
+        description: Full-workspace test-only delivery phase timings
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -15,6 +21,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MESH_TALK_TEST_TIMING: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/feat/automatic-delivery-receipts') || inputs.diagnostic_timing) && '1' || '0' }}
 
 jobs:
   checks:
@@ -103,7 +110,14 @@ jobs:
       - name: Test (macOS + Windows)
         if: matrix.os != 'ubuntu-latest'
         working-directory: src-tauri
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
+            cargo test --workspace -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+          else
+            cargo test --workspace
+          fi
 
       # Capture loader evidence when Windows cannot even start the test harness.
       # This diagnostic never turns a failed test step into a successful check.
@@ -148,7 +162,22 @@ jobs:
       - name: Test + coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
+            cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+          else
+            cargo llvm-cov --workspace --lcov --output-path lcov.info
+          fi
+
+      - name: Upload test timing diagnostics
+        if: always() && env.MESH_TALK_TEST_TIMING == '1'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timing-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mesh-talk-test-timing.log
+          if-no-files-found: warn
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'

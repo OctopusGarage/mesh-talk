@@ -15,10 +15,12 @@
 //! functions log and swallow errors instead of propagating them.
 
 /// The keychain service name; the account is the mesh-talk username.
+#[cfg(not(test))]
 const SERVICE: &str = "mesh-talk";
 
 /// Build the keychain entry for a username, or `None` if the platform keyring
 /// can't be reached (e.g. no Secret Service on a headless Linux box).
+#[cfg(not(test))]
 fn entry(username: &str) -> Option<keyring::Entry> {
     match keyring::Entry::new(SERVICE, username) {
         Ok(e) => Some(e),
@@ -31,6 +33,7 @@ fn entry(username: &str) -> Option<keyring::Entry> {
 
 /// Persist the password for `username` in the OS keychain (best-effort). Overwrites
 /// any existing secret for that account.
+#[cfg(not(test))]
 pub fn save(username: &str, password: &str) {
     let Some(entry) = entry(username) else { return };
     if let Err(e) = entry.set_password(password) {
@@ -40,6 +43,7 @@ pub fn save(username: &str, password: &str) {
 
 /// Load the saved password for `username`, or `None` if there is no entry, the
 /// keychain is unavailable, or the read failed (any failure → manual login).
+#[cfg(not(test))]
 pub fn load(username: &str) -> Option<String> {
     let entry = entry(username)?;
     match entry.get_password() {
@@ -53,6 +57,7 @@ pub fn load(username: &str) -> Option<String> {
 }
 
 /// Clear any saved password for `username` (best-effort; a missing entry is fine).
+#[cfg(not(test))]
 pub fn clear(username: &str) {
     let Some(entry) = entry(username) else { return };
     match entry.delete_credential() {
@@ -61,9 +66,30 @@ pub fn clear(username: &str) {
     }
 }
 
-// NOTE (test seam): there is no clean unit test for the save→load→clear round trip. Each
-// function opens a FRESH `keyring::Entry`, and keyring's `mock` backend is per-Entry and
-// explicitly non-persistent ("no persistence between sessions"), so a mocked round trip
-// can't share state across calls; a real-keychain test is flaky/unavailable in CI (locked
-// or absent on headless runners). The logic here is a thin, error-swallowing wrapper; its
-// behavior is exercised end-to-end by the app's auto-login flow.
+// The OS credential provider is deliberately mocked in unit/IPC tests. This
+// avoids touching the developer's real credentials and permits deterministic
+// owner-isolation checks; production still uses the platform keyring above.
+#[cfg(test)]
+static TEST_SECRETS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(Default::default);
+#[cfg(test)]
+pub fn save(username: &str, password: &str) {
+    TEST_SECRETS
+        .lock()
+        .unwrap()
+        .insert(username.into(), password.into());
+}
+#[cfg(test)]
+pub fn load(username: &str) -> Option<String> {
+    TEST_SECRETS.lock().unwrap().get(username).cloned()
+}
+#[cfg(test)]
+pub fn clear(username: &str) {
+    TEST_SECRETS.lock().unwrap().remove(username);
+}
+
+// Ownership tests use the explicit cfg(test) provider above. They prove auth and
+// metadata sequencing, not a real platform keyring round trip: keyring's built-in
+// mock is per Entry, and the real keyring can be locked or absent in CI. Production
+// platform integration remains a separate end-to-end validation boundary.

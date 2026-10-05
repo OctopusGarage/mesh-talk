@@ -31,6 +31,7 @@ import {
   convKey,
   fromHistoryItem,
   useChat,
+  captureChatOwnership,
   type ChatMessage,
   type Conversation,
 } from "@/store/chat";
@@ -121,22 +122,23 @@ export function ConversationHistoryDialog({
   // conversation changed under it). Re-scoping is automatic: a new `key` re-runs this.
   useEffect(() => {
     if (!open || !ready) return;
+    const lease = captureChatOwnership();
     let alive = true;
     setLoading(true);
     setError(null);
     const load =
       conversation.kind === "account"
-        ? chat.accountHistory(conversation.id, FULL_HISTORY_LIMIT)
+        ? chat.ownerHistory(lease.owner!, conversation.id, FULL_HISTORY_LIMIT)
         : chat.channelHistory(conversation.id, FULL_HISTORY_LIMIT);
     load
       .then((hist) => {
-        if (alive) setItems(hist.map(fromHistoryItem));
+        if (alive && lease.current()) setItems(hist.map(fromHistoryItem));
       })
       .catch((e) => {
-        if (alive) setError(errorMessage(e));
+        if (alive && lease.current()) setError(errorMessage(e));
       })
       .finally(() => {
-        if (alive) setLoading(false);
+        if (alive && lease.current()) setLoading(false);
       });
     return () => {
       alive = false;
@@ -175,11 +177,14 @@ export function ConversationHistoryDialog({
   );
 
   const saveFile = async (file: NonNullable<ChatMessage["file"]>) => {
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
     try {
       const dest = await saveDialog({ defaultPath: file.name });
-      if (typeof dest === "string") await chat.saveFile(file.fileConv, dest);
+      if (lease.current() && typeof dest === "string")
+        await chat.saveFile(file.fileConv, dest);
     } catch (e) {
-      setError(errorMessage(e));
+      if (lease.current()) setError(errorMessage(e));
     }
   };
 

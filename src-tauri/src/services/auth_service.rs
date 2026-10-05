@@ -10,6 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Session duration in seconds (24 hours)
 const SESSION_DURATION_SECS: u64 = 24 * 60 * 60;
 
+#[cfg(test)]
+type RenamePersistenceGate =
+    Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>;
+
 /// Authentication error types
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthError {
@@ -83,6 +87,8 @@ impl Session {
 /// Authentication service for managing user registration, login, and logout
 #[derive(Clone)]
 pub struct AuthService {
+    #[cfg(test)]
+    rename_persisted: RenamePersistenceGate,
     /// Identity manager for user authentication
     identity_manager: Arc<IdentityManager>,
     /// In-memory storage of sessions (key: session token, value: Session)
@@ -97,6 +103,8 @@ impl AuthService {
     /// Create a new authentication service
     pub fn new(identity_manager: Arc<IdentityManager>) -> Self {
         Self {
+            #[cfg(test)]
+            rename_persisted: Arc::new(Mutex::new(None)),
             identity_manager,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             current_user: Arc::new(Mutex::new(None)),
@@ -244,9 +252,10 @@ impl AuthService {
     /// identity store (verifying `password`) and updates the in-memory current user.
     /// The login `username` is unchanged. Returns the updated session user.
     pub fn set_display_name(&self, password: &str, new_display_name: &str) -> AuthResult<User> {
-        let username = {
+        let (username, owner) = {
             let guard = self.current_user.lock().unwrap();
-            guard.as_ref().ok_or(AuthError::NotLoggedIn)?.name.clone()
+            let user = guard.as_ref().ok_or(AuthError::NotLoggedIn)?;
+            (user.name.clone(), user.user_id.clone())
         };
 
         let identity_user = self
@@ -265,8 +274,16 @@ impl AuthService {
                 other => AuthError::StorageError(format!("Failed to set display name: {}", other)),
             })?;
 
+        #[cfg(test)]
+        if let Some((entered, release)) = self.rename_persisted.lock().unwrap().take() {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
         let mut guard = self.current_user.lock().unwrap();
         let user = guard.as_mut().ok_or(AuthError::NotLoggedIn)?;
+        if user.user_id != owner {
+            return Err(AuthError::NotLoggedIn);
+        }
         user.display_name = identity_user.effective_display_name().to_string();
         Ok(user.clone())
     }
@@ -308,6 +325,44 @@ mod tests {
     use super::*;
     use mesh_talk_core::storage::file_manager::FileManager;
     use std::sync::Arc;
+
+    #[test]
+    fn delayed_persisted_rename_does_not_retarget_current_service_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = AuthService::new(Arc::new(IdentityManager::new(FileManager::new(
+            dir.path().to_owned(),
+        ))));
+        auth.register("alice".into(), "password-a".into(), "fixture".into())
+            .unwrap();
+        auth.register("bob".into(), "password-b".into(), "fixture".into())
+            .unwrap();
+        let (_, token) = auth.login("alice".into(), "password-a".into()).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *auth.rename_persisted.lock().unwrap() = Some((entered_tx, release_rx));
+        let rename_auth = auth.clone();
+        let rename =
+            std::thread::spawn(move || rename_auth.set_display_name("password-a", "Alice renamed"));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        auth.logout(token).unwrap();
+        auth.login("bob".into(), "password-b".into()).unwrap();
+        release_tx.send(()).unwrap();
+        assert!(
+            rename.join().unwrap().is_err(),
+            "completed A persistence must reject a replaced current user"
+        );
+        assert_eq!(
+            auth.current_user
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .display_name,
+            "bob"
+        );
+    }
 
     fn setup_test_context() -> (
         AuthService,

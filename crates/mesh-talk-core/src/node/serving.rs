@@ -3,7 +3,6 @@
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
-use crate::file::decode_manifest;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 use crate::node::session::{request_round, serve_one, serve_wire_bytes, Served, SessionError};
 use crate::transport::SecureChannel;
@@ -19,7 +18,7 @@ const MAX_SERVE_ROUNDS: usize = 10_000;
 const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Ceiling on concurrently-served inbound connections, so a flood of TCP + Noise handshakes
 /// can't spawn unbounded tasks. Generous for a LAN; excess connections wait for a slot.
-const MAX_CONCURRENT_CONNS: usize = 256;
+pub(super) const MAX_CONCURRENT_CONNS: usize = 256;
 
 impl Node {
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
@@ -69,13 +68,18 @@ impl Node {
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
+            _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = self.accept_connections(listener) => {}
         }
     }
 
     async fn accept_connections(self: Arc<Self>, listener: TcpListener) {
         let conns = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS));
+        // Dropping this loop aborts children; their runtime work permits remain
+        // held until Tokio actually destroys each connection future.
+        let mut connections = tokio::task::JoinSet::new();
         loop {
+            while connections.try_join_next().is_some() {}
             // Reserve a connection slot BEFORE accepting, so we never serve more than the cap;
             // excess inbound connections wait in the OS accept queue until a slot frees.
             let permit = match Arc::clone(&conns).acquire_owned().await {
@@ -96,12 +100,19 @@ impl Node {
                 }
             };
             let node = Arc::clone(&self);
-            tokio::spawn(async move {
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
+            connections.spawn(work.track(async move {
                 let _permit = permit; // held for the connection's lifetime, freed on drop
+                #[cfg(test)]
+                if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
+                    let _ = hook.send(());
+                }
                 if let Ok(channel) = node.privacy_accept(stream).await {
                     node.serve_connection(channel).await;
                 }
-            });
+            }));
         }
     }
 
@@ -212,11 +223,18 @@ impl Node {
                     None => continue,
                 }
             } else {
-                let author_uid = event.author.user_id();
                 let sender_x25519 = {
-                    match self.routing_peer(&author_uid) {
-                        Some(p) => p.public.x25519_pub,
-                        None => continue, // author unknown → can't open yet
+                    match self.historical_author(event.author.ed25519_pub()) {
+                        Some(p)
+                            if conv
+                                == super::conversation::dm_conversation_id(
+                                    &self.identity.public(),
+                                    &p.public(),
+                                ) =>
+                        {
+                            p.x25519_pub
+                        }
+                        _ => continue, // unknown author or incorrect device pair
                     }
                 };
                 match crate::dm::open(&self.identity, &sender_x25519, &event.ciphertext) {
@@ -224,10 +242,9 @@ impl Node {
                     Err(_) => continue,
                 }
             };
-            let Some(manifest) = decode_manifest(&plaintext) else {
+            let Some(manifest) = super::files::validated_manifest(&plaintext) else {
                 continue;
             };
-            self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
             let received = ReceivedFile {
                 conv,
                 from: event.author.user_id(),
@@ -247,14 +264,23 @@ impl Node {
             let host_conv = if is_channel {
                 conv
             } else {
-                let author_uid = event.author.user_id();
-                let peer_account = { self.routing_peer(&author_uid).and_then(|p| p.account_id) };
+                let peer_account = self
+                    .historical_author(event.author.ed25519_pub())
+                    .and_then(|p| p.account_id());
                 let my_account = self.account.account_id();
                 match peer_account {
                     Some(acct) if acct != my_account => account_conversation_id(&my_account, &acct),
                     _ => conv,
                 }
             };
+            if self
+                .delivery
+                .lock()
+                .expect("delivery lock not poisoned")
+                .manifest_event_erased(event.id)
+            {
+                continue;
+            }
             // Persist the surfaced manifest durably so the file book's emitted set + this
             // manifest survive a restart — WITHOUT the old bug of marking never-opened
             // manifests emitted (which lost the file). Best-effort: a failure here at worst
@@ -262,21 +288,35 @@ impl Node {
             // Key by the HOST (DM/channel/account) conversation, not the per-file conv, so
             // `conversation_files` can list a conversation's files in time order for
             // history. Startup FileBook seeding iterates all entries regardless of key.
-            let _ = self
-                .received_files
-                .lock()
-                .expect("received_files mutex not poisoned")
-                .record(
-                    host_conv,
-                    event.author.user_id(),
-                    event.wall_clock,
-                    &plaintext,
-                    event.id,
-                );
+            let entry = super::received_log::ReceivedEntry {
+                event_id: event.id,
+                conversation: host_conv,
+                from: event.author.user_id(),
+                wall_clock: event.wall_clock,
+                plaintext,
+            };
+            let installed = if is_channel {
+                self.received_files
+                    .lock()
+                    .expect("files lock not poisoned")
+                    .record_durable(&entry)
+            } else {
+                match self.historical_author(event.author.ed25519_pub()) {
+                    Some(proof) => self.accept_manifest_event(&event, &proof, entry),
+                    None => continue,
+                }
+            };
+            if installed.is_err() {
+                continue;
+            }
+            if !is_channel {
+                continue;
+            } // live journal recovery owns DM file publication
+            self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
             {
                 let mut files = self.files.lock().expect("files mutex not poisoned");
                 files.mark_emitted(event.id);
-                files.record(manifest);
+                files.record_event(event.id, manifest);
             }
             surfaced.push(received);
         }
@@ -390,9 +430,12 @@ impl Node {
     /// anything new. A no-op if no post office is known. Best-effort and
     /// fail-soft — a dial/round error just ends this drain; the next one retries.
     pub async fn drain_from_post_office(&self) {
-        let (post_office, peers) = {
+        if self.cached_peer_snapshot_async().await.is_err() {
+            log::warn!("verified discovery cache update failed");
+        }
+        let post_office = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            (elected_post_office(&roster), roster.peers())
+            elected_post_office(&roster)
         };
         let Some(po) = post_office else {
             return;
@@ -406,8 +449,8 @@ impl Node {
         };
         let store = self.sync_store(channel.peer_identity());
         // Drain a DM conversation per non-PO peer (we never DM a post office).
-        for peer in peers.iter().filter(|p| !p.post_office) {
-            let conv = dm_conversation_id(&self.identity.public(), &peer.public);
+        for peer in self.historical_dm_peers() {
+            let conv = dm_conversation_id(&self.identity.public(), &peer.public());
             if request_round(&mut channel, &store, conv).await.is_err() {
                 return; // channel broke; the next drain re-dials
             }
@@ -448,6 +491,11 @@ impl Node {
     /// (author not yet in the roster, or its ratchet key not yet derivable) is
     /// retried on a later sync rather than lost.
     pub(in crate::node) fn emit_new_messages(&self, conv: ConversationId) {
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        if self.recover_delivery(&mut delivery).is_err() {
+            log::warn!("DM processing awaits local delivery recovery");
+            return;
+        }
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let candidates: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
@@ -463,91 +511,10 @@ impl Node {
                 .collect()
         };
         for event in candidates {
-            // Resolve the author's public identity + display name from the roster.
-            let author_uid = event.author.user_id();
-            let (peer_public, peer_name, peer_account) = {
-                match self.routing_peer(&author_uid) {
-                    Some(p) => (p.public, p.name, p.account_id),
-                    None => continue, // unknown author yet; retry later (NOT marked emitted)
-                }
+            let Some(proof) = self.historical_author(event.author.ed25519_pub()) else {
+                continue;
             };
-            // Decrypt the ratchet wire. The wire key is single-use: a successful
-            // decrypt advances + persists the session, so a re-fed event won't reopen.
-            let wrapped = {
-                let mut r = self
-                    .dm_ratchet
-                    .lock()
-                    .expect("dm_ratchet mutex not poisoned");
-                match r.decrypt(&self.identity, &peer_public, &event.ciphertext) {
-                    Ok(pt) => pt,
-                    Err(_) => continue, // not yet decryptable / not a ratchet DM (NOT emitted)
-                }
-            };
-            // Account-addressed (multi-device) envelope? File it under the ACCOUNT
-            // conversation, recording the route's sender account (account history
-            // derives `from_me` from it). A legacy plaintext keeps today's device-pair
-            // behavior. The live `ReceivedDm` still carries the author device's
-            // id/name — it is just a "something changed" poke; display reads history.
-            let (record_conv, record_from, record_plaintext, body) =
-                match DmEnvelope::decode(&wrapped) {
-                    Some(env) => {
-                        // Bind the envelope's claimed sender account to the AUTHENTICATED
-                        // author device's certified account — a device cannot forge a
-                        // message "from" another account. (A self-synced copy is authored
-                        // by our own device, which carries our own account, so it matches
-                        // when sender_account == my_account.)
-                        if peer_account.as_deref() != Some(env.route.sender_account.as_str()) {
-                            self.emitted
-                                .lock()
-                                .expect("emitted mutex not poisoned")
-                                .insert(event.id);
-                            continue;
-                        }
-                        let my_account = self.account.account_id();
-                        let counterparty = if env.route.sender_account == my_account {
-                            env.route.recipient_account.clone() // self-synced copy of our own send
-                        } else {
-                            env.route.sender_account.clone()
-                        };
-                        let acct_conv = account_conversation_id(&my_account, &counterparty);
-                        let body = MessageBody::decode(&env.body);
-                        // Record the FULL envelope so account history recovers the
-                        // logical msg_id (for reactions/replies).
-                        (
-                            acct_conv,
-                            env.route.sender_account.clone(),
-                            wrapped.clone(),
-                            body,
-                        )
-                    }
-                    None => {
-                        let body = MessageBody::decode(&wrapped);
-                        (conv, author_uid.clone(), wrapped.clone(), body)
-                    }
-                };
-            // Persist the received plaintext (the wire key is single-use/gone), then
-            // mark emitted — only AFTER a successful decrypt + record.
-            let _ = self
-                .received
-                .lock()
-                .expect("received mutex not poisoned")
-                .record(
-                    record_conv,
-                    record_from,
-                    event.wall_clock,
-                    &record_plaintext,
-                    event.id,
-                );
-            self.emitted
-                .lock()
-                .expect("emitted mutex not poisoned")
-                .insert(event.id);
-            let _ = self.incoming.send(ReceivedDm {
-                from: author_uid,
-                from_name: peer_name,
-                text: body.text,
-                reply_to: body.reply_to,
-            });
+            let _ = self.accept_dm_event(&event, &proof, &mut delivery);
         }
     }
 }
