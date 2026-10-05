@@ -143,6 +143,7 @@ export async function receiptScenarios(c) {
 
 export async function receiptRestartScenario(c, state, cold) {
   await c.click(c.row());
+  await revealLatestNativeMessage(c, state.labels[state.labels.length - 1]);
   await receiptPhase(c, state, "receipt-source-restart-durable", "delivered", true, cold);
 }
 
