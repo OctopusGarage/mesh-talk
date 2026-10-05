@@ -299,6 +299,49 @@ mod tests {
         }
     }
 
+    fn reserve_discovery_port() -> tokio::net::UdpSocket {
+        // Match runtime discovery's reuse options and wildcard address, retaining
+        // ownership through startup rather than returning an unreserved port.
+        tauri::async_runtime::block_on(async {
+            mesh_talk_core::transport::net::discovery_socket(0).unwrap()
+        })
+    }
+
+    #[test]
+    fn discovery_reservation_survives_competing_nonreuse_bind_until_runtime_start() {
+        let root = tempfile::tempdir().unwrap();
+        let reservation = reserve_discovery_port();
+        let port = reservation.local_addr().unwrap().port();
+        let competitor = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port));
+        let competitor_blocked = competitor.is_err();
+        let started = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "reserved",
+            "Reserved",
+            "pw",
+            port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        ));
+        drop(reservation);
+        drop(competitor);
+        let startup_error = started.as_ref().err().map(ToString::to_string);
+        if let Ok(runtime) = started {
+            tauri::async_runtime::block_on(runtime.stop());
+        }
+        assert!(
+            competitor_blocked,
+            "non-reuse competitor acquired reserved port; real startup error: {startup_error:?}"
+        );
+        assert!(
+            startup_error.is_none(),
+            "compatible reservation prevented runtime startup: {startup_error:?}"
+        );
+    }
+
     struct Fixture {
         root: tempfile::TempDir,
         app_state: AppState,
@@ -333,9 +376,8 @@ mod tests {
             let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
                 .build()
                 .unwrap();
-            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let discovery_port = socket.local_addr().unwrap().port();
-            drop(socket);
+            let reservation = reserve_discovery_port();
+            let discovery_port = reservation.local_addr().unwrap().port();
             let runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
                 root.path(),
                 "alice",
@@ -349,6 +391,7 @@ mod tests {
                 |_| {},
             ))
             .unwrap();
+            drop(reservation);
             *node.0.blocking_lock() = Some(runtime);
             Self {
                 root,
@@ -471,9 +514,8 @@ mod tests {
     fn registered_status_query_does_not_track_real_incoming_account_message() {
         let fixture = Fixture::new();
         let remote_root = tempfile::tempdir().unwrap();
-        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let reservation = reserve_discovery_port();
         let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
         let remote = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
             remote_root.path(),
             "sender",
@@ -487,6 +529,7 @@ mod tests {
             |_| {},
         ))
         .unwrap();
+        drop(reservation);
         fixture.announce_peer(
             remote
                 .handle()
