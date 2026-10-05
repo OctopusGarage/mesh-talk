@@ -53,7 +53,6 @@ fn frame_receipt(sealed: Vec<u8>) -> Vec<u8> {
 
 /// Only Ed25519 keys determine scope, like the DM pair. Full Ed25519/X25519
 /// identities are independently bound inside the receipt and by signed proofs.
-#[allow(dead_code)] // Used by the next Node delivery integration phase.
 pub(crate) fn delivery_conversation_id(a: &PublicIdentity, b: &PublicIdentity) -> ConversationId {
     let mut pair = [a.ed25519_pub, b.ed25519_pub];
     pair.sort();
@@ -82,7 +81,6 @@ pub(crate) struct ReceiptPayload {
     confirmed_at: u64,
 }
 
-#[allow(dead_code)] // Typed preparation is reserved for Node's durable receive transaction.
 impl ReceiptPayload {
     /// `accepted` must be the actual plaintext opened from `original` by the
     /// host's detached ratchet decryption, not an imported history/backfill row.
@@ -213,10 +211,10 @@ impl ReceiptPayload {
 pub(crate) struct AuthenticatedReceipt {
     logical_id: EventId,
     original_event_id: EventId,
+    #[cfg(test)]
     confirmed_at: u64,
 }
 
-#[allow(dead_code)] // Consumed by the next Node status integration phase.
 impl AuthenticatedReceipt {
     pub(crate) fn logical_id(&self) -> EventId {
         self.logical_id
@@ -226,6 +224,7 @@ impl AuthenticatedReceipt {
         self.original_event_id
     }
 
+    #[cfg(test)]
     pub(crate) fn confirmed_at(&self) -> u64 {
         self.confirmed_at
     }
@@ -237,7 +236,6 @@ pub(crate) struct OpenedReceipt {
     payload: ReceiptPayload,
 }
 
-#[allow(dead_code)] // Used by the next Node receipt dispatch phase.
 impl OpenedReceipt {
     pub(crate) fn logical_id(&self) -> EventId {
         self.payload.logical_id
@@ -281,6 +279,7 @@ impl OpenedReceipt {
         Some(AuthenticatedReceipt {
             logical_id: payload.logical_id,
             original_event_id: payload.original_event_id,
+            #[cfg(test)]
             confirmed_at: payload.confirmed_at,
         })
     }
@@ -290,7 +289,6 @@ impl OpenedReceipt {
 /// target proof, and separately checks current privacy authorization. Full proof
 /// equality rejects account rebinding and X25519 substitution. A post office
 /// transporting the event never becomes the confirming principal.
-#[allow(dead_code)] // Runtime stays unchanged until the atomic Node integration.
 pub(crate) fn open_receipt(
     sender: &DeviceIdentity,
     sender_account: &str,
@@ -342,7 +340,7 @@ fn valid_account(account: &str) -> bool {
 /// Parse the existing sealed-box type under a small byte budget before its
 /// general-purpose opener. This preserves its strict, fixed-int wire format
 /// after its receipt-only marker, without changing ordinary DM crypto.
-fn valid_sealed_wire(wire: &[u8]) -> bool {
+pub(in crate::node) fn valid_sealed_wire(wire: &[u8]) -> bool {
     if wire.len() > MAX_RECEIPT_WIRE {
         return false;
     }

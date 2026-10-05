@@ -58,6 +58,17 @@ enum SyncWire {
     // Appended (stable discriminants) for the whole-conversation fingerprint short-circuit.
     FpRequest(FpRequest),
     FpResponse(FpResponse),
+    // Optional final custody probe. Legacy endpoints close this disposable
+    // connection; ordinary reconciliation remains byte-for-byte compatible.
+    DurableHaveRequest {
+        conversation: ConversationId,
+        event_id: EventId,
+    },
+    DurableHaveResponse {
+        conversation: ConversationId,
+        event_id: EventId,
+        stored: bool,
+    },
 }
 
 /// One chunk of a streamed `have` id-set.
@@ -107,11 +118,42 @@ fn encode(wire: &SyncWire) -> Result<Vec<u8>, SessionError> {
 }
 
 fn decode(bytes: &[u8]) -> Result<SyncWire, SessionError> {
+    if bytes.len() > MAX_PLAINTEXT {
+        return Err(SessionError::Serialization("oversized sync frame".into()));
+    }
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
+        .with_limit(MAX_PLAINTEXT as u64)
         .reject_trailing_bytes()
         .deserialize(bytes)
         .map_err(|e| SessionError::Serialization(e.to_string()))
+}
+
+/// A qualified exact storage claim over the authenticated channel, issued only
+/// after the remote synchronizes its currently authorized durable store.
+/// This is custody, never a recipient delivery receipt.
+pub(crate) async fn request_durable_have<IO>(
+    channel: &mut SecureChannel<IO>,
+    conversation: ConversationId,
+    event_id: EventId,
+) -> Result<bool, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::DurableHaveRequest {
+            conversation,
+            event_id,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::DurableHaveResponse {
+            conversation: c,
+            event_id: id,
+            stored,
+        } if c == conversation && id == event_id => Ok(stored),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
 }
 
 /// Stream a `have` id-set as chunk frames (always ≥1 frame, so the receiver gets an
@@ -357,6 +399,23 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     match decode(bytes)? {
+        SyncWire::DurableHaveRequest {
+            conversation,
+            event_id,
+        } => {
+            let stored = store
+                .lock()
+                .expect("store mutex not poisoned")
+                .durable_have(&conversation, &event_id);
+            channel
+                .send(&encode(&SyncWire::DurableHaveResponse {
+                    conversation,
+                    event_id,
+                    stored,
+                })?)
+                .await?;
+            Ok(Served::Handled(conversation))
+        }
         SyncWire::Request(request) => {
             let conversation = request.conversation;
             // The Request's inline have is empty on the networked path; read the
@@ -414,6 +473,7 @@ where
         | SyncWire::ReqHave(_)
         | SyncWire::RespHave(_)
         | SyncWire::FpResponse(_) => Err(SessionError::UnexpectedMessage),
+        SyncWire::DurableHaveResponse { .. } => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -426,6 +486,156 @@ mod tests {
 
     fn conv() -> ConversationId {
         ConversationId::new([1u8; 32])
+    }
+
+    #[derive(Serialize, Deserialize)]
+    enum LegacyWire {
+        Request(SyncRequest),
+        Response(SyncResponse),
+        Followup(SyncFollowup),
+        ReqHave(HaveChunk),
+        RespHave(HaveChunk),
+        FpRequest(FpRequest),
+        FpResponse(FpResponse),
+    }
+
+    #[test]
+    fn optional_storage_probe_preserves_legacy_tags_and_has_fixed_strict_size() {
+        let request = SyncRequest {
+            conversation: conv(),
+            have: vec![],
+        };
+        assert_eq!(
+            encode(&SyncWire::Request(request.clone())).unwrap(),
+            bincode::serialize(&LegacyWire::Request(request)).unwrap()
+        );
+        let fp = FpResponse { matched: true };
+        assert_eq!(
+            encode(&SyncWire::FpResponse(fp)).unwrap(),
+            bincode::serialize(&LegacyWire::FpResponse(FpResponse { matched: true })).unwrap()
+        );
+        let request = encode(&SyncWire::DurableHaveRequest {
+            conversation: conv(),
+            event_id: EventId::new([3; 32]),
+        })
+        .unwrap();
+        assert_eq!(request.len(), 68);
+        assert_eq!(&request[..4], &7u32.to_le_bytes());
+        assert!(bincode::deserialize::<LegacyWire>(&request).is_err());
+        let mut trailing = request.clone();
+        trailing.push(0);
+        assert!(decode(&trailing).is_err());
+        for length in [0, 4, 67] {
+            assert!(decode(&request[..length]).is_err());
+        }
+        let mut response = encode(&SyncWire::DurableHaveResponse {
+            conversation: conv(),
+            event_id: EventId::new([3; 32]),
+            stored: true,
+        })
+        .unwrap();
+        assert_eq!(response.len(), 69);
+        response[68] = 2;
+        assert!(decode(&response).is_err());
+        let oversized = encode(&SyncWire::Response(SyncResponse {
+            conversation: conv(),
+            events: vec![],
+            have: vec![EventId::new([0; 32]); 3000],
+        }))
+        .unwrap();
+        assert!(decode(&oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_have_never_qualifies_as_durable_custody() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let event = Event::new(&alice, conv(), 1, vec![], 1, 0, EventKind::Message, vec![1]);
+        let id = event.id;
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let mut log = EventLog::default();
+            log.append(event).unwrap();
+            serve_one(&mut channel, &Mutex::new(log)).await.unwrap();
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        assert!(!request_durable_have(&mut channel, conv(), id)
+            .await
+            .unwrap());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_storage_probe_rejects_wrong_conversation_or_event() {
+        for wrong_conversation in [true, false] {
+            let alice = DeviceIdentity::generate();
+            let bob = DeviceIdentity::generate();
+            let id = EventId::new([3; 32]);
+            let (a, b) = tokio::io::duplex(65536);
+            let server = tokio::spawn(async move {
+                let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+                let _ = channel.recv().await.unwrap();
+                channel
+                    .send(
+                        &encode(&SyncWire::DurableHaveResponse {
+                            conversation: if wrong_conversation {
+                                ConversationId::new([2; 32])
+                            } else {
+                                conv()
+                            },
+                            event_id: if wrong_conversation {
+                                id
+                            } else {
+                                EventId::new([4; 32])
+                            },
+                            stored: true,
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+            assert!(matches!(
+                request_durable_have(&mut channel, conv(), id).await,
+                Err(SessionError::UnexpectedMessage)
+            ));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_endpoint_syncs_normally_then_rejects_only_optional_probe() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let event = Event::new(&alice, conv(), 1, vec![], 1, 0, EventKind::Message, vec![1]);
+        let id = event.id;
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let store = Mutex::new(EventLog::default());
+            loop {
+                let bytes = channel.recv().await.unwrap();
+                if bincode::deserialize::<LegacyWire>(&bytes).is_err() {
+                    break;
+                }
+                serve_wire_bytes(&mut channel, &store, &bytes)
+                    .await
+                    .unwrap();
+            }
+            assert!(store.lock().unwrap().has(&id));
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        let mut log = EventLog::default();
+        log.append(event).unwrap();
+        request_round(&mut channel, &Mutex::new(log), conv())
+            .await
+            .unwrap();
+        assert!(request_durable_have(&mut channel, conv(), id)
+            .await
+            .is_err());
+        server.await.unwrap();
     }
 
     #[tokio::test]

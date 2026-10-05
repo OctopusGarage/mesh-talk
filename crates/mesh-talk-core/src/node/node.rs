@@ -214,7 +214,8 @@ pub struct Node {
     pub(in crate::node) delivery: Mutex<super::delivery_store::DeliveryStore>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
-    pub(in crate::node) delivery_control_ids: Mutex<HashMap<EventId, Option<String>>>,
+    pub(in crate::node) delivery_control_ids:
+        Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
     pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
     /// Decrypted received-message plaintext, for serving history after the wire key is gone.
     pub(in crate::node) received: Mutex<ReceivedLog>,
@@ -571,7 +572,7 @@ impl Node {
             .unwrap_or_default()
     }
 
-    /// Append a channel event, sequencing it from the channel's log position. Returns
+    /// Append a local event, sequencing it from the conversation's log position. Returns
     /// the event's `seq` (its position in our own per-author chain), used to index the
     /// sent sidecar for channel history.
     pub(in crate::node) fn append_event(
@@ -580,6 +581,11 @@ impl Node {
         kind: EventKind,
         ciphertext: Vec<u8>,
     ) -> Result<u64, NodeError> {
+        // Accepted immutable intents reserve their author's sequence even before
+        // installation. Serialize every local allocation with that reservation.
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
         let (parents, lamport) = log.prepare(&channel);

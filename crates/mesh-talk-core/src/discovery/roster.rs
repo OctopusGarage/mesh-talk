@@ -2,7 +2,7 @@
 
 use crate::discovery::announce::Announce;
 use crate::identity::device::PublicIdentity;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -57,11 +57,35 @@ pub const MAX_PEERS: usize = 1024;
 pub struct Roster {
     peers: HashMap<UserId, PeerRecord>,
     announcements: HashMap<UserId, Announce>,
-    historical: HashMap<UserId, Announce>,
+    historical: BTreeMap<UserId, Announce>,
     conflicting_history: HashSet<UserId>,
 }
 
 impl Roster {
+    pub(crate) fn historical_announcement(&self, public: &PublicIdentity) -> Option<&Announce> {
+        let id = public.user_id();
+        self.historical
+            .get(&id)
+            .filter(|a| !self.conflicting_history.contains(&id) && a.public() == *public)
+    }
+    pub(crate) fn next_historical_after(&self, cursor: Option<&str>) -> Option<Announce> {
+        let start = cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        self.historical
+            .range::<str, _>((start, std::ops::Bound::Unbounded))
+            .chain(self.historical.range::<str, _>((
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Included(cursor.unwrap_or("")),
+            )))
+            .find(|(id, _)| !self.conflicting_history.contains(*id))
+            .map(|(_, a)| a.clone())
+    }
+    pub(crate) fn historical_by_author(&self, author: &[u8; 32]) -> Option<Announce> {
+        let id = PublicIdentity::user_id_from(author);
+        self.historical
+            .get(&id)
+            .filter(|a| a.ed25519_pub == *author && !self.conflicting_history.contains(&id))
+            .cloned()
+    }
     /// Verify and record an announce received from `source_ip`. Returns an
     /// [`UpdateOutcome`]: `Rejected` if inauthentic or our own `self_user_id`,
     /// `New` on first sight of the peer, `Refreshed` if it was already known.
@@ -192,6 +216,40 @@ mod tests {
 
     fn ip() -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))
+    }
+
+    #[test]
+    fn historical_cursor_skips_conflicted_first_peer_and_wraps() {
+        let mut identities = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+        identities.sort_by_key(|d| d.public().user_id());
+        let account = crate::identity::account::Account::generate();
+        let mut roster = Roster::default();
+        for device in &identities {
+            roster.update(
+                &Announce::new_with_account(device, &account, "peer", 9),
+                ip(),
+                "self",
+            );
+        }
+        roster.update(
+            &Announce::new_with_account(
+                &identities[0],
+                &crate::identity::account::Account::generate(),
+                "conflict",
+                9,
+            ),
+            ip(),
+            "self",
+        );
+        let valid = identities[1].public();
+        assert_eq!(roster.next_historical_after(None).unwrap().public(), valid);
+        assert_eq!(
+            roster
+                .next_historical_after(Some(&valid.user_id()))
+                .unwrap()
+                .public(),
+            valid
+        );
     }
 
     #[test]

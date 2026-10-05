@@ -1,5 +1,231 @@
 use super::*;
 
+#[test]
+fn tight_receipt_capacity_reserves_full_binding_and_indexed_cancel_before_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let tx = incoming(dir.path());
+    let receipt = match &tx {
+        DeliveryTransaction::Incoming {
+            receipt: Some(r), ..
+        } => r.as_ref().clone(),
+        _ => unreachable!(),
+    };
+    let metadata = bincode::serialized_size(&OutboxRecord::Receipt(Box::new(receipt.clone())))
+        .unwrap()
+        + FRAME_OVERHEAD;
+    let finished = bincode::serialized_size(&OutboxRecord::FinishedReceipt(
+        CompletedReceipt::from(&receipt),
+    ))
+    .unwrap()
+        + FRAME_OVERHEAD;
+    let cancel = bincode::serialized_size(&OutboxRecord::Cancel(
+        receipt.conversation,
+        receipt.logical_id,
+    ))
+    .unwrap()
+        + FRAME_OVERHEAD;
+    let old_bound = HEADER_BYTES + metadata + finished + cancel;
+    let mut tight = DeliveryStore::open_with_limits(
+        dir.path(),
+        "pw",
+        DeliveryLimits {
+            outbox_bytes: old_bound,
+            ..DeliveryLimits::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        tight
+            .begin(bincode::deserialize(&bincode::serialize(&tx).unwrap()).unwrap())
+            .is_err(),
+        "full destination identity must be reserved before acceptance"
+    );
+    assert!(tight.pending_transactions().is_empty());
+    drop(tight);
+    let limits = DeliveryLimits {
+        outbox_bytes: old_bound + 64,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store.begin(tx).unwrap();
+    let mut log = PersistentEventLog::open(&dir.path().join("events"), "pw").unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&dir.path().join("sessions"), "pw").unwrap());
+    let mut sent = SentLog::open(&dir.path().join("sent"), "pw").unwrap();
+    let mut received = ReceivedLog::open(&dir.path().join("received"), "pw").unwrap();
+    store
+        .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
+        .unwrap();
+    store
+        .finish_receipt(receipt.conversation, receipt.original_event_id)
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .cancel(receipt.conversation, receipt.logical_id)
+        .unwrap();
+    assert!(store.outbox_path.metadata().unwrap().len() <= old_bound + 64);
+    assert!(store.receipt_scopes.is_empty() && store.completed_receipt_devices.is_empty());
+}
+
+#[test]
+fn receipt_scope_cancellation_handles_queued_completed_raw_and_reused_logical_ids_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let base = match incoming(dir.path()) {
+        DeliveryTransaction::Incoming {
+            receipt: Some(r), ..
+        } => *r,
+        _ => unreachable!(),
+    };
+    let signer = DeviceIdentity::from_secret_bytes([3; 32], [4; 32]);
+    let logical = EventId::new([71; 32]);
+    let left = ConversationId::new([61; 32]);
+    let right = ConversationId::new([62; 32]);
+    let mut rows = Vec::new();
+    for number in 0..192u64 {
+        let mut row = base.clone();
+        let mut original = [0; 32];
+        original[..8].copy_from_slice(&number.to_le_bytes());
+        row.original_event_id = EventId::new(original);
+        row.conversation = if number < 128 { left } else { right };
+        row.logical_id = if number % 3 == 0 {
+            row.original_event_id
+        } else {
+            logical
+        };
+        row.destination.event = Event::new(
+            &signer,
+            base.destination.event.conversation_id,
+            number + 1,
+            vec![],
+            number + 1,
+            101,
+            EventKind::Message,
+            number.to_le_bytes().to_vec(),
+        );
+        store
+            .install_record(OutboxRecord::Receipt(Box::new(row.clone())))
+            .unwrap();
+        if number % 2 == 0 {
+            store
+                .finish_receipt(row.conversation, row.original_event_id)
+                .unwrap();
+        }
+        rows.push(row);
+    }
+    drop(store);
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    store.cancel(left, logical).unwrap();
+    for row in &rows {
+        let erased = row.conversation == left && row.logical_id == logical;
+        assert_eq!(
+            store.has_receipt_for(row.conversation, row.original_event_id),
+            !erased
+        );
+    }
+    for row in &rows {
+        store
+            .cancel(row.conversation, row.original_event_id)
+            .unwrap();
+    }
+    assert!(
+        store.receipts.is_empty()
+            && store.completed_receipts.is_empty()
+            && store.completed_receipt_devices.is_empty()
+    );
+    assert!(store.receipt_events.is_empty() && store.receipt_scopes.is_empty());
+    drop(store);
+    let store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert!(store.cancellation_rows().is_empty() && store.control_ids().is_empty());
+    assert!(store.receipt_events.is_empty() && store.receipt_scopes.is_empty());
+}
+
+#[test]
+fn worker_rotates_messages_and_destinations_and_rebuilds_sparse_work_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    for id in [7, 8] {
+        store
+            .install_record(metadata_for(&outgoing_with_own_fanout(dir.path(), id)).unwrap())
+            .unwrap();
+    }
+    let mut cursor = None;
+    let mut destinations = BTreeMap::new();
+    let mut seen = BTreeMap::<EventId, Vec<EventId>>::new();
+    for expected in [7, 8, 7, 8] {
+        let (id, destination) = store.next_destination(cursor).unwrap();
+        assert_eq!(id, EventId::new([expected; 32]));
+        seen.entry(id).or_default().push(destination.event_id);
+        destinations.insert(id, destination.event_id);
+        cursor = Some(id);
+    }
+    assert!(seen.values().all(|v| v[0] != v[1]));
+    let original = store.message(EventId::new([7; 32])).unwrap().destinations[0]
+        .event
+        .id;
+    store
+        .mark_delivered_for(EventId::new([7; 32]), original)
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert_eq!(store.active_work.len(), 2);
+    assert_eq!(store.work_events.len(), 3);
+    assert!(!store.contains_work_event(original));
+    store.cancel(account_conv(), EventId::new([8; 32])).unwrap();
+    assert_eq!(store.active_work.len(), 1);
+    assert_eq!(store.work_events.len(), 1);
+    let (id, reference) = store.next_destination(None).unwrap();
+    store.retire_destination(id, reference.event_id).unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert!(store.next_destination(None).is_none());
+    assert!(store.active_work.is_empty() && store.work_events.is_empty());
+}
+
+#[test]
+fn old_compact_receipt_keeps_dedup_but_only_new_bound_record_can_project_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let tx = incoming(dir.path());
+    let receipt = match tx {
+        DeliveryTransaction::Incoming {
+            receipt: Some(r), ..
+        } => *r,
+        _ => unreachable!(),
+    };
+    store
+        .install_record(OutboxRecord::Receipt(Box::new(receipt.clone())))
+        .unwrap();
+    store
+        .install_record(OutboxRecord::FinishedReceipt(CompletedReceipt::from(
+            &receipt,
+        )))
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert!(store.has_receipt_for(receipt.conversation, receipt.original_event_id));
+    assert!(!store
+        .control_ids()
+        .contains_key(&receipt.destination.event.id));
+    store
+        .install_record(OutboxRecord::FinishedBoundReceipt(
+            CompletedReceipt::from(&receipt),
+            receipt.destination.device.clone(),
+        ))
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert_eq!(
+        store.control_ids()[&receipt.destination.event.id].device,
+        receipt.destination.device
+    );
+    store
+        .cancel(receipt.conversation, receipt.original_event_id)
+        .unwrap();
+    assert!(store.control_ids().is_empty() && store.completed_receipt_devices.is_empty());
+}
+
 fn outgoing_with_own_fanout(dir: &std::path::Path, n: u8) -> DeliveryTransaction {
     let mut tx = outgoing(dir, n);
     if let DeliveryTransaction::Outgoing {

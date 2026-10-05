@@ -69,6 +69,7 @@ impl Node {
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
+            _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = self.accept_connections(listener) => {}
         }
     }

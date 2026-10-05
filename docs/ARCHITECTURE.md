@@ -58,7 +58,8 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   forward secrecy + post-compromise recovery; bounded out-of-order (1000/2000); lower
   `user_id` is the canonical initiator (simultaneous-init tie-break); state encrypted on
   disk (`node/ratchet_sessions.rs`). The `dm.rs` X3DH sealed-box (no FS) is now used only
-  to distribute channel keys and seal file manifests.
+  to distribute channel keys, seal file manifests and encrypt delivery-control
+  metadata (the latter has no forward secrecy and contains no message text).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
@@ -100,11 +101,50 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   interface, plus a unicast announce/response reply, a /24 unicast scan fallback, a startup
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
   + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
-- **Delivery** — `send_*` appends the sealed event, then `deliver_direct` (Noise dial +
+- **Legacy/channel/file delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
+
+Tracked DMs are accepted into an encrypted, bounded transaction journal and
+immutable outbox before transport. Retries reuse the original logical message ID,
+ratchet transition and signed device events. A receiver saves decrypted plaintext
+durably before publishing an automatic encrypted delivery receipt in a separate,
+domain-derived device-pair conversation. These controls never produce chat
+callbacks or receipts of their own. Only a validated receipt from an exact target
+device/account marks a tracked message Delivered; successful sessions, online
+presence, relay custody and own-device copies leave it Awaiting.
+All local event allocations and own-author sync backfill first recover accepted
+intents under the delivery lock, so generic reactions/manifests cannot consume
+an immutable intent's reserved sequence. Failed recovery blocks competing writes.
+
+`run_accept_loop` also owns the shared recurring delivery worker for desktop,
+CLI and SDK hosts. It wakes on local acceptance and periodically retries missed
+wakes, selects one destination and one receipt per iteration, and rotates logical
+messages and their independent destination cursors. It takes owned bounded
+snapshots after local recovery on the blocking pool, releases store locks before
+network awaits, and bounds each network operation to 400 ms. Dropping the accept
+loop cancels its worker and the worker's outstanding network operations. Historical DM and
+control pulls use a receive-only reconciliation projection; controls can be pulled
+directly or through the relay while the original sender is offline.
+
+An optional, fixed-size exact-event storage probe follows ordinary reconciliation
+on its disposable connection. New durable nodes and post offices synchronize
+their store and check the current authorized projection before confirming custody.
+Existing sync discriminants and ordinary frames are unchanged; legacy endpoints
+reject only the optional probe, and their unqualified Have sets never retire work.
+Qualified custody retires queued controls or already-confirmed unfinished fanout,
+but never implies recipient delivery. Retained immutable controls remain available
+to authorized pulls after a relay evicts them or disappears. New compact receipt
+metadata retains the exact destination identity/account; old compact metadata
+without that binding remains deduplicated but cannot be projected automatically.
+Private post offices relay other-peer control pairs only with verified identities,
+manual permission for both participants, participant authors and parent closure.
+Local deletion/retention cancels retry metadata and disables its control projection;
+it remains a local erase, not remote recall or removal of encrypted log history.
+Successful cancellation invalidates subsequent guarded frame admission, including
+previously snapshotted controls; it cannot retract a write already admitted.
 
 **Invisible mode and account permissions:**
 `node::PrivacyPolicy` stores a bounded, encrypted, atomically replaced local

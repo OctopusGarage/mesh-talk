@@ -8,6 +8,93 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
+#[test]
+fn pending_accepted_intent_precedes_generic_own_sequence_allocation() {
+    pending_accepted_intent_precedes_own_event(false);
+}
+
+#[test]
+fn pending_accepted_intent_precedes_own_author_sync_backfill() {
+    pending_accepted_intent_precedes_own_event(true);
+}
+
+fn pending_accepted_intent_precedes_own_event(backfill: bool) {
+    use super::delivery_store::{DeliveryDestination, DeliveryTransaction, OutgoingDelivery};
+    use crate::eventlog::{sync::SyncStore, Event, EventKind};
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let ba = Account::generate();
+        let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+        let conv = super::conversation::dm_conversation_id(&alice.public(), &bob.public());
+        let competing = Event::new(&alice, conv, 1, vec![], 1, 11, EventKind::React, vec![2]);
+        let (a, _) = node(dir.path(), alice, Account::generate(), &bp);
+        let (wire, prepared) = a
+            .dm_ratchet
+            .lock()
+            .unwrap()
+            .prepare_encrypt(&a.identity, &bob.public(), &[1])
+            .unwrap();
+        let original = Event::new(
+            &a.identity,
+            conv,
+            1,
+            vec![],
+            1,
+            10,
+            EventKind::Message,
+            wire,
+        );
+        a.delivery
+            .lock()
+            .unwrap()
+            .begin(DeliveryTransaction::Outgoing {
+                message: OutgoingDelivery {
+                    logical_id: original.id,
+                    sender_account: a.account_id(),
+                    recipient_account: Some(ba.account_id()),
+                    conversation: conv,
+                    wall_clock: 10,
+                    destinations: vec![DeliveryDestination {
+                        device: bob.public(),
+                        account: Some(ba.account_id()),
+                        event: original.clone(),
+                        receipt_eligible: true,
+                    }],
+                },
+                sent: super::sentlog::SentEntry {
+                    conversation: conv,
+                    seq: 1,
+                    wall_clock: 10,
+                    plaintext: vec![1],
+                },
+                ratchets: vec![prepared],
+            })
+            .unwrap();
+        if backfill {
+            assert!(a
+                .sync_store(&bob.public())
+                .lock()
+                .unwrap()
+                .ingest(competing)
+                .is_err());
+        } else {
+            assert_eq!(a.append_event(conv, EventKind::React, vec![2]).unwrap(), 2);
+        }
+        let mut delivery = a.delivery.lock().unwrap();
+        a.recover_delivery(&mut delivery).unwrap();
+        assert!(delivery.message(original.id).is_some());
+        assert!(a
+            .log
+            .lock()
+            .unwrap()
+            .events(&conv)
+            .iter()
+            .any(|e| e.id == original.id));
+    }
+}
+
 fn node(
     dir: &Path,
     identity: DeviceIdentity,
@@ -38,6 +125,523 @@ fn node(
         .unwrap(),
         rx,
     )
+}
+
+#[tokio::test]
+async fn automatic_receipt_roundtrip_with_both_original_peers_stopped_in_turn() {
+    automatic_offline_roundtrip(false).await;
+}
+
+#[tokio::test]
+async fn automatic_receipt_reuses_exact_ack_after_relay_eviction() {
+    automatic_offline_roundtrip(true).await;
+}
+
+#[tokio::test]
+async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only() {
+    use crate::eventlog::{sync::SyncStore, Event, EventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let po = DeviceIdentity::generate();
+    let pa = Account::generate();
+    let pp = Announce::new_post_office_with_account(&po, &pa, "PO", 9);
+    let (p, _) = node(dir.path(), po, pa, &ap);
+    p.roster
+        .lock()
+        .unwrap()
+        .update(&bp, IpAddr::V4(Ipv4Addr::LOCALHOST), &p.user_id());
+    p.configure_privacy(
+        dir.path(),
+        "pw",
+        &pp,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    p.set_allowed(&aa.account_id(), true).await.unwrap();
+    p.set_invisible(true).await.unwrap();
+    let dm = super::conversation::dm_conversation_id(&alice.public(), &bob.public());
+    let original = Event::new(&alice, dm, 1, vec![], 1, 10, EventKind::Message, vec![1]);
+    let received = super::received_log::ReceivedEntry {
+        event_id: original.id,
+        conversation: dm,
+        from: alice.public().user_id(),
+        wall_clock: 10,
+        plaintext: b"message".to_vec(),
+    };
+    let payload = super::delivery_receipt::ReceiptPayload::prepare(
+        &bob.public(),
+        &ba.account_id(),
+        &ap,
+        &original,
+        &received,
+        11,
+    )
+    .unwrap();
+    let control = super::delivery_receipt::delivery_conversation_id(&alice.public(), &bob.public());
+    let ack = Event::new(
+        &bob,
+        control,
+        1,
+        vec![],
+        1,
+        11,
+        EventKind::Message,
+        payload.seal(&bob).unwrap(),
+    );
+    assert!(p
+        .sync_store(&alice.public())
+        .lock()
+        .unwrap()
+        .ingest(ack.clone())
+        .is_err());
+    p.set_allowed(&ba.account_id(), true).await.unwrap();
+    assert!(p
+        .sync_store(&alice.public())
+        .lock()
+        .unwrap()
+        .ingest(ack.clone())
+        .is_ok());
+    assert_eq!(
+        p.sync_store(&bob.public())
+            .lock()
+            .unwrap()
+            .event_ids(&control),
+        vec![ack.id]
+    );
+    assert!(p
+        .sync_store(&alice.public())
+        .lock()
+        .unwrap()
+        .durable_have(&control, &ack.id));
+    let outsider = DeviceIdentity::generate();
+    let forged = Event::new(
+        &outsider,
+        control,
+        1,
+        vec![],
+        2,
+        12,
+        EventKind::Message,
+        ack.ciphertext.clone(),
+    );
+    assert!(p
+        .sync_store(&alice.public())
+        .lock()
+        .unwrap()
+        .ingest(forged)
+        .is_err());
+    p.set_allowed(&ba.account_id(), false).await.unwrap();
+    assert!(p
+        .sync_store(&alice.public())
+        .lock()
+        .unwrap()
+        .event_ids(&control)
+        .is_empty());
+    assert!(!p
+        .sync_store(&alice.public())
+        .lock()
+        .unwrap()
+        .durable_have(&control, &ack.id));
+}
+
+#[tokio::test]
+async fn automatic_worker_stalled_fanout_does_not_starve_other_messages_and_drop_cancels() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let extra = DeviceIdentity::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let ep = Announce::new_with_account(
+        &extra,
+        &aa,
+        "Stalled own device",
+        stalled.local_addr().unwrap().port(),
+    );
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&ep, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let first = a
+        .enqueue_to_account(&b.account_id(), b"first fair", None)
+        .await
+        .unwrap();
+    let second = a
+        .enqueue_to_account(&b.account_id(), b"second fair", None)
+        .await
+        .unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        rx.recv().await.unwrap();
+        rx.recv().await.unwrap();
+        while a.delivery_status(first) != Some(DeliveryStatus::Delivered)
+            || a.delivery_status(second) != Some(DeliveryStatus::Delivered)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(b.account_history(&a.account_id(), 10).len(), 2);
+    at.abort();
+    let _ = at.await;
+    let third = a
+        .enqueue_to_account(&b.account_id(), b"worker stopped", None)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(700), rx.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(a.delivery_status(third), Some(DeliveryStatus::Awaiting));
+    bt.abort();
+    let _ = bt.await;
+}
+
+#[tokio::test]
+async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_and_private() {
+    use crate::eventlog::sync::SyncStore;
+    for private in [false, true] {
+        for clear in [false, true] {
+            let ad = tempfile::tempdir().unwrap();
+            let bd = tempfile::tempdir().unwrap();
+            let alice = DeviceIdentity::generate();
+            let aa = Account::generate();
+            let akeys = alice.secret_bytes();
+            let own = aa.account_id();
+            let bob = DeviceIdentity::generate();
+            let ba = Account::generate();
+            let bkeys = bob.secret_bytes();
+            let baccount = ba.secret_bytes();
+            let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+            let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+            let (a, _) = node(ad.path(), alice, aa, &bp);
+            let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+            b.configure_privacy(
+                bd.path(),
+                "pw",
+                &bp,
+                Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+            b.set_allowed(&own, true).await.unwrap();
+            b.set_invisible(private).await.unwrap();
+            let id = a
+                .enqueue_to_account(&b.account_id(), b"retained source", None)
+                .await
+                .unwrap();
+            let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+                .event
+                .clone();
+            b.log
+                .lock()
+                .unwrap()
+                .append_durable(original.clone())
+                .unwrap();
+            b.emit_new_messages(original.conversation_id);
+            assert_eq!(rx.try_recv().unwrap().text, b"retained source");
+            let receipt = b.delivery.lock().unwrap().retry_receipts(1)[0].clone();
+            // Focused projection test installs the qualified-custody store stage;
+            // automatic transport qualification is tested by real loopbacks.
+            b.delivery
+                .lock()
+                .unwrap()
+                .finish_receipt(receipt.conversation, original.id)
+                .unwrap();
+            drop(b);
+            let (b, _) = node(
+                bd.path(),
+                DeviceIdentity::from_secret_bytes(bkeys.0, bkeys.1),
+                Account::from_secret_bytes(baccount),
+                &ap,
+            );
+            b.configure_privacy(
+                bd.path(),
+                "pw",
+                &bp,
+                Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+            let control = receipt.destination.event.conversation_id;
+            assert_eq!(
+                b.sync_store(&ap.public())
+                    .lock()
+                    .unwrap()
+                    .event_ids(&control),
+                vec![receipt.destination.event.id]
+            );
+            if clear {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let accepting = a.clone();
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    accepting.privacy_accept(stream).await.unwrap()
+                });
+                let mut channel = b.privacy_dial(addr, &ap.public()).await.unwrap();
+                let mut receiver = server.await.unwrap();
+                b.prune_older_than(0).unwrap();
+                b.delete_message(control, crate::eventlog::EventId::new([0; 32]), false)
+                    .unwrap();
+                channel.send(b"no-op erase keeps session").await.unwrap();
+                assert_eq!(receiver.recv().await.unwrap(), b"no-op erase keeps session");
+                b.clear_account_conversation(&own).unwrap();
+                assert!(matches!(
+                    channel.send(b"snapshotted ACK").await,
+                    Err(crate::transport::TransportError::AdmissionDenied)
+                ));
+                assert!(b
+                    .sync_store(&ap.public())
+                    .lock()
+                    .unwrap()
+                    .event_ids(&control)
+                    .is_empty());
+                drop(b);
+                let (b, _) = node(
+                    bd.path(),
+                    DeviceIdentity::from_secret_bytes(bkeys.0, bkeys.1),
+                    Account::from_secret_bytes(baccount),
+                    &ap,
+                );
+                b.configure_privacy(
+                    bd.path(),
+                    "pw",
+                    &bp,
+                    Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+                )
+                .unwrap();
+                assert!(b
+                    .sync_store(&ap.public())
+                    .lock()
+                    .unwrap()
+                    .event_ids(&control)
+                    .is_empty());
+            } else {
+                if private {
+                    b.set_allowed(&own, false).await.unwrap();
+                    assert!(b
+                        .sync_store(&ap.public())
+                        .lock()
+                        .unwrap()
+                        .event_ids(&control)
+                        .is_empty());
+                    b.set_allowed(&own, true).await.unwrap();
+                }
+                let newaccount = Account::generate();
+                let newproof = Announce::new_with_account(
+                    &DeviceIdentity::from_secret_bytes(akeys.0, akeys.1),
+                    &newaccount,
+                    "Rebound Alice",
+                    9,
+                );
+                b.roster.lock().unwrap().update(
+                    &newproof,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    &b.user_id(),
+                );
+                b.initiate_contact(&newaccount.account_id()).await.unwrap();
+                assert!(b
+                    .sync_store(&ap.public())
+                    .lock()
+                    .unwrap()
+                    .event_ids(&control)
+                    .is_empty());
+                assert!(!b
+                    .sync_store(&ap.public())
+                    .lock()
+                    .unwrap()
+                    .durable_have(&control, &receipt.destination.event.id));
+                let substituted = Announce::new_with_account(
+                    &DeviceIdentity::from_secret_bytes(akeys.0, [77; 32]),
+                    &newaccount,
+                    "Substituted X",
+                    9,
+                );
+                b.roster.lock().unwrap().update(
+                    &substituted,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    &b.user_id(),
+                );
+                assert!(b.initiate_contact(&newaccount.account_id()).await.is_err());
+                assert!(b
+                    .sync_store(&substituted.public())
+                    .lock()
+                    .unwrap()
+                    .event_ids(&control)
+                    .is_empty());
+            }
+        }
+    }
+}
+
+async fn automatic_offline_roundtrip(evict: bool) {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let akeys = alice.secret_bytes();
+    let aaccount = aa.secret_bytes();
+    let bkeys = bob.secret_bytes();
+    let baccount = ba.secret_bytes();
+    let target = ba.account_id();
+    let own = aa.account_id();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (initial_bob, _) = node(bd.path(), bob, ba, &ap);
+    drop(initial_bob);
+    drop(bl); // Bob's prior profile is closed and listener stopped before enqueue.
+    let po = DeviceIdentity::generate();
+    let pokeys = po.secret_bytes();
+    let pl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pp = Announce::new_post_office(&po, "Relay", pl.local_addr().unwrap().port());
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", po).unwrap(),
+    ));
+    let mut pt = Some(tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(pokeys.0, pokeys.1),
+        pl,
+        relay.clone(),
+    )));
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&pp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let id = a
+        .enqueue_to_account(&target, b"strict automatic offline", None)
+        .await
+        .unwrap();
+    let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .id;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !relay.lock().unwrap().has(&original) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    at.abort();
+    let _ = at.await;
+    drop(a); // Alice stays stopped for ALL Bob recovery.
+    let bl = TcpListener::bind(("127.0.0.1", bp.tcp_port)).await.unwrap();
+    let (b, mut brx) = node(
+        bd.path(),
+        DeviceIdentity::from_secret_bytes(bkeys.0, bkeys.1),
+        Account::from_secret_bytes(baccount),
+        &ap,
+    );
+    b.roster
+        .lock()
+        .unwrap()
+        .update(&pp, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    let mut bt = Some(tokio::spawn(b.clone().run_accept_loop(bl)));
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), brx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.text, b"strict automatic offline");
+    assert_eq!(b.account_history(&own, 10).len(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !b.delivery.lock().unwrap().retry_receipts(1).is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(brx.try_recv().is_err());
+    let control =
+        super::delivery_receipt::delivery_conversation_id(&b.identity.public(), &ap.public());
+    let ack = b.log.lock().unwrap().events(&control)[0].clone();
+    if evict {
+        let mut po = relay.lock().unwrap();
+        po.set_retention_cap(0, 0);
+        po.accept(crate::eventlog::Event::new(
+            &b.identity,
+            crate::eventlog::ConversationId::new([91; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            crate::eventlog::EventKind::Message,
+            vec![1],
+        ))
+        .unwrap();
+        assert!(!po.has(&ack.id));
+        po.set_retention_cap(100_000, 100);
+    }
+    if evict {
+        let task = pt.take().unwrap();
+        task.abort();
+        let _ = task.await;
+    }
+    let b = if evict {
+        Some(b)
+    } else {
+        let task = bt.take().unwrap();
+        task.abort();
+        let _ = task.await;
+        drop(b);
+        None // Bob fully stops before Alice returns in strict isolation.
+    };
+    let al = TcpListener::bind(("127.0.0.1", ap.tcp_port)).await.unwrap();
+    let (a, mut arx) = node(
+        ad.path(),
+        DeviceIdentity::from_secret_bytes(akeys.0, akeys.1),
+        Account::from_secret_bytes(aaccount),
+        &bp,
+    );
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&pp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(a.account_history(&target, 10)[0].id, id);
+    assert_eq!(a.account_history(&target, 10).len(), 1);
+    assert!(arx.try_recv().is_err());
+    if let Some(b) = b {
+        assert_eq!(b.log.lock().unwrap().events(&control), vec![&ack]);
+    }
+    assert!(brx.try_recv().is_err());
+    at.abort();
+    let _ = at.await;
+    if let Some(task) = bt {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = pt {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 #[tokio::test]
@@ -158,12 +762,10 @@ async fn actual_durable_receive_sends_control_receipt_without_chat_callback() {
         .await
         .unwrap();
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    a.flush_delivery(id).await;
     tokio::time::timeout(std::time::Duration::from_secs(3), brx.recv())
         .await
         .unwrap()
         .unwrap();
-    b.flush_delivery_receipts(8).await;
     for _ in 0..100 {
         if a.delivery_status(id) == Some(DeliveryStatus::Delivered) {
             break;
@@ -172,6 +774,16 @@ async fn actual_durable_receive_sends_control_receipt_without_chat_callback() {
     }
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert_eq!(b.account_history(&own, 10)[0].text, b"confirmed");
+    for _ in 0..200 {
+        if b.delivery.lock().unwrap().retry_receipts(1).is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        b.delivery.lock().unwrap().retry_receipts(1).is_empty(),
+        "qualified durable custody retires receipt work"
+    );
     assert!(arx.try_recv().is_err());
     at.abort();
     bt.abort();
@@ -282,6 +894,12 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
     assert_eq!(a.account_history(&target, 10)[0].id, id);
     assert_eq!(a.account_history(&target, 10)[0].text, b"accepted once");
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
+    let conv = super::conversation::dm_conversation_id(&a.identity.public(), &bob.public());
+    let versions = a.log.lock().unwrap().version_vector(&conv);
+    assert!(a
+        .append_event(conv, crate::eventlog::EventKind::React, vec![2])
+        .is_err());
+    assert_eq!(a.log.lock().unwrap().version_vector(&conv), versions);
     assert!(a
         .enqueue_to_account(&target, b"must wait", None)
         .await
@@ -290,8 +908,20 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
     );
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert!(!a.delivery.lock().unwrap().pending_transactions().is_empty());
+    assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     std::fs::rename(&moved, &sidecar_dir).unwrap();
-    a.flush_delivery(id).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !a.delivery.lock().unwrap().pending_transactions().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    worker.abort();
+    let _ = worker.await;
     assert_eq!(a.account_history(&target, 10).len(), 1);
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert_eq!(a.delete_account_message(&target, id).unwrap(), 1);
@@ -650,6 +1280,9 @@ async fn private_control_receipt_obeys_current_permission_and_queued_account_bin
     }
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert!(arx.try_recv().is_err());
+    // Synthetic queued revoke/rebind checks must not race the automatic worker.
+    at.abort();
+    let _ = at.await;
     let blocked = a
         .enqueue_to_account(&b.account_id(), b"revoked before transfer", None)
         .await
@@ -683,9 +1316,7 @@ async fn private_control_receipt_obeys_current_permission_and_queued_account_bin
     a.flush_delivery(blocked).await;
     assert!(brx.try_recv().is_err());
     assert_eq!(a.delivery_status(blocked), Some(DeliveryStatus::Awaiting));
-    at.abort();
     bt.abort();
-    let _ = at.await;
     let _ = bt.await;
 }
 

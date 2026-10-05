@@ -1,5 +1,4 @@
 //! Encrypted delivery transaction journal and immutable outbox metadata.
-#![allow(dead_code)] // Bounded cursor / exact retirement APIs are consumed by the next worker phase.
 
 use super::dm_envelope::DmEnvelope;
 use super::dm_ratchet::{DmRatchet, PreparedRatchet};
@@ -11,7 +10,7 @@ use crate::eventlog::LogError;
 use crate::identity::device::PublicIdentity;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -54,6 +53,12 @@ pub(crate) struct ReceiptDelivery {
     pub(crate) conversation: ConversationId,
     pub(crate) wall_clock: u64,
     pub(crate) destination: DeliveryDestination,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ControlBinding {
+    pub device: PublicIdentity,
+    pub account: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +199,7 @@ enum OutboxRecord {
     FinishedReceipt(CompletedReceipt),
     Cancel(ConversationId, EventId),
     RetireDestination(EventId, EventId),
+    FinishedBoundReceipt(CompletedReceipt, PublicIdentity),
 }
 
 /// One owner per profile, protected by the Node's delivery transaction guard.
@@ -209,8 +215,14 @@ pub(crate) struct DeliveryStore {
     pending: Vec<DeliveryTransaction>,
     messages: BTreeMap<EventId, OutgoingDelivery>,
     completed: BTreeMap<EventId, CompletedDelivery>,
+    active_work: BTreeSet<EventId>,
+    work_events: BTreeMap<EventId, EventId>,
+    destination_cursors: BTreeMap<EventId, EventId>,
     completed_receipts: BTreeMap<EventId, CompletedReceipt>,
+    completed_receipt_devices: BTreeMap<EventId, PublicIdentity>,
     receipts: BTreeMap<EventId, ReceiptDelivery>,
+    receipt_events: BTreeMap<EventId, EventId>,
+    receipt_scopes: BTreeMap<([u8; 32], EventId), BTreeSet<EventId>>,
     limits: DeliveryLimits,
     outbox_records: usize,
     needs_sync: bool,
@@ -313,15 +325,31 @@ impl DeliveryStore {
         Ok(())
     }
 
-    pub(crate) fn control_ids(&self) -> std::collections::HashMap<EventId, Option<String>> {
+    pub(crate) fn control_ids(&self) -> std::collections::HashMap<EventId, ControlBinding> {
         self.receipts
             .values()
-            .map(|r| (r.destination.event.id, r.destination.account.clone()))
-            .chain(
-                self.completed_receipts
-                    .values()
-                    .map(|r| (r.receipt_event_id, r.destination_account.clone())),
-            )
+            .map(|r| {
+                (
+                    r.destination.event.id,
+                    ControlBinding {
+                        device: r.destination.device.clone(),
+                        account: r.destination.account.clone(),
+                    },
+                )
+            })
+            .chain(self.completed_receipts.values().filter_map(|r| {
+                self.completed_receipt_devices
+                    .get(&r.original_event_id)
+                    .map(|device| {
+                        (
+                            r.receipt_event_id,
+                            ControlBinding {
+                                device: device.clone(),
+                                account: r.destination_account.clone(),
+                            },
+                        )
+                    })
+            }))
             .collect()
     }
     /// Local replay is independent of current network permissions. Bind accepted
@@ -378,10 +406,12 @@ impl DeliveryStore {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn open(dir: &Path, password: &str) -> Result<Self, LogError> {
         Self::open_with_limits(dir, password, DeliveryLimits::default())
     }
 
+    #[cfg(test)]
     pub(crate) fn open_with_limits(
         dir: &Path,
         password: &str,
@@ -431,8 +461,14 @@ impl DeliveryStore {
             pending: Vec::new(),
             messages: BTreeMap::new(),
             completed: BTreeMap::new(),
+            active_work: BTreeSet::new(),
+            work_events: BTreeMap::new(),
+            destination_cursors: BTreeMap::new(),
             completed_receipts: BTreeMap::new(),
+            completed_receipt_devices: BTreeMap::new(),
             receipts: BTreeMap::new(),
+            receipt_events: BTreeMap::new(),
+            receipt_scopes: BTreeMap::new(),
             limits,
             outbox_records: records.len(),
             needs_sync: false,
@@ -630,6 +666,7 @@ impl DeliveryStore {
     /// Caller authenticates a receipt against exact immutable destination events
     /// before invoking this method. Network presence or relay acceptance never
     /// invokes it. The durable record precedes the status index update.
+    #[cfg(test)]
     pub(crate) fn mark_delivered(&mut self, id: EventId) -> Result<(), LogError> {
         self.sync_replacement()?;
         if self.completed.contains_key(&id) {
@@ -703,6 +740,7 @@ impl DeliveryStore {
         self.completed.get(&id).filter(|m| !m.remaining.is_empty())
     }
 
+    #[cfg(test)]
     pub(crate) fn retry_completed_after(
         &self,
         cursor: Option<EventId>,
@@ -744,9 +782,10 @@ impl DeliveryStore {
             .values()
             .find(|r| r.original_event_id == original_event_id && r.conversation == conversation)
             .ok_or_else(|| invalid("unknown delivery receipt"))?;
-        self.install_record(OutboxRecord::FinishedReceipt(CompletedReceipt::from(
-            receipt,
-        )))
+        self.install_record(OutboxRecord::FinishedBoundReceipt(
+            CompletedReceipt::from(receipt),
+            receipt.destination.device.clone(),
+        ))
     }
 
     pub(crate) fn has_receipt_for(
@@ -755,7 +794,7 @@ impl DeliveryStore {
         original_event_id: EventId,
     ) -> bool {
         self.completed_receipts.get(&original_event_id).is_some_and(|r| r.conversation == conversation)
-            || self.receipts.values().any(|r| r.original_event_id == original_event_id && r.conversation == conversation)
+            || self.receipt_events.get(&original_event_id).and_then(|id| self.receipts.get(id)).is_some_and(|r| r.conversation == conversation)
             || self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Incoming { receipt: Some(r), .. } if r.original_event_id == original_event_id && r.conversation == conversation))
     }
 
@@ -763,11 +802,69 @@ impl DeliveryStore {
         self.messages.get(&id)
     }
 
+    /// A single owned destination, selected by a stable two-dimensional cursor.
+    /// This never copies the other ciphertexts in a fanout message.
+    pub(crate) fn next_destination(
+        &mut self,
+        cursor: Option<EventId>,
+    ) -> Option<(EventId, DeliveryReference)> {
+        if self.needs_sync || !self.pending.is_empty() {
+            return None;
+        }
+        let start = cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        let id = *self
+            .active_work
+            .range((start, std::ops::Bound::Unbounded))
+            .next()
+            .or_else(|| self.active_work.first())?;
+        let references = if let Some(m) = self.messages.get(&id) {
+            m.destinations
+                .iter()
+                .map(|d| DeliveryReference {
+                    device: d.device.clone(),
+                    account: d.account.clone(),
+                    event_id: d.event.id,
+                    receipt_eligible: d.receipt_eligible,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.completed.get(&id)?.remaining.clone()
+        };
+        let reference = references
+            .iter()
+            .filter(|d| {
+                self.destination_cursors
+                    .get(&id)
+                    .is_none_or(|c| d.event_id > *c)
+            })
+            .min_by_key(|d| d.event_id)
+            .or_else(|| references.iter().min_by_key(|d| d.event_id))?
+            .clone();
+        self.destination_cursors.insert(id, reference.event_id);
+        Some((id, reference))
+    }
+
+    pub(crate) fn contains_destination(&self, id: EventId, event: EventId) -> bool {
+        self.messages
+            .get(&id)
+            .is_some_and(|m| m.destinations.iter().any(|d| d.event.id == event))
+            || self
+                .completed
+                .get(&id)
+                .is_some_and(|m| m.remaining.iter().any(|d| d.event_id == event))
+    }
+
+    pub(crate) fn contains_work_event(&self, event: EventId) -> bool {
+        self.receipts.contains_key(&event) || self.work_events.contains_key(&event)
+    }
+
     /// Owned bounded snapshots release the delivery lock before transport awaits.
+    #[cfg(test)]
     pub(crate) fn retry_messages(&self, limit: usize) -> Vec<OutgoingDelivery> {
         self.retry_messages_after(None, limit)
     }
 
+    #[cfg(test)]
     pub(crate) fn retry_messages_after(
         &self,
         cursor: Option<EventId>,
@@ -813,7 +910,7 @@ impl DeliveryStore {
         &mut self,
         conversation: ConversationId,
         id: EventId,
-    ) -> Result<(), LogError> {
+    ) -> Result<bool, LogError> {
         self.sync_replacement()?;
         if !self.pending.is_empty() {
             return Err(invalid("recover delivery before erasing history"));
@@ -826,19 +923,18 @@ impl DeliveryStore {
                 .completed
                 .get(&id)
                 .is_some_and(|m| m.conversation == conversation)
-            && !self.receipts.values().any(|r| {
-                r.conversation == conversation && (r.logical_id == id || r.original_event_id == id)
-            })
-            && !self.completed_receipts.values().any(|r| {
-                r.conversation == conversation && (r.logical_id == id || r.original_event_id == id)
-            })
+            && !self
+                .receipt_scopes
+                .contains_key(&(*conversation.as_bytes(), id))
         {
-            return self.outbox.sync();
+            self.outbox.sync()?;
+            return Ok(false);
         }
-        self.install_record(OutboxRecord::Cancel(conversation, id))
+        self.install_record(OutboxRecord::Cancel(conversation, id))?;
+        Ok(true)
     }
 
-    fn sync_replacement(&mut self) -> Result<(), LogError> {
+    pub(crate) fn sync_replacement(&mut self) -> Result<(), LogError> {
         if self.needs_sync {
             self.journal.sync()?;
             self.outbox.sync()?;
@@ -860,6 +956,18 @@ impl DeliveryStore {
 
     fn record_installed(&self, record: &OutboxRecord) -> Result<bool, LogError> {
         match record {
+            OutboxRecord::FinishedBoundReceipt(receipt, device) => {
+                if let Some(existing) = self
+                    .completed_receipt_devices
+                    .get(&receipt.original_event_id)
+                {
+                    if existing != device {
+                        return Err(invalid("conflicting completed receipt device"));
+                    }
+                    return self.record_installed(&OutboxRecord::FinishedReceipt(receipt.clone()));
+                }
+                Ok(false)
+            }
             OutboxRecord::Message(message) => match self.messages.get(&message.logical_id) {
                 Some(existing) if existing != message => {
                     Err(invalid("conflicting delivery metadata"))
@@ -882,11 +990,7 @@ impl DeliveryStore {
                             }
                             return Ok(true);
                         }
-                        if self
-                            .receipts
-                            .values()
-                            .any(|r| r.original_event_id == receipt.original_event_id)
-                        {
+                        if self.receipt_events.contains_key(&receipt.original_event_id) {
                             return Err(invalid("duplicate original receipt metadata"));
                         }
                         Ok(false)
@@ -917,6 +1021,25 @@ impl DeliveryStore {
         if self.record_installed(&record)? {
             return Ok(());
         }
+        let changed = match &record {
+            OutboxRecord::Message(m) => Some(m.logical_id),
+            OutboxRecord::Delivered(m) => Some(m.logical_id),
+            OutboxRecord::RetireDestination(id, _) | OutboxRecord::Cancel(_, id) => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = changed {
+            if let Some(m) = self.messages.get(&id) {
+                for d in &m.destinations {
+                    self.work_events.remove(&d.event.id);
+                }
+            }
+            if let Some(m) = self.completed.get(&id) {
+                for d in &m.remaining {
+                    self.work_events.remove(&d.event_id);
+                }
+            }
+            self.active_work.remove(&id);
+        }
         match record {
             OutboxRecord::Message(message) => {
                 if self.completed.contains_key(&message.logical_id) {
@@ -925,6 +1048,13 @@ impl DeliveryStore {
                 self.messages.insert(message.logical_id, message);
             }
             OutboxRecord::Receipt(receipt) => {
+                self.index_receipt(
+                    receipt.conversation,
+                    receipt.logical_id,
+                    receipt.original_event_id,
+                );
+                self.receipt_events
+                    .insert(receipt.original_event_id, receipt.destination.event.id);
                 self.receipts.insert(receipt.destination.event.id, *receipt);
             }
             OutboxRecord::Delivered(completed) => {
@@ -955,6 +1085,11 @@ impl DeliveryStore {
                     completed.recipient_account = None;
                 }
             }
+            OutboxRecord::FinishedBoundReceipt(completed, device) => {
+                let original = completed.original_event_id;
+                self.apply_record(OutboxRecord::FinishedReceipt(completed))?;
+                self.completed_receipt_devices.insert(original, device);
+            }
             OutboxRecord::FinishedReceipt(completed) => {
                 if let Some(receipt) = self.receipts.get(&completed.receipt_event_id) {
                     if CompletedReceipt::from(receipt) != completed {
@@ -962,6 +1097,12 @@ impl DeliveryStore {
                     }
                 }
                 self.receipts.remove(&completed.receipt_event_id);
+                self.receipt_events.remove(&completed.original_event_id);
+                self.index_receipt(
+                    completed.conversation,
+                    completed.logical_id,
+                    completed.original_event_id,
+                );
                 self.completed_receipts
                     .insert(completed.original_event_id, completed);
             }
@@ -980,14 +1121,49 @@ impl DeliveryStore {
                 {
                     self.completed.remove(&id);
                 }
-                self.receipts.retain(|_, r| {
-                    r.conversation != conversation
-                        || (r.logical_id != id && r.original_event_id != id)
-                });
-                self.completed_receipts.retain(|_, r| {
-                    r.conversation != conversation
-                        || (r.logical_id != id && r.original_event_id != id)
-                });
+                let originals = self
+                    .receipt_scopes
+                    .get(&(*conversation.as_bytes(), id))
+                    .cloned()
+                    .unwrap_or_default();
+                for original in originals {
+                    let active = self
+                        .receipt_events
+                        .remove(&original)
+                        .and_then(|ack| self.receipts.remove(&ack));
+                    let completed = self.completed_receipts.remove(&original);
+                    self.completed_receipt_devices.remove(&original);
+                    let binding = active
+                        .map(|r| (r.conversation, r.logical_id))
+                        .or_else(|| completed.map(|r| (r.conversation, r.logical_id)));
+                    if let Some((scope, logical)) = binding {
+                        for key in [(*scope.as_bytes(), logical), (*scope.as_bytes(), original)] {
+                            if let Some(ids) = self.receipt_scopes.get_mut(&key) {
+                                ids.remove(&original);
+                                if ids.is_empty() {
+                                    self.receipt_scopes.remove(&key);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(id) = changed {
+            if let Some(m) = self.messages.get(&id) {
+                for d in &m.destinations {
+                    self.work_events.insert(d.event.id, id);
+                }
+            }
+            if let Some(m) = self.completed.get(&id) {
+                for d in &m.remaining {
+                    self.work_events.insert(d.event_id, id);
+                }
+            }
+            if self.messages.contains_key(&id) || self.completed_work(id).is_some() {
+                self.active_work.insert(id);
+            } else {
+                self.destination_cursors.remove(&id);
             }
         }
         if self.messages.len() > self.limits.messages
@@ -1000,10 +1176,45 @@ impl DeliveryStore {
         Ok(())
     }
 
+    fn index_receipt(&mut self, conversation: ConversationId, logical: EventId, original: EventId) {
+        for key in [
+            (*conversation.as_bytes(), logical),
+            (*conversation.as_bytes(), original),
+        ] {
+            self.receipt_scopes.entry(key).or_default().insert(original);
+        }
+    }
+
     fn ensure_outbox_space(&mut self, record: &OutboxRecord) -> Result<(), LogError> {
         let mut size = bincode::serialized_size(record)
             .map_err(|_| invalid("delivery encoding"))?
             .saturating_add(FRAME_OVERHEAD);
+        // Each accepted row already reserves its cancellation record. A valid
+        // cancellation releases at least this much future debt; avoid scanning
+        // every other row during a local bulk erase. Compaction still handles
+        // physical byte/record thresholds through the ordinary fallback below.
+        if let OutboxRecord::Cancel(conversation, id) = record {
+            let valid_scope = self
+                .messages
+                .get(id)
+                .is_some_and(|m| m.conversation == *conversation)
+                || self
+                    .completed
+                    .get(id)
+                    .is_some_and(|m| m.conversation == *conversation)
+                || self
+                    .receipt_scopes
+                    .contains_key(&(*conversation.as_bytes(), *id));
+            if valid_scope
+                && !self.needs_sync
+                && self.pending.is_empty()
+                && self.outbox_path.metadata()?.len().saturating_add(size)
+                    <= self.limits.outbox_bytes
+                && self.outbox_records.saturating_add(1) <= self.limits.max_outbox_records()
+            {
+                return Ok(());
+            }
+        }
         let mut reserved_records = 1usize;
         for tx in &self.pending {
             if let Some(pending_record) = metadata_for(tx) {
@@ -1049,7 +1260,8 @@ impl DeliveryStore {
                 destination_account: Some("0".repeat(32)),
             }))
             .map_err(|_| invalid("delivery encoding"))?
-            .saturating_add(FRAME_OVERHEAD);
+            .saturating_add(FRAME_OVERHEAD)
+            .saturating_add(64);
         let mut messages: BTreeMap<EventId, DeliveryStatus> = self
             .messages
             .keys()
@@ -1102,7 +1314,8 @@ impl DeliveryStore {
             OutboxRecord::Delivered(message) => {
                 messages.insert(message.logical_id, DeliveryStatus::Delivered);
             }
-            OutboxRecord::FinishedReceipt(receipt) => {
+            OutboxRecord::FinishedReceipt(receipt)
+            | OutboxRecord::FinishedBoundReceipt(receipt, _) => {
                 receipts.remove(&receipt.receipt_event_id);
                 completed_receipts.insert(receipt.original_event_id, receipt);
             }
@@ -1217,12 +1430,14 @@ impl DeliveryStore {
                 .cloned()
                 .map(OutboxRecord::Delivered),
         );
-        snapshot.extend(
-            self.completed_receipts
-                .values()
-                .cloned()
-                .map(OutboxRecord::FinishedReceipt),
-        );
+        snapshot.extend(self.completed_receipts.values().map(|r| {
+            self.completed_receipt_devices
+                .get(&r.original_event_id)
+                .map_or_else(
+                    || OutboxRecord::FinishedReceipt(r.clone()),
+                    |device| OutboxRecord::FinishedBoundReceipt(r.clone(), device.clone()),
+                )
+        }));
         snapshot.extend(
             self.receipts
                 .values()
@@ -1306,7 +1521,8 @@ impl DeliveryStore {
                 }
                 Ok(())
             }
-            OutboxRecord::FinishedReceipt(receipt) => {
+            OutboxRecord::FinishedReceipt(receipt)
+            | OutboxRecord::FinishedBoundReceipt(receipt, _) => {
                 if receipt
                     .destination_account
                     .as_deref()

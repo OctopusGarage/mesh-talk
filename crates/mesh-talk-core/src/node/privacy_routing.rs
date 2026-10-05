@@ -40,9 +40,31 @@ impl Node {
         &self,
         author: &[u8; 32],
     ) -> Option<crate::discovery::Announce> {
-        self.historical_peer_proofs()
-            .into_iter()
-            .find(|p| p.ed25519_pub == *author && self.known_account_allowed(&p.public()))
+        let proof = {
+            let state = self
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned");
+            if let Some(state) = state.as_ref() {
+                state.proofs.by_author(author).or_else(|| {
+                    if state.policy.snapshot().invisible {
+                        return None;
+                    }
+                    self.roster
+                        .lock()
+                        .expect("roster lock not poisoned")
+                        .historical_by_author(author)
+                        .filter(|p| p.account_id().is_none())
+                })
+            } else {
+                self.roster
+                    .lock()
+                    .expect("roster lock not poisoned")
+                    .historical_by_author(author)
+            }
+        };
+        proof.filter(|p| self.known_account_allowed(&p.public()))
     }
 
     pub(in crate::node) fn historical_dm_peers(&self) -> Vec<crate::discovery::Announce> {

@@ -49,7 +49,15 @@ impl Node {
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
-        delivery.cancel(conv, target).map_err(NodeError::Log)?;
+        if delivery.cancel(conv, target).map_err(NodeError::Log)? {
+            self.privacy
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        *self
+            .delivery_control_ids
+            .lock()
+            .expect("control ids lock not poisoned") = delivery.control_ids();
         let mut removed = 0;
 
         // Received plaintext sidecar: match by logical id.
@@ -133,11 +141,25 @@ impl Node {
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
-        for (conversation, id, clock) in delivery.cancellation_rows() {
-            if should_remove(conversation, clock) {
-                delivery.cancel(conversation, id).map_err(NodeError::Log)?;
+        let cancelled: Result<(), NodeError> = (|| {
+            for (conversation, id, clock) in delivery.cancellation_rows() {
+                if should_remove(conversation, clock)
+                    && delivery.cancel(conversation, id).map_err(NodeError::Log)?
+                {
+                    // Invalidate subsequent frame admission even if a later
+                    // cancellation fails. Already-started writes are not recall.
+                    self.privacy
+                        .generation
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
             }
-        }
+            Ok(())
+        })();
+        *self
+            .delivery_control_ids
+            .lock()
+            .expect("control ids lock not poisoned") = delivery.control_ids();
+        cancelled?;
         let mut removed = 0;
         removed += self
             .received
