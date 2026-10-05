@@ -20,6 +20,14 @@ export function requiredBrowserPaths(tier) {
     "settings switches light dark and Chinese English within bounds", "Unicode multiline and unbroken wide messages stay in the log",
   ]) paths.push(["portable-core.spec.ts", `${size} browser-only core`, title]);
   if (tier === "extended") paths.push(["portable-core.spec.ts", "@extended palette locale resize and repeated dialog DOM retention smoke"]);
+  paths.push(
+    ["automatic-delivery.spec.ts", "text, sticker and file card stay Awaiting until explicit authoritative mock projection"],
+    ["automatic-delivery.spec.ts", "a native picker completed after conversation navigation cannot send to the new conversation"],
+    ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],
+    ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
+    ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],
+    ["media-lifecycle.spec.ts", "same UUID relogin revokes the old owned URL exactly once"],
+  );
   return paths;
 }
 export function validateBrowserReport(report, { count, browser, expectedPaths }) {

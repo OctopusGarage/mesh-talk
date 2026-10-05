@@ -24,7 +24,12 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "portable-core.spec.ts",
+  testMatch: [
+    "portable-core.spec.ts",
+    "automatic-delivery.spec.ts",
+    "media-recovery.spec.ts",
+    "media-lifecycle.spec.ts",
+  ],
   grepInvert: tier === "core" ? /@extended/ : undefined,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

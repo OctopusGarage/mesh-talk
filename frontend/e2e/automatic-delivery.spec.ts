@@ -1,4 +1,4 @@
-import { test, expect } from "./tauri-mock";
+import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, BOB } from "./helpers/session";
 
 test("text, sticker and file card stay Awaiting until explicit authoritative mock projection", async ({

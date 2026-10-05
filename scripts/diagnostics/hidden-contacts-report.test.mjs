@@ -9,6 +9,26 @@ const complete = () => ({
   schema: 2, sourceSha: "a".repeat(40), platform: process.platform, native: true, mocked: false,
   scenarios: Object.fromEntries(REQUIRED_SCENARIOS.map(name => [name, { passed: true, elapsedMs: 1, evidence: [`${name}.json`, `${name}.png`, `${name}.log`], evidenceDigests: Object.fromEntries(["json", "png", "log"].map(extension => [`${name}.${extension}`, "b".repeat(64)])) }])),
 });
+test("requires three real receipt phases with exact stable identities", async () => {
+  const { validateObservations } = await import("./hidden-contacts-report.mjs");
+  for (const name of ["receipt-offline-awaiting", "receipt-peer-restart-delivered", "receipt-source-restart-durable"]) {
+    assert.ok(REQUIRED_SCENARIOS.includes(name));
+    assert.ok(validateObservations(name, {}).length);
+  }
+});
+test("receipt phases reject changed identity, malformed IDs and false state", async () => {
+  const { validateObservations, validateReceiptSequence } = await import("./hidden-contacts-report.mjs");
+  const ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+  const observation = { owner: "a".repeat(36), account: "d".repeat(32), ids, originalIds: ids, statuses: ["awaiting", "awaiting", "awaiting"], cardsVerified: true, actualPeerExit: true };
+  assert.deepEqual(validateObservations("receipt-offline-awaiting", observation), []);
+  for (const patch of [{ statuses: ["delivered", "awaiting", "awaiting"] }, { actualPeerExit: false }, { ids: ["bad"] }, { originalIds: [...ids].reverse() }]) assert.ok(validateObservations("receipt-offline-awaiting", { ...observation, ...patch }).length);
+  const phases = [observation, { ...observation }, { ...observation }];
+  assert.deepEqual(validateReceiptSequence(phases), []);
+  for (const patch of [{ owner: "b".repeat(36) }, { account: "e".repeat(32) }, { ids: [...ids].reverse() }]) assert.ok(validateReceiptSequence([observation, { ...observation, ...patch }, observation]).length);
+  const durable = { ...observation, statuses: ["delivered", "delivered", "delivered"], sameKeystorePeerRestart: true, actualProcessRestart: true };
+  assert.ok(validateObservations("receipt-source-restart-durable", durable).length, "online receiver can hide missing persisted delivery");
+  assert.deepEqual(validateObservations("receipt-source-restart-durable", { ...durable, peerOfflineDuringSourceRestart: true }), []);
+});
 test("requires native invisible-mode, reply and restart evidence", () => {
   for (const name of ["privacy-mode", "privacy-reply", "privacy-restart"]) {
     assert.ok(REQUIRED_SCENARIOS.includes(name), `missing ${name}`);
@@ -47,7 +67,8 @@ test("typed observations reject missing checks and preserve explicit download li
   const { validateObservations } = await import("./hidden-contacts-report.mjs");
   assert.deepEqual(validateObservations("direct-messages", { uiToCliRendered: true, uiToCliPersisted: true, cliToUiRendered: true, cliToUiPersisted: true }), []);
   for (const observations of [{}, { uiToCliRendered: "true" }, { uiToCliRendered: false }]) assert.ok(validateObservations("direct-messages", observations).length);
-  assert.deepEqual(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is not automated" }), []);
+  assert.deepEqual(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, bytesVerified: true, downloadVerified: false, limitation: "OS save picker is not automated" }), []);
+  assert.ok(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is not automated" }).length);
   assert.ok(validateObservations("incoming-attachment", { manifestPersisted: true, genericFileRendered: true, downloadVerified: false }).length);
 });
 test("rejects missing, failed and evidence-free scenarios", () => {

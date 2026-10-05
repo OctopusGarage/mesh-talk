@@ -27,6 +27,62 @@ second line
 第三行`, `long-${nonce}-` + "mesh消息🙂 ".repeat(300) + `end-${nonce}`];
 }
 
+export function orderedReceiptStatuses(ids, records) {
+  assert.equal(records.length, ids.length, "all requested receipt IDs have a projection");
+  return ids.map(id => {
+    const matches = records.filter(record => record.id === id);
+    assert.equal(matches.length, 1, "exactly one projection for original ID");
+    assert.ok(["awaiting", "delivered"].includes(matches[0].status));
+    return matches[0].status;
+  });
+}
+
+async function receiptPhase(c, state, name, expected, historical = false) {
+  assert.equal(c.owner, state.owner, "receipt owner unchanged");
+  if (historical) assert.equal(c.peerExited(), true, "receiver remains exited during cold source verification");
+  const history = await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 });
+  for (const id of state.ids) assert.equal(history.filter(item => item.id === id && item.from_me).length, 1, "original accepted history entry retained once");
+  const statuses = await c.until(`original IDs become ${expected}`, async () => {
+    const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
+    return values.every(value => value === expected) && values;
+  });
+  for (const label of [...state.labels].reverse()) {
+    if (historical) await revealHistoricalNativeMessage(c, label);
+    else await revealLatestNativeMessage(c, label);
+    await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
+  }
+  if (historical) assert.equal(c.peerExited(), true, "receiver still exited after durable receipt verification");
+  await c.passed(name, { owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && c.peerExited(), acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" });
+}
+
+export async function receiptScenarios(c) {
+  await c.stopPeer(); // actual exit, deliberately no presence TTL wait
+  await c.click(c.row());
+  const text = `receipt-text-${c.nonce}`, sticker = `receipt-sticker-${c.nonce}`, fileName = `receipt-file-${c.nonce}.txt`;
+  await c.fill("composer-input", text);
+  await c.click("composer-send");
+  const textEntry = await c.until("offline text accepted with original event ID", async () => (await c.observe("owner_account_history", { owner: c.owner, account: c.account, limit: 500 })).find(item => item.from_me && item.text === text));
+  const stickerId = await c.invoke("owner_enqueue_sticker", { owner: c.owner, account: c.account, stickerId: `native-${c.nonce}`, fallback: sticker });
+  const path = join(c.fixture, fileName);
+  await writeFile(path, `outbound custody fixture ${c.nonce}\n`);
+  const file = await c.invoke("owner_enqueue_file", { owner: c.owner, account: c.account, path, media: false });
+  const state = { owner: c.owner, ids: [textEntry.id, stickerId, file.id], labels: [text, sticker, fileName] };
+  // Real navigation hydrates IPC-created fixtures through production owner history.
+  const group = (await c.observe("list_channels"))[0];
+  assert.ok(group, "existing native group fixture available for navigation");
+  await c.click(`conversation-row-${group.channel_id}`);
+  await c.click(c.row());
+  await receiptPhase(c, state, "receipt-offline-awaiting", "awaiting");
+  await c.restartPeer();
+  await receiptPhase(c, state, "receipt-peer-restart-delivered", "delivered");
+  return state;
+}
+
+export async function receiptRestartScenario(c, state) {
+  await c.click(c.row());
+  await receiptPhase(c, state, "receipt-source-restart-durable", "delivered", true);
+}
+
 export async function signedPeerObservation({ peer, userId, peerName, observe, until }) {
   // Sign-out/sign-in creates a fresh node. Discovery is asynchronous: the old
   // CLI output is not proof that the replacement UI node has rediscovered it.
@@ -171,7 +227,12 @@ export async function coreScenarios(c) {
   await revealLatestNativeMessage(c, fileName);
   const classification = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e && !!e.querySelector('button') && !e.querySelector('[data-testid=file-image],[data-testid=file-video]');", [fileName]);
   assert.equal(classification, true);
-  await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is outside embedded W3C DOM automation; download not invoked because its default destination is outside the fixture." });
+  await until("incoming attachment decrypted bytes available", async () => {
+    const received = await c.readFileBytes(attachment.file.file_conv);
+    assert.deepEqual(received, Array.from(bytes));
+    return true;
+  });
+  await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified; OS save picker is outside embedded W3C DOM automation and was not invoked." });
   await privacySettings();
   const settingsLayouts = {};
   for (const { name, request, viewport } of settingsTargets) {

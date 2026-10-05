@@ -1,4 +1,4 @@
-import { test, expect } from "./tauri-mock";
+import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
 type Diagnostic = {

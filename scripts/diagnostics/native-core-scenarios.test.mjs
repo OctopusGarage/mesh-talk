@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Writable } from "node:stream";
 import { writeChildCommand } from "./native-core-scenarios.mjs";
+test("receipt evidence rejects sparse missing or changed message IDs", async () => {
+  const { orderedReceiptStatuses } = await import("./native-core-scenarios.mjs");
+  const ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+  const records = ids.map(id => ({ id, status: "delivered" }));
+  assert.deepEqual(orderedReceiptStatuses(ids, records.reverse()), ["delivered", "delivered", "delivered"]);
+  assert.throws(() => orderedReceiptStatuses(ids, records.slice(1)));
+  assert.throws(() => orderedReceiptStatuses(ids, [...records, records[0]]));
+});
 
 test("exact native content fixtures respect the composer's intentional outer trimming", async () => {
   const { nativeMessageContents } = await import("./native-core-scenarios.mjs");

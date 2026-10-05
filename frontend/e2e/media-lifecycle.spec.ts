@@ -1,4 +1,4 @@
-import { test, expect } from "./tauri-mock";
+import { test, expect } from "./helpers/portable-evidence";
 import { enterChat } from "./helpers/session";
 
 test("same-identity disable/re-enable never returns a revoked URL", async ({

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { inspectPng } from "../evals/png-evidence.mjs";
+REQUIRED_SCENARIOS.push("receipt-offline-awaiting", "receipt-peer-restart-delivered", "receipt-source-restart-durable");
 
 const REQUIRED_TRUE = {
   "hide-cancel": ["retained", "cancelDefaultFocus", "enterCancelled"],
@@ -23,6 +24,23 @@ const REQUIRED_TRUE = {
 export function validateObservations(name, observations, platform) {
   const errors = [];
   const require = (condition, message) => { if (!condition) errors.push(`${name}: ${message}`); };
+  if (name.startsWith("receipt-")) {
+    require(/^[0-9a-f-]{36}$/.test(observations?.owner ?? ""), "missing owner");
+    require(/^[0-9a-f]{32}$/.test(observations?.account ?? ""), "missing target account");
+    const ids = observations?.ids;
+    require(Array.isArray(ids) && ids.length === 3 && new Set(ids).size === 3 && ids.every(id => /^[0-9a-f]{64}$/.test(id)), "invalid text/sticker/file IDs");
+    require(JSON.stringify(ids) === JSON.stringify(observations?.originalIds), "message IDs changed");
+    const expected = name === "receipt-offline-awaiting" ? "awaiting" : "delivered";
+    require(Array.isArray(observations?.statuses) && observations.statuses.length === 3 && observations.statuses.every(status => status === expected), "incorrect receipt state");
+    require(observations?.cardsVerified === true, "missing native card projection");
+    require(observations?.actualPeerExit === true, "peer did not actually exit");
+    if (name !== "receipt-offline-awaiting") require(observations?.sameKeystorePeerRestart === true, "missing same-keystore restart");
+    if (name === "receipt-source-restart-durable") {
+      require(observations?.actualProcessRestart === true, "missing app restart");
+      require(observations?.peerOfflineDuringSourceRestart === true, "receiver must remain exited throughout source restart");
+    }
+  }
+  if (name === "incoming-attachment") require(observations?.bytesVerified === true, "missing exact decrypted bytes");
   for (const key of REQUIRED_TRUE[name] ?? []) require(observations?.[key] === true, `missing successful observation ${key}`);
   const nonempty = value => typeof value === "string" && value.trim().length > 0;
   if (name === "auth-register-signin") require(nonempty(observations?.owner), "missing registered account");
@@ -50,14 +68,22 @@ export function validateObservations(name, observations, platform) {
   return errors;
 }
 
+export function validateReceiptSequence(phases) {
+  if (phases.length !== 3 || phases.some(phase => !phase)) return ["Missing receipt phase evidence"];
+  const identity = phase => JSON.stringify([phase.owner, phase.account, phase.ids]);
+  return phases.every(phase => identity(phase) === identity(phases[0])) ? [] : ["Receipt phase owner/account/original IDs differ"];
+}
+
 export async function validateEvidence(report, root, expected = {}) {
   const errors = validateReport(report, expected);
+  const receipts = new Map();
   for (const name of REQUIRED_SCENARIOS) {
     try {
       const evidence = JSON.parse(await readFile(join(root, `${name}.json`), "utf8"));
       if (evidence.name !== name || evidence.sourceSha !== report.sourceSha || !evidence.observations || typeof evidence.observations !== "object" || Array.isArray(evidence.observations)) throw new Error("invalid or stale observation JSON");
       const observationErrors = validateObservations(name, evidence.observations, report.platform);
       if (observationErrors.length) throw new Error(observationErrors.join("; "));
+      if (name.startsWith("receipt-")) receipts.set(name, evidence.observations);
       const png = await readFile(join(root, `${name}.png`));
       inspectPng(png);
       for (const extension of ["json", "png", "log"]) {
@@ -69,6 +95,7 @@ export async function validateEvidence(report, root, expected = {}) {
       errors.push(`Invalid evidence for ${name}: ${error.message}`);
     }
   }
+  errors.push(...validateReceiptSequence(["receipt-offline-awaiting", "receipt-peer-restart-delivered", "receipt-source-restart-durable"].map(name => receipts.get(name))));
   return errors;
 }
 export function validateReport(report, expected = {}) {

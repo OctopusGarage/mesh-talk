@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { coreScenarios, restartedCoreScenarios, writeChildCommand } from "./native-core-scenarios.mjs";
+import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, signedPeerObservation } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -88,11 +88,16 @@ async function request(method, path, body) {
 }
 const command = (method, path, body) => request(method, `/session/${session}${path}`, body);
 const execute = (script, args = []) => command("POST", "/execute/sync", { script, args });
-// Actual production IPC, read-only observations only. Frontend behavior is
-// changed exclusively through visible controls and native keyboard/mouse input.
-const observe = (cmd, args = {}) => command("POST", "/execute/async", {
+// Real IPC, never replaced. Receipt fixtures explicitly enqueue sticker/file
+// through production IPC; other frontend actions use visible controls.
+const invoke = (cmd, args = {}) => command("POST", "/execute/async", {
   script: "const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke(arguments[0],arguments[1]).then(v=>done({ok:true,value:v}),e=>done({ok:false,error:String(e)}));", args: [cmd, args],
 }).then(result => { assert.equal(result.ok, true, `production ${cmd} observation failed`); return result.value; });
+const observe = invoke;
+const readFileBytes = fileConv => command("POST", "/execute/async", {
+  script: "const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('read_file',{fileConv:arguments[0]}).then(buffer=>done({ok:true,bytes:Array.from(new Uint8Array(buffer))}),error=>done({ok:false,error:String(error)}));",
+  args: [fileConv],
+}).then(result => { assert.equal(result.ok, true, "production read_file failed"); return result.bytes; });
 const selector = id => `[data-testid="${id}"]`;
 const exists = id => execute("return !!document.querySelector(arguments[0]);", [selector(id)]);
 async function element(id) {
@@ -280,8 +285,13 @@ try {
   account = accounts.account_id;
   await element(row());
   await click(row());
-  const coreContext = { execute, observe, until, passed, fill, click, peer, account, userId, fixture, history, row, privacySettings, key, signOut, login, userName, peerName, command, focusOwnedWindow, openDialog, settledDialog, element, exists, owner: signedInUser, nonce: randomBytes(4).toString("hex") };
+  const coreContext = { execute, observe, invoke, readFileBytes, until, passed, fill, click, get peer() { return peer; }, account, userId, fixture, history, row, privacySettings, key, signOut, login, userName, peerName, command, focusOwnedWindow, openDialog, settledDialog, element, exists, get owner() { return signedInUser; }, nonce: randomBytes(4).toString("hex"),
+    stopPeer: async () => { const old = peer; await stop(old, true); assert.ok(!owned.has(old), "peer actually exited"); },
+    peerExited: () => !owned.has(peer) && (peer.exitCode !== null || peer.signalCode !== null),
+    restartPeer: async () => { const originalId = /node (\S+) listening/.exec(peer.output)?.[1]; assert.match(originalId ?? "", /^[0-9a-f]{32}$/); peer = launch(nodeBinary, ["--keystore", join(fixture, "peer", "identity.keystore"), "--password", password, "--name", peerName, "--discovery-port", String(discoveryPort)]); const restartedId = await until("same-keystore peer restarted", () => /node (\S+) listening/.exec(peer.output)?.[1], 180000); assert.equal(restartedId, originalId, "restarted peer has original signing identity"); },
+  };
   const coreState = await coreScenarios(coreContext);
+  const receiptState = await receiptScenarios(coreContext);
   const beforeText = `native-before-${randomBytes(4).toString("hex")}`;
   await fill("composer-input", beforeText);
   await click("composer-send");
@@ -317,10 +327,16 @@ try {
   await writeChildCommand(peer, `/account-msg ${ownAccount} ${privateReply}\n`);
   await until("authorized private reply delivered", async () => (await history()).some(h => h.text === privateReply));
   await passed("privacy-reply", { manualGrantAfterRevocation: true, realCliReplyStored: true, policy: await privacyPolicy() });
+  await coreContext.stopPeer();
+  assert.equal(coreContext.peerExited(), true, "receiver exited before source restart");
   await stop(app);
   await startApp();
   await login(userName);
   await restartedCoreScenarios(coreContext, coreState);
+  await receiptRestartScenario(coreContext, receiptState);
+  await coreContext.restartPeer();
+  await signedPeerObservation(coreContext);
+  await until("same account rediscovered after receiver restart", async () => (await observe("list_accounts")).some(a => a.account_id === account && a.names.includes(peerName)));
   const restoredPrivacy = await privacyPolicy();
   assert.equal(restoredPrivacy.invisible, true);
   assert.ok(restoredPrivacy.allowed_accounts.some(a => a.id === account && a.source === "Manual"));
