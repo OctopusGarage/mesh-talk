@@ -132,6 +132,10 @@ pub struct FileHistoryInfo {
 /// Errors from node operations.
 #[derive(Debug)]
 pub enum NodeError {
+    /// Caller-supplied local data cannot be accepted.
+    InvalidInput(String),
+    /// The host rejected a local operation under its owner guard.
+    Authorization(String),
     /// `send_dm` to a `user_id` not in the roster.
     UnknownPeer(UserId),
     /// Sealing the DM payload failed.
@@ -150,6 +154,8 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NodeError::InvalidInput(m) => write!(f, "invalid input: {m}"),
+            NodeError::Authorization(m) => write!(f, "authorization: {m}"),
             NodeError::UnknownPeer(u) => write!(f, "unknown peer: {u}"),
             NodeError::Seal(e) => write!(f, "seal error: {e}"),
             NodeError::Log(e) => write!(f, "log error: {e}"),

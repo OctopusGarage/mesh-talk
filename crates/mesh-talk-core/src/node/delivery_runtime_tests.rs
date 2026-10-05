@@ -10,6 +10,80 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 
 #[tokio::test]
+async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", 1);
+    let (a, _) = node(dir.path(), alice, aa, &bp);
+    a.configure_privacy(
+        dir.path(),
+        "pw",
+        &a.signed_announce("Alice", 1),
+        Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(
+            false,
+        )),
+    )
+    .unwrap();
+    let denied = a
+        .enqueue_to_account_if(&ba.account_id(), b"before permission", None, |_| {
+            Err(NodeError::Authorization("host replaced".into()))
+        })
+        .await;
+    assert!(matches!(denied, Err(NodeError::Authorization(_))));
+    assert!(a.privacy_snapshot().allowed_accounts.is_empty());
+    let before_sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
+    let mut checks = 0;
+    let denied = a
+        .enqueue_to_account_if(&ba.account_id(), b"deny WAL", None, |accept| {
+            checks += 1;
+            if checks == 1 {
+                accept()
+            } else {
+                Err(NodeError::Authorization("host replaced after grant".into()))
+            }
+        })
+        .await;
+    assert!(matches!(denied, Err(NodeError::Authorization(_))));
+    assert_eq!(checks, 2);
+    assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
+    assert!(a.sentlog.lock().unwrap().conversations().is_empty());
+    assert!(a.log.lock().unwrap().conversations().is_empty());
+    assert_eq!(
+        std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
+        before_sessions
+    );
+    let path = dir.path().join("staged.txt");
+    std::fs::write(&path, b"real staged bytes").unwrap();
+    let authorized = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let during_staging = authorized.clone();
+    let denied = a
+        .enqueue_file_to_account_progress_if(
+            &ba.account_id(),
+            &path,
+            crate::file::FileKind::File,
+            move |_| during_staging.store(false, std::sync::atomic::Ordering::Release),
+            |accept| {
+                if authorized.load(std::sync::atomic::Ordering::Acquire) {
+                    accept()
+                } else {
+                    Err(NodeError::Authorization(
+                        "host replaced during staging".into(),
+                    ))
+                }
+            },
+        )
+        .await;
+    assert!(matches!(denied, Err(NodeError::Authorization(_))));
+    assert!(a.account_history(&ba.account_id(), 10).is_empty());
+    assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
+    // Chunk staging was real, but no local file card/WAL transaction was accepted.
+    assert!(!a.log.lock().unwrap().conversations().is_empty());
+}
+
+#[tokio::test]
 async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claiming_custody() {
     use crate::eventlog::sync::SyncStore;
     use crate::transport::SecureChannel;
@@ -678,6 +752,14 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     assert!(
         result.is_err(),
         "oversized transport event cannot be durably accepted"
+    );
+    assert!(
+        result
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .starts_with("invalid input:"),
+        "local frame rejection must not be diagnosed as corrupt storage"
     );
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert!(a.sentlog.lock().unwrap().conversations().is_empty());
@@ -1565,7 +1647,9 @@ fn oversized_manifest_is_rejected_before_staging_ciphertext_chunks() {
     let result = a.stage_file(&path, crate::file::FileKind::File, |_| {
         panic!("transport-impossible manifests must fail before the first chunk");
     });
-    assert!(matches!(result, Err(NodeError::File(ref error)) if error.contains("transport frame")));
+    assert!(
+        matches!(result, Err(NodeError::InvalidInput(ref error)) if error.contains("transport frame"))
+    );
     assert_eq!(a.log.lock().unwrap().conversations(), before);
 }
 

@@ -1550,6 +1550,11 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
     );
 
     // The owner renames; the change converges on Bob.
+    let empty_name = alice_node.rename_channel(channel, "   ").await.unwrap_err();
+    assert!(
+        empty_name.to_string().starts_with("invalid input:"),
+        "local name rejection must be typed invalid input"
+    );
     alice_node.rename_channel(channel, "renamed").await.unwrap();
     // A message after the rename carries the new name — a deterministic barrier proving
     // Bob processed the rename's MembershipChange.

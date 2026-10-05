@@ -33,6 +33,13 @@ const FILE_PULL_INTERVAL_SECS: u64 = 3;
 /// A no-op when no new peers appeared and when we've never set an avatar.
 const PROFILE_REPUBLISH_INTERVAL_SECS: u64 = 3;
 
+#[cfg(test)]
+type InitializationHook = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+static NAMES_OPEN_HOOKS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<std::path::PathBuf, InitializationHook>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// Which peers to (re)publish our profile to this round: those present now (excluding post
 /// offices, which relay rather than render avatars) that were ABSENT in the previous round.
 /// `present_prev` holds the PREVIOUS round's present set and is updated in place to this
@@ -157,6 +164,39 @@ impl NodeRuntime {
         on_profile: impl Fn(crate::node::ReceivedProfile) + Send + 'static,
         on_call_signal: impl Fn(crate::node::ReceivedCallSignal) + Send + 'static,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_guarded(
+            base_dir,
+            account_id,
+            display_name,
+            password,
+            discovery_port,
+            on_dm,
+            on_channel,
+            on_file,
+            on_profile,
+            on_call_signal,
+            |launch| Ok(launch(display_name)),
+        )
+        .await
+    }
+
+    /// Prepare stores without launching producers; the host authorizes the final
+    /// synchronous launch under its session guard and supplies the current name.
+    pub async fn start_guarded(
+        base_dir: &Path,
+        account_id: &str,
+        display_name: &str,
+        password: &str,
+        discovery_port: u16,
+        on_dm: impl Fn(ReceivedDm) + Send + 'static,
+        on_channel: impl Fn(crate::node::channel::ReceivedChannelMessage) + Send + 'static,
+        on_file: impl Fn(crate::node::filebook::ReceivedFile) + Send + 'static,
+        on_profile: impl Fn(crate::node::ReceivedProfile) + Send + 'static,
+        on_call_signal: impl Fn(crate::node::ReceivedCallSignal) + Send + 'static,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let dir = base_dir.join("accounts").join(account_id);
         std::fs::create_dir_all(&dir)?;
 
@@ -206,9 +246,18 @@ impl NodeRuntime {
         let names_handle = {
             let names_path = dir.join("names.log");
             let password = password.to_string();
-            tokio::task::spawn_blocking(move || NameDirectory::open(&names_path, &password))
+            tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                {
+                    let hook = NAMES_OPEN_HOOKS.lock().unwrap().remove(&names_path);
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                NameDirectory::open(&names_path, &password)
+            })
         };
-        let node = {
+        let node_result = {
             let roster = Arc::clone(&roster);
             let messages_log = dir.join("messages.log");
             let sent_log = dir.join("sent.log");
@@ -227,8 +276,15 @@ impl NodeRuntime {
                 )
             })
             .await
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
         };
+        // Both blocking writers must finish even when either initializer fails.
+        // Dropping a JoinHandle would detach a writer into the replacement profile.
+        let names_result = names_handle.await;
+        let node = node_result
+            .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??;
+        let names = Arc::new(Mutex::new(names_result.map_err(|e| {
+            RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
+        })??));
         // Load policy and verified account proofs before discovery or accept/drain tasks.
         let visibility = Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(
             false,
@@ -250,135 +306,139 @@ impl NodeRuntime {
         visibility
             .set_public(!node.privacy_snapshot().invisible)
             .await;
-        let names = Arc::new(Mutex::new(names_handle.await.map_err(|e| {
-            RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
-        })??));
 
         let socket = Arc::new(discovery_socket(discovery_port)?);
 
-        let discovery_trigger = Arc::new(Notify::new());
-        let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-        tasks.extend(spawn_discovery_with_visibility(
-            Arc::clone(&socket),
-            Arc::clone(&roster),
-            Arc::clone(&announce),
-            self_uid.clone(),
-            discovery_port,
-            Some(Arc::clone(&discovery_trigger)),
-            visibility,
-        ));
-        tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
-        {
-            let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    node.probe_private_routes().await;
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                }
-            }));
-        }
-        {
-            let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    node.drain_from_post_office().await;
-                    tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)).await;
-                }
-            }));
-        }
-        {
-            let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    node.pull_pending_files().await;
-                    tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
-                }
-            }));
-        }
-        tasks.push(tokio::spawn(async move {
-            while let Some(dm) = incoming_rx.recv().await {
-                on_dm(dm);
+        let mut launch = Some(move |current_name: &str| {
+            let current_announce = node.signed_announce(current_name, tcp_port);
+            let _ = node.update_presence(&current_announce);
+            swap_announce(&announce, &current_announce);
+            let discovery_trigger = Arc::new(Notify::new());
+            let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+            tasks.extend(spawn_discovery_with_visibility(
+                Arc::clone(&socket),
+                Arc::clone(&roster),
+                Arc::clone(&announce),
+                self_uid.clone(),
+                discovery_port,
+                Some(Arc::clone(&discovery_trigger)),
+                visibility,
+            ));
+            tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
+            {
+                let node = Arc::clone(&node);
+                tasks.push(tokio::spawn(async move {
+                    loop {
+                        node.probe_private_routes().await;
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                }));
             }
-        }));
-        tasks.push(tokio::spawn(async move {
-            while let Some(msg) = channel_rx.recv().await {
-                on_channel(msg);
+            {
+                let node = Arc::clone(&node);
+                tasks.push(tokio::spawn(async move {
+                    loop {
+                        node.drain_from_post_office().await;
+                        tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)).await;
+                    }
+                }));
             }
-        }));
-        tasks.push(tokio::spawn(async move {
-            while let Some(f) = file_rx.recv().await {
-                on_file(f);
+            {
+                let node = Arc::clone(&node);
+                tasks.push(tokio::spawn(async move {
+                    loop {
+                        node.pull_pending_files().await;
+                        tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
+                    }
+                }));
             }
-        }));
-        // Forward received peer profiles (avatar updates) to the host app.
-        if let Some(mut profile_rx) = node.take_profile_receiver() {
             tasks.push(tokio::spawn(async move {
-                while let Some(p) = profile_rx.recv().await {
-                    on_profile(p);
+                while let Some(dm) = incoming_rx.recv().await {
+                    on_dm(dm);
                 }
             }));
-        }
-        // Forward inbound call signals (WebRTC SDP/bye) to the host app — ephemeral, never logged.
-        if let Some(mut call_signal_rx) = node.take_call_signal_receiver() {
             tasks.push(tokio::spawn(async move {
-                while let Some(s) = call_signal_rx.recv().await {
-                    on_call_signal(s);
+                while let Some(msg) = channel_rx.recv().await {
+                    on_channel(msg);
                 }
             }));
-        }
-        // Re-publish our avatar to freshly-discovered peers: poll the roster, and for any
-        // peer user-id we hadn't seen before, send our current profile (a no-op if we've
-        // set no avatar). Bounded — `seen` only tracks ids, and re-publish skips known peers.
-        {
-            let node = Arc::clone(&node);
-            let roster = Arc::clone(&roster);
-            let names = Arc::clone(&names);
             tasks.push(tokio::spawn(async move {
-                // The set of peers PRESENT in the previous poll — NOT a monotonic "ever seen"
-                // set. A peer is republished-to when it's present now but was absent last
-                // round, which covers both first discovery AND a reconnect after the roster
-                // evicted it (PEER_TTL). A monotonic set would never re-publish to a peer that
-                // restarted, so it would keep showing our stale avatar until we re-set it.
-                let mut present_prev: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                loop {
-                    let peers: Vec<PeerRecord> = {
-                        let r = roster.lock().expect("roster mutex not poisoned");
-                        r.peers()
-                    };
-                    // Remember every peer's announced name durably, so a member that later
-                    // goes offline (and is evicted from the live roster) still shows a name.
-                    // `record` is a no-op when unchanged, so this doesn't grow the log.
-                    {
-                        let mut dir = names.lock().expect("names mutex not poisoned");
-                        for p in &peers {
-                            let _ = dir.record(&p.public.user_id(), &p.name);
+                while let Some(f) = file_rx.recv().await {
+                    on_file(f);
+                }
+            }));
+            // Forward received peer profiles (avatar updates) to the host app.
+            if let Some(mut profile_rx) = node.take_profile_receiver() {
+                tasks.push(tokio::spawn(async move {
+                    while let Some(p) = profile_rx.recv().await {
+                        on_profile(p);
+                    }
+                }));
+            }
+            // Forward inbound call signals (WebRTC SDP/bye) to the host app — ephemeral, never logged.
+            if let Some(mut call_signal_rx) = node.take_call_signal_receiver() {
+                tasks.push(tokio::spawn(async move {
+                    while let Some(s) = call_signal_rx.recv().await {
+                        on_call_signal(s);
+                    }
+                }));
+            }
+            // Re-publish our avatar to freshly-discovered peers: poll the roster, and for any
+            // peer user-id we hadn't seen before, send our current profile (a no-op if we've
+            // set no avatar). Bounded — `seen` only tracks ids, and re-publish skips known peers.
+            {
+                let node = Arc::clone(&node);
+                let roster = Arc::clone(&roster);
+                let names = Arc::clone(&names);
+                tasks.push(tokio::spawn(async move {
+                    // The set of peers PRESENT in the previous poll — NOT a monotonic "ever seen"
+                    // set. A peer is republished-to when it's present now but was absent last
+                    // round, which covers both first discovery AND a reconnect after the roster
+                    // evicted it (PEER_TTL). A monotonic set would never re-publish to a peer that
+                    // restarted, so it would keep showing our stale avatar until we re-set it.
+                    let mut present_prev: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    loop {
+                        let peers: Vec<PeerRecord> = {
+                            let r = roster.lock().expect("roster mutex not poisoned");
+                            r.peers()
+                        };
+                        // Remember every peer's announced name durably, so a member that later
+                        // goes offline (and is evicted from the live roster) still shows a name.
+                        // `record` is a no-op when unchanged, so this doesn't grow the log.
+                        {
+                            let mut dir = names.lock().expect("names mutex not poisoned");
+                            for p in &peers {
+                                let _ = dir.record(&p.public.user_id(), &p.name);
+                            }
                         }
+                        // Re-publish our avatar to peers that just (re)appeared (a no-op if we've
+                        // set no avatar). Bounded by the live roster size.
+                        for peer in profile_republish_targets(&mut present_prev, &peers) {
+                            node.republish_profile_to(&peer).await;
+                        }
+                        tokio::time::sleep(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS))
+                            .await;
                     }
-                    // Re-publish our avatar to peers that just (re)appeared (a no-op if we've
-                    // set no avatar). Bounded by the live roster size.
-                    for peer in profile_republish_targets(&mut present_prev, &peers) {
-                        node.republish_profile_to(&peer).await;
-                    }
-                    tokio::time::sleep(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS)).await;
-                }
-            }));
-        }
+                }));
+            }
 
-        Ok(NodeRuntime {
-            node,
-            roster,
-            names,
-            user_id: self_uid,
-            account_id,
-            display_name: display_name.to_string(),
-            announce,
-            tcp_port,
-            account_path: dir.join("account.keystore"),
-            password: password.to_string(),
-            discovery_trigger,
-            tasks,
-        })
+            NodeRuntime {
+                node,
+                roster,
+                names,
+                user_id: self_uid,
+                account_id,
+                display_name: current_name.to_string(),
+                announce,
+                tcp_port,
+                account_path: dir.join("account.keystore"),
+                password: password.to_string(),
+                discovery_trigger,
+                tasks,
+            }
+        });
+        authorize_launch(&mut |name| launch.take().expect("runtime launch is single-use")(name))
     }
 
     /// This node's own user-id fingerprint.
@@ -771,6 +831,95 @@ mod retirement_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_node_or_privacy_initialization_joins_already_started_names_writer() {
+        for failure_path in ["messages.log", "privacy.policy"] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join("accounts").join("owner");
+            std::fs::create_dir_all(directory.join(failure_path)).unwrap();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            NAMES_OPEN_HOOKS.lock().unwrap().insert(
+                directory.join("names.log"),
+                Box::new(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }),
+            );
+            let base = root.path().to_owned();
+            let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
+            let startup = tokio::spawn(async move {
+                let result = NodeRuntime::start(
+                    &base,
+                    "owner",
+                    "Owner",
+                    "pw",
+                    0,
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                )
+                .await;
+                finished_tx.send(()).unwrap();
+                result
+            });
+            entered_rx.await.unwrap();
+            let returned_while_writer_blocked =
+                tokio::time::timeout(Duration::from_millis(150), &mut finished_rx)
+                    .await
+                    .is_ok();
+            release_tx.send(()).unwrap();
+            assert!(startup.await.unwrap().is_err());
+            assert!(
+                !returned_while_writer_blocked,
+                "{failure_path} error detached the paused names writer"
+            );
+            // Completion includes the real NameDirectory::open append/writer, not
+            // just the gate callback: both handles were actually joined.
+            assert!(directory.join("names.log").is_file());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn names_initialization_error_waits_for_node_initializer_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("accounts").join("owner");
+        std::fs::create_dir_all(directory.join("names.log")).unwrap();
+        let result = NodeRuntime::start(
+            root.path(),
+            "owner",
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(directory.join("messages.log").is_file());
+        // Reopening immediately after error must not race a detached Node writer.
+        let node = NodeRuntime::start(
+            root.path(),
+            "other",
+            "Other",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        node.stop().await;
+    }
 
     fn fake_peer(post_office: bool) -> PeerRecord {
         PeerRecord {

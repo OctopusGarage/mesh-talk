@@ -101,6 +101,28 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   This is in-process runtime ownership; external SDK operations and host file staging
   require the host's own lifecycle serialization, and no cross-process lease is implied.
 
+  The desktop host serializes authentication operations separately from runtime
+  replacement. Every published session has a private owner/generation lease; a
+  valid startup request receives a monotonically increasing ticket under that
+  session guard. Replacement awaits the old runtime's consuming stop before
+  opening any new profile. Guarded startup joins all already-started initializer
+  writers on errors and authorizes the synchronous producer launch, installation,
+  and each inbound callback against the current lease/ticket. A late rename cannot
+  change a replacement session or runtime; startup uses the current matching name.
+  Successful logout forgets the original login credential before awaiting teardown.
+
+  New `owner_*` delivery IPC captures the lease before waiting for the runtime
+  lock. Local text/sticker/file enqueue keeps that lifecycle admission through
+  privacy updates and staging, then holds the matching session guard over the WAL
+  append. Admitted host enqueue tasks retain the lock even if their IPC caller is
+  cancelled; this does not extend that guarantee to legacy IPC or arbitrary SDK
+  operations. Stable file results include the original card ID and file conversation.
+  Owner-sensitive identity queries atomically inspect session plus runtime; status
+  queries accept at most 256 IDs and project only the exact account conversation.
+  Own-device synchronization, device-addressed legacy history and incoming rows
+  have no external delivery status. Existing SDK and legacy IPC response shapes
+  remain available; new frontend flows must use the owner-sensitive surface.
+
 ## 4. Networking & delivery (`discovery/`, `node/`, `postoffice/`)
 
 - **Discovery** — signed `Announce` (Ed25519, version 2) carries `x25519_pub`, `tcp_port`,

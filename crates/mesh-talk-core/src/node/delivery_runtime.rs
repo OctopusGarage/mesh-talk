@@ -543,6 +543,10 @@ impl Node {
         peer: &str,
         ids: &[EventId],
     ) -> Vec<(EventId, DeliveryStatus)> {
+        // Own-device synchronization has no external recipient delivery claim.
+        if peer == self.account_id() {
+            return Vec::new();
+        }
         let store = self.delivery.lock().expect("delivery lock not poisoned");
         let conv = super::conversation::account_conversation_id(&self.account_id(), peer);
         ids.iter()

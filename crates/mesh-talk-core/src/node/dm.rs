@@ -60,8 +60,28 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
     ) -> Result<EventId, NodeError> {
-        self.enqueue_account_inner(target, MessageBody::new(text.to_vec(), reply_to).encode())
+        self.enqueue_to_account_if(target, text, reply_to, |accept| accept())
             .await
+    }
+
+    /// Calls `authorize` before privacy grant and again at final WAL acceptance.
+    /// For each successful invocation, the callback must execute the supplied
+    /// synchronous operation exactly once and propagate its result. The final
+    /// operation is single-use; retaining a synchronous owner guard through it
+    /// makes authorization and durable acceptance atomic.
+    pub async fn enqueue_to_account_if(
+        &self,
+        target: &str,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        self.enqueue_account_inner(
+            target,
+            MessageBody::new(text.to_vec(), reply_to).encode(),
+            authorize,
+        )
+        .await
     }
 
     pub async fn enqueue_sticker_to_account(
@@ -70,9 +90,24 @@ impl Node {
         sticker_id: &str,
         fallback: &[u8],
     ) -> Result<EventId, NodeError> {
+        self.enqueue_sticker_to_account_if(target, sticker_id, fallback, |accept| accept())
+            .await
+    }
+
+    /// Calls `authorize` before privacy grant and again at final WAL acceptance.
+    /// For each successful invocation, execute the supplied synchronous operation
+    /// exactly once and propagate its result; the final WAL operation is single-use.
+    pub async fn enqueue_sticker_to_account_if(
+        &self,
+        target: &str,
+        sticker_id: &str,
+        fallback: &[u8],
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
         self.enqueue_account_inner(
             target,
             MessageBody::sticker(sticker_id.to_owned(), fallback.to_vec()).encode(),
+            authorize,
         )
         .await
     }
@@ -105,7 +140,9 @@ impl Node {
         &self,
         target: &str,
         inner: Vec<u8>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
+        authorize(&mut || Ok(()))?;
         let dests = self.account_fanout_targets(target);
         if !dests
             .iter()
@@ -119,11 +156,12 @@ impl Node {
         let msg_id = random_msg_id();
         let envelope =
             DmEnvelope::new(self.account_id(), target.to_owned(), msg_id, inner).encode();
-        self.enqueue_encoded(
+        self.enqueue_encoded_if(
             dests,
             Some(target.to_owned()),
             envelope,
             Some(EventId::new(msg_id)),
+            &mut authorize,
         )
     }
 
@@ -133,6 +171,17 @@ impl Node {
         target: Option<String>,
         plaintext: Vec<u8>,
         logical: Option<EventId>,
+    ) -> Result<EventId, NodeError> {
+        self.enqueue_encoded_if(dests, target, plaintext, logical, &mut |accept| accept())
+    }
+
+    fn enqueue_encoded_if(
+        &self,
+        dests: Vec<PeerRecord>,
+        target: Option<String>,
+        plaintext: Vec<u8>,
+        logical: Option<EventId>,
+        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
@@ -175,9 +224,9 @@ impl Node {
                 wire,
             );
             if !super::session::event_fits_frame(&event) {
-                return Err(NodeError::Log(crate::eventlog::LogError::CorruptFile(
+                return Err(NodeError::InvalidInput(
                     "message exceeds transport frame".into(),
-                )));
+                ));
             }
             let eligible =
                 proof_account.is_some() && proof_account.as_deref() != Some(account.as_str());
@@ -212,25 +261,29 @@ impl Node {
         log.sync().map_err(NodeError::Log)?;
         drop(log);
         drop(ratchet);
-        store
-            .begin(DeliveryTransaction::Outgoing {
-                message: OutgoingDelivery {
-                    logical_id: id,
-                    sender_account: account,
-                    recipient_account: recipient,
-                    conversation: conv,
-                    wall_clock: clock,
-                    destinations,
-                },
-                sent: SentEntry {
-                    conversation: conv,
-                    seq,
-                    wall_clock: clock,
-                    plaintext,
-                },
-                ratchets: prepared,
-            })
-            .map_err(NodeError::Log)?;
+        let mut transaction = Some(DeliveryTransaction::Outgoing {
+            message: OutgoingDelivery {
+                logical_id: id,
+                sender_account: account,
+                recipient_account: recipient,
+                conversation: conv,
+                wall_clock: clock,
+                destinations,
+            },
+            sent: SentEntry {
+                conversation: conv,
+                seq,
+                wall_clock: clock,
+                plaintext,
+            },
+            ratchets: prepared,
+        });
+        authorize(&mut || {
+            store
+                .begin(transaction.take().expect("accept is single-use"))
+                .map(|_| ())
+                .map_err(NodeError::Log)
+        })?;
         // WAL acceptance cannot turn into a failed send inviting duplicates.
         if self.recover_delivery(&mut store).is_err() {
             log::warn!("accepted delivery awaits local recovery");

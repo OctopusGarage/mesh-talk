@@ -333,6 +333,29 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_to_account_progress_if(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            |accept| accept(),
+        )
+        .await
+    }
+
+    /// Calls `authorize` before privacy grant/staging and again at final WAL
+    /// acceptance after staging. For each successful invocation, execute the
+    /// supplied synchronous operation exactly once and propagate its result.
+    /// The final WAL operation is single-use and must run under the owner guard.
+    pub async fn enqueue_file_to_account_progress_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        authorize(&mut || Ok(()))?;
         let dests = self.account_fanout_targets(target_account_id);
         if !dests
             .iter()
@@ -354,11 +377,12 @@ impl Node {
             &self.account.account_id(),
             target_account_id,
         );
-        let id = self.accept_staged_manifest(
+        let id = self.accept_staged_manifest_if(
             &dests,
             account_conv,
             Some(target_account_id.to_owned()),
             &manifest,
+            &mut authorize,
         )?;
         Ok((id, file_conv))
     }
@@ -369,6 +393,19 @@ impl Node {
         host: ConversationId,
         target_account: Option<String>,
         manifest: &FileManifestV3,
+    ) -> Result<crate::eventlog::EventId, NodeError> {
+        self.accept_staged_manifest_if(peers, host, target_account, manifest, &mut |accept| {
+            accept()
+        })
+    }
+
+    fn accept_staged_manifest_if(
+        &self,
+        peers: &[crate::discovery::PeerRecord],
+        host: ConversationId,
+        target_account: Option<String>,
+        manifest: &FileManifestV3,
+        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
         use super::delivery_store::{DeliveryDestination, DeliveryTransaction, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
@@ -397,7 +434,7 @@ impl Node {
                     wire,
                 );
                 if !super::session::event_fits_frame(&event) {
-                    return Err(NodeError::File(
+                    return Err(NodeError::InvalidInput(
                         "file manifest exceeds transport frame".into(),
                     ));
                 }
@@ -452,26 +489,30 @@ impl Node {
                 &author,
             )
             .map_err(NodeError::Log)?;
-        store
-            .begin(DeliveryTransaction::OutgoingManifest {
-                message: OutgoingDelivery {
-                    logical_id: id,
-                    sender_account: self.account_id(),
-                    recipient_account: target_account,
-                    conversation: host,
-                    wall_clock: clock,
-                    destinations,
-                },
-                received: Box::new(super::received_log::ReceivedEntry {
-                    event_id: id,
-                    conversation: host,
-                    from: own.user_id(),
-                    wall_clock: clock,
-                    plaintext,
-                }),
-                file,
-            })
-            .map_err(NodeError::Log)?;
+        let mut transaction = Some(DeliveryTransaction::OutgoingManifest {
+            message: OutgoingDelivery {
+                logical_id: id,
+                sender_account: self.account_id(),
+                recipient_account: target_account,
+                conversation: host,
+                wall_clock: clock,
+                destinations,
+            },
+            received: Box::new(super::received_log::ReceivedEntry {
+                event_id: id,
+                conversation: host,
+                from: own.user_id(),
+                wall_clock: clock,
+                plaintext,
+            }),
+            file,
+        });
+        authorize(&mut || {
+            store
+                .begin(transaction.take().expect("accept is single-use"))
+                .map(|_| ())
+                .map_err(NodeError::Log)
+        })?;
         if self.recover_delivery(&mut store).is_ok() {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
@@ -563,7 +604,7 @@ impl Node {
             .map_err(|e| NodeError::File(format!("stat file: {e}")))?
             .len();
         if size > MAX_FILE_SIZE {
-            return Err(NodeError::File(format!(
+            return Err(NodeError::InvalidInput(format!(
                 "file too large: {size} bytes (max {MAX_FILE_SIZE})"
             )));
         }
@@ -599,7 +640,7 @@ impl Node {
             .saturating_add(u64::from(prospective.v2.chunk_count) * 32)
             .saturating_add(sealed_overhead);
         if wire_size > crate::transport::MAX_PLAINTEXT as u64 {
-            return Err(NodeError::File(
+            return Err(NodeError::InvalidInput(
                 "file manifest exceeds transport frame".into(),
             ));
         }
@@ -614,7 +655,7 @@ impl Node {
             vec![0; wire_size as usize],
         );
         if !super::session::event_fits_frame(&prospective_event) {
-            return Err(NodeError::File(
+            return Err(NodeError::InvalidInput(
                 "file manifest exceeds transport frame".into(),
             ));
         }
