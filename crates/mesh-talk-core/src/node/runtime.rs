@@ -550,8 +550,15 @@ impl NodeRuntime {
     /// other good devices must be re-linked.
     pub fn rekey_account(&self) -> Result<String, NodeError> {
         let account = crate::identity::account::Account::generate();
-        crate::identity::account_keystore::save(&self.account_path, &self.password, &account)
-            .map_err(|e| NodeError::Channel(format!("persist new account: {e}")))?;
+        self.node
+            .persist_account_adoption(&account.account_id(), || {
+                crate::identity::account_keystore::save(
+                    &self.account_path,
+                    &self.password,
+                    &account,
+                )
+                .map_err(|e| NodeError::Channel(format!("persist new account: {e}")))
+            })?;
         Ok(account.account_id())
     }
 
@@ -581,8 +588,15 @@ impl NodeRuntime {
             .link_to_device(peer.addr, &peer.public, code)
             .await?;
         let account = crate::identity::account::Account::from_secret_bytes(linked.secret);
-        crate::identity::account_keystore::save(&self.account_path, &self.password, &account)
-            .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))?;
+        self.node
+            .persist_account_adoption(&account.account_id(), || {
+                crate::identity::account_keystore::save(
+                    &self.account_path,
+                    &self.password,
+                    &account,
+                )
+                .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))
+            })?;
         Ok(linked.account_id)
     }
 

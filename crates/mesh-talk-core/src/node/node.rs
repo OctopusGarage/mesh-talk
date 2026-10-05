@@ -210,6 +210,12 @@ pub struct Node {
     pub(in crate::node) media: crate::node::media_store::MediaStore,
     /// Per-peer Double Ratchet sessions (forward-secret DM crypto), encrypted on disk.
     pub(in crate::node) dm_ratchet: Mutex<DmRatchet>,
+    /// Serializes every DM ratchet consumer and ordered recovery.
+    pub(in crate::node) delivery: Mutex<super::delivery_store::DeliveryStore>,
+    pub(in crate::node) delivery_notify: tokio::sync::Notify,
+    pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
+    pub(in crate::node) delivery_control_ids: Mutex<HashMap<EventId, Option<String>>>,
+    pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
     /// Decrypted received-message plaintext, for serving history after the wire key is gone.
     pub(in crate::node) received: Mutex<ReceivedLog>,
     /// Durable record of file manifests we've SURFACED (reuses the ReceivedLog format),
@@ -354,15 +360,28 @@ impl Node {
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
-        let log = log_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut log = log_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let dm_ratchet = DmRatchet::new(sessions);
+        let mut dm_ratchet = DmRatchet::new(sessions);
+        let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
+        delivery.bind_profile(
+            log_path,
+            password,
+            &identity.public(),
+            &account.account_id(),
+        )?;
+        delivery.validate_owner(&identity.public(), &account.account_id())?;
+        while delivery
+            .recover_next(&mut dm_ratchet, &mut log, &mut sentlog, &mut received)?
+            .is_some()
+        {}
+        let delivery_control_ids = delivery.control_ids();
         // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
         // every id in the log. An event that was ingested durably but never recorded (it
         // arrived before we learned its author — the DM-convergence race — or before its
@@ -442,6 +461,11 @@ impl Node {
             pending_files: Mutex::new(HashSet::new()),
             media,
             dm_ratchet: Mutex::new(dm_ratchet),
+            delivery: Mutex::new(delivery),
+            delivery_notify: tokio::sync::Notify::new(),
+            delivery_status_notify: tokio::sync::Notify::new(),
+            delivery_control_ids: Mutex::new(delivery_control_ids),
+            delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),

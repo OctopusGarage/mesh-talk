@@ -57,6 +57,39 @@ impl GuardedSyncStore<'_> {
                 && super::conversation::dm_conversation_id(&me, &a.public()) == *conversation
         });
         let mut allowed = HashSet::new();
+        let control_target = proofs.iter().find(|a| {
+            a.account_id()
+                .is_some_and(|id| id != own_account && state.policy.allows(&id))
+                && super::delivery_receipt::delivery_conversation_id(&me, &a.public())
+                    == *conversation
+        });
+        if let Some(target) = control_target {
+            if self.peer == target.public() || relay {
+                let own_controls = self
+                    .node
+                    .delivery_control_ids
+                    .lock()
+                    .expect("control ids lock not poisoned");
+                for event in events {
+                    let eligible = (event.author.ed25519_pub() == &me.ed25519_pub
+                        && own_controls.get(&event.id) == Some(&target.account_id()))
+                        || super::delivery_receipt::open_receipt(
+                            &self.node.identity,
+                            &own_account,
+                            target,
+                            event,
+                        )
+                        .is_some();
+                    if event.kind == EventKind::Message
+                        && eligible
+                        && event.parents.iter().all(|id| allowed.contains(id))
+                    {
+                        allowed.insert(event.id);
+                    }
+                }
+            }
+            return allowed;
+        }
         if let Some(target) = target {
             if self.peer == target.public() || own_peer || relay {
                 for event in events {
@@ -256,10 +289,11 @@ impl SyncStore for GuardedSyncStore<'_> {
                 )));
             }
         }
-        self.node
-            .log
-            .lock()
-            .expect("log lock not poisoned")
-            .append(event)
+        let mut log = self.node.log.lock().expect("log lock not poisoned");
+        if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
+            log.append_durable(event)
+        } else {
+            log.append(event)
+        }
     }
 }

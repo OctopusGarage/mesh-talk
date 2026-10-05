@@ -1,4 +1,69 @@
 use super::*;
+
+#[test]
+fn control_ciphertext_is_not_legacy_chat_ciphertext() {
+    let f = Fixture::new(true);
+    let event = f.event_for(&f.payload());
+    assert!(f.authenticate(&event).is_some());
+    assert!(
+        crate::dm::open(&f.alice, &f.bob.public().x25519_pub, &event.ciphertext).is_err(),
+        "a legacy sealed-box chat opener must reject delivery controls"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&dir.path().join("legacy"), "pw").unwrap());
+    assert!(ratchet
+        .decrypt(&f.alice, &f.bob.public(), &event.ciphertext)
+        .is_err());
+    // A still older permissive bincode parser sees only an empty Vec; its
+    // normal AEAD opener cannot authenticate that as a chat message either.
+    let legacy: crate::dm::SealedEnvelope = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .deserialize(&event.ciphertext)
+        .unwrap();
+    assert!(legacy.ciphertext.is_empty());
+    assert!(crate::dm::open(
+        &f.alice,
+        &f.bob.public().x25519_pub,
+        &bincode::serialize(&legacy).unwrap()
+    )
+    .is_err());
+}
+
+#[test]
+fn receipt_only_frame_is_exact_and_rejects_missing_wrong_nonzero_or_truncated_marker() {
+    let f = Fixture::new(true);
+    let valid = f.event_for(&f.payload());
+    assert!(valid.ciphertext.starts_with(&RECEIPT_FRAME));
+    assert_eq!(&valid.ciphertext[32..40], &[0; 8]);
+    for case in 0..5 {
+        let mut wire = valid.ciphertext.clone();
+        match case {
+            0 => wire = wire[40..].to_vec(),
+            1 => wire[0] ^= 1,
+            2 => wire[24] += 1,
+            3 => wire[32] = 1,
+            4 => wire.truncate(39),
+            _ => unreachable!(),
+        }
+        let event = Event::new(
+            &f.bob,
+            valid.conversation_id,
+            1,
+            vec![],
+            1,
+            valid.wall_clock,
+            EventKind::Message,
+            wire,
+        );
+        assert!(event.verify_integrity() && event.verify_signature());
+        assert!(
+            f.authenticate(&event).is_none(),
+            "receipt frame case {case}"
+        );
+    }
+}
 use crate::identity::account::Account;
 use crate::node::delivery_store::DeliveryDestination;
 use crate::node::{dm_ratchet::DmRatchet, ratchet_sessions::RatchetSessions};
@@ -240,7 +305,8 @@ fn signed_sealed_payload_changes_cannot_confirm_a_different_binding() {
         }
         // Adversarial recipient can sign arbitrary payload bytes; avoid the safe mint API.
         let bytes = bincode::serialize(&payload).unwrap();
-        let wire = crate::dm::seal(&f.bob, &f.alice.public().x25519_pub, &bytes).unwrap();
+        let wire =
+            frame_receipt(crate::dm::seal(&f.bob, &f.alice.public().x25519_pub, &bytes).unwrap());
         let event = Event::new(
             &f.bob,
             delivery_conversation_id(&f.alice.public(), &f.bob.public()),
@@ -283,8 +349,9 @@ fn wrong_signature_ciphertext_scope_kind_and_confirmation_time_are_ignored() {
             6 => {
                 let bytes = f.payload().encode().unwrap();
                 let outsider = DeviceIdentity::generate();
-                let wire =
-                    crate::dm::seal(&outsider, &f.alice.public().x25519_pub, &bytes).unwrap();
+                let wire = frame_receipt(
+                    crate::dm::seal(&outsider, &f.alice.public().x25519_pub, &bytes).unwrap(),
+                );
                 event = Event::new(
                     &f.bob,
                     valid.conversation_id,
@@ -492,12 +559,13 @@ fn sealed_box_frame_length_is_bounded_before_the_existing_decoder_allocates() {
     for case in 0..4 {
         let mut wire = event.ciphertext.clone();
         match case {
-            0 => wire[32..40].copy_from_slice(&u64::MAX.to_le_bytes()),
+            0 => wire[72..80].copy_from_slice(&u64::MAX.to_le_bytes()),
             1 => wire.push(0),
             2 => wire.truncate(39),
             3 => {
                 wire = vec![0; 40 + MAX_RECEIPT_PLAINTEXT + 17];
                 wire[32..40].copy_from_slice(&((MAX_RECEIPT_PLAINTEXT + 17) as u64).to_le_bytes());
+                wire = frame_receipt(wire);
             }
             _ => unreachable!(),
         }
@@ -539,12 +607,14 @@ fn authenticated_own_account_copy_never_mints_or_confirms_delivery() {
     payload.original_conversation = own.message.destinations[0].event.conversation_id;
     payload.original_event_id = own.received.event_id;
     payload.logical_id = own.message.logical_id;
-    let wire = crate::dm::seal(
-        &own.bob,
-        &own.alice.public().x25519_pub,
-        &bincode::serialize(&payload).unwrap(),
-    )
-    .unwrap();
+    let wire = frame_receipt(
+        crate::dm::seal(
+            &own.bob,
+            &own.alice.public().x25519_pub,
+            &bincode::serialize(&payload).unwrap(),
+        )
+        .unwrap(),
+    );
     let event = Event::new(
         &own.bob,
         payload.conversation(),

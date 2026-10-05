@@ -1,5 +1,5 @@
 //! Encrypted delivery transaction journal and immutable outbox metadata.
-#![allow(dead_code)] // Node integration is a separate, reviewed implementation phase.
+#![allow(dead_code)] // Bounded cursor / exact retirement APIs are consumed by the next worker phase.
 
 use super::dm_envelope::DmEnvelope;
 use super::dm_ratchet::{DmRatchet, PreparedRatchet};
@@ -57,10 +57,22 @@ pub(crate) struct ReceiptDelivery {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CompletedDelivery {
-    logical_id: EventId,
-    conversation: ConversationId,
-    wall_clock: u64,
+pub(crate) struct CompletedDelivery {
+    pub(crate) logical_id: EventId,
+    pub(crate) conversation: ConversationId,
+    pub(crate) wall_clock: u64,
+    pub(crate) recipient_account: Option<String>,
+    pub(crate) remaining: Vec<DeliveryReference>,
+}
+
+/// Only unfinished transport work survives delivery confirmation. Ciphertext
+/// remains in the immutable event log, not duplicated in completed statuses.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeliveryReference {
+    pub(crate) device: PublicIdentity,
+    pub(crate) account: Option<String>,
+    pub(crate) event_id: EventId,
+    pub(crate) receipt_eligible: bool,
 }
 
 impl From<&OutgoingDelivery> for CompletedDelivery {
@@ -69,6 +81,17 @@ impl From<&OutgoingDelivery> for CompletedDelivery {
             logical_id: message.logical_id,
             conversation: message.conversation,
             wall_clock: message.wall_clock,
+            recipient_account: message.recipient_account.clone(),
+            remaining: message
+                .destinations
+                .iter()
+                .map(|d| DeliveryReference {
+                    device: d.device.clone(),
+                    account: d.account.clone(),
+                    event_id: d.event.id,
+                    receipt_eligible: d.receipt_eligible,
+                })
+                .collect(),
         }
     }
 }
@@ -80,6 +103,7 @@ struct CompletedReceipt {
     receipt_event_id: EventId,
     conversation: ConversationId,
     wall_clock: u64,
+    destination_account: Option<String>,
 }
 
 impl From<&ReceiptDelivery> for CompletedReceipt {
@@ -90,6 +114,7 @@ impl From<&ReceiptDelivery> for CompletedReceipt {
             receipt_event_id: receipt.destination.event.id,
             conversation: receipt.conversation,
             wall_clock: receipt.wall_clock,
+            destination_account: receipt.destination.account.clone(),
         }
     }
 }
@@ -168,6 +193,7 @@ enum OutboxRecord {
     Delivered(CompletedDelivery),
     FinishedReceipt(CompletedReceipt),
     Cancel(ConversationId, EventId),
+    RetireDestination(EventId, EventId),
 }
 
 /// One owner per profile, protected by the Node's delivery transaction guard.
@@ -175,6 +201,7 @@ enum OutboxRecord {
 /// Completing a transaction rewrites only the small secret journal, not the
 /// potentially large outbox. The outbox compacts only at its byte/record bound.
 pub(crate) struct DeliveryStore {
+    profile: Option<(EncryptedRecordLog<DeliveryProfile>, DeliveryProfile)>,
     journal: EncryptedRecordLog<DeliveryTransaction>,
     outbox: EncryptedRecordLog<OutboxRecord>,
     journal_path: PathBuf,
@@ -189,7 +216,168 @@ pub(crate) struct DeliveryStore {
     needs_sync: bool,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DeliveryProfile {
+    device: PublicIdentity,
+    account: String,
+    adoption: Option<String>,
+}
+
 impl DeliveryStore {
+    pub(crate) fn bind_profile(
+        &mut self,
+        log_path: &Path,
+        password: &str,
+        own: &PublicIdentity,
+        account: &str,
+    ) -> Result<(), LogError> {
+        let mut path = log_path.as_os_str().to_os_string();
+        path.push(".delivery-owner");
+        let accepted = !self.pending.is_empty() || !self.cancellation_rows().is_empty();
+        if !Path::new(&path).try_exists()? && accepted {
+            return Err(invalid("missing delivery profile binding"));
+        }
+        preflight(Path::new(&path), 4096, 1)?;
+        let (mut file, entries) =
+            EncryptedRecordLog::<DeliveryProfile>::open(Path::new(&path), password, b"MTDOWN")?;
+        let expected = DeliveryProfile {
+            device: own.clone(),
+            account: account.to_owned(),
+            adoption: None,
+        };
+        if entries.is_empty() && accepted {
+            return Err(invalid("missing delivery profile binding"));
+        }
+        if entries.iter().any(|p| {
+            !valid_account(&p.account) || p.adoption.as_deref().is_some_and(|a| !valid_account(a))
+        }) {
+            return Err(invalid("invalid delivery profile binding"));
+        }
+        if entries.is_empty() {
+            file.append_durable(&expected)?;
+        } else if entries.len() != 1 || entries[0].device != *own {
+            return Err(invalid("delivery store belongs to another profile"));
+        } else if entries[0] != expected {
+            // A trusted local account adoption is supported for the same full
+            // device only after secret intents are resolved. Old account work
+            // loses network/status eligibility; accepted history is retained.
+            if entries[0].account != account {
+                if !self.pending.is_empty() {
+                    return Err(invalid("recover old account delivery before adoption"));
+                }
+                if entries[0].adoption.as_deref() != Some(account)
+                    && !self.cancellation_rows().is_empty()
+                {
+                    return Err(invalid("prepare old account delivery before adoption"));
+                }
+                for (conversation, id, _) in self.cancellation_rows() {
+                    self.cancel(conversation, id)?;
+                }
+            }
+            file.rewrite(std::slice::from_ref(&expected))?;
+        }
+        file.sync()?;
+        self.profile = Some((file, expected));
+        Ok(())
+    }
+
+    pub(crate) fn prepare_profile_adoption(&mut self, account: &str) -> Result<(), LogError> {
+        if !valid_account(account) {
+            return Err(invalid("invalid delivery adoption account"));
+        }
+        if !self.pending.is_empty() {
+            return Err(invalid("recover delivery before account adoption"));
+        }
+        let (file, profile) = self
+            .profile
+            .as_mut()
+            .ok_or_else(|| invalid("delivery owner is unbound"))?;
+        let mut prepared = profile.clone();
+        prepared.adoption = Some(account.to_owned());
+        file.rewrite(std::slice::from_ref(&prepared))?;
+        file.sync()?;
+        *profile = prepared;
+        Ok(())
+    }
+
+    pub(crate) fn cancel_profile_adoption(&mut self) -> Result<(), LogError> {
+        let (file, profile) = self
+            .profile
+            .as_mut()
+            .ok_or_else(|| invalid("delivery owner is unbound"))?;
+        let mut restored = profile.clone();
+        restored.adoption = None;
+        file.rewrite(std::slice::from_ref(&restored))?;
+        file.sync()?;
+        *profile = restored;
+        Ok(())
+    }
+
+    pub(crate) fn control_ids(&self) -> std::collections::HashMap<EventId, Option<String>> {
+        self.receipts
+            .values()
+            .map(|r| (r.destination.event.id, r.destination.account.clone()))
+            .chain(
+                self.completed_receipts
+                    .values()
+                    .map(|r| (r.receipt_event_id, r.destination_account.clone())),
+            )
+            .collect()
+    }
+    /// Local replay is independent of current network permissions. Bind accepted
+    /// state to this profile before installing any saved ratchet transition.
+    pub(crate) fn validate_owner(
+        &self,
+        own: &PublicIdentity,
+        account: &str,
+    ) -> Result<(), LogError> {
+        let message_ok = |m: &OutgoingDelivery| {
+            m.sender_account == account
+                && m.destinations
+                    .iter()
+                    .all(|d| d.event.author.ed25519_pub() == &own.ed25519_pub)
+        };
+        let receipt_ok = |r: &ReceiptDelivery| {
+            r.destination.event.author.ed25519_pub() == &own.ed25519_pub
+                && r.destination.event.conversation_id
+                    == super::delivery_receipt::delivery_conversation_id(own, &r.destination.device)
+        };
+        if self.messages.values().any(|m| !message_ok(m))
+            || self.receipts.values().any(|r| !receipt_ok(r))
+        {
+            return Err(invalid("delivery store belongs to another profile"));
+        }
+        for tx in &self.pending {
+            let valid = match tx {
+                DeliveryTransaction::Outgoing { message, .. } => message_ok(message),
+                DeliveryTransaction::Incoming {
+                    sender,
+                    original,
+                    received,
+                    receipt,
+                    ..
+                } => {
+                    let route_valid = if received.plaintext.starts_with(b"MTDE1") {
+                        DmEnvelope::decode(&received.plaintext).is_some_and(|e| {
+                            e.route.sender_account == account
+                                || e.route.recipient_account == account
+                        })
+                    } else {
+                        received.conversation == original.conversation_id
+                            && received.from == sender.user_id()
+                    };
+                    original.conversation_id == super::conversation::dm_conversation_id(own, sender)
+                        && sender.ed25519_pub != own.ed25519_pub
+                        && route_valid
+                        && receipt.as_ref().is_none_or(|r| receipt_ok(r))
+                }
+            };
+            if !valid {
+                return Err(invalid("delivery transaction belongs to another profile"));
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn open(dir: &Path, password: &str) -> Result<Self, LogError> {
         Self::open_with_limits(dir, password, DeliveryLimits::default())
     }
@@ -199,17 +387,43 @@ impl DeliveryStore {
         password: &str,
         limits: DeliveryLimits,
     ) -> Result<Self, LogError> {
+        Self::open_paths(
+            dir.join("delivery-transactions.log"),
+            dir.join("delivery-outbox.log"),
+            password,
+            limits,
+        )
+    }
+
+    pub(crate) fn open_for_log(log_path: &Path, password: &str) -> Result<Self, LogError> {
+        let mut journal = log_path.as_os_str().to_os_string();
+        journal.push(".delivery-transactions");
+        let mut outbox = log_path.as_os_str().to_os_string();
+        outbox.push(".delivery-outbox");
+        Self::open_paths(
+            journal.into(),
+            outbox.into(),
+            password,
+            DeliveryLimits::default(),
+        )
+    }
+
+    fn open_paths(
+        journal_path: PathBuf,
+        outbox_path: PathBuf,
+        password: &str,
+        limits: DeliveryLimits,
+    ) -> Result<Self, LogError> {
         if limits.journal_bytes < HEADER_BYTES || limits.outbox_bytes < HEADER_BYTES {
             return Err(invalid("delivery file capacity"));
         }
-        let journal_path = dir.join("delivery-transactions.log");
-        let outbox_path = dir.join("delivery-outbox.log");
         preflight(&journal_path, limits.journal_bytes, limits.transactions)?;
         let max_records = limits.max_outbox_records();
         preflight(&outbox_path, limits.outbox_bytes, max_records)?;
         let (journal, pending) = EncryptedRecordLog::open(&journal_path, password, JOURNAL_MAGIC)?;
         let (outbox, records) = EncryptedRecordLog::open(&outbox_path, password, OUTBOX_MAGIC)?;
         let mut store = Self {
+            profile: None,
             journal,
             outbox,
             journal_path,
@@ -319,6 +533,39 @@ impl DeliveryStore {
         })
     }
 
+    pub(crate) fn status_in(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> Option<DeliveryStatus> {
+        let in_scope = self.messages.get(&id).is_some_and(|m| m.conversation == conversation)
+            || self.completed.get(&id).is_some_and(|m| m.conversation == conversation)
+            || self.pending.iter().any(|tx| matches!(tx, DeliveryTransaction::Outgoing { message, .. } if message.logical_id == id && message.conversation == conversation));
+        in_scope.then(|| self.status(id)).flatten()
+    }
+
+    pub(crate) fn cancellation_rows(&self) -> Vec<(ConversationId, EventId, u64)> {
+        self.messages
+            .values()
+            .map(|m| (m.conversation, m.logical_id, m.wall_clock))
+            .chain(
+                self.completed
+                    .values()
+                    .map(|m| (m.conversation, m.logical_id, m.wall_clock)),
+            )
+            .chain(
+                self.receipts
+                    .values()
+                    .map(|m| (m.conversation, m.logical_id, m.wall_clock)),
+            )
+            .chain(
+                self.completed_receipts
+                    .values()
+                    .map(|m| (m.conversation, m.logical_id, m.wall_clock)),
+            )
+            .collect()
+    }
+
     /// Replay strictly in journal order. Ratchets cannot be used for unrelated
     /// operations while an earlier intent is incomplete. Locks are acquired by
     /// the caller in delivery → ratchet → log → received/sent order; no awaits.
@@ -394,7 +641,83 @@ impl DeliveryStore {
         let Some(message) = self.messages.get(&id) else {
             return Err(invalid("unknown delivery message"));
         };
-        self.install_record(OutboxRecord::Delivered(CompletedDelivery::from(message)))
+        let mut completed = CompletedDelivery::from(message);
+        completed.remaining.clear();
+        completed.recipient_account = None;
+        self.install_record(OutboxRecord::Delivered(completed))
+    }
+
+    pub(crate) fn mark_delivered_for(
+        &mut self,
+        id: EventId,
+        original: EventId,
+    ) -> Result<(), LogError> {
+        self.sync_replacement()?;
+        if !self.pending.is_empty() {
+            return Err(invalid("recover delivery before confirming"));
+        }
+        if self.completed.contains_key(&id) {
+            return self.retire_destination(id, original);
+        }
+        let message = self
+            .messages
+            .get(&id)
+            .ok_or_else(|| invalid("unknown delivery message"))?;
+        if !message
+            .destinations
+            .iter()
+            .any(|d| d.event.id == original && d.receipt_eligible)
+        {
+            return Err(invalid("unknown confirmed destination"));
+        }
+        let mut completed = CompletedDelivery::from(message);
+        completed.remaining.retain(|d| d.event_id != original);
+        if completed.remaining.is_empty() {
+            completed.recipient_account = None;
+        }
+        self.install_record(OutboxRecord::Delivered(completed))
+    }
+
+    /// Only exact authenticated durable remote-have proofs may retire transport
+    /// references. Session success alone never calls this method.
+    pub(crate) fn retire_destination(
+        &mut self,
+        id: EventId,
+        original: EventId,
+    ) -> Result<(), LogError> {
+        self.sync_replacement()?;
+        if !self.pending.is_empty() {
+            return Err(invalid("recover delivery before retiring destination"));
+        }
+        let completed = self
+            .completed
+            .get(&id)
+            .ok_or_else(|| invalid("unknown completed delivery"))?;
+        if !completed.remaining.iter().any(|d| d.event_id == original) {
+            return self.outbox.sync();
+        }
+        self.install_record(OutboxRecord::RetireDestination(id, original))
+    }
+
+    pub(crate) fn completed_work(&self, id: EventId) -> Option<&CompletedDelivery> {
+        self.completed.get(&id).filter(|m| !m.remaining.is_empty())
+    }
+
+    pub(crate) fn retry_completed_after(
+        &self,
+        cursor: Option<EventId>,
+        limit: usize,
+    ) -> Vec<CompletedDelivery> {
+        if self.needs_sync || !self.pending.is_empty() {
+            return Vec::new();
+        }
+        let start = cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        self.completed
+            .range((start, std::ops::Bound::Unbounded))
+            .filter(|(_, m)| !m.remaining.is_empty())
+            .take(limit.min(64))
+            .map(|(_, m)| m.clone())
+            .collect()
     }
 
     /// The host decides whether authenticated direct sync or durable relay
@@ -606,12 +929,31 @@ impl DeliveryStore {
             }
             OutboxRecord::Delivered(completed) => {
                 if let Some(message) = self.messages.get(&completed.logical_id) {
-                    if CompletedDelivery::from(message) != completed {
+                    let expected = CompletedDelivery::from(message);
+                    if expected.conversation != completed.conversation
+                        || expected.wall_clock != completed.wall_clock
+                        || (!completed.remaining.is_empty()
+                            && expected.recipient_account != completed.recipient_account)
+                        || completed
+                            .remaining
+                            .iter()
+                            .any(|d| !expected.remaining.contains(d))
+                    {
                         return Err(invalid("conflicting completed delivery metadata"));
                     }
                 }
                 self.messages.remove(&completed.logical_id);
                 self.completed.insert(completed.logical_id, completed);
+            }
+            OutboxRecord::RetireDestination(id, event) => {
+                let completed = self
+                    .completed
+                    .get_mut(&id)
+                    .ok_or_else(|| invalid("unknown completed delivery"))?;
+                completed.remaining.retain(|d| d.event_id != event);
+                if completed.remaining.is_empty() {
+                    completed.recipient_account = None;
+                }
             }
             OutboxRecord::FinishedReceipt(completed) => {
                 if let Some(receipt) = self.receipts.get(&completed.receipt_event_id) {
@@ -686,6 +1028,8 @@ impl DeliveryStore {
                 logical_id: EventId::new([0; 32]),
                 conversation: ConversationId::new([0; 32]),
                 wall_clock: 0,
+                recipient_account: None,
+                remaining: Vec::new(),
             }))
             .map_err(|_| invalid("delivery encoding"))?
             .saturating_add(FRAME_OVERHEAD);
@@ -702,6 +1046,7 @@ impl DeliveryStore {
                 receipt_event_id: EventId::new([0; 32]),
                 conversation: ConversationId::new([0; 32]),
                 wall_clock: 0,
+                destination_account: Some("0".repeat(32)),
             }))
             .map_err(|_| invalid("delivery encoding"))?
             .saturating_add(FRAME_OVERHEAD);
@@ -782,6 +1127,7 @@ impl DeliveryStore {
                         || (receipt.logical_id != *id && receipt.original_event_id != *id)
                 });
             }
+            OutboxRecord::RetireDestination(_, _) => {}
         }
         let future_bytes = messages
             .values()
@@ -795,7 +1141,68 @@ impl DeliveryStore {
             .sum::<u64>()
             .saturating_add((cancel_size + finished_size).saturating_mul(receipts.len() as u64))
             .saturating_add(cancel_size.saturating_mul(completed_receipts.len() as u64));
-        size = size.saturating_add(future_bytes);
+        let retire_size = bincode::serialized_size(&OutboxRecord::RetireDestination(
+            EventId::new([0; 32]),
+            EventId::new([0; 32]),
+        ))
+        .map_err(|_| invalid("delivery encoding"))?
+        .saturating_add(FRAME_OVERHEAD);
+        let mut work: BTreeMap<EventId, (bool, Vec<DeliveryReference>)> = self
+            .messages
+            .values()
+            .map(|m| (m.logical_id, (true, CompletedDelivery::from(m).remaining)))
+            .collect();
+        work.extend(
+            self.completed
+                .values()
+                .filter(|m| !m.remaining.is_empty())
+                .map(|m| (m.logical_id, (false, m.remaining.clone()))),
+        );
+        for tx in &self.pending {
+            if let DeliveryTransaction::Outgoing { message, .. } = tx {
+                work.entry(message.logical_id)
+                    .or_insert_with(|| (true, CompletedDelivery::from(message).remaining));
+            }
+        }
+        match record {
+            OutboxRecord::Message(m) => {
+                work.insert(m.logical_id, (true, CompletedDelivery::from(m).remaining));
+            }
+            OutboxRecord::Delivered(m) => {
+                work.insert(m.logical_id, (false, m.remaining.clone()));
+            }
+            OutboxRecord::RetireDestination(id, event) => {
+                if let Some((_, refs)) = work.get_mut(id) {
+                    refs.retain(|r| r.event_id != *event);
+                }
+            }
+            OutboxRecord::Cancel(_, id) if !messages.contains_key(id) => {
+                work.remove(id);
+            }
+            _ => {}
+        }
+        let mut fanout_bytes = 0u64;
+        for (awaiting, refs) in work.values() {
+            if *awaiting && refs.len() > 1 {
+                // Initial confirmation contains compact remaining refs plus the
+                // recipient account; reserve the worst case before acceptance.
+                fanout_bytes = fanout_bytes
+                    .saturating_add(
+                        bincode::serialized_size(refs).map_err(|_| invalid("delivery encoding"))?,
+                    )
+                    .saturating_add(48);
+            }
+            let retire_count = if *awaiting {
+                refs.len().saturating_sub(1)
+            } else {
+                refs.len()
+            };
+            fanout_bytes =
+                fanout_bytes.saturating_add(retire_size.saturating_mul(retire_count as u64));
+        }
+        size = size
+            .saturating_add(future_bytes)
+            .saturating_add(fanout_bytes);
         let max_records = self.limits.max_outbox_records();
         if self.outbox_path.metadata()?.len().saturating_add(size) <= self.limits.outbox_bytes
             && self.outbox_records.saturating_add(reserved_records) <= max_records
@@ -859,7 +1266,12 @@ impl DeliveryStore {
                 _ => {}
             }
         }
-        if messages.len() > self.limits.messages
+        let completed_work = self
+            .completed
+            .values()
+            .filter(|m| !m.remaining.is_empty())
+            .count();
+        if messages.len().saturating_add(completed_work) > self.limits.messages
             || receipts.len() > self.limits.receipts
             || messages.len().saturating_add(self.completed.len()) > self.limits.completed
             || receipts.len().saturating_add(self.completed_receipts.len())
@@ -875,6 +1287,35 @@ impl DeliveryStore {
         match record {
             OutboxRecord::Message(message) => self.validate_message(message),
             OutboxRecord::Receipt(receipt) => self.validate_destination(&receipt.destination),
+            OutboxRecord::Delivered(completed) => {
+                let mut ids = HashSet::new();
+                if completed.remaining.len() > self.limits.destinations
+                    || completed
+                        .recipient_account
+                        .as_deref()
+                        .is_some_and(|a| !valid_account(a))
+                    || completed.remaining.iter().any(|r| {
+                        !ids.insert(r.event_id)
+                            || r.account.as_deref().is_some_and(|a| !valid_account(a))
+                            || (r.receipt_eligible
+                                && (r.account.is_none()
+                                    || r.account != completed.recipient_account))
+                    })
+                {
+                    return Err(invalid("invalid remaining fanout references"));
+                }
+                Ok(())
+            }
+            OutboxRecord::FinishedReceipt(receipt) => {
+                if receipt
+                    .destination_account
+                    .as_deref()
+                    .is_none_or(|a| !valid_account(a))
+                {
+                    return Err(invalid("invalid completed receipt binding"));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

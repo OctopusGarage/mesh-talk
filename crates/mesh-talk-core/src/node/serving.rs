@@ -451,6 +451,11 @@ impl Node {
     /// (author not yet in the roster, or its ratchet key not yet derivable) is
     /// retried on a later sync rather than lost.
     pub(in crate::node) fn emit_new_messages(&self, conv: ConversationId) {
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        if self.recover_delivery(&mut delivery).is_err() {
+            log::warn!("DM processing awaits local delivery recovery");
+            return;
+        }
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let candidates: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
@@ -466,91 +471,16 @@ impl Node {
                 .collect()
         };
         for event in candidates {
-            // Resolve the author's public identity + display name from the roster.
-            let author_uid = event.author.user_id();
-            let (peer_public, peer_name, peer_account) = {
-                match self.historical_author(event.author.ed25519_pub()) {
-                    Some(p) => (p.public(), p.name.clone(), p.account_id()),
-                    None => continue, // unknown author yet; retry later (NOT marked emitted)
-                }
+            let Some(proof) = self.historical_author(event.author.ed25519_pub()) else {
+                continue;
             };
-            // Decrypt the ratchet wire. The wire key is single-use: a successful
-            // decrypt advances + persists the session, so a re-fed event won't reopen.
-            let wrapped = {
-                let mut r = self
-                    .dm_ratchet
+            if let Some(message) = self.accept_dm_event(&event, &proof, &mut delivery) {
+                self.emitted
                     .lock()
-                    .expect("dm_ratchet mutex not poisoned");
-                match r.decrypt(&self.identity, &peer_public, &event.ciphertext) {
-                    Ok(pt) => pt,
-                    Err(_) => continue, // not yet decryptable / not a ratchet DM (NOT emitted)
-                }
-            };
-            // Account-addressed (multi-device) envelope? File it under the ACCOUNT
-            // conversation, recording the route's sender account (account history
-            // derives `from_me` from it). A legacy plaintext keeps today's device-pair
-            // behavior. The live `ReceivedDm` still carries the author device's
-            // id/name — it is just a "something changed" poke; display reads history.
-            let (record_conv, record_from, record_plaintext, body) =
-                match DmEnvelope::decode(&wrapped) {
-                    Some(env) => {
-                        // Bind the envelope's claimed sender account to the AUTHENTICATED
-                        // author device's certified account — a device cannot forge a
-                        // message "from" another account. (A self-synced copy is authored
-                        // by our own device, which carries our own account, so it matches
-                        // when sender_account == my_account.)
-                        if peer_account.as_deref() != Some(env.route.sender_account.as_str()) {
-                            self.emitted
-                                .lock()
-                                .expect("emitted mutex not poisoned")
-                                .insert(event.id);
-                            continue;
-                        }
-                        let my_account = self.account.account_id();
-                        let counterparty = if env.route.sender_account == my_account {
-                            env.route.recipient_account.clone() // self-synced copy of our own send
-                        } else {
-                            env.route.sender_account.clone()
-                        };
-                        let acct_conv = account_conversation_id(&my_account, &counterparty);
-                        let body = MessageBody::decode(&env.body);
-                        // Record the FULL envelope so account history recovers the
-                        // logical msg_id (for reactions/replies).
-                        (
-                            acct_conv,
-                            env.route.sender_account.clone(),
-                            wrapped.clone(),
-                            body,
-                        )
-                    }
-                    None => {
-                        let body = MessageBody::decode(&wrapped);
-                        (conv, author_uid.clone(), wrapped.clone(), body)
-                    }
-                };
-            // Persist the received plaintext (the wire key is single-use/gone), then
-            // mark emitted — only AFTER a successful decrypt + record.
-            let _ = self
-                .received
-                .lock()
-                .expect("received mutex not poisoned")
-                .record(
-                    record_conv,
-                    record_from,
-                    event.wall_clock,
-                    &record_plaintext,
-                    event.id,
-                );
-            self.emitted
-                .lock()
-                .expect("emitted mutex not poisoned")
-                .insert(event.id);
-            let _ = self.incoming.send(ReceivedDm {
-                from: author_uid,
-                from_name: peer_name,
-                text: body.text,
-                reply_to: body.reply_to,
-            });
+                    .expect("emitted mutex not poisoned")
+                    .insert(event.id);
+                let _ = self.incoming.send(message);
+            }
         }
     }
 }

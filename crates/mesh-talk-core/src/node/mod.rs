@@ -12,6 +12,9 @@ pub(crate) mod channel_senders;
 pub(crate) mod channels;
 pub(crate) mod conversation;
 pub(crate) mod delivery_receipt;
+mod delivery_runtime;
+#[cfg(test)]
+mod delivery_runtime_tests;
 pub(crate) mod delivery_store;
 pub(crate) mod dm;
 pub(crate) mod dm_envelope;

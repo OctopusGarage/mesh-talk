@@ -1,5 +1,142 @@
 use super::*;
 
+fn outgoing_with_own_fanout(dir: &std::path::Path, n: u8) -> DeliveryTransaction {
+    let mut tx = outgoing(dir, n);
+    if let DeliveryTransaction::Outgoing {
+        message,
+        sent,
+        ratchets,
+    } = &mut tx
+    {
+        let alice = DeviceIdentity::from_secret_bytes([1; 32], [2; 32]);
+        let other = DeviceIdentity::from_secret_bytes([5; 32], [6; 32]);
+        let ratchet = DmRatchet::new(RatchetSessions::open(&dir.join("sessions"), "pw").unwrap());
+        let (wire, prepared) = ratchet
+            .prepare_encrypt(&alice, &other.public(), &sent.plaintext)
+            .unwrap();
+        message.destinations.push(DeliveryDestination {
+            device: other.public(),
+            account: Some(message.sender_account.clone()),
+            receipt_eligible: false,
+            event: Event::new(
+                &alice,
+                dm_conversation_id(&alice.public(), &other.public()),
+                1,
+                vec![],
+                1,
+                message.wall_clock,
+                EventKind::Message,
+                wire,
+            ),
+        });
+        ratchets.push(prepared);
+    }
+    tx
+}
+
+#[test]
+fn confirmed_fanout_refs_reserve_bytes_and_work_slot_until_exact_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let tx = outgoing_with_own_fanout(dir.path(), 7);
+    let (metadata, minimal) = match &tx {
+        DeliveryTransaction::Outgoing { message, .. } => {
+            let mut minimal = CompletedDelivery::from(message);
+            minimal.remaining.clear();
+            minimal.recipient_account = None;
+            (
+                bincode::serialized_size(&metadata_for(&tx).unwrap()).unwrap() + FRAME_OVERHEAD,
+                bincode::serialized_size(&OutboxRecord::Delivered(minimal)).unwrap()
+                    + FRAME_OVERHEAD,
+            )
+        }
+        _ => unreachable!(),
+    };
+    let cancel =
+        bincode::serialized_size(&OutboxRecord::Cancel(account_conv(), EventId::new([7; 32])))
+            .unwrap()
+            + FRAME_OVERHEAD;
+    let mut tight = DeliveryStore::open_with_limits(
+        dir.path(),
+        "pw",
+        DeliveryLimits {
+            outbox_bytes: HEADER_BYTES + metadata + minimal + cancel,
+            ..DeliveryLimits::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        tight.begin(tx).is_err(),
+        "compact remaining references need reserved confirmation/retirement bytes"
+    );
+    assert!(tight.pending_transactions().is_empty());
+    drop(tight);
+    let mut store = DeliveryStore::open_with_limits(
+        dir.path(),
+        "pw",
+        DeliveryLimits {
+            messages: 1,
+            ..DeliveryLimits::default()
+        },
+    )
+    .unwrap();
+    let live = outgoing_with_own_fanout(dir.path(), 7);
+    let (original, own_copy) = match &live {
+        DeliveryTransaction::Outgoing { message, .. } => (
+            message.destinations[0].event.id,
+            message.destinations[1].event.id,
+        ),
+        _ => unreachable!(),
+    };
+    store.begin(live).unwrap();
+    let mut log = PersistentEventLog::open(&dir.path().join("events"), "pw").unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&dir.path().join("sessions"), "pw").unwrap());
+    let mut sent = SentLog::open(&dir.path().join("sent"), "pw").unwrap();
+    let mut received = ReceivedLog::open(&dir.path().join("received"), "pw").unwrap();
+    store
+        .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
+        .unwrap();
+    store
+        .mark_delivered_for(EventId::new([7; 32]), original)
+        .unwrap();
+    assert_eq!(
+        store.status(EventId::new([7; 32])),
+        Some(DeliveryStatus::Delivered)
+    );
+    assert_eq!(
+        store
+            .completed_work(EventId::new([7; 32]))
+            .unwrap()
+            .remaining[0]
+            .event_id,
+        own_copy
+    );
+    assert!(
+        store.begin(outgoing(dir.path(), 8)).is_err(),
+        "completed unfinished fanout must count against work capacity"
+    );
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(
+        dir.path(),
+        "pw",
+        DeliveryLimits {
+            messages: 1,
+            ..DeliveryLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(store.retry_completed_after(None, 8).len(), 1);
+    store
+        .retire_destination(EventId::new([7; 32]), own_copy)
+        .unwrap();
+    assert_eq!(
+        store.status(EventId::new([7; 32])),
+        Some(DeliveryStatus::Delivered)
+    );
+    assert!(store.completed_work(EventId::new([7; 32])).is_none());
+    assert!(store.begin(outgoing(dir.path(), 8)).is_ok());
+}
+
 #[test]
 fn conflicting_queued_or_completed_receipt_rejects_before_durable_intent() {
     for completed in [false, true] {
@@ -175,6 +312,8 @@ fn outbox_capacity_reserves_metadata_for_every_accepted_intent() {
         logical_id: EventId::new([7; 32]),
         conversation: account_conv(),
         wall_clock: 100,
+        recipient_account: None,
+        remaining: Vec::new(),
     }))
     .unwrap()
         + FRAME_OVERHEAD;
@@ -210,6 +349,8 @@ fn tight_capacity_reserves_completion_and_cancel_and_reuses_freed_slot() {
         logical_id: EventId::new([7; 32]),
         conversation: account_conv(),
         wall_clock: 100,
+        recipient_account: None,
+        remaining: Vec::new(),
     }))
     .unwrap()
         + FRAME_OVERHEAD;

@@ -30,6 +30,26 @@ const MAX_RECEIPT_PLAINTEXT: usize = 512;
 const MAX_RECEIPT_WIRE: usize = 1024;
 const MAX_DM_PLAINTEXT: usize = 256 * 1024;
 const MAX_PARENTS: usize = 1024;
+/// Legacy sealed-box decoders see a fixed 32-byte ephemeral key followed
+/// by an empty ciphertext vector. Strict parsers reject the trailing body;
+/// permissive parsers fail AEAD on empty ciphertext without allocating it.
+const RECEIPT_FRAME: [u8; 40] = {
+    let mut marker = [0; 40];
+    let mut index = 0;
+    while index < DOMAIN.len() {
+        marker[index] = DOMAIN[index];
+        index += 1;
+    }
+    marker[24] = VERSION;
+    marker
+};
+
+fn frame_receipt(sealed: Vec<u8>) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(RECEIPT_FRAME.len() + sealed.len());
+    framed.extend_from_slice(&RECEIPT_FRAME);
+    framed.extend_from_slice(&sealed);
+    framed
+}
 
 /// Only Ed25519 keys determine scope, like the DM pair. Full Ed25519/X25519
 /// identities are independently bound inside the receipt and by signed proofs.
@@ -147,6 +167,7 @@ impl ReceiptPayload {
             return Err(DmError::Encrypt);
         }
         crate::dm::seal(recipient, &self.sender_device.x25519_pub, &self.encode()?)
+            .map(frame_receipt)
     }
 
     fn encode(&self) -> Result<Vec<u8>, DmError> {
@@ -297,7 +318,8 @@ pub(crate) fn open_receipt(
     {
         return None;
     }
-    let plaintext = crate::dm::open(sender, &target.x25519_pub, &event.ciphertext).ok()?;
+    let wire = event.ciphertext.strip_prefix(&RECEIPT_FRAME)?;
+    let plaintext = crate::dm::open(sender, &target.x25519_pub, wire).ok()?;
     let payload = ReceiptPayload::decode(&plaintext)?;
     if payload.sender_device != own_device
         || payload.recipient_device != target
@@ -319,11 +341,14 @@ fn valid_account(account: &str) -> bool {
 
 /// Parse the existing sealed-box type under a small byte budget before its
 /// general-purpose opener. This preserves its strict, fixed-int wire format
-/// without introducing a second framing layout or changing ordinary DM crypto.
+/// after its receipt-only marker, without changing ordinary DM crypto.
 fn valid_sealed_wire(wire: &[u8]) -> bool {
     if wire.len() > MAX_RECEIPT_WIRE {
         return false;
     }
+    let Some(wire) = wire.strip_prefix(&RECEIPT_FRAME) else {
+        return false;
+    };
     let Ok(envelope) = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_limit(MAX_RECEIPT_WIRE as u64)

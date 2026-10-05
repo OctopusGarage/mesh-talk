@@ -237,6 +237,12 @@ impl Node {
     pub async fn initiate_contact(&self, account: &str) -> io::Result<()> {
         self.initiate_contact_if(account, || Ok(())).await
     }
+    /// The enqueue acceptance path commits permission locally; its outbox owns
+    /// transport scheduling, including publication of signed return presence.
+    pub(in crate::node) async fn initiate_contact_locally(&self, account: &str) -> io::Result<()> {
+        self.change_allowed(account, true, PermissionSource::Initiated, || Ok(()))
+            .await
+    }
     /// Recheck the active owner under the policy gate before committing an initiated grant.
     /// A prior manual grant is retained rather than demoted to initiated permission.
     pub async fn initiate_contact_if(

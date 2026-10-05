@@ -46,6 +46,10 @@ impl Node {
         target: EventId,
         account: bool,
     ) -> Result<usize, NodeError> {
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        delivery.cancel(conv, target).map_err(NodeError::Log)?;
         let mut removed = 0;
 
         // Received plaintext sidecar: match by logical id.
@@ -126,6 +130,14 @@ impl Node {
         &self,
         should_remove: impl Fn(ConversationId, u64) -> bool,
     ) -> Result<usize, NodeError> {
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        for (conversation, id, clock) in delivery.cancellation_rows() {
+            if should_remove(conversation, clock) {
+                delivery.cancel(conversation, id).map_err(NodeError::Log)?;
+            }
+        }
         let mut removed = 0;
         removed += self
             .received

@@ -6,7 +6,7 @@
 use super::conversation::{account_conversation_id, dm_conversation_id};
 use super::node::FileHistoryInfo;
 use super::{DmEnvelope, HistoryEntry, MessageBody, Node, SearchHit};
-use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
+use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
 
 impl Node {
@@ -92,12 +92,7 @@ impl Node {
 
         // Account messages are stored as full `DmEnvelope`s; the logical `msg_id` is
         // the stable, cross-device id reactions/replies target.
-        for sent in self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .entries(&conv)
-        {
+        for sent in self.sent_entries_for_history(conv) {
             let (id, body) = decode_account_entry(&sent.plaintext);
             entries.push(HistoryEntry {
                 id,
@@ -164,32 +159,11 @@ impl Node {
     /// The wire ratchet key is single-use and gone, so history is served from the
     /// stores — that IS the forward-secrecy property, not a limitation.
     pub fn history(&self, conversation: ConversationId, limit: usize) -> Vec<HistoryEntry> {
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        // Map our own Message events' seq -> id, to give sent sidecar entries an id.
-        let mut my_msg_ids: std::collections::HashMap<u64, EventId> =
-            std::collections::HashMap::new();
-        {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            for event in log.events(&conversation) {
-                if event.kind == EventKind::Message && event.author == self_author {
-                    my_msg_ids.insert(event.seq, event.id);
-                }
-            }
-        }
-
         let mut entries: Vec<HistoryEntry> = Vec::new();
-        for sent in self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .entries(&conversation)
-        {
+        for (id, sent) in self.raw_sent_history(conversation) {
             let body = MessageBody::decode(&sent.plaintext);
             entries.push(HistoryEntry {
-                id: my_msg_ids
-                    .get(&sent.seq)
-                    .copied()
-                    .unwrap_or(EventId::new([0u8; 32])),
+                id,
                 from_me: true,
                 who: "you".to_string(),
                 text: body.text,
