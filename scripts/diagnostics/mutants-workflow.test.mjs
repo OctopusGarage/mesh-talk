@@ -11,6 +11,10 @@ test("both mutation modes forward test threads to the test binary, not Cargo", (
   assert.doesNotMatch(workflow, /continue-on-error: true/);
   assert.match(workflow, /cargo test --workspace -- --test-threads=2/);
   assert.match(workflow, /tool: cargo-mutants@27\.1\.0/);
+  assert.match(wrapper, /const shard = mutationShard\(Number\(process\.env\.GITHUB_RUN_NUMBER/);
+  assert.match(wrapper, /"--shard", shard/);
+  assert.match(wrapper, /"--sharding", "round-robin"/);
+  assert.match(wrapper, /"--timeout", "240"/);
 });
 
 test("mutation report upload includes the workspace-root output directory", () => {
