@@ -231,6 +231,47 @@ describe("call lifetime", () => {
       peerId: "carol",
     });
   });
+
+  it("a late answer rejection cannot end a newer incoming call", async () => {
+    let rejectAnswer!: (error: unknown) => void;
+    class RejectingPc extends FakePc {
+      setRemoteDescription = vi.fn(
+        () =>
+          new Promise<void>((_, reject) => {
+            rejectAnswer = reject;
+          }),
+      );
+    }
+    vi.stubGlobal(
+      "RTCPeerConnection",
+      RejectingPc as unknown as typeof RTCPeerConnection,
+    );
+    await useCalls.getState().startCall(
+      {
+        name: "Bob",
+        accountId: "bob",
+        deviceIds: ["bob-device"],
+      },
+      false,
+    );
+    const oldId = useCalls.getState().callId!;
+    useCalls.getState().onSignal({
+      from: "bob-device",
+      payload: JSON.stringify({ callId: oldId, kind: "answer", sdp: "BAD" }),
+    });
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    rejectAnswer(new Error("old answer rejected"));
+    await flush();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "incoming",
+      callId: "new",
+      peerId: "carol",
+      error: null,
+    });
+  });
 });
 
 describe("local actions send the right signal", () => {
