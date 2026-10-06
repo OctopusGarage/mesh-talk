@@ -61,6 +61,11 @@ bidirectional DM, Unicode/multiline/long content, channel delivery, attachment
 rendering, history after real process restart, theme persistence, profile/avatar
 geometry and settings geometry at default and minimum window sizes.
 
+At native app readiness, the dev-only driver also requires the handled Mesh-Talk
+tray icon to exist and Tauri's unhandled default `main` tray icon to be absent.
+This checks actual Tauri registration on each runner; it does not simulate an OS
+tray click or inspect stale icons retained by a Windows shell after a crash.
+
 Each passing scenario supplies JSON observations, a screenshot and a redacted
 process log. Schema 2 requires the tested source revision and SHA256 digests for
 all three files. Validation requires typed scenario observations and fully decodes

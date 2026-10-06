@@ -5,7 +5,7 @@ use tauri::{AppHandle, Manager};
 const MENU_SHOW: &str = "show";
 const MENU_HIDE: &str = "hide";
 const MENU_QUIT: &str = "quit";
-const TRAY_ID: &str = "mesh-talk-tray";
+pub const TRAY_ID: &str = "mesh-talk-tray";
 
 /// Create the main tray icon and menu (Show / Hide / Quit).
 pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -18,6 +18,7 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&tray_menu)
+        .icon_as_template(cfg!(target_os = "macos"))
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             MENU_QUIT => app.exit(0),
@@ -65,5 +66,17 @@ fn toggle_window_visibility(app: &AppHandle) {
                 let _ = window.set_focus();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn startup_has_no_unhandled_config_tray_icon() {
+        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        assert!(
+            context.config().app.tray_icon.is_none(),
+            "Tauri auto-registers app.trayIcon before the handled tray is created"
+        );
     }
 }
