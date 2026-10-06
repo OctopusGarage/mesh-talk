@@ -94,7 +94,7 @@ help:
 	@echo "  make e2e              Run the end-to-end multi-process tests (slow)"
 	@echo "  make eval-smoke       Run delivery and AI regression smoke checks"
 	@echo "  make ai-eval          Run real model-backed AI evals (requires AI_EVAL_COMMAND)"
-	@echo "  make smoke-full       Run full real smoke: unit/integration + backend/UI E2E"
+	@echo "  make smoke-full       Run full real smoke: Rust/frontend unit + backend/UI E2E"
 	@echo "  make clean            Clean build artifacts"
 	@echo "  make clean-target-cache      Prune stale Cargo target cache"
 	@echo "  make clean-target-cache-dry-run Preview target cache pruning"

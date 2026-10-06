@@ -83,6 +83,13 @@ The frontend also has a Playwright UI end-to-end suite (selectors keyed on
 cd frontend && npm run e2e        # CI: .github/workflows/e2e-ui.yml
 ```
 
+Run `cd frontend && npm run test:coverage` for a report over all production
+TypeScript and TSX files. CI runs this on Linux, macOS and Windows and stores
+the Linux report as an artifact. The store line threshold guards against a
+regression in state logic; interactive components are exercised separately by
+Playwright and native desktop E2E. A zero in the Vitest report is a unit-test
+gap, not proof that the component has no browser coverage.
+
 ## Delivery / AI Regression Smoke
 
 The project has a deterministic smoke gate for delivery verification and AI-agent prompt

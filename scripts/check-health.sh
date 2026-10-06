@@ -260,10 +260,15 @@ if ! { cd frontend && npm run typecheck; }; then
 fi
 cd ..
 
-# Run frontend unit tests (Vitest)
+# Run frontend unit tests (Vitest); full health also enforces the store coverage floor.
 print_status "success" "Running frontend tests..."
-if ! { cd frontend && npm test; }; then
-    print_status "error" "Frontend tests failed. Please fix the failing tests."
+if [ "$FAST" = "1" ]; then
+    FRONTEND_TEST_SCRIPT="test"
+else
+    FRONTEND_TEST_SCRIPT="test:coverage"
+fi
+if ! { cd frontend && npm run "$FRONTEND_TEST_SCRIPT"; }; then
+    print_status "error" "Frontend tests or coverage failed. Please fix the failing gate."
     exit 1
 fi
 cd ..
