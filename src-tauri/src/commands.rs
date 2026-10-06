@@ -736,62 +736,66 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             .unwrap_or_else(|| (crate::data_dir(), crate::configured_discovery_port()));
         #[cfg(not(test))]
         let (base_dir, discovery_port) = (crate::data_dir(), crate::configured_discovery_port());
-        match mesh_talk_core::node::NodeRuntime::start_guarded(
-            &base_dir,
-            &account_id,
-            &display_name,
-            &password,
-            discovery_port,
-            move |dm| {
-                let _ = dm_authority.current(|_| {
-                    crate::events::emit_dm_received(
-                        &app_handle_for_dm,
-                        dm.from,
-                        dm.from_name,
-                        dm.text,
-                        dm.reply_to,
-                    );
-                });
+        match mesh_talk_core::node::NodeRuntime::start_configured_guarded(
+            mesh_talk_core::node::RuntimeConfig {
+                base_dir: &base_dir,
+                account_id: &account_id,
+                display_name: &display_name,
+                password: &password,
+                discovery_port,
             },
-            move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                let _ = channel_authority.current(|_| {
-                    crate::events::emit_channel_message(
-                        &app_handle_for_channel,
-                        hex::encode(msg.channel_id.as_bytes()),
-                        msg.channel_name,
-                        msg.from,
-                        msg.text,
-                        msg.reply_to,
-                    );
-                });
-            },
-            move |f: mesh_talk_core::node::ReceivedFile| {
-                let _ = file_authority.current(|_| {
-                    crate::events::emit_file_received(
-                        &app_handle_for_file,
-                        hex::encode(f.conv.as_bytes()),
-                        f.from,
-                        f.name,
-                        f.size,
-                        f.mime,
-                        hex::encode(f.file_conv.as_bytes()),
-                        f.media,
-                    );
-                });
-            },
-            move |p: mesh_talk_core::node::ReceivedProfile| {
-                let _ = profile_authority.current(|_| {
-                    crate::events::emit_profile_received(
-                        &app_handle_for_profile,
-                        p.account_id,
-                        p.avatar,
-                    );
-                });
-            },
-            move |s: mesh_talk_core::node::ReceivedCallSignal| {
-                let _ = call_authority.current(|_| {
-                    crate::events::emit_call_signal(&app_handle_for_call, s.from, s.payload);
-                });
+            mesh_talk_core::node::RuntimeEvents {
+                on_dm: Box::new(move |dm| {
+                    let _ = dm_authority.current(|_| {
+                        crate::events::emit_dm_received(
+                            &app_handle_for_dm,
+                            dm.from,
+                            dm.from_name,
+                            dm.text,
+                            dm.reply_to,
+                        );
+                    });
+                }),
+                on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
+                    let _ = channel_authority.current(|_| {
+                        crate::events::emit_channel_message(
+                            &app_handle_for_channel,
+                            hex::encode(msg.channel_id.as_bytes()),
+                            msg.channel_name,
+                            msg.from,
+                            msg.text,
+                            msg.reply_to,
+                        );
+                    });
+                }),
+                on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
+                    let _ = file_authority.current(|_| {
+                        crate::events::emit_file_received(
+                            &app_handle_for_file,
+                            hex::encode(f.conv.as_bytes()),
+                            f.from,
+                            f.name,
+                            f.size,
+                            f.mime,
+                            hex::encode(f.file_conv.as_bytes()),
+                            f.media,
+                        );
+                    });
+                }),
+                on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
+                    let _ = profile_authority.current(|_| {
+                        crate::events::emit_profile_received(
+                            &app_handle_for_profile,
+                            p.account_id,
+                            p.avatar,
+                        );
+                    });
+                }),
+                on_call_signal: Box::new(move |s: mesh_talk_core::node::ReceivedCallSignal| {
+                    let _ = call_authority.current(|_| {
+                        crate::events::emit_call_signal(&app_handle_for_call, s.from, s.payload);
+                    });
+                }),
             },
             |launch| {
                 authority
