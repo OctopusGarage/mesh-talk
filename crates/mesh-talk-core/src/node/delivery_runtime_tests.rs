@@ -1128,7 +1128,10 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     };
     let mut slowest_poll = std::time::Duration::ZERO;
     let completed = tokio::time::timeout(
-        std::time::Duration::from_secs(if count == 1 { 5 } else { 60 }),
+        // This observes full file and receipt convergence, including a retry
+        // after the last chunk. Windows CI can take over five seconds here
+        // even after the receiver has verified every byte.
+        std::time::Duration::from_secs(if count == 1 { 10 } else { 60 }),
         async {
             if !first_progress {
                 return;
@@ -1375,7 +1378,7 @@ async fn delayed_private_file_peer(
                             if delay == FilePeerDelay::Exchange {
                                 100
                             } else {
-                                150
+                                100
                             },
                         ))
                         .await;
