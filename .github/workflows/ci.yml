@@ -144,7 +144,10 @@ jobs:
             Write-Host "Harness exit code: $LASTEXITCODE"
             if ($LASTEXITCODE -ne 0) { $test = $candidate; break }
           }
-          if (-not $test) { throw 'No application test executable found' }
+          if (-not $test) {
+            Write-Host 'All application test harnesses start successfully; inspect the failed test above.'
+            exit 0
+          }
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
@@ -196,7 +199,7 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: src-tauri/lcov.info
+          files: frontend/coverage/lcov.info,src-tauri/lcov.info
           fail_ci_if_error: false
 
       - name: Spelling (typos)

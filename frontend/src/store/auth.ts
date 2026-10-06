@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { auth } from "@/lib/api";
+import { auth, chat } from "@/lib/api";
 import { errorMessage as errMsg } from "@/lib/error";
 import type { UserInfo } from "@/lib/types";
 
@@ -125,6 +125,9 @@ export const useAuth = create<AuthState>((set, get) => ({
       booting: false,
       error: null,
     }));
+    // The unread badge belongs to the signed-in session. ChatApp unmounts at this
+    // point, so its unread-count effect cannot clear the OS badge on its own.
+    void chat.setBadge(0).catch(() => {});
     try {
       await auth.logout();
     } catch {

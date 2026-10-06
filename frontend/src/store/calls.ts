@@ -321,8 +321,10 @@ export const useCalls = create<CallState>((set, get) => {
             sdp: conn.localDescription?.sdp ?? "",
           }),
         );
+        if (get().callId !== callId) return;
         armConnectTimeout();
       } catch (e) {
+        if (get().callId !== callId) return;
         set({ error: errorMessage(e) });
         void send(peerId, { callId, kind: "bye", reason: "failed" });
         end("failed");
@@ -425,11 +427,14 @@ export const useCalls = create<CallState>((set, get) => {
         void pc
           .setRemoteDescription({ type: "answer", sdp: msg.sdp })
           .then(() => {
+            if (get().callId !== callId) return;
             set({ phase: "connecting" });
             for (const d of losers)
               void send(d, { callId, kind: "bye", reason: "hangup" });
           })
-          .catch(() => end("failed"));
+          .catch(() => {
+            if (get().callId === callId) end("failed");
+          });
         return;
       }
 
