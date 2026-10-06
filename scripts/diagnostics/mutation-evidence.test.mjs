@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseSelectedMutants, validateMutationReport } from "../release/mutation-evidence.mjs";
+import { mutationShard, parseSelectedMutants, validateMutationReport } from "../release/mutation-evidence.mjs";
+
+test("mutation shard rotates across workflow runs and stays within 256 shards", () => {
+  assert.equal(mutationShard(1), "0/256");
+  assert.equal(mutationShard(2), "1/256");
+  assert.equal(mutationShard(256), "255/256");
+  assert.equal(mutationShard(257), "0/256");
+  assert.throws(() => mutationShard(0), /invalid workflow run number/);
+});
 
 const outcome = (summary) => ({ scenario: { Mutant: {} }, summary });
 const report = {

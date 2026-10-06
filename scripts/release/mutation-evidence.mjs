@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 
+export function mutationShard(runNumber) {
+  assert.ok(Number.isSafeInteger(runNumber) && runNumber > 0, "invalid workflow run number");
+  return `${(runNumber - 1) % 256}/256`;
+}
+
 export function parseSelectedMutants(output, status) {
   assert.equal(status, 0, "mutation list tool failed");
   // cargo-mutants 27.1.0 exits before emitting JSON for an empty selection.

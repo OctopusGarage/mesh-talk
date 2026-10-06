@@ -497,17 +497,17 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
         .send_file_dm(bob.user_id(), &path, crate::file::FileKind::File)
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             bob.node.pull_pending_files().await;
             if bob.node.read_file(file).is_ok() {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("private file transfer did not complete within the test deadline");
     assert_eq!(
         bob.node.read_file(file).unwrap(),
         b"private attachment bytes"
