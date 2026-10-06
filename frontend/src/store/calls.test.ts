@@ -76,6 +76,31 @@ afterEach(() => {
 });
 
 describe("onSignal — incoming offer", () => {
+  it("a cancelled accept's late media failure cannot end a newer incoming call", async () => {
+    let rejectMedia!: (error: unknown) => void;
+    getUserMedia.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectMedia = reject;
+        }),
+    );
+    getUserMedia.mockRejectedValueOnce(new Error("old mic failed"));
+    useCalls.getState().onSignal(offer("bob", "old"));
+    const pending = useCalls.getState().accept();
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    rejectMedia(new Error("old camera failed"));
+    await pending;
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "incoming",
+      callId: "new",
+      peerId: "carol",
+      error: null,
+    });
+  });
+
   it("rings: phase=incoming, peer bound to the AUTHENTICATED from (not a payload field)", () => {
     // The payload self-asserts a different sender; the store must use the event `from`.
     useCalls.getState().onSignal({
@@ -163,6 +188,48 @@ describe("onSignal — bye routing is scoped to the current call", () => {
       payload: JSON.stringify({ callId: "c1", kind: "bye", reason: "hangup" }),
     });
     expect(useCalls.getState().phase).toBe("incoming");
+  });
+});
+
+describe("call lifetime", () => {
+  it("a late answer completion cannot put a newer call into connecting", async () => {
+    let finishAnswer!: () => void;
+    class DeferredPc extends FakePc {
+      setRemoteDescription = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishAnswer = resolve;
+          }),
+      );
+    }
+    vi.stubGlobal(
+      "RTCPeerConnection",
+      DeferredPc as unknown as typeof RTCPeerConnection,
+    );
+    await useCalls.getState().startCall(
+      {
+        name: "Bob",
+        accountId: "bob",
+        deviceIds: ["bob-device"],
+      },
+      false,
+    );
+    const oldId = useCalls.getState().callId!;
+    useCalls.getState().onSignal({
+      from: "bob-device",
+      payload: JSON.stringify({ callId: oldId, kind: "answer", sdp: "ANSWER" }),
+    });
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    finishAnswer();
+    await flush();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "incoming",
+      callId: "new",
+      peerId: "carol",
+    });
   });
 });
 

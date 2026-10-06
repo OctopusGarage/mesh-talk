@@ -18,6 +18,17 @@ beforeEach(() => {
 });
 
 describe("auth store", () => {
+  it("clears the OS unread badge when a session logs out", async () => {
+    invoke.mockResolvedValue(undefined);
+    useAuth.setState({
+      user: { id: "u1", username: "alice", display_name: "Alice" },
+    });
+
+    await useAuth.getState().logout();
+
+    expect(invoke).toHaveBeenCalledWith("set_badge", { count: 0 });
+  });
+
   it("late same-UUID old-session catch cannot change the new session loading/error", async () => {
     let rejectOld!: (error: unknown) => void;
     invoke.mockImplementation((cmd: string) =>

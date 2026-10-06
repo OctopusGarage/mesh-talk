@@ -1,5 +1,71 @@
-import { describe, it, expect } from "vitest";
-import { shouldNotify } from "./notify";
+import { describe, it, expect, vi } from "vitest";
+
+const { isPermissionGranted, requestPermission, sendNotification } = vi.hoisted(
+  () => ({
+    isPermissionGranted: vi.fn(),
+    requestPermission: vi.fn(),
+    sendNotification: vi.fn(),
+  }),
+);
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+}));
+
+import { ensureNotificationPermission, shouldNotify } from "./notify";
+
+it("shares a pending notification permission request across startup calls", async () => {
+  let resolveCheck!: (result: boolean) => void;
+  const pendingCheck = new Promise<boolean>((resolve) => {
+    resolveCheck = resolve;
+  });
+  isPermissionGranted.mockReturnValue(pendingCheck);
+  requestPermission.mockResolvedValue("granted");
+
+  const first = ensureNotificationPermission();
+  await vi.waitFor(() => expect(isPermissionGranted).toHaveBeenCalledOnce());
+  const second = ensureNotificationPermission();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const checksBeforeResolution = isPermissionGranted.mock.calls.length;
+  resolveCheck(false);
+  await Promise.all([first, second]);
+
+  expect(checksBeforeResolution).toBe(1);
+  expect(requestPermission).toHaveBeenCalledTimes(1);
+});
+
+it("waits for an active permission dialog before deciding whether a new event may notify", async () => {
+  vi.resetModules();
+  isPermissionGranted.mockReset().mockResolvedValue(false);
+  sendNotification.mockReset();
+  let finishRequest!: (result: string) => void;
+  requestPermission.mockReset().mockImplementation(
+    () =>
+      new Promise<string>((resolve) => {
+        finishRequest = resolve;
+      }),
+  );
+  const { ensureNotificationPermission: ensure, notifyInbound } =
+    await import("./notify");
+  const first = ensure();
+  await vi.waitFor(() => expect(requestPermission).toHaveBeenCalledOnce());
+  let secondFinished = false;
+  const second = notifyInbound("New message", "Hello", false).then(() => {
+    secondFinished = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const finishedBeforeDecision = secondFinished;
+  finishRequest("granted");
+  await Promise.all([first, second]);
+
+  expect(finishedBeforeDecision).toBe(false);
+  expect(requestPermission).toHaveBeenCalledTimes(1);
+  expect(sendNotification).toHaveBeenCalledWith({
+    title: "New message",
+    body: "Hello",
+  });
+});
 
 describe("shouldNotify", () => {
   it("suppresses when focused on the active conversation", () => {
