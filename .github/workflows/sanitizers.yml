@@ -8,10 +8,12 @@ name: Sanitizers
 # GTK/WebKit C libraries whose internals trip ASan with false positives we can't
 # fix from here, so the app is deliberately excluded.
 #
-# Triggers: weekly schedule + manual dispatch only. ASan needs the nightly
-# toolchain + `-Z build-std` (a full std rebuild), which is slow and nightly-
-# dependent, so it is NOT run on every push/PR (those are covered by ci.yml).
+# Run on PRs targeting main so branch protection can require this memory-safety
+# check before merge. Keep the weekly run to catch toolchain and dependency drift.
+# ASan needs the nightly toolchain + `-Z build-std` (a full std rebuild).
 on:
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC
   workflow_dispatch:
