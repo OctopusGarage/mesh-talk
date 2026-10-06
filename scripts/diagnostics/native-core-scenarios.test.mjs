@@ -7,8 +7,8 @@ test("Windows native helper only emits bounded owned-PID control keys with ABI-s
   for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33]]) {
     const script = nativeWindowsKeyboardScript(12345, key);
     assert.ok(script.includes(`[NativeKeyboard]::SendOwned(12345, ${vk})`));
-    for (const text of ["GetForegroundWindow", "GetWindowThreadProcessId", "actualPid != ownedPid", "Marshal.SizeOf(typeof(INPUT))", "SendInput(2", "inserted != 2", "GetLastWin32Error", "LayoutKind.Explicit", "MOUSEINPUT", "KEYEVENTF_KEYUP", "Mark 'start'", "Mark 'activate'", "Mark 'compiled'", "keyboard:owned", "Mark 'sent'", "Out.Flush"]) assert.ok(script.includes(text), text);
-    assert.ok(!script.includes("SendWait") && !script.includes("dispatchEvent"));
+    for (const text of ["GetForegroundWindow", "GetWindowThreadProcessId", "actualPid != ownedPid", "Marshal.SizeOf(typeof(INPUT))", "SendInput(2", "inserted != 2", "GetLastWin32Error", "LayoutKind.Explicit", "MOUSEINPUT", "KEYEVENTF_KEYUP", "EnumWindows", "IsWindowVisible", "SetForegroundWindow", "FocusOwned", "Mark 'start'", "Mark 'activate'", "Mark 'compiled'", "keyboard:owned", "Mark 'sent'", "Out.Flush"]) assert.ok(script.includes(text), text);
+    assert.ok(!script.includes("SendWait") && !script.includes("dispatchEvent") && !script.includes("WScript.Shell"));
   }
   for (const pid of [0, -1, NaN, 1.5, "123;evil"]) assert.throws(() => nativeWindowsKeyboardScript(pid, "\uE00C"));
   for (const key of ["a", "{ESC}", "\uE008"]) assert.throws(() => nativeWindowsKeyboardScript(12345, key));
