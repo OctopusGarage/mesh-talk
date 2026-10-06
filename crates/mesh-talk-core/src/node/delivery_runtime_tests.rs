@@ -1374,14 +1374,7 @@ async fn delayed_private_file_peer(
                                 .delayed_response_exchanges
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            if delay == FilePeerDelay::Exchange {
-                                100
-                            } else {
-                                100
-                            },
-                        ))
-                        .await;
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     } else if super::session::is_round_request(&bytes, file)
                         && node
                             .file_progress(file)
