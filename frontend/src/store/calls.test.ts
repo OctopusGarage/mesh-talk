@@ -192,6 +192,54 @@ describe("onSignal — bye routing is scoped to the current call", () => {
 });
 
 describe("call lifetime", () => {
+  it("a cancelled answer cannot arm a timer against a newer call", async () => {
+    let finishSignal!: () => void;
+    const pendingSignal = new Promise<void>((resolve) => {
+      finishSignal = resolve;
+    });
+    invoke.mockImplementation((command) =>
+      command === "send_call_signal" ? pendingSignal : Promise.resolve(),
+    );
+    useCalls.getState().onSignal(offer("bob", "old"));
+    const pending = useCalls.getState().accept();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "send_call_signal",
+        expect.anything(),
+      ),
+    );
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    vi.useFakeTimers();
+    try {
+      finishSignal();
+      await pending;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(useCalls.getState()).toMatchObject({
+        phase: "incoming",
+        callId: "new",
+        peerId: "carol",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an incoming call's own media failure ends that call", async () => {
+    getUserMedia.mockRejectedValue(new Error("microphone unavailable"));
+    useCalls.getState().onSignal(offer("bob", "current"));
+
+    await useCalls.getState().accept();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "idle",
+      callId: null,
+      endedReason: "failed",
+      error: "microphone unavailable",
+    });
+  });
+
   it("a late answer completion cannot put a newer call into connecting", async () => {
     let finishAnswer!: () => void;
     class DeferredPc extends FakePc {
@@ -270,6 +318,39 @@ describe("call lifetime", () => {
       callId: "new",
       peerId: "carol",
       error: null,
+    });
+  });
+
+  it("a current answer rejection ends the failed call", async () => {
+    class RejectingPc extends FakePc {
+      setRemoteDescription = vi.fn(async () => {
+        throw new Error("invalid answer");
+      });
+    }
+    vi.stubGlobal(
+      "RTCPeerConnection",
+      RejectingPc as unknown as typeof RTCPeerConnection,
+    );
+    await useCalls.getState().startCall(
+      {
+        name: "Bob",
+        accountId: "bob",
+        deviceIds: ["bob-device"],
+      },
+      false,
+    );
+    const callId = useCalls.getState().callId!;
+
+    useCalls.getState().onSignal({
+      from: "bob-device",
+      payload: JSON.stringify({ callId, kind: "answer", sdp: "BAD" }),
+    });
+    await flush();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "idle",
+      callId: null,
+      endedReason: "failed",
     });
   });
 });

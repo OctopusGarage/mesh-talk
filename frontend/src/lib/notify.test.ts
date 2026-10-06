@@ -33,6 +33,8 @@ it("shares a pending notification permission request across startup calls", asyn
 
   expect(checksBeforeResolution).toBe(1);
   expect(requestPermission).toHaveBeenCalledTimes(1);
+  await ensureNotificationPermission();
+  expect(isPermissionGranted).toHaveBeenCalledTimes(1);
 });
 
 it("waits for an active permission dialog before deciding whether a new event may notify", async () => {
@@ -64,6 +66,32 @@ it("waits for an active permission dialog before deciding whether a new event ma
   expect(sendNotification).toHaveBeenCalledWith({
     title: "New message",
     body: "Hello",
+  });
+});
+
+it("uses existing OS permission without opening a new dialog", async () => {
+  vi.resetModules();
+  isPermissionGranted.mockReset().mockResolvedValue(true);
+  requestPermission.mockReset();
+  const { ensureNotificationPermission: ensure } = await import("./notify");
+
+  await ensure();
+
+  expect(isPermissionGranted).toHaveBeenCalledOnce();
+  expect(requestPermission).not.toHaveBeenCalled();
+});
+
+it("uses a useful fallback body for an empty inbound notification", async () => {
+  vi.resetModules();
+  isPermissionGranted.mockReset().mockResolvedValue(true);
+  sendNotification.mockReset();
+  const { notifyInbound } = await import("./notify");
+
+  await notifyInbound("Alice", "", false);
+
+  expect(sendNotification).toHaveBeenCalledWith({
+    title: "Alice",
+    body: "New message",
   });
 });
 
