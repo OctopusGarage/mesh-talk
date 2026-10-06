@@ -17,22 +17,29 @@ events.
 ## 1. Process & layers
 
 ```
-React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.rs)
-        ▲   ──listen() events──                         │
-        │                                               ▼
-        │                                   NodeRuntime (node/runtime.rs)
-        │                                   starts 7 bg tasks per login:
-        │                                   UDP listen / UDP multicast announce /
-        └────────── on_dm/on_channel/on_file callbacks ── TCP accept / PO drain /
-                                                          DM·channel·file forwarders
-                                                               │
-                                                          Node (node/node.rs) — orchestration
+React UI ── lib/api/*.ts ──invoke()──▶ Tauri IPC (chat_commands/)
+   ▲                                    │
+   │ Tauri events                       ▼
+   └─────────────── RuntimeEvents ← NodeRuntime (node/runtime.rs)
+                                           │ discovery, accept, maintenance
+                                           ▼
+                                   Node (node/node.rs) — orchestration
         ┌──────────────┬───────────────┬──────────────┬───────┴──────┐
    identity/      transport/        eventlog/       discovery/    postoffice/
    ratchet/       (Noise XX)        (DAG + sync)    (signed UDP)  (elect+relay)
    channel/ dm/
         └────────────── storage/encryption.rs (PBKDF2-600k + AES-256-GCM at rest) ──┘
 ```
+
+`mesh-talk-core` owns protocol state, network tasks, and encrypted persistence.
+The desktop shell composes it using `RuntimeConfig` and `RuntimeEvents` in
+`src-tauri/src/commands.rs`. `NodeRuntime::start` remains a compatibility
+constructor for SDK callers. The shell owns the session and translates inbound
+events to Tauri events; it does not own protocol or wire types. Desktop IPC
+commands live in `src-tauri/src/chat_commands/`, grouped by account, messaging,
+channels, files, platform, and diagnostics. `mod.rs` re-exports the established
+command names for Tauri registration. Commands clone a node handle from
+`NodeState` before asynchronous node work, releasing the session lock first.
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
@@ -304,8 +311,9 @@ proof protocol or event format is introduced.
 ## 5. Frontend (`frontend/`)
 
 **React 18 + TypeScript + Tailwind + shadcn/ui**, state in **zustand**, built with Vite.
-`lib/api.ts` exposes typed `auth` + `chat` wrappers over `invoke()` (every command);
-`lib/events.ts` subscribes to `dm-received`/`channel-message`/`file-received`.
+`lib/api.ts` keeps the stable typed exports; `lib/api/` owns the feature-specific
+`invoke()` wrappers and command payloads. `lib/events.ts` subscribes to
+`dm-received`/`channel-message`/`file-received`.
 `store/auth.ts` holds the session; `store/chat.ts` holds per-conversation message/
 reaction/unread state and routes incoming DMs to the sender's *account* (one conversation
 per multi-device contact). `features/chat/` is the 3-pane app (sidebar · messages ·
