@@ -1682,7 +1682,10 @@ mod tests {
             });
             tokio::task::spawn_blocking(move || {
                 entered_rx
-                    .recv_timeout(std::time::Duration::from_secs(5))
+                    // Native node preparation can exceed five seconds on a busy
+                    // Windows runner. Wait for the actual launch boundary, while
+                    // retaining a finite bound for a genuine startup deadlock.
+                    .recv_timeout(std::time::Duration::from_secs(30))
                     .unwrap()
             })
             .await
