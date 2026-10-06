@@ -110,6 +110,7 @@ describe("onSignal — incoming offer", () => {
         kind: "offer",
         sdp: "X",
         name: "Bob",
+        video: true,
         from: "mallory",
       }),
     });
@@ -125,6 +126,34 @@ describe("onSignal — incoming offer", () => {
       useCalls.getState().onSignal({ from: "bob", payload: "not json" }),
     ).not.toThrow();
     expect(useCalls.getState().phase).toBe("idle");
+  });
+
+  it("ignores valid JSON that is not a call signal", () => {
+    for (const payload of [
+      "null",
+      "[]",
+      "{}",
+      '{"kind":"offer","callId":"c1","sdp":42,"video":true}',
+      '{"kind":"offer","callId":"","sdp":"X","video":true}',
+      '{"kind":"answer","callId":"c1","sdp":42}',
+      '{"kind":"bye","callId":"c1","reason":"unknown"}',
+      '{"kind":"ping","callId":"c1"}',
+    ]) {
+      expect(() =>
+        useCalls.getState().onSignal({ from: "bob", payload }),
+      ).not.toThrow();
+      expect(useCalls.getState().phase).toBe("idle");
+    }
+  });
+
+  it("accepts every defined bye reason without interpreting an idle call", () => {
+    for (const reason of ["hangup", "decline", "busy", "failed"]) {
+      useCalls.getState().onSignal({
+        from: "bob",
+        payload: JSON.stringify({ callId: "c1", kind: "bye", reason }),
+      });
+      expect(useCalls.getState().phase).toBe("idle");
+    }
   });
 
   it("does NOT ring when the calls feature is disabled; declines the caller instead", () => {
@@ -718,6 +747,29 @@ describe("multi-device fan-out", () => {
     });
     expect(useCalls.getState().phase).toBe("idle"); // all devices gone
     expect(useCalls.getState().endedReason).toBe("busy");
+  });
+
+  it("a duplicate decline from a removed device cannot cancel the remaining ring", async () => {
+    await useCalls.getState().startCall(target, false);
+    const callId = useCalls.getState().callId!;
+    const decline = {
+      from: "d1",
+      payload: JSON.stringify({ callId, kind: "bye", reason: "decline" }),
+    };
+
+    useCalls.getState().onSignal(decline);
+    useCalls.getState().onSignal(decline);
+
+    expect(useCalls.getState()).toMatchObject({ phase: "outgoing", callId });
+    useCalls.getState().onSignal({
+      from: "d2",
+      payload: JSON.stringify({ callId, kind: "answer", sdp: "ANSWER" }),
+    });
+    await flush();
+    expect(useCalls.getState()).toMatchObject({
+      phase: "connecting",
+      peerId: "d2",
+    });
   });
 
   it("a late second answer (after one already won) is ignored", async () => {

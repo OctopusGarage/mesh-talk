@@ -57,11 +57,16 @@ export const usePresence = create<PresenceState>((set, get) => ({
     const lease = captureOwner();
     set({ map: EMPTY });
     let cancelled = false;
+    let nextPoll = 0;
+    let lastApplied = 0;
     const poll = async () => {
+      const pollId = ++nextPoll;
       try {
         const next = await presenceApi.get();
-        if (!cancelled && lease.current())
+        if (!cancelled && lease.current() && pollId > lastApplied) {
+          lastApplied = pollId;
           set({ map: reconcile(get().map, next) });
+        }
       } catch {
         // node may still be starting, or got torn down — ignore (next tick retries).
       }

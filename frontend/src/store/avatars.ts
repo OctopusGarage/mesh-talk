@@ -48,6 +48,12 @@ interface AvatarsState {
 
 /** Stable empty map so a "no avatars yet" load keeps a constant ref. */
 const EMPTY: Record<string, string> = {};
+let localRevision = 0;
+let pendingWrite: Promise<void> = Promise.resolve();
+const pendingEdits = new Map<
+  string,
+  { revision: number; dataUrl: string | null; current: () => boolean }
+>();
 
 export const useAvatars = create<AvatarsState>((set, get) => ({
   local: EMPTY,
@@ -58,10 +64,19 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
 
   load: async (current = () => true) => {
     const lease = captureRuntimeOwner();
+    const revision = localRevision;
     if (!lease.current() || !current()) return;
     try {
       const local = (await avatarsApi.get()) ?? EMPTY;
-      if (lease.current() && current()) set({ local });
+      if (lease.current() && current() && revision === localRevision) {
+        const merged = { ...local };
+        for (const [id, edit] of pendingEdits) {
+          if (!edit.current()) continue;
+          if (edit.dataUrl) merged[id] = edit.dataUrl;
+          else delete merged[id];
+        }
+        set({ local: merged });
+      }
     } catch {
       // avatars are local UI personalization; a load failure is non-fatal.
     }
@@ -90,6 +105,8 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     const lease = captureRuntimeOwner();
     const ownId = get().ownId;
     if (!lease.current()) return;
+    const revision = ++localRevision;
+    pendingEdits.set(id, { revision, dataUrl, current: lease.current });
     // Optimistic: update the local mirror immediately so every identity spot re-renders.
     set((s) => {
       const next = { ...s.local };
@@ -97,14 +114,29 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
       else delete next[id];
       return { local: next };
     });
-    try {
-      await avatarsApi.set(id, dataUrl);
-      // Setting/clearing OUR OWN avatar propagates it to peers (signed profile).
-      if (lease.current() && id === ownId) await avatarsApi.publish(dataUrl);
-    } catch {
-      // On failure, reconcile the local mirror from disk so it matches what was stored.
-      if (lease.current()) await get().load(lease.current);
-    }
+    const currentEdit = () =>
+      lease.current() && pendingEdits.get(id)?.revision === revision;
+    // Native writes snapshot the full avatar table. Keep their completion order aligned
+    // with the user's edits, including changes to different contacts.
+    const task = pendingWrite.then(async () => {
+      if (!lease.current()) return;
+      try {
+        await avatarsApi.set(id, dataUrl);
+        // Setting/clearing OUR OWN avatar propagates it to peers (signed profile).
+        if (currentEdit() && id === ownId) await avatarsApi.publish(dataUrl);
+      } catch {
+        // A superseded failure must not replace a newer optimistic edit.
+        if (currentEdit()) {
+          pendingEdits.delete(id);
+          await get().load(lease.current);
+        }
+      } finally {
+        if (pendingEdits.get(id)?.revision === revision)
+          pendingEdits.delete(id);
+      }
+    });
+    pendingWrite = task.catch(() => {});
+    await task;
   },
 
   reassertOwn: async (current = () => true) => {

@@ -61,9 +61,8 @@ export function FilesTray() {
         defaultPath: downloadDir || undefined,
       });
       if (lease.current() && typeof dir === "string") {
-        const cur = await settingsApi.get();
         if (!lease.current()) return;
-        await settingsApi.set({ ...cur, download_dir: dir });
+        await settingsApi.update({ download_dir: dir });
         if (lease.current()) setDownloadDir(dir);
       }
     } catch (e) {
