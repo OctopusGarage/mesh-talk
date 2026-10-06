@@ -616,6 +616,7 @@ struct FilePeerObservation {
     fresh_completion: std::sync::atomic::AtomicBool,
     active_file_channels: std::sync::atomic::AtomicUsize,
     max_file_channels: std::sync::atomic::AtomicUsize,
+    delayed_response_exchanges: std::sync::atomic::AtomicUsize,
 }
 
 struct ObservedFileChannel(Arc<FilePeerObservation>);
@@ -1212,6 +1213,15 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         "restart must restore immutable chunk work and private scope"
     );
     assert_eq!(b.read_file(file).unwrap(), bytes);
+    if delay == FilePeerDelay::Exchange {
+        let delayed = observation
+            .delayed_response_exchanges
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            delayed >= 5,
+            "{delayed} delayed 100ms exchanges must exceed one 400ms operation budget"
+        );
+    }
     if count > 1 {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while observation
@@ -1356,9 +1366,14 @@ async fn delayed_private_file_peer(
                         || (delay == FilePeerDelay::Exchange
                             && super::session::requests_response(&bytes))
                     {
+                        if delay == FilePeerDelay::Exchange {
+                            observation
+                                .delayed_response_exchanges
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(
                             if delay == FilePeerDelay::Exchange {
-                                250
+                                100
                             } else {
                                 150
                             },
