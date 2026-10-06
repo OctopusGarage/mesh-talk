@@ -36,20 +36,42 @@ export function nativeWindowsKeyboardScript(pid, key) {
   return `$ErrorActionPreference = 'Stop';
 function Mark($phase) { [Console]::WriteLine('keyboard:' + $phase); [Console]::Out.Flush() }
 Mark 'start';
-$shell = New-Object -ComObject WScript.Shell;
-if (-not $shell.AppActivate(${pid})) { throw 'Owned application could not be activated' }
-Mark 'activate'; Start-Sleep -Milliseconds 200;
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 public static class NativeKeyboard {
   [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public UIntPtr dwExtraInfo; }
   [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public UIntPtr dwExtraInfo; }
   [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public MOUSEINPUT mi; }
   [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION data; }
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  delegate bool EnumWindowsProc(IntPtr window, IntPtr state);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
   [DllImport("user32.dll", SetLastError=true)] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
   [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+  public static void FocusOwned(uint ownedPid) {
+    uint actualPid;
+    if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) != 0 && actualPid == ownedPid) return;
+    IntPtr target = IntPtr.Zero;
+    EnumWindows((window, state) => {
+      uint process;
+      GetWindowThreadProcessId(window, out process);
+      if (process == ownedPid && IsWindowVisible(window)) { target = window; return false; }
+      return true;
+    }, IntPtr.Zero);
+    if (target == IntPtr.Zero) throw new InvalidOperationException("Owned application window not found");
+    ShowWindowAsync(target, 9);
+    SetForegroundWindow(target);
+    for (int attempt = 0; attempt < 20; attempt++) {
+      if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) != 0 && actualPid == ownedPid) return;
+      Thread.Sleep(50);
+    }
+    throw new InvalidOperationException("Owned application did not become foreground");
+  }
   public static void SendOwned(uint ownedPid, ushort vk) {
     if (vk != 9 && vk != 13 && vk != 27 && vk != 33) throw new InvalidOperationException("Unsupported control key");
     const uint KEYEVENTF_KEYUP = 2;
@@ -69,6 +91,8 @@ public static class NativeKeyboard {
 }
 '@
 Mark 'compiled';
+[NativeKeyboard]::FocusOwned(${pid});
+Mark 'activate';
 [NativeKeyboard]::SendOwned(${pid}, ${vk});
 Mark 'sent';`;
 }

@@ -1052,7 +1052,10 @@ async fn manual_presence_publication_has_one_deadline_for_multiple_stalled_devic
         listeners.push(listener);
     }
     tokio::time::timeout(
-        Duration::from_secs(12),
+        // The publication has one 10s handshake deadline. Leave room for
+        // scheduling on loaded Windows runners while still rejecting three
+        // sequential 10s handshakes.
+        Duration::from_secs(20),
         alice.set_allowed(&account.account_id(), true),
     )
     .await

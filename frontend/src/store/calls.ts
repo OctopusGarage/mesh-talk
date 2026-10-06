@@ -27,6 +27,35 @@ type Signal =
   | { callId: string; kind: "answer"; sdp: string }
   | { callId: string; kind: "bye"; reason: ByeReason };
 
+function parseSignal(payload: string): Signal | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const msg = value as Record<string, unknown>;
+  if (typeof msg.callId !== "string" || !msg.callId) return null;
+  if (msg.kind === "offer") {
+    return typeof msg.sdp === "string" &&
+      typeof msg.name === "string" &&
+      typeof msg.video === "boolean"
+      ? (msg as unknown as Signal)
+      : null;
+  }
+  if (msg.kind === "answer")
+    return typeof msg.sdp === "string" ? (msg as unknown as Signal) : null;
+  if (msg.kind === "bye")
+    return msg.reason === "hangup" ||
+      msg.reason === "decline" ||
+      msg.reason === "busy" ||
+      msg.reason === "failed"
+      ? (msg as unknown as Signal)
+      : null;
+  return null;
+}
+
 export type CallPhase =
   "idle" | "outgoing" | "incoming" | "connecting" | "connected" | "ended";
 
@@ -370,12 +399,8 @@ export const useCalls = create<CallState>((set, get) => {
     },
 
     onSignal: (e) => {
-      let msg: Signal;
-      try {
-        msg = JSON.parse(e.payload) as Signal;
-      } catch {
-        return; // malformed signaling — ignore
-      }
+      const msg = parseSignal(e.payload);
+      if (!msg) return;
       const { phase, callId, peerId } = get();
 
       if (msg.kind === "offer") {
@@ -444,7 +469,8 @@ export const useCalls = create<CallState>((set, get) => {
           msg.reason === "decline" || msg.reason === "busy" ? msg.reason : null;
         // A still-ringing device declined / was busy / unreachable: drop just that device,
         // and only end the call once NONE remain (the others may still pick up).
-        if (phase === "outgoing" && ringingPeers.includes(e.from)) {
+        if (phase === "outgoing") {
+          if (!ringingPeers.includes(e.from)) return;
           ringingPeers = ringingPeers.filter((d) => d !== e.from);
           if (ringingPeers.length === 0) end(note);
           return;
