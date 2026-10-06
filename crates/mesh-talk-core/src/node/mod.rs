@@ -77,4 +77,4 @@ pub use profile::{ProfilePayload, MAX_AVATAR_BYTES};
 pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{aggregate, ReactionPayload, ReactionView};
 pub use received_log::{ReceivedEntry, ReceivedLog};
-pub use runtime::{NodeRuntime, RuntimeError};
+pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents};

@@ -97,6 +97,25 @@ impl From<std::io::Error> for RuntimeError {
     }
 }
 
+/// Host settings for one running node. `account_id` namespaces local data;
+/// the cryptographic account ID comes from the account keystore.
+pub struct RuntimeConfig<'a> {
+    pub base_dir: &'a Path,
+    pub account_id: &'a str,
+    pub display_name: &'a str,
+    pub password: &'a str,
+    pub discovery_port: u16,
+}
+
+/// Inbound events forwarded to the host from independent runtime tasks.
+pub struct RuntimeEvents {
+    pub on_dm: Box<dyn Fn(ReceivedDm) + Send + 'static>,
+    pub on_channel: Box<dyn Fn(crate::node::channel::ReceivedChannelMessage) + Send + 'static>,
+    pub on_file: Box<dyn Fn(crate::node::filebook::ReceivedFile) + Send + 'static>,
+    pub on_profile: Box<dyn Fn(crate::node::ReceivedProfile) + Send + 'static>,
+    pub on_call_signal: Box<dyn Fn(crate::node::ReceivedCallSignal) + Send + 'static>,
+}
+
 /// A running node plus the background tasks that drive it. Use [`Self::stop`]
 /// before reopening its stores. Drop only requests best-effort cancellation.
 pub struct NodeRuntime {
@@ -143,10 +162,9 @@ impl NodeRuntime {
         }
         self.node.runtime_work.drain().await;
     }
-    /// Open the per-account node under `base_dir/accounts/<account_id>/` (keystore +
-    /// durable logs encrypted with `password`), advertise `display_name`, and start
-    /// discovery + the accept loop + a periodic post-office drain + an inbound
-    /// forwarder that calls `on_dm` for each received DM.
+    /// Compatibility constructor with positional startup arguments.
+    /// New hosts should use [`Self::start_configured`] or
+    /// [`Self::start_configured_guarded`].
     ///
     /// `account_id` is the host app's account identifier — it only namespaces the
     /// data directory so each logged-in user gets their own keystore/logs. It is
@@ -180,6 +198,15 @@ impl NodeRuntime {
         .await
     }
 
+    /// Start a node using named host settings and inbound event handlers.
+    pub async fn start_configured(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+    ) -> Result<NodeRuntime, RuntimeError> {
+        let display_name = config.display_name.to_owned();
+        Self::start_configured_guarded(config, events, |launch| Ok(launch(&display_name))).await
+    }
+
     /// Prepare stores without launching producers; the host authorizes the final
     /// synchronous launch under its session guard and supplies the current name.
     pub async fn start_guarded(
@@ -197,6 +224,49 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded(
+            RuntimeConfig {
+                base_dir,
+                account_id,
+                display_name,
+                password,
+                discovery_port,
+            },
+            RuntimeEvents {
+                on_dm: Box::new(on_dm),
+                on_channel: Box::new(on_channel),
+                on_file: Box::new(on_file),
+                on_profile: Box::new(on_profile),
+                on_call_signal: Box::new(on_call_signal),
+            },
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Prepare stores, then let the host authorize the final synchronous launch
+    /// under its session guard. The host may supply the current display name.
+    pub async fn start_configured_guarded(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
+        let RuntimeConfig {
+            base_dir,
+            account_id,
+            display_name,
+            password,
+            discovery_port,
+        } = config;
+        let RuntimeEvents {
+            on_dm,
+            on_channel,
+            on_file,
+            on_profile,
+            on_call_signal,
+        } = events;
         let dir = base_dir.join("accounts").join(account_id);
         std::fs::create_dir_all(&dir)?;
 
@@ -966,17 +1036,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // An uncommon discovery port so the test doesn't touch the real one.
         let dp = 47990;
-        let runtime = NodeRuntime::start(
-            dir.path(),
-            "alice-user-id",
-            "Alice",
-            "pw",
-            dp,
-            |_dm| {},
-            |_ch| {},
-            |_f| {},
-            |_p| {},
-            |_s| {},
+        let runtime = NodeRuntime::start_configured(
+            RuntimeConfig {
+                base_dir: dir.path(),
+                account_id: "alice-user-id",
+                display_name: "Alice",
+                password: "pw",
+                discovery_port: dp,
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_dm| {}),
+                on_channel: Box::new(|_ch| {}),
+                on_file: Box::new(|_f| {}),
+                on_profile: Box::new(|_p| {}),
+                on_call_signal: Box::new(|_s| {}),
+            },
         )
         .await
         .expect("runtime starts");
