@@ -9,10 +9,13 @@ name: Sanitizers
 # fix from here, so the app is deliberately excluded.
 #
 # Run on PRs targeting main so branch protection can require this memory-safety
-# check before merge. Keep the weekly run to catch toolchain and dependency drift.
+# check before merge. Run again on main so the README badge reflects the merged
+# code; keep the weekly run to catch toolchain and dependency drift.
 # ASan needs the nightly toolchain + `-Z build-std` (a full std rebuild).
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC
