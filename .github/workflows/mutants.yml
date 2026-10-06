@@ -2,8 +2,10 @@ name: Mutation Testing
 
 # cargo-mutants injects bugs and checks the test suite catches them (the Rust
 # equivalent of Stryker). It runs the suite once per mutant, so it is slow:
-#   - on PRs it only tests mutants in the changed lines (fast),
-#   - weekly / on demand it runs the full sweep.
+#   - on PRs it samples mutants in the changed lines,
+#   - weekly / on demand it samples the whole workspace.
+# Each run tests one of 256 rotating round-robin shards so the job can finish
+# within its 60-minute limit. The summary states the shard and result count.
 # Surviving mutants are surfaced as annotations + an artifact but do NOT block
 # (this is an existing codebase; treat results as a coverage-quality signal).
 on:
@@ -73,7 +75,7 @@ jobs:
         working-directory: src-tauri
         run: node ../scripts/release/run-mutants.mjs --in-diff ../mutants-diff.patch
 
-      - name: Mutants (full sweep)
+      - name: Mutants (workspace sample)
         if: github.event_name != 'pull_request'
         working-directory: src-tauri
         run: node ../scripts/release/run-mutants.mjs
