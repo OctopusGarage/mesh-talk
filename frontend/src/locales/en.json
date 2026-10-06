@@ -115,6 +115,7 @@
     "localNetwork": "Local network",
     "peopleOnLan_one": "{{count}} person online on the LAN",
     "peopleOnLan_other": "{{count}} people online on the LAN",
+    "onlineShort": "{{count}} online",
     "pin": "Pin to top",
     "unpin": "Unpin",
     "rename": "Rename",
@@ -210,7 +211,8 @@
   },
   "settings": {
     "title": "Settings",
-    "description": "Appearance, background behavior, and where received files are saved.",
+    "description": "Privacy, appearance, background behavior, files, and chat history.",
+    "scrollMore": "Scroll for more settings",
     "sectionAppearance": "Appearance",
     "sectionBackground": "Background",
     "sectionFiles": "Files",

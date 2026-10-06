@@ -111,6 +111,7 @@
     "localNetwork": "Red local",
     "peopleOnLan_one": "{{count}} persona en línea en la LAN",
     "peopleOnLan_other": "{{count}} personas en línea en la LAN",
+    "onlineShort": "{{count}} en línea",
     "pin": "Fijar arriba",
     "unpin": "Dejar de fijar",
     "rename": "Renombrar",
@@ -206,7 +207,8 @@
   },
   "settings": {
     "title": "Ajustes",
-    "description": "Apariencia, comportamiento en segundo plano y dónde se guardan los archivos recibidos.",
+    "description": "Privacidad, apariencia, comportamiento en segundo plano, archivos e historial de chat.",
+    "scrollMore": "Desplázate para ver más ajustes",
     "sectionAppearance": "Apariencia",
     "sectionBackground": "Segundo plano",
     "sectionFiles": "Archivos",

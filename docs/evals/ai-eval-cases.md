@@ -9,8 +9,8 @@ the real model-backed AI eval. The canonical executable suite is
 | MT-AI-001 | `.claude/agents/code-reviewer.md` | Reviews lead with correctness/security/test findings and concrete file references. |
 | MT-AI-002 | `.claude/agents/e2e-runner.md` | Runs `make e2e`, triages startup timeout vs environment vs real delivery regression, and never claims green without observed output. |
 | MT-AI-003 | `.claude/agents/bug-hunter.md` | Reports only verified bugs with repro, severity, blast radius, and fix direction. |
-| MT-AI-004 | `.claude/settings.json` | Claude Code edits to key files trigger the AI eval smoke gate, and heavy cargo commands stay under the CPU guard. |
-| MT-AI-005 | `.github/pull_request_template.md` | PRs ask authors to document AI eval / smoke commands when code, prompts, models, agent rules, or core flows change. |
+| MT-AI-004 | `AGENTS.md` | Project guidance preserves module boundaries, validation commands, and security expectations. |
+| MT-AI-005 | `docs/evals/delivery-ai-regression.md` | Delivery guidance distinguishes deterministic and model-backed evaluation, trigger rules, and human review. |
 
 Run:
 

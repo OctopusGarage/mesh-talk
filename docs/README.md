@@ -29,6 +29,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements. |
 | [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md) | Delivery validation, full real smoke, real AI eval coverage, commands, triggers, gaps, and hardening plan. |
 | [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md) | Stable AI eval and smoke cases. |
+| [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md) | Screenshot-assisted UI and UX review, browser evidence, and decisions. |
 | [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md) | Hidden-contact real mesh, three-platform native UI, evidence gates and usability rubric. |
 | [`docs/evals/quality-gates.md`](evals/quality-gates.md) | Scenario-based review, mutation evidence, four-platform artifact verification and controlled release publication. |
 | [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md) | Product workflow evaluation layers, three-platform real backend/native evidence, portable browser boundaries and fail-closed CI gating. |

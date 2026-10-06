@@ -50,6 +50,8 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
   the environment cannot run multicast/TCP tests.
 - UI behavior or layout changes must run the relevant Playwright spec, and visual snapshot
   updates require human review of the diff images.
+- AI-assisted UI reviews use the screenshot evidence and interaction checks described in
+  `docs/evals/ui-ux-ai-review.md`; the agent-contract eval does not assess app usability.
 
 ## Trigger Rules
 
