@@ -76,6 +76,31 @@ afterEach(() => {
 });
 
 describe("onSignal — incoming offer", () => {
+  it("a cancelled accept's late media failure cannot end a newer incoming call", async () => {
+    let rejectMedia!: (error: unknown) => void;
+    getUserMedia.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectMedia = reject;
+        }),
+    );
+    getUserMedia.mockRejectedValueOnce(new Error("old mic failed"));
+    useCalls.getState().onSignal(offer("bob", "old"));
+    const pending = useCalls.getState().accept();
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    rejectMedia(new Error("old camera failed"));
+    await pending;
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "incoming",
+      callId: "new",
+      peerId: "carol",
+      error: null,
+    });
+  });
+
   it("rings: phase=incoming, peer bound to the AUTHENTICATED from (not a payload field)", () => {
     // The payload self-asserts a different sender; the store must use the event `from`.
     useCalls.getState().onSignal({
@@ -163,6 +188,170 @@ describe("onSignal — bye routing is scoped to the current call", () => {
       payload: JSON.stringify({ callId: "c1", kind: "bye", reason: "hangup" }),
     });
     expect(useCalls.getState().phase).toBe("incoming");
+  });
+});
+
+describe("call lifetime", () => {
+  it("a cancelled answer cannot arm a timer against a newer call", async () => {
+    let finishSignal!: () => void;
+    const pendingSignal = new Promise<void>((resolve) => {
+      finishSignal = resolve;
+    });
+    invoke.mockImplementation((command) =>
+      command === "send_call_signal" ? pendingSignal : Promise.resolve(),
+    );
+    useCalls.getState().onSignal(offer("bob", "old"));
+    const pending = useCalls.getState().accept();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "send_call_signal",
+        expect.anything(),
+      ),
+    );
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    vi.useFakeTimers();
+    try {
+      finishSignal();
+      await pending;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(useCalls.getState()).toMatchObject({
+        phase: "incoming",
+        callId: "new",
+        peerId: "carol",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an incoming call's own media failure ends that call", async () => {
+    getUserMedia.mockRejectedValue(new Error("microphone unavailable"));
+    useCalls.getState().onSignal(offer("bob", "current"));
+
+    await useCalls.getState().accept();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "idle",
+      callId: null,
+      endedReason: "failed",
+      error: "microphone unavailable",
+    });
+  });
+
+  it("a late answer completion cannot put a newer call into connecting", async () => {
+    let finishAnswer!: () => void;
+    class DeferredPc extends FakePc {
+      setRemoteDescription = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishAnswer = resolve;
+          }),
+      );
+    }
+    vi.stubGlobal(
+      "RTCPeerConnection",
+      DeferredPc as unknown as typeof RTCPeerConnection,
+    );
+    await useCalls.getState().startCall(
+      {
+        name: "Bob",
+        accountId: "bob",
+        deviceIds: ["bob-device"],
+      },
+      false,
+    );
+    const oldId = useCalls.getState().callId!;
+    useCalls.getState().onSignal({
+      from: "bob-device",
+      payload: JSON.stringify({ callId: oldId, kind: "answer", sdp: "ANSWER" }),
+    });
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    finishAnswer();
+    await flush();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "incoming",
+      callId: "new",
+      peerId: "carol",
+    });
+  });
+
+  it("a late answer rejection cannot end a newer incoming call", async () => {
+    let rejectAnswer!: (error: unknown) => void;
+    class RejectingPc extends FakePc {
+      setRemoteDescription = vi.fn(
+        () =>
+          new Promise<void>((_, reject) => {
+            rejectAnswer = reject;
+          }),
+      );
+    }
+    vi.stubGlobal(
+      "RTCPeerConnection",
+      RejectingPc as unknown as typeof RTCPeerConnection,
+    );
+    await useCalls.getState().startCall(
+      {
+        name: "Bob",
+        accountId: "bob",
+        deviceIds: ["bob-device"],
+      },
+      false,
+    );
+    const oldId = useCalls.getState().callId!;
+    useCalls.getState().onSignal({
+      from: "bob-device",
+      payload: JSON.stringify({ callId: oldId, kind: "answer", sdp: "BAD" }),
+    });
+    useCalls.getState().teardown();
+    useCalls.getState().onSignal(offer("carol", "new"));
+
+    rejectAnswer(new Error("old answer rejected"));
+    await flush();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "incoming",
+      callId: "new",
+      peerId: "carol",
+      error: null,
+    });
+  });
+
+  it("a current answer rejection ends the failed call", async () => {
+    class RejectingPc extends FakePc {
+      setRemoteDescription = vi.fn(async () => {
+        throw new Error("invalid answer");
+      });
+    }
+    vi.stubGlobal(
+      "RTCPeerConnection",
+      RejectingPc as unknown as typeof RTCPeerConnection,
+    );
+    await useCalls.getState().startCall(
+      {
+        name: "Bob",
+        accountId: "bob",
+        deviceIds: ["bob-device"],
+      },
+      false,
+    );
+    const callId = useCalls.getState().callId!;
+
+    useCalls.getState().onSignal({
+      from: "bob-device",
+      payload: JSON.stringify({ callId, kind: "answer", sdp: "BAD" }),
+    });
+    await flush();
+
+    expect(useCalls.getState()).toMatchObject({
+      phase: "idle",
+      callId: null,
+      endedReason: "failed",
+    });
   });
 });
 

@@ -4807,6 +4807,7 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     wait_for_durable_delivery(&a, second).await;
     case.phase("receipt-case-after-account-adoption");
     assert_eq!(a.delivery_status(second), Some(DeliveryStatus::Delivered));
+    let stale_bp = bp.clone();
     let adopted = Account::generate();
     b.persist_account_adoption(&adopted.account_id(), || {
         crate::identity::account_keystore::save(&bd.path().join("account.keystore"), "pw", &adopted)
@@ -4836,7 +4837,34 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
         .lock()
         .unwrap()
         .update(&bp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    a.initiate_contact_locally(&b.account_id()).await.unwrap();
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&stale_bp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    // An old authenticated connection can publish the pre-adoption account
+    // between discovery of the new proof and this explicit contact. Simulate
+    // that interleaving above, then repeat the new signed announcement until
+    // the grant observes it. The receipt assertion below remains the subject
+    // of this test; stale roster entries must not make setup timing-dependent.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let outcome =
+                a.roster
+                    .lock()
+                    .unwrap()
+                    .update(&bp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+            assert!(outcome.accepted());
+            match a.initiate_contact_locally(&b.account_id()).await {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("adopted account grant failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("fresh adopted account proof was never observed");
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     let third = a
         .enqueue_to_account(&b.account_id(), b"after account adoption", None)

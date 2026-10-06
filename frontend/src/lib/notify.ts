@@ -11,6 +11,29 @@ export function shouldNotify(opts: {
 }
 
 let granted: boolean | null = null;
+let permissionCheck: Promise<boolean> | null = null;
+
+function notificationPermission(): Promise<boolean> {
+  if (permissionCheck) return permissionCheck;
+  if (granted !== null) return Promise.resolve(granted);
+  const pending = (async () => {
+    const n = await import("@tauri-apps/plugin-notification");
+    granted = await n.isPermissionGranted();
+    if (!granted) granted = (await n.requestPermission()) === "granted";
+    return granted;
+  })();
+  permissionCheck = pending.then(
+    (allowed) => {
+      permissionCheck = null;
+      return allowed;
+    },
+    (error) => {
+      permissionCheck = null;
+      throw error;
+    },
+  );
+  return permissionCheck;
+}
 
 /**
  * Request notification permission once, eagerly, at startup.
@@ -24,11 +47,7 @@ let granted: boolean | null = null;
  */
 export async function ensureNotificationPermission(): Promise<void> {
   try {
-    const n = await import("@tauri-apps/plugin-notification");
-    if (granted === null) {
-      granted = await n.isPermissionGranted();
-      if (!granted) granted = (await n.requestPermission()) === "granted";
-    }
+    await notificationPermission();
   } catch {
     /* best-effort — notifications/badges are non-critical */
   }
@@ -46,12 +65,10 @@ export async function notifyInbound(
     if (!shouldNotify({ windowFocused, isActiveConversation })) return;
     // Lazy import so this module (and the store that uses it) stays importable in the node
     // unit-test environment, where the Tauri plugin has no runtime.
-    const n = await import("@tauri-apps/plugin-notification");
-    if (granted === null) {
-      granted = await n.isPermissionGranted();
-      if (!granted) granted = (await n.requestPermission()) === "granted";
+    if (await notificationPermission()) {
+      const n = await import("@tauri-apps/plugin-notification");
+      n.sendNotification({ title, body: body || "New message" });
     }
-    if (granted) n.sendNotification({ title, body: body || "New message" });
   } catch {
     /* notifications are best-effort — never let them break message handling */
   }

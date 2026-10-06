@@ -33,3 +33,11 @@ test("full health runs before merging and retains independent platform results",
   assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: true$/m);
   assert.match(workflow, /^      fail-fast: false$/m);
 });
+
+test("Codecov receives the frontend and Rust coverage produced by CI", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const step = workflow.split(/^      - /m).find((value) => value.startsWith("name: Upload coverage to Codecov\n"));
+  assert.ok(step, "the Codecov upload step must exist");
+  assert.match(step, /files:.*frontend\/coverage\/lcov\.info/, "frontend coverage must not be carried forward from an older commit");
+  assert.match(step, /files:.*src-tauri\/lcov\.info/, "Rust coverage must remain part of the upload");
+});
