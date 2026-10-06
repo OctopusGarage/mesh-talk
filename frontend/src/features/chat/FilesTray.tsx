@@ -167,12 +167,13 @@ export function FilesTray() {
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
-          size="icon"
           data-testid="sidebar-action-files"
           title={t("files.received")}
-          className="relative"
+          aria-label={t("files.received")}
+          className="relative h-9 min-w-0 gap-2 px-2.5 text-xs font-medium"
         >
-          <Download className="h-4 w-4" />
+          <Download className="h-4 w-4 shrink-0" />
+          <span className="truncate">{t("files.received")}</span>
           {files.length > 0 && (
             <Badge className="absolute -right-0.5 -top-0.5 h-4 min-w-4 justify-center bg-primary px-1 text-primary-foreground">
               {files.length}

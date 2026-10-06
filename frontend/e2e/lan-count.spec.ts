@@ -15,5 +15,9 @@ test("footer counts only presence-ONLINE people, not every roster entry", async 
   await expect(count).toBeVisible();
   // Mock roster = bob + carol, but only bob is presence-ONLINE (carol last seen 120s ago).
   // The count must reflect the online dot (1), NOT raw roster membership (2).
-  await expect.poll(async () => (await count.textContent())?.trim()).toBe("1");
+  await expect(count).toHaveText("1 online");
+  await expect(count).toHaveAttribute(
+    "aria-label",
+    "1 person online on the LAN",
+  );
 });

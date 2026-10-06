@@ -15,6 +15,27 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   await enterChat(page);
 
   await expectNoHorizontalOverflow(page, "chat shell");
+  await expect(page.getByTestId("sidebar-action-search")).toHaveText(
+    "Search messages",
+  );
+  await expect(page.getByTestId("sidebar-action-files")).toHaveText(
+    "Received files",
+  );
+  await expect(page.getByTestId("lan-online-count")).toContainText("online");
+  await expect(page.getByTestId("lan-online-count")).toHaveAttribute(
+    "aria-label",
+    /person online on the LAN/,
+  );
+  await expectMinTargetSize(
+    page.getByTestId("sidebar-action-search"),
+    32,
+    "sidebar search",
+  );
+  await expectMinTargetSize(
+    page.getByTestId("sidebar-action-files"),
+    32,
+    "received files",
+  );
   await expectElementsWithin(
     page,
     '[data-testid^="conversation-row-"]',
@@ -92,3 +113,37 @@ test("stranded prompt dismiss target meets interaction invariants", async ({
   );
   await expectVisibleFocus(page, page.getByTestId("stranded-dismiss"));
 });
+
+for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
+  test(`sidebar actions fit in ${language}`, async ({ page }) => {
+    await page.addInitScript(
+      (nextLanguage) => localStorage.setItem("mesh-talk-lang", nextLanguage),
+      language,
+    );
+    await enterChat(page);
+    const bounds = await page.evaluate(() => {
+      const sidebar = document.querySelector('[data-testid="sidebar"]');
+      const search = document.querySelector(
+        '[data-testid="sidebar-action-search"]',
+      );
+      const files = document.querySelector(
+        '[data-testid="sidebar-action-files"]',
+      );
+      if (!sidebar || !search || !files)
+        throw new Error("Sidebar action missing");
+      return {
+        sidebar: sidebar.getBoundingClientRect().right,
+        search: search.getBoundingClientRect().right,
+        files: files.getBoundingClientRect().right,
+      };
+    });
+    expect(
+      bounds.search,
+      `${language}: search exceeds sidebar`,
+    ).toBeLessThanOrEqual(bounds.sidebar + 0.5);
+    expect(
+      bounds.files,
+      `${language}: files exceeds sidebar`,
+    ).toBeLessThanOrEqual(bounds.sidebar + 0.5);
+  });
+}
