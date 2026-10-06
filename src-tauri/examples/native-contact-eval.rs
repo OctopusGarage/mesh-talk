@@ -183,6 +183,30 @@ fn main() {
     // Isolate OS config, webview storage, and window-state plugin preferences as
     // well as the application's explicit data root, without changing HOME.
     mesh_talk::run_tauri_configured(Some(root.clone()), Some(discovery_port), |builder| {
+        // Run after the application's setup. Tauri creates a configured tray before setup;
+        // the app creates its handled tray during setup. Both IDs present means the
+        // user sees two icons, and the configured one has no Mesh-Talk click handler.
+        let builder = builder.plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("single-tray-eval")
+                .on_event(|app, event| {
+                    if matches!(event, tauri::RunEvent::Ready) {
+                        assert!(
+                            app.tray_by_id("main").is_none(),
+                            "unhandled default tray icon"
+                        );
+                        assert!(
+                            app.tray_by_id(mesh_talk::tray::TRAY_ID).is_some(),
+                            "handled Mesh-Talk tray icon missing"
+                        );
+                        assert!(
+                            app.default_window_icon().is_some(),
+                            "tray icon image missing"
+                        );
+                        eprintln!("native tray verified: one handled icon");
+                    }
+                })
+                .build(),
+        );
         let builder = builder.plugin(tauri_plugin_wdio_webdriver::init_with_port(port));
         #[cfg(target_os = "macos")]
         let builder = builder.plugin(native_keyboard_plugin());
