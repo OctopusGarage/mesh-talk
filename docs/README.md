@@ -51,5 +51,6 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 ## Design history
 
 The current design is documented in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
-Historical design specs, implementation plans, and detailed task history are
-available in git history; the former `docs/superpowers/` files are not tracked.
+The [host refactor design](superpowers/specs/2026-10-06-host-architecture-refactor-design.md)
+and [implementation plan](superpowers/plans/2026-10-06-host-architecture-refactor.md)
+record the desktop architecture decisions. Older task history is available in git history.
