@@ -72,6 +72,25 @@ it("a load during an unfinished avatar write keeps the optimistic image", async 
   await saving;
 });
 
+it("a load during an unfinished avatar clear does not restore the old image", async () => {
+  let finishWrite!: () => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "set_avatar")
+      return new Promise<void>((resolve) => {
+        finishWrite = resolve;
+      });
+    if (command === "get_avatars") return Promise.resolve({ own: "old-photo" });
+    return Promise.resolve();
+  });
+  useAvatars.setState({ local: { own: "old-photo" } });
+  const saving = useAvatars.getState().setAvatar("own", null);
+  await vi.waitFor(() => expect(finishWrite).toBeDefined());
+  await useAvatars.getState().load();
+  expect(useAvatars.getState().local.own).toBeUndefined();
+  finishWrite();
+  await saving;
+});
+
 it("rapid avatar changes persist and publish the latest image last", async () => {
   let finishFirst!: () => void;
   const persisted: Record<string, string> = {};
@@ -148,6 +167,26 @@ it("a pending avatar edit from the old session does not leak into the next sessi
   expect(useAvatars.getState().local).toEqual({});
   finishWrite();
   await oldSave;
+});
+
+it("a queued edit from a retired session never writes to the next session", async () => {
+  let finishFirst!: () => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "set_avatar")
+      return new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+    return Promise.resolve();
+  });
+  const first = useAvatars.getState().setAvatar("first", "old-photo");
+  await vi.waitFor(() => expect(finishFirst).toBeDefined());
+  const queued = useAvatars.getState().setAvatar("second", "private-photo");
+  useAuth.setState({ generation: 1 });
+  finishFirst();
+  await Promise.all([first, queued]);
+  expect(
+    invoke.mock.calls.filter(([command]) => command === "set_avatar"),
+  ).toHaveLength(1);
 });
 
 for (const action of ["load", "loadPeers", "reassertOwn"] as const) {

@@ -135,10 +135,23 @@ describe("onSignal — incoming offer", () => {
       "{}",
       '{"kind":"offer","callId":"c1","sdp":42,"video":true}',
       '{"kind":"offer","callId":"","sdp":"X","video":true}',
+      '{"kind":"answer","callId":"c1","sdp":42}',
+      '{"kind":"bye","callId":"c1","reason":"unknown"}',
+      '{"kind":"ping","callId":"c1"}',
     ]) {
       expect(() =>
         useCalls.getState().onSignal({ from: "bob", payload }),
       ).not.toThrow();
+      expect(useCalls.getState().phase).toBe("idle");
+    }
+  });
+
+  it("accepts every defined bye reason without interpreting an idle call", () => {
+    for (const reason of ["hangup", "decline", "busy", "failed"]) {
+      useCalls.getState().onSignal({
+        from: "bob",
+        payload: JSON.stringify({ callId: "c1", kind: "bye", reason }),
+      });
       expect(useCalls.getState().phase).toBe("idle");
     }
   });
