@@ -148,53 +148,32 @@ export function SettingsDialog() {
     );
   }, [open]);
 
-  // Persist the toggles. Re-read the current settings first so we don't clobber fields the
-  // dialog doesn't manage (e.g. download_dir, set in the Files tray).
-  const persist = (next: {
-    minimize_to_tray: boolean;
-    notifications: boolean;
-  }) => {
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, ...next }))
-      .catch(() => {});
-  };
-
   const onMinimize = (v: boolean) => {
     setMinimizeToTray(v);
-    persist({ minimize_to_tray: v, notifications });
+    void settingsApi.update({ minimize_to_tray: v }).catch(() => {});
   };
   const onNotifications = (v: boolean) => {
     setNotifications(v);
-    persist({ minimize_to_tray: minimizeToTray, notifications: v });
+    void settingsApi.update({ notifications: v }).catch(() => {});
   };
   // Toggling "stay signed in" off makes the backend immediately forget the saved
   // keychain secret (see set_app_settings), so the next launch shows the login screen.
   const onStaySignedIn = (v: boolean) => {
     setStaySignedIn(v);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, stay_signed_in: v }))
-      .catch(() => {});
+    void settingsApi.update({ stay_signed_in: v }).catch(() => {});
   };
   // Persisting retention triggers an immediate backend prune of older messages (see
   // set_app_settings), so a tightened window takes effect at once.
   const onRetention = (days: number) => {
     setRetentionDays(days);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, retention_days: days }))
-      .catch(() => {});
+    void settingsApi.update({ retention_days: days }).catch(() => {});
   };
   // Opt into the experimental calls feature. Update the reactive store immediately so the
   // conversation header's call buttons appear/disappear without waiting for a reload.
   const onCalls = (v: boolean) => {
     setCallsEnabled(v);
     useSettings.getState().setCallsEnabled(v);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, calls_enabled: v }))
-      .catch(() => {});
+    void settingsApi.update({ calls_enabled: v }).catch(() => {});
   };
   // Pick a ringtone: persist it, reflect it in the reactive store, and play a preview so the
   // user hears the choice immediately.
@@ -202,10 +181,7 @@ export function SettingsDialog() {
     setRingtone(id);
     useSettings.getState().setRingtone(id);
     previewRingtone(id);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, ringtone: id }))
-      .catch(() => {});
+    void settingsApi.update({ ringtone: id }).catch(() => {});
   };
   const onLaunch = async (v: boolean) => {
     setAutostartBusy(true);
@@ -228,8 +204,7 @@ export function SettingsDialog() {
         defaultPath: downloadDir || undefined,
       });
       if (typeof dir === "string") {
-        const cur = await settingsApi.get();
-        await settingsApi.set({ ...cur, download_dir: dir });
+        await settingsApi.update({ download_dir: dir });
         setDownloadDir(dir);
       }
     } catch {

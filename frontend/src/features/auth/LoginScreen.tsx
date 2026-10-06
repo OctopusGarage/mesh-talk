@@ -40,10 +40,7 @@ export function LoginScreen() {
 
   const onStay = (v: boolean) => {
     setStay(v);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, stay_signed_in: v }))
-      .catch(() => {});
+    void settingsApi.update({ stay_signed_in: v }).catch(() => {});
   };
 
   const submit = async (e: React.FormEvent) => {

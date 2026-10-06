@@ -50,6 +50,26 @@ it("ignores a late poll after the account changes", async () => {
   stop();
 });
 
+it("does not let an older poll overwrite a newer presence snapshot", async () => {
+  const pending: Array<(snapshot: Record<string, unknown>) => void> = [];
+  getPresence.mockImplementation(
+    () => new Promise((resolve) => pending.push(resolve)),
+  );
+  const stop = usePresence.getState().start();
+  try {
+    expect(pending).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pending).toHaveLength(2);
+    pending[1]({ bob: { online: true, last_seen_secs: 0 } });
+    await Promise.resolve();
+    pending[0]({ bob: { online: false, last_seen_secs: 60 } });
+    await Promise.resolve();
+    expect(usePresence.getState().map.bob.online).toBe(true);
+  } finally {
+    stop();
+  }
+});
+
 it("distinguishes online, recent, and offline at the TTL boundary", () => {
   expect(presenceStatus({ online: true, last_seen_secs: null })).toBe("online");
   expect(presenceStatus({ online: false, last_seen_secs: 299 })).toBe("recent");
