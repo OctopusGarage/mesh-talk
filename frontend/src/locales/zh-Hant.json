@@ -115,6 +115,7 @@
     "localNetwork": "區域網路",
     "peopleOnLan_one": "區域網路 {{count}} 人在線",
     "peopleOnLan_other": "區域網路 {{count}} 人在線",
+    "onlineShort": "{{count}} 人在線",
     "pin": "釘選至頂端",
     "unpin": "取消釘選",
     "rename": "重新命名",
@@ -210,7 +211,8 @@
   },
   "settings": {
     "title": "設定",
-    "description": "外觀、背景行為，以及接收檔案的儲存位置。",
+    "description": "管理隱私、外觀、背景行為、檔案及聊天記錄。",
+    "scrollMore": "捲動查看更多設定",
     "sectionAppearance": "外觀",
     "sectionBackground": "背景",
     "sectionFiles": "檔案",

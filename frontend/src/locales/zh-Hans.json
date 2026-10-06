@@ -115,6 +115,7 @@
     "localNetwork": "局域网",
     "peopleOnLan_one": "局域网 {{count}} 人在线",
     "peopleOnLan_other": "局域网 {{count}} 人在线",
+    "onlineShort": "{{count}} 人在线",
     "pin": "置顶",
     "unpin": "取消置顶",
     "rename": "重命名",
@@ -210,7 +211,8 @@
   },
   "settings": {
     "title": "设置",
-    "description": "外观、后台行为，以及接收文件的保存位置。",
+    "description": "管理隐私、外观、后台行为、文件和聊天记录。",
+    "scrollMore": "滚动查看更多设置",
     "sectionAppearance": "外观",
     "sectionBackground": "后台",
     "sectionFiles": "文件",

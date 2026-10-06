@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bell,
   BellRing,
+  ChevronDown,
   FlaskConical,
   FolderOpen,
   History,
@@ -123,6 +124,8 @@ export function SettingsDialog() {
   const [retentionDays, setRetentionDays] = useState(0);
   const [callsEnabled, setCallsEnabled] = useState(false);
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
+  const settingsScroll = useRef<HTMLDivElement>(null);
+  const [moreBelow, setMoreBelow] = useState(true);
 
   // Load current state whenever the dialog opens.
   useEffect(() => {
@@ -239,7 +242,13 @@ export function SettingsDialog() {
   const currentLang = resolveLanguage(i18n.language) ?? "en";
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) setMoreBelow(true);
+      }}
+    >
       <DialogTrigger asChild>
         <Button
           variant="ghost"
@@ -250,13 +259,27 @@ export function SettingsDialog() {
           <Settings className="h-4 w-4" />
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-md" data-testid="settings-dialog">
+      <DialogContent
+        className="max-w-md overflow-hidden"
+        data-testid="settings-dialog"
+      >
         <DialogHeader>
           <DialogTitle>{t("settings.title")}</DialogTitle>
           <DialogDescription>{t("settings.description")}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid max-h-[70vh] gap-5 overflow-y-auto pr-0.5">
+        <div
+          ref={settingsScroll}
+          onScroll={() => {
+            const element = settingsScroll.current;
+            if (element)
+              setMoreBelow(
+                element.scrollTop + element.clientHeight <
+                  element.scrollHeight - 4,
+              );
+          }}
+          className="grid h-[min(65vh,calc(100vh-12rem))] min-h-0 gap-5 overflow-y-auto pr-0.5"
+        >
           <PrivacySettings />
           <Section title={t("contactVisibility.section")}>
             <Row
@@ -481,6 +504,22 @@ export function SettingsDialog() {
             )}
           </Section>
         </div>
+        {moreBelow && (
+          <button
+            type="button"
+            data-testid="settings-scroll-more"
+            onClick={() =>
+              settingsScroll.current?.scrollBy({
+                top: settingsScroll.current.clientHeight * 0.8,
+                behavior: "smooth",
+              })
+            }
+            className="flex min-h-8 w-full items-center justify-center gap-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {t("settings.scrollMore")}
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+        )}
       </DialogContent>
     </Dialog>
   );
