@@ -20,5 +20,18 @@ export default defineConfig({
     chunkSizeWarningLimit: 1000,
   },
   server: { port: 5173, strictPort: true },
-  test: { environment: "node", globals: false, include: ["src/**/*.test.ts"] },
+  test: {
+    environment: "node",
+    globals: false,
+    include: ["src/**/*.test.ts"],
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["src/**/*.test.ts", "src/**/*.d.ts"],
+      reporter: ["text", "json-summary", "lcov"],
+      thresholds: {
+        "src/store/**/*.ts": { lines: 70 },
+      },
+    },
+  },
 });

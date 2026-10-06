@@ -8,6 +8,7 @@ export default tseslint.config(
   {
     ignores: [
       "dist",
+      "coverage",
       "playwright-report",
       "test-results",
       "e2e/__screens__",

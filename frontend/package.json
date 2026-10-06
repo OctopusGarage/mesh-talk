@@ -11,6 +11,7 @@
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.e2e.json",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "format": "prettier --write src/",
     "format:check": "prettier --check src/",
     "e2e": "playwright test"
@@ -50,14 +51,15 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
     "@eslint/js": "^9.16.0",
     "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4.3.3",
     "@tauri-apps/cli": "^2.11.5",
+    "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "@vitest/coverage-v8": "4.1.11",
     "eslint": "^10.11.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react-hooks": "^7.1.1",

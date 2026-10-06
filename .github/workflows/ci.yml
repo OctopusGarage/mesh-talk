@@ -72,6 +72,18 @@ jobs:
           npm ci
           npm run build
 
+      - name: Frontend unit tests and coverage
+        working-directory: frontend
+        run: npm run test:coverage
+
+      - name: Upload frontend coverage
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-coverage-${{ github.run_attempt }}
+          path: frontend/coverage/
+          if-no-files-found: warn
+
       - name: Delivery and AI eval smoke
         if: matrix.os == 'ubuntu-latest'
         run: |

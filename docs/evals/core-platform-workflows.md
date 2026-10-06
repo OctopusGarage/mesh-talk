@@ -6,6 +6,15 @@ not evidence that the shipped desktop workflow works.
 
 ## Layers and honest boundaries
 
+The protected CI matrix runs Rust workspace unit/integration tests and frontend
+Vitest unit tests on Linux, macOS and Windows. Linux records Rust `llvm-cov` and
+frontend V8 coverage; the frontend report includes every production `.ts` and
+`.tsx` file, including files with zero unit coverage. The `src/store` line gate
+is 70%. Run `cd frontend && npm run test:coverage` locally to inspect the
+frontend report in `frontend/coverage/`. Browser and native E2E assertions do
+not contribute to this unit coverage percentage, so low component percentages
+must be read alongside the scenario matrix below.
+
 | Layer | Systems exercised | Platforms | Boundary |
 | --- | --- | --- | --- |
 | Backend core | Real CLI processes, signed discovery, encrypted TCP, DM/channel delivery, process restart, relay delivery, received file bytes | Linux, Windows, macOS | No renderer; discovery can use its signed unicast fallback, so a passed scenario does not prove multicast-only discovery |
