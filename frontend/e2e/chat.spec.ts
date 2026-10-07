@@ -121,6 +121,14 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(jump).toBeVisible();
     await jump.click();
     await expect(page.getByText("latest-after-long-message")).toBeInViewport();
+    await expect
+      .poll(() =>
+        log.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      )
+      .toBeLessThan(48);
   });
 
   test("Enter sends, Shift+Enter inserts a newline", async ({ page }) => {

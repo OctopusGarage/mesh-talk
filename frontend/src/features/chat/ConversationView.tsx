@@ -560,9 +560,8 @@ export function ConversationView() {
             type="button"
             aria-label={t("conversation.jumpToLatest")}
             onClick={() =>
-              virtuosoRef.current?.scrollToIndex({
-                index: "LAST",
-                align: "end",
+              virtuosoRef.current?.scrollTo({
+                top: Number.MAX_SAFE_INTEGER,
                 behavior: "auto",
               })
             }
