@@ -14,6 +14,7 @@ import { useTheme } from "@/lib/theme";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { THEME_CREST } from "@/lib/themeCrest";
 import { Composer } from "./Composer";
+import { jumpToLatest } from "./jumpToLatest";
 import {
   IMAGE_EXTENSIONS,
   VIDEO_EXTENSIONS,
@@ -559,12 +560,7 @@ export function ConversationView() {
           <button
             type="button"
             aria-label={t("conversation.jumpToLatest")}
-            onClick={() =>
-              virtuosoRef.current?.scrollToIndex({
-                index: messages.length - 1,
-                behavior: "smooth",
-              })
-            }
+            onClick={() => jumpToLatest(() => virtuosoRef.current)}
             className="absolute bottom-3 right-4 z-10 rounded-full border bg-background/90 p-2 shadow-md backdrop-blur hover:bg-accent"
           >
             <ChevronDown className="h-4 w-4" />

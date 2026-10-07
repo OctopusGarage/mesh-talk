@@ -98,6 +98,39 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByText("hello e2e")).toBeVisible();
   });
 
+  test("jump to latest reveals a message after an oversized bubble", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await openBobDm(page);
+    const box = page.getByTestId("composer-input");
+    await box.fill(`long-start ${"mesh message ".repeat(500)} long-end`);
+    await page.getByTestId("composer-send").click();
+    await box.fill("latest-after-long-message");
+    await page.getByTestId("composer-send").click();
+
+    const log = page.getByRole("log");
+    await log.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect(page.getByText("latest-after-long-message")).toBeInViewport();
+    await log.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    const jump = page.getByRole("button", { name: "Jump to latest messages" });
+    await expect(jump).toBeVisible();
+    await jump.click();
+    await expect(page.getByText("latest-after-long-message")).toBeInViewport();
+    await expect
+      .poll(() =>
+        log.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      )
+      .toBeLessThan(48);
+  });
+
   test("Enter sends, Shift+Enter inserts a newline", async ({ page }) => {
     await enterChat(page);
     await openBobDm(page);
