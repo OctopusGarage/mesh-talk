@@ -33,14 +33,16 @@ export function GroupAvatar({
     return <IdentityGlyph seed={channelId} size={size} title={title} />;
   }
 
-  // A member's avatar SEED is its account id (avatars are account-keyed): self resolves to
-  // our account, others via the roster; fall back to the device id when the account's unknown.
+  // A member's avatar seed is its account id. Membership carries the durable binding,
+  // while the roster supplies it for older responses that lack that field.
   const seeds = members
     .slice(0, 9)
     .map((m) =>
       m.user_id === myId
         ? myAccountId || m.user_id
-        : (peers.find((p) => p.user_id === m.user_id)?.account_id ?? m.user_id),
+        : (m.account_id ??
+          peers.find((p) => p.user_id === m.user_id)?.account_id ??
+          m.user_id),
     );
 
   if (seeds.length === 0) {

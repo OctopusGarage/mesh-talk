@@ -55,9 +55,11 @@ export function MembersDialog() {
   // add/remove is rejected by every node), so a non-owner only ever sees a read-only list.
   const isOwner = channelOwner !== "" && channelOwner === myId;
 
-  // A member's account id (and so its presence) comes from the discovery roster.
+  // Membership retains the verified account id when a device leaves discovery.
   const accountOf = (userId: string) =>
-    peers.find((p) => p.user_id === userId)?.account_id ?? null;
+    members.find((m) => m.user_id === userId)?.account_id ??
+    peers.find((p) => p.user_id === userId)?.account_id ??
+    null;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
