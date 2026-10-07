@@ -108,6 +108,8 @@ impl From<mesh_talk_core::node::NodeError> for CommandError {
 
         let msg = e.to_string();
         match e {
+            NodeError::InvalidInput(_) => CommandError::InvalidInput(msg),
+            NodeError::Authorization(_) => CommandError::Authorization(msg),
             // Recipient not yet discovered / not in the roster.
             NodeError::UnknownPeer(_) => CommandError::PeerUnknown(msg),
 
@@ -186,15 +188,16 @@ pub struct RegisterResult {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn login(
-    app_handle: tauri::AppHandle,
+pub async fn login<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     username: String,
     password: String,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<LoginResult, CommandError> {
-    let result = login_impl(username, password.clone(), app_state.inner()).await?;
+    let outcome = login_impl(username, password.clone(), app_state.inner()).await?;
+    let result = outcome.result;
 
     if result.success {
         // Start the node: per-account stores under ~/.mesh-talk/accounts/<user_id>/.
@@ -203,29 +206,24 @@ pub async fn login(
         // stores; the node's was first created with the raw value, so it must keep using the
         // raw value. Do NOT "unify" these to the trimmed form without a keystore migration —
         // that would break decryption for any user whose password has leading/trailing space.
-        if let Some(session) = app_state.session().get() {
+        {
             // "Stay signed in": persist the RAW password (the one the node keystore needs)
             // to the OS keychain so the next launch can auto-unlock; otherwise forget any
             // previously-saved secret. Keyed by the trimmed username the user typed.
-            let stay = settings_state.get().stay_signed_in;
-            let keychain_user = session.user.name.clone();
-            if stay {
-                crate::session_store::save(&keychain_user, &password);
-                crate::settings::record_last_user(
-                    &app_handle,
-                    settings_state.inner(),
-                    Some(keychain_user),
-                );
-            } else {
-                crate::session_store::clear(&keychain_user);
-                crate::settings::record_last_user(&app_handle, settings_state.inner(), None);
-            }
+            remember_login(
+                &app_handle,
+                app_state.inner(),
+                settings_state.inner(),
+                &outcome.user,
+                &outcome.lease,
+                &password,
+            )?;
             spawn_node_runtime(
                 app_handle.clone(),
-                session.user.user_id.clone(),
-                session.user.display_name.clone(),
+                outcome.lease,
                 password,
                 node_state.inner().clone(),
+                app_state.session().clone(),
             );
         }
     }
@@ -240,12 +238,13 @@ pub async fn login(
 /// stored secret is stale — so the frontend falls back to manual login. A stale secret is
 /// cleared so it can't keep failing on every launch.
 #[tauri::command]
-pub async fn auto_login(
-    app_handle: tauri::AppHandle,
+pub async fn auto_login<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<Option<UserInfo>, CommandError> {
+    let entry_generation = app_state.session().generation();
     let settings = settings_state.get();
     if !settings.stay_signed_in {
         return Ok(None);
@@ -256,27 +255,48 @@ pub async fn auto_login(
     let Some(password) = crate::session_store::load(&username) else {
         return Ok(None);
     };
+    #[cfg(test)]
+    if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+        let _ = entered.send("auto-login-entry");
+    }
 
-    match login_impl(username.clone(), password.clone(), app_state.inner()).await {
-        Ok(result) if result.success => {
-            if let Some(session) = app_state.session().get() {
-                let user_info = UserInfo::from(session.user.clone());
-                spawn_node_runtime(
-                    app_handle.clone(),
-                    session.user.user_id.clone(),
-                    session.user.display_name.clone(),
-                    password,
-                    node_state.inner().clone(),
-                );
-                return Ok(Some(user_info));
-            }
-            Ok(None)
+    #[cfg(test)]
+    {
+        let gate = app_state.auto_admission_gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
+    match login_impl_guarded(
+        username.clone(),
+        password.clone(),
+        app_state.inner(),
+        Some(entry_generation),
+    )
+    .await
+    {
+        Ok(outcome) if outcome.result.success => {
+            let user_info = UserInfo::from(outcome.user);
+            spawn_node_runtime(
+                app_handle.clone(),
+                outcome.lease,
+                password,
+                node_state.inner().clone(),
+                app_state.session().clone(),
+            );
+            Ok(Some(user_info))
         }
         // Stored secret no longer authenticates (e.g. password changed elsewhere): forget it
         // and fall back to manual login rather than surfacing a hard error on every launch.
         _ => {
-            crate::session_store::clear(&username);
-            crate::settings::record_last_user(&app_handle, settings_state.inner(), None);
+            let _ = app_state.session().unchanged(entry_generation, || {
+                if settings_state.get().last_user.as_deref() != Some(username.as_str()) {
+                    return;
+                }
+                crate::session_store::clear(&username);
+                crate::settings::record_last_user(&app_handle, settings_state.inner(), None);
+            });
             Ok(None)
         }
     }
@@ -296,11 +316,68 @@ pub fn clear_saved_session(
     Ok(())
 }
 
+struct AuthOutcome {
+    result: LoginResult,
+    user: User,
+    lease: crate::state::SessionLease,
+}
+
+fn remember_login<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+    app: &AppState,
+    settings: &crate::settings::SettingsState,
+    user: &User,
+    lease: &crate::state::SessionLease,
+    raw_password: &str,
+) -> CommandResult<()> {
+    app.session()
+        .matching(lease, |_| {
+            if settings.get().stay_signed_in {
+                crate::session_store::save(&user.name, raw_password);
+                crate::settings::record_last_user(handle, settings, Some(user.name.clone()));
+            } else {
+                crate::session_store::clear(&user.name);
+                crate::settings::record_last_user(handle, settings, None);
+            }
+        })
+        .map_err(CommandError::Authentication)
+}
+
+/// Called inside successful logout's auth-operation guard.
+fn forget_logged_out<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+    settings: &crate::settings::SettingsState,
+    username: &str,
+) {
+    crate::session_store::clear(username);
+    if settings.get().last_user.as_deref() == Some(username) {
+        crate::settings::record_last_user(handle, settings, None);
+    }
+}
+
 async fn login_impl(
     username: String,
     password: String,
     app_state: &AppState,
-) -> CommandResult<LoginResult> {
+) -> CommandResult<AuthOutcome> {
+    login_impl_guarded(username, password, app_state, None).await
+}
+
+async fn login_impl_guarded(
+    username: String,
+    password: String,
+    app_state: &AppState,
+    expected_generation: Option<u64>,
+) -> CommandResult<AuthOutcome> {
+    let auth_operation = app_state.auth_operation.clone().lock_owned().await;
+    // Saved credentials describe the session observed at invocation, unlike an
+    // explicit manual login. Reauthorize under auth serialization before mutation.
+    if expected_generation.is_some_and(|generation| generation != app_state.session().generation())
+    {
+        return Err(CommandError::Authentication(
+            "Saved login superseded".into(),
+        ));
+    }
     if username.trim().is_empty() || password.trim().is_empty() {
         return Err(CommandError::Validation(
             "Username and password are required".into(),
@@ -314,27 +391,33 @@ async fn login_impl(
     // worker for its full duration. Run it on the blocking pool (AuthService is Arc-cloneable);
     // only the cheap session mutation stays on the reactor.
     let auth_service = app_state.auth_service().clone();
+    let session = app_state.session().clone();
     let auth_result = {
         let normalized_username = normalized_username.clone();
         let normalized_password = normalized_password.clone();
         tokio::task::spawn_blocking(move || {
-            auth_service.login(normalized_username, normalized_password)
+            // The blocking operation owns auth serialization even if its IPC
+            // future is cancelled. Publication belongs to this actual result.
+            let _auth = auth_operation;
+            let (user, token) =
+                auth_service.login(normalized_username, normalized_password.clone())?;
+            let lease = session.publish(token.clone(), user.clone(), normalized_password);
+            Ok::<_, AuthError>(AuthOutcome {
+                user: user.clone(),
+                lease,
+                result: LoginResult {
+                    success: true,
+                    token: Some(token),
+                    user: Some(UserInfo::from(user)),
+                },
+            })
         })
         .await
         .map_err(|e| CommandError::Service(format!("join error: {e}")))?
     };
 
     match auth_result {
-        Ok((user, token)) => {
-            app_state
-                .session()
-                .set(token.clone(), user.clone(), normalized_password);
-            Ok(LoginResult {
-                success: true,
-                token: Some(token),
-                user: Some(UserInfo::from(user)),
-            })
-        }
+        Ok(outcome) => Ok(outcome),
         Err(AuthError::UserNotFound) | Err(AuthError::InvalidCredentials) => Err(
             CommandError::Authentication("Invalid username or password".into()),
         ),
@@ -352,15 +435,72 @@ async fn login_impl(
 }
 
 #[tauri::command]
-pub async fn logout(
+pub async fn logout<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
+    settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<LogoutResult, CommandError> {
+    let lease = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authentication)?;
+    let username = app_state
+        .session()
+        .matching(&lease, |info| info.user.name.clone())
+        .map_err(CommandError::Authentication)?;
+    #[cfg(test)]
+    if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+        let _ = entered.send("logout-entry");
+    }
     // Clear the session FIRST; only stop the node once logout actually succeeded, so an
     // error path (e.g. no session) can't leave the node torn down with the session intact.
-    let result = logout_impl(app_state.inner())?;
-    // Stop and drop the node runtime (Drop aborts its background tasks).
-    node_state.0.lock().await.take();
+    let (result, retirement_ticket) = {
+        let _auth = app_state.auth_operation.lock().await;
+        app_state
+            .session()
+            .matching(&lease, |_| ())
+            .map_err(CommandError::Authentication)?;
+        let result = logout_impl(app_state.inner())?;
+        let ticket = node_state
+            .2
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        // Forget exactly the successfully signed-out credential before releasing
+        // auth serialization. A replacement login can now remember its own secret.
+        forget_logged_out(&app_handle, settings_state.inner(), &username);
+        #[cfg(test)]
+        if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+            let _ = entered.send("logout-published");
+        }
+        (result, ticket)
+    };
+    // The child owns retirement, so cancellation of the host caller cannot drop
+    // stop's producer joins or release profile serialization prematurely.
+    let node = node_state.inner().clone();
+    #[cfg(test)]
+    let retirement_gate = app_state.logout_retirement_gate.clone();
+    let retirement = tokio::spawn(async move {
+        let _startup = node.1.clone().lock_owned().await;
+        if node.2.load(std::sync::atomic::Ordering::Acquire) != retirement_ticket {
+            return;
+        }
+        let old = node.0.lock().await.take();
+        if let Some(old) = old {
+            #[cfg(test)]
+            {
+                let gate = retirement_gate.lock().unwrap().take();
+                if let Some((entered, release)) = gate {
+                    let _ = entered.send(());
+                    let _ = release.await;
+                }
+            }
+            old.stop().await;
+        }
+    });
+    retirement
+        .await
+        .map_err(|_| CommandError::Service("Runtime retirement failed".into()))?;
     Ok(result)
 }
 
@@ -448,15 +588,36 @@ pub async fn rename_account(
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
 ) -> Result<UserInfo, CommandError> {
-    let session = require_session(app_state.inner())?;
+    let lease = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authentication)?;
+    #[cfg(test)]
+    if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+        let _ = entered.send("rename-entry");
+    }
+    let auth = app_state.auth_operation.clone().lock_owned().await;
+    let session = app_state
+        .session()
+        .matching(&lease, |info| info.clone())
+        .map_err(CommandError::Authentication)?;
 
     // Persist to the identity store. The Argon2 password verify inside is CPU-bound, so
     // run it on the blocking pool (AuthService is Arc-cloneable).
     let auth_service = app_state.auth_service().clone();
     let password = session.password.clone();
     let name_for_store = new_display_name.clone();
+    let session_state = app_state.session().clone();
+    let rename_lease = lease.clone();
     let updated = tokio::task::spawn_blocking(move || {
-        auth_service.set_display_name(&password, &name_for_store)
+        let _auth = auth;
+        let updated = auth_service.set_display_name(&password, &name_for_store)?;
+        session_state
+            .matching(&rename_lease, |info| {
+                info.user.display_name = updated.display_name.clone()
+            })
+            .map_err(|_| AuthError::NotLoggedIn)?;
+        Ok::<_, AuthError>(updated)
     })
     .await
     .map_err(|e| CommandError::Service(format!("join error: {e}")))?
@@ -470,18 +631,39 @@ pub async fn rename_account(
         other => CommandError::Service(format!("Failed to rename: {other:?}")),
     })?;
 
-    // Mirror onto the in-memory session so later reads (UserInfo) reflect the new name.
-    app_state
-        .session()
-        .set_display_name(updated.display_name.clone());
+    // Auth serialization was released by the joined persistence/publication
+    // operation before waiting for the runtime lifecycle lock.
+    #[cfg(test)]
+    if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+        let _ = entered.send("rename-published");
+    }
 
     // Hot-swap the live node's announce if it's running. A no-op before the node starts —
     // the new name is persisted and gets advertised on next login regardless.
     {
-        let mut guard = node_state.0.lock().await;
-        if let Some(rt) = guard.as_mut() {
-            rt.set_display_name(&updated.display_name);
+        #[cfg(test)]
+        {
+            let gate = app_state.rename_hot_gate.lock().unwrap().take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
         }
+        let mut guard = node_state.0.lock().await;
+        app_state
+            .session()
+            .matching(&lease, |info| {
+                if node_state.check_installation(&lease).is_err() {
+                    return;
+                }
+                if let Some(rt) = guard
+                    .as_mut()
+                    .filter(|rt| rt.host_account_id() == Some(lease.owner()))
+                {
+                    rt.set_display_name(&info.user.display_name);
+                }
+            })
+            .map_err(CommandError::Authentication)?;
     }
 
     Ok(UserInfo::from(updated))
@@ -518,73 +700,120 @@ fn node_start_error_for_log(
 /// reloads the account keystore, so a re-spawn adopts a freshly-linked account secret).
 /// `account_id` is the host-app namespace for the data directory — distinct from the
 /// node's cryptographic account.
-pub(crate) fn spawn_node_runtime(
-    app_handle: tauri::AppHandle,
-    account_id: String,
-    display_name: String,
+pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    lease: crate::state::SessionLease,
     password: String,
     node_handle: crate::chat_commands::NodeState,
+    session: crate::state::SessionState,
 ) {
+    let Ok(authority) = RuntimeAuthority::request(session, lease, node_handle.clone()) else {
+        return;
+    };
+    let dm_authority = authority.clone();
+    let channel_authority = authority.clone();
+    let file_authority = authority.clone();
+    let profile_authority = authority.clone();
+    let call_authority = authority.clone();
     let app_handle_for_dm = app_handle.clone();
     let app_handle_for_channel = app_handle.clone();
     let app_handle_for_file = app_handle.clone();
     let app_handle_for_profile = app_handle.clone();
     let app_handle_for_call = app_handle.clone();
     tauri::async_runtime::spawn(async move {
+        let Ok(permit) = authority.begin().await else {
+            return;
+        };
+        let display_name = permit.display_name.clone();
+        let account_id = authority.lease.owner().to_owned();
         // The base directory for node per-account data (the app's `~/.mesh-talk`).
-        let base_dir = crate::data_dir();
-        match mesh_talk_core::node::NodeRuntime::start(
-            &base_dir,
-            &account_id,
-            &display_name,
-            &password,
-            crate::configured_discovery_port(),
-            move |dm| {
-                crate::events::emit_dm_received(
-                    &app_handle_for_dm,
-                    dm.from,
-                    dm.from_name,
-                    dm.text,
-                    dm.reply_to,
-                );
+        #[cfg(test)]
+        let (base_dir, discovery_port) = node_handle
+            .4
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| (crate::data_dir(), crate::configured_discovery_port()));
+        #[cfg(not(test))]
+        let (base_dir, discovery_port) = (crate::data_dir(), crate::configured_discovery_port());
+        match mesh_talk_core::node::NodeRuntime::start_configured_guarded(
+            mesh_talk_core::node::RuntimeConfig {
+                base_dir: &base_dir,
+                account_id: &account_id,
+                display_name: &display_name,
+                password: &password,
+                discovery_port,
             },
-            move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                crate::events::emit_channel_message(
-                    &app_handle_for_channel,
-                    hex::encode(msg.channel_id.as_bytes()),
-                    msg.channel_name,
-                    msg.from,
-                    msg.text,
-                    msg.reply_to,
-                );
+            mesh_talk_core::node::RuntimeEvents {
+                on_dm: Box::new(move |dm| {
+                    let _ = dm_authority.current(|_| {
+                        crate::events::emit_dm_received(
+                            &app_handle_for_dm,
+                            dm.from,
+                            dm.from_name,
+                            dm.text,
+                            dm.reply_to,
+                        );
+                    });
+                }),
+                on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
+                    let _ = channel_authority.current(|_| {
+                        crate::events::emit_channel_message(
+                            &app_handle_for_channel,
+                            hex::encode(msg.channel_id.as_bytes()),
+                            msg.channel_name,
+                            msg.from,
+                            msg.text,
+                            msg.reply_to,
+                        );
+                    });
+                }),
+                on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
+                    let _ = file_authority.current(|_| {
+                        crate::events::emit_file_received(
+                            &app_handle_for_file,
+                            hex::encode(f.conv.as_bytes()),
+                            f.from,
+                            f.name,
+                            f.size,
+                            f.mime,
+                            hex::encode(f.file_conv.as_bytes()),
+                            f.media,
+                        );
+                    });
+                }),
+                on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
+                    let _ = profile_authority.current(|_| {
+                        crate::events::emit_profile_received(
+                            &app_handle_for_profile,
+                            p.account_id,
+                            p.avatar,
+                        );
+                    });
+                }),
+                on_call_signal: Box::new(move |s: mesh_talk_core::node::ReceivedCallSignal| {
+                    let _ = call_authority.current(|_| {
+                        crate::events::emit_call_signal(&app_handle_for_call, s.from, s.payload);
+                    });
+                }),
             },
-            move |f: mesh_talk_core::node::ReceivedFile| {
-                crate::events::emit_file_received(
-                    &app_handle_for_file,
-                    hex::encode(f.conv.as_bytes()),
-                    f.from,
-                    f.name,
-                    f.size,
-                    f.mime,
-                    hex::encode(f.file_conv.as_bytes()),
-                    f.media,
-                );
-            },
-            move |p: mesh_talk_core::node::ReceivedProfile| {
-                crate::events::emit_profile_received(
-                    &app_handle_for_profile,
-                    p.account_id,
-                    p.avatar,
-                );
-            },
-            move |s: mesh_talk_core::node::ReceivedCallSignal| {
-                crate::events::emit_call_signal(&app_handle_for_call, s.from, s.payload);
+            |launch| {
+                authority
+                    .current(|info| launch(&info.user.display_name))
+                    .map_err(|_| {
+                        mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "session replaced",
+                        ))
+                    })
             },
         )
         .await
         {
             Ok(runtime) => {
-                *node_handle.0.lock().await = Some(runtime);
+                if !permit.install(runtime).await {
+                    return;
+                }
                 // Keep lifecycle diagnostics without persisting an account identifier.
                 log::info!("Node started");
             }
@@ -596,42 +825,1014 @@ pub(crate) fn spawn_node_runtime(
     });
 }
 
+#[derive(Clone)]
+struct RuntimeAuthority {
+    session: crate::state::SessionState,
+    lease: crate::state::SessionLease,
+    node: crate::chat_commands::NodeState,
+    ticket: u64,
+}
+
+impl RuntimeAuthority {
+    fn request(
+        session: crate::state::SessionState,
+        lease: crate::state::SessionLease,
+        node: crate::chat_commands::NodeState,
+    ) -> Result<Self, String> {
+        let ticket = session.matching(&lease, |_| {
+            node.2.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
+        })?;
+        Ok(Self {
+            session,
+            lease,
+            node,
+            ticket,
+        })
+    }
+
+    async fn begin(&self) -> Result<StartupPermit, String> {
+        let serialization = self.node.1.clone().lock_owned().await;
+        self.current(|_| ())?;
+        let old = self.node.0.lock().await.take();
+        if let Some(old) = old {
+            old.stop().await;
+        }
+        let display_name = self.current(|info| info.user.display_name.clone())?;
+        Ok(StartupPermit {
+            authority: self.clone(),
+            _serialization: serialization,
+            display_name,
+        })
+    }
+
+    fn current<T>(
+        &self,
+        operation: impl FnOnce(&mut crate::state::SessionInfo) -> T,
+    ) -> Result<T, String> {
+        self.session.matching(&self.lease, |info| {
+            if self.node.2.load(std::sync::atomic::Ordering::Acquire) != self.ticket {
+                return Err("startup superseded".into());
+            }
+            Ok(operation(info))
+        })?
+    }
+}
+
+struct StartupPermit {
+    authority: RuntimeAuthority,
+    _serialization: tokio::sync::OwnedMutexGuard<()>,
+    display_name: String,
+}
+
+impl StartupPermit {
+    async fn install(self, runtime: mesh_talk_core::node::NodeRuntime) -> bool {
+        let mut guard = self.authority.node.0.lock().await;
+        let mut runtime = Some(runtime);
+        let installed = self
+            .authority
+            .current(|info| {
+                let rt = runtime.as_mut().unwrap();
+                if rt.display_name() != info.user.display_name {
+                    rt.set_display_name(&info.user.display_name);
+                }
+                *guard = runtime.take();
+                *self.authority.node.3.lock().unwrap() =
+                    Some((self.authority.lease.clone(), self.authority.ticket));
+            })
+            .is_ok();
+        drop(guard);
+        if !installed {
+            runtime.unwrap().stop().await;
+        }
+        installed
+    }
+}
+
 /// Adopt an account secret just persisted by a successful device link: drop the running
 /// node runtime and re-spawn it so it reloads the account keystore (now holding the
 /// linked account) and re-advertises under it. Reuses the held session credentials — no
 /// re-login required.
 #[tauri::command]
-pub async fn adopt_linked_account(
-    app_handle: tauri::AppHandle,
+pub async fn adopt_linked_account<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
 ) -> Result<(), CommandError> {
+    let lease = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authentication)?;
     let pw = {
         let guard = node_state.0.lock().await;
-        guard
-            .as_ref()
-            .map(|rt| rt.restart_password().to_string())
-            .ok_or_else(CommandError::not_started)?
+        app_state
+            .session()
+            .matching(&lease, |_| {
+                node_state.check_installation(&lease)?;
+                guard
+                    .as_ref()
+                    .filter(|rt| rt.host_account_id() == Some(lease.owner()))
+                    .map(|rt| rt.restart_password().to_string())
+                    .ok_or_else(CommandError::not_started)
+            })
+            .map_err(CommandError::Authentication)??
     };
-    let session = app_state
-        .session()
-        .get()
-        .ok_or_else(|| CommandError::Authentication("not logged in".into()))?;
-    let account_id = session.user.user_id.clone();
-    let display_name = session.user.display_name.clone();
-    node_state.0.lock().await.take();
     spawn_node_runtime(
         app_handle,
-        account_id,
-        display_name,
+        lease,
         pw,
         node_state.inner().clone(),
+        app_state.session().clone(),
     );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use tauri::Manager;
+    struct AuthFixture {
+        root: tempfile::TempDir,
+        app_state: AppState,
+        node: crate::chat_commands::NodeState,
+        settings: crate::settings::SettingsState,
+        webview: tauri::WebviewWindow<tauri::test::MockRuntime>,
+        alice: String,
+        bob: String,
+    }
+
+    impl AuthFixture {
+        fn new(label: &str) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let auth = crate::services::auth_service::AuthService::new(std::sync::Arc::new(
+                mesh_talk_core::identity::manager::IdentityManager::new(
+                    mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+                ),
+            ));
+            let alice = format!("owneripc-{label}-alice");
+            let bob = format!("owneripc-{label}-bob");
+            auth.register(alice.clone(), "password-a".into(), "fixture".into())
+                .unwrap();
+            auth.register(bob.clone(), "password-b".into(), "fixture".into())
+                .unwrap();
+            let app_state = AppState::new(auth);
+            let signed_in = tauri::async_runtime::block_on(login_impl(
+                alice.clone(),
+                " password-a ".into(),
+                &app_state,
+            ))
+            .unwrap();
+            let node = crate::chat_commands::NodeState::empty();
+            let runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+                root.path(),
+                signed_in.lease.owner(),
+                "Alice",
+                " password-a ",
+                0,
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            ))
+            .unwrap();
+            *node.0.blocking_lock() = Some(runtime);
+            let settings =
+                crate::settings::SettingsState::isolated(root.path().join("settings.json"));
+            let mut value = settings.get();
+            value.stay_signed_in = true;
+            settings.set(value);
+            let app = tauri::test::mock_builder()
+                .manage(app_state.clone())
+                .manage(node.clone())
+                .manage(settings.clone())
+                .invoke_handler(tauri::generate_handler![
+                    login,
+                    auto_login,
+                    adopt_linked_account,
+                    rename_account,
+                    logout,
+                    crate::owner_commands::owner_node_identity
+                ])
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .unwrap();
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+                .build()
+                .unwrap();
+            *node.4.lock().unwrap() = Some((root.path().to_owned(), 0));
+            remember_login(
+                webview.app_handle(),
+                &app_state,
+                &settings,
+                &signed_in.user,
+                &signed_in.lease,
+                " password-a ",
+            )
+            .unwrap();
+            Self {
+                root,
+                app_state,
+                node,
+                settings,
+                webview,
+                alice,
+                bob,
+            }
+        }
+
+        fn login_bob(&self) -> AuthOutcome {
+            tauri::async_runtime::block_on(login_impl(
+                self.bob.clone(),
+                "password-b".into(),
+                &self.app_state,
+            ))
+            .unwrap()
+        }
+
+        fn wait_phase(receiver: &std::sync::mpsc::Receiver<&'static str>, phase: &str) {
+            loop {
+                if receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    == phase
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    impl Drop for AuthFixture {
+        fn drop(&mut self) {
+            let _startup = self.node.1.blocking_lock();
+            let old = self.node.0.blocking_lock().take();
+            if let Some(old) = old {
+                tauri::async_runtime::block_on(old.stop());
+            }
+            crate::session_store::clear(&self.alice);
+            crate::session_store::clear(&self.bob);
+        }
+    }
+
+    fn invoke_auth(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        cmd: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        tauri::test::get_ipc_response(
+            webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: if cfg!(windows) {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                }
+                .parse()
+                .unwrap(),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.into(),
+            },
+        )
+        .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+    }
+
+    #[test]
+    fn stale_login_credential_result_and_original_logout_cleanup_preserve_new_owner_metadata() {
+        let fixture = AuthFixture::new("metadata");
+        let stale = fixture.app_state.session().capture().unwrap();
+        let stale_user = fixture.app_state.session().get().unwrap().user;
+        let raw = fixture
+            .node
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .restart_password()
+            .to_string();
+        assert_eq!(raw, " password-a ");
+        assert_eq!(
+            fixture.app_state.session().get().unwrap().password,
+            "password-a"
+        );
+        {
+            let _auth = fixture.app_state.auth_operation.blocking_lock();
+            logout_impl(&fixture.app_state).unwrap();
+            forget_logged_out(
+                fixture.webview.app_handle(),
+                &fixture.settings,
+                &fixture.alice,
+            );
+        }
+        let bob = fixture.login_bob();
+        remember_login(
+            fixture.webview.app_handle(),
+            &fixture.app_state,
+            &fixture.settings,
+            &bob.user,
+            &bob.lease,
+            " password-b ",
+        )
+        .unwrap();
+        assert!(remember_login(
+            fixture.webview.app_handle(),
+            &fixture.app_state,
+            &fixture.settings,
+            &stale_user,
+            &stale,
+            "old wrong password"
+        )
+        .is_err());
+        // Production forget helper is tested against a later B snapshot too;
+        // the actual logout command executes it under auth serialization.
+        forget_logged_out(
+            fixture.webview.app_handle(),
+            &fixture.settings,
+            &fixture.alice,
+        );
+        assert_eq!(
+            crate::session_store::load(&fixture.bob).as_deref(),
+            Some(" password-b ")
+        );
+        assert_eq!(
+            fixture.settings.get().last_user.as_deref(),
+            Some(fixture.bob.as_str())
+        );
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.root.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["last_user"], fixture.bob);
+        // Credential provider is cfg(test) memory-backed, while auth service,
+        // session generation, settings state + isolated JSON and runtime are real.
+    }
+
+    #[test]
+    fn registered_login_and_auto_login_publish_actual_owner_and_preserve_raw_runtime_password() {
+        let fixture = AuthFixture::new("login");
+        let old_device = fixture
+            .node
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .user_id()
+            .to_owned();
+        let result = invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username":fixture.alice, "password":" password-a "}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["user"]["username"], fixture.alice);
+        let wait_installed = || {
+            tauri::async_runtime::block_on(async {
+                let lease = fixture.app_state.session().capture().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let installed = fixture
+                            .node
+                            .3
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|(current, _)| current == &lease);
+                        if installed {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            })
+        };
+        wait_installed();
+        let identity = invoke_auth(
+            &fixture.webview,
+            "owner_node_identity",
+            serde_json::json!({"owner": result["user"]["id"]}),
+        )
+        .unwrap();
+        assert_eq!(identity["device_id"], old_device);
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_lock()
+                .as_ref()
+                .unwrap()
+                .restart_password(),
+            " password-a "
+        );
+        // A newly authenticated generation cannot adopt the previous installed
+        // generation's restart password/profile merely because UUID is unchanged.
+        tauri::async_runtime::block_on(login_impl(
+            fixture.alice.clone(),
+            " password-a ".into(),
+            &fixture.app_state,
+        ))
+        .unwrap();
+        assert!(invoke_auth(
+            &fixture.webview,
+            "adopt_linked_account",
+            serde_json::json!({})
+        )
+        .is_err());
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some(" password-a ")
+        );
+        let automatic = invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap();
+        assert_eq!(automatic["username"], fixture.alice);
+        wait_installed();
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_lock()
+                .as_ref()
+                .unwrap()
+                .restart_password(),
+            " password-a "
+        );
+    }
+
+    #[test]
+    fn registered_stale_auto_login_success_cannot_resurrect_logout() {
+        let fixture = AuthFixture::new("autoresurrection");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *fixture.app_state.auto_admission_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        let webview = fixture.webview.clone();
+        let automatic =
+            std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
+        tauri::async_runtime::block_on(entered_rx).unwrap();
+        invoke_auth(&fixture.webview, "logout", serde_json::json!({})).unwrap();
+        let ticket = fixture.node.2.load(std::sync::atomic::Ordering::Acquire);
+        release_tx.send(()).unwrap();
+        let result = automatic.join().unwrap().unwrap();
+        assert_eq!(result, serde_json::Value::Null);
+        assert!(fixture.app_state.session().get().is_none());
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+        assert!(fixture.settings.get().last_user.is_none());
+        assert!(fixture.node.0.blocking_lock().is_none());
+        assert_eq!(
+            fixture.node.2.load(std::sync::atomic::Ordering::Acquire),
+            ticket
+        );
+    }
+
+    #[test]
+    fn registered_stale_auto_login_failure_cannot_forget_replacement_owner() {
+        let fixture = AuthFixture::new("autofailure");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let auth = fixture.app_state.auth_operation.blocking_lock();
+        let webview = fixture.webview.clone();
+        let automatic =
+            std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
+        AuthFixture::wait_phase(&entered_rx, "auto-login-entry");
+        logout_impl(&fixture.app_state).unwrap();
+        let (user, token) = fixture
+            .app_state
+            .auth_service()
+            .login(fixture.bob.clone(), "password-b".into())
+            .unwrap();
+        let lease = fixture
+            .app_state
+            .session()
+            .publish(token, user.clone(), "password-b".into());
+        remember_login(
+            fixture.webview.app_handle(),
+            &fixture.app_state,
+            &fixture.settings,
+            &user,
+            &lease,
+            "password-b",
+        )
+        .unwrap();
+        drop(auth);
+        assert_eq!(automatic.join().unwrap().unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            crate::session_store::load(&fixture.bob).as_deref(),
+            Some("password-b")
+        );
+        assert_eq!(
+            fixture.settings.get().last_user.as_deref(),
+            Some(fixture.bob.as_str())
+        );
+    }
+
+    #[test]
+    fn registered_genuine_stale_auto_login_secret_is_forgotten_without_a_session_change() {
+        let fixture = AuthFixture::new("stalesecret");
+        {
+            let _auth = fixture.app_state.auth_operation.blocking_lock();
+            logout_impl(&fixture.app_state).unwrap();
+        }
+        crate::session_store::save(&fixture.alice, "wrong-password");
+        assert_eq!(
+            invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(fixture.settings.get().last_user.is_none());
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+    }
+
+    #[test]
+    fn aborted_host_logout_retains_retirement_serialization() {
+        // Private host boundary gate, not a blocked core writer. Core retirement
+        // tests separately prove stop joins actual blocking producers.
+        let fixture = AuthFixture::new("abortlogout");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *fixture.app_state.logout_retirement_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        let handle = fixture.webview.app_handle().clone();
+        let caller = tauri::async_runtime::spawn(async move {
+            logout(
+                handle.clone(),
+                handle.state(),
+                handle.state(),
+                handle.state(),
+            )
+            .await
+        });
+        tauri::async_runtime::block_on(entered_rx).unwrap();
+        assert!(fixture.node.0.blocking_lock().is_none());
+        caller.abort();
+        assert!(tauri::async_runtime::block_on(caller).is_err());
+        let signed_in = tauri::async_runtime::block_on(login_impl(
+            fixture.alice.clone(),
+            "password-a".into(),
+            &fixture.app_state,
+        ))
+        .unwrap();
+        let authority = RuntimeAuthority::request(
+            fixture.app_state.session().clone(),
+            signed_in.lease.clone(),
+            fixture.node.clone(),
+        )
+        .unwrap();
+        let serialization_retained = fixture.node.1.try_lock().is_err();
+        let replacement = tauri::async_runtime::spawn(async move { authority.begin().await });
+        let _ = release_tx.send(());
+        let permit = tauri::async_runtime::block_on(replacement)
+            .unwrap()
+            .unwrap();
+        // Only after retirement completes may the actual same-owner profile open.
+        let reopened = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+            fixture.root.path(),
+            signed_in.lease.owner(),
+            "Alice",
+            " password-a ",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        ))
+        .unwrap();
+        assert!(tauri::async_runtime::block_on(permit.install(reopened)));
+        assert!(
+            serialization_retained,
+            "aborted caller released startup serialization before retirement completed"
+        );
+    }
+
+    #[test]
+    fn registered_concurrent_rename_uses_latest_published_name() {
+        let fixture = AuthFixture::new("renameorder");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *fixture.app_state.rename_hot_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        let webview = fixture.webview.clone();
+        let first = std::thread::spawn(move || {
+            invoke_auth(
+                &webview,
+                "rename_account",
+                serde_json::json!({"newDisplayName":"First name"}),
+            )
+        });
+        tauri::async_runtime::block_on(entered_rx).unwrap();
+        invoke_auth(
+            &fixture.webview,
+            "rename_account",
+            serde_json::json!({"newDisplayName":"Latest name"}),
+        )
+        .unwrap();
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        assert_eq!(
+            fixture.app_state.session().get().unwrap().user.display_name,
+            "Latest name"
+        );
+        let identities = mesh_talk_core::identity::manager::IdentityManager::new(
+            mesh_talk_core::storage::file_manager::FileManager::new(fixture.root.path().to_owned()),
+        );
+        assert_eq!(
+            identities
+                .authenticate_user(&fixture.alice, "password-a")
+                .unwrap()
+                .effective_display_name(),
+            "Latest name"
+        );
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_lock()
+                .as_ref()
+                .unwrap()
+                .display_name(),
+            "Latest name"
+        );
+    }
+
+    #[test]
+    fn registered_delayed_rename_cannot_hot_rename_a_replacement_runtime() {
+        let fixture = AuthFixture::new("rename");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let mut lifecycle = fixture.node.0.blocking_lock();
+        let webview = fixture.webview.clone();
+        let rename = std::thread::spawn(move || {
+            invoke_auth(
+                &webview,
+                "rename_account",
+                serde_json::json!({"newDisplayName":"Alice renamed"}),
+            )
+        });
+        AuthFixture::wait_phase(&entered_rx, "rename-published");
+        assert_eq!(
+            fixture.app_state.session().get().unwrap().user.display_name,
+            "Alice renamed"
+        );
+        {
+            let _auth = fixture.app_state.auth_operation.blocking_lock();
+            logout_impl(&fixture.app_state).unwrap();
+        }
+        let bob = fixture.login_bob();
+        let old = lifecycle.take().unwrap();
+        tauri::async_runtime::block_on(old.stop());
+        let replacement = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+            fixture.root.path(),
+            bob.lease.owner(),
+            "Bob",
+            "password-b",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        ))
+        .unwrap();
+        *lifecycle = Some(replacement);
+        drop(lifecycle);
+        assert!(rename.join().unwrap().is_err());
+        assert_eq!(
+            fixture.app_state.session().get().unwrap().user.display_name,
+            fixture.bob
+        );
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_lock()
+                .as_ref()
+                .unwrap()
+                .display_name(),
+            "Bob"
+        );
+        let identities = mesh_talk_core::identity::manager::IdentityManager::new(
+            mesh_talk_core::storage::file_manager::FileManager::new(fixture.root.path().to_owned()),
+        );
+        assert_eq!(
+            identities
+                .authenticate_user(&fixture.alice, "password-a")
+                .unwrap()
+                .effective_display_name(),
+            "Alice renamed"
+        );
+    }
+
+    #[test]
+    fn registered_queued_logout_rejects_entry_generation_and_preserves_new_saved_login() {
+        let fixture = AuthFixture::new("queuedlogout");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let auth = fixture.app_state.auth_operation.blocking_lock();
+        let webview = fixture.webview.clone();
+        let logout =
+            std::thread::spawn(move || invoke_auth(&webview, "logout", serde_json::json!({})));
+        AuthFixture::wait_phase(&entered_rx, "logout-entry");
+        logout_impl(&fixture.app_state).unwrap();
+        // Already hold the same auth mutex; publish a real B service result
+        // synchronously to create an exact queued-command generation boundary.
+        let (user, token) = fixture
+            .app_state
+            .auth_service()
+            .login(fixture.bob.clone(), "password-b".into())
+            .unwrap();
+        let lease = fixture
+            .app_state
+            .session()
+            .publish(token, user.clone(), "password-b".into());
+        remember_login(
+            fixture.webview.app_handle(),
+            &fixture.app_state,
+            &fixture.settings,
+            &user,
+            &lease,
+            "password-b",
+        )
+        .unwrap();
+        drop(auth);
+        assert!(logout.join().unwrap().is_err());
+        assert_eq!(
+            crate::session_store::load(&fixture.bob).as_deref(),
+            Some("password-b")
+        );
+        assert_eq!(
+            fixture.settings.get().last_user.as_deref(),
+            Some(fixture.bob.as_str())
+        );
+        assert!(
+            fixture.node.0.blocking_lock().is_some(),
+            "stale logout must not retire any runtime"
+        );
+    }
+
+    #[test]
+    fn registered_successful_logout_forgets_original_login_before_awaiting_runtime_retirement() {
+        let fixture = AuthFixture::new("logout");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let startup = fixture.node.1.blocking_lock();
+        let webview = fixture.webview.clone();
+        let logout =
+            std::thread::spawn(move || invoke_auth(&webview, "logout", serde_json::json!({})));
+        AuthFixture::wait_phase(&entered_rx, "logout-published");
+        assert!(fixture.app_state.session().get().is_none());
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+        assert!(fixture.settings.get().last_user.is_none());
+        let bob = fixture.login_bob();
+        remember_login(
+            fixture.webview.app_handle(),
+            &fixture.app_state,
+            &fixture.settings,
+            &bob.user,
+            &bob.lease,
+            "password-b",
+        )
+        .unwrap();
+        let _new_start = RuntimeAuthority::request(
+            fixture.app_state.session().clone(),
+            bob.lease,
+            fixture.node.clone(),
+        )
+        .unwrap();
+        drop(startup);
+        assert_eq!(
+            logout.join().unwrap().unwrap(),
+            serde_json::json!({"success":true})
+        );
+        assert_eq!(
+            crate::session_store::load(&fixture.bob).as_deref(),
+            Some("password-b")
+        );
+        assert_eq!(
+            fixture.settings.get().last_user.as_deref(),
+            Some(fixture.bob.as_str())
+        );
+    }
+    fn fixture_user(owner: &str) -> User {
+        User {
+            user_id: owner.into(),
+            name: owner.into(),
+            display_name: owner.into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        }
+    }
+
+    #[test]
+    fn stale_start_request_cannot_supersede_current_owner_or_callbacks() {
+        let session = crate::state::SessionState::default();
+        let node = crate::chat_commands::NodeState::empty();
+        let old = session.publish("a".into(), fixture_user("alice"), "pw".into());
+        let current = session.publish("b".into(), fixture_user("bob"), "pw".into());
+        let valid = RuntimeAuthority::request(session.clone(), current, node.clone()).unwrap();
+        let ticket = valid.ticket;
+        assert!(RuntimeAuthority::request(session.clone(), old, node.clone()).is_err());
+        assert_eq!(node.2.load(std::sync::atomic::Ordering::Acquire), ticket);
+        let latest = RuntimeAuthority::request(session, valid.lease.clone(), node).unwrap();
+        let mut callbacks = 0;
+        for _ in 0..5 {
+            assert!(valid.current(|_| callbacks += 1).is_err());
+            latest.current(|_| callbacks += 1).unwrap();
+        }
+        assert_eq!(callbacks, 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_prelaunch_guard_rejects_session_replacement_without_launching_producers() {
+        for replacement_owner in ["bob", "alice"] {
+            let root = tempfile::tempdir().unwrap();
+            let session = crate::state::SessionState::default();
+            let node = crate::chat_commands::NodeState::empty();
+            let lease = session.publish("a".into(), fixture_user("alice"), "pw".into());
+            let authority =
+                RuntimeAuthority::request(session.clone(), lease, node.clone()).unwrap();
+            let permit = authority.begin().await.unwrap();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let directory = root.path().to_owned();
+            let prepare = tokio::spawn(async move {
+                mesh_talk_core::node::NodeRuntime::start_guarded(
+                    &directory,
+                    "alice",
+                    "captured old name",
+                    "pw",
+                    0,
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                    move |launch| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        authority
+                            .current(|info| launch(&info.user.display_name))
+                            .map_err(|_| {
+                                mesh_talk_core::node::RuntimeError::Io(std::io::Error::from(
+                                    std::io::ErrorKind::PermissionDenied,
+                                ))
+                            })
+                    },
+                )
+                .await
+            });
+            tokio::task::spawn_blocking(move || {
+                entered_rx
+                    // Native node preparation can exceed five seconds on a busy
+                    // Windows runner. Wait for the actual launch boundary, while
+                    // retaining a finite bound for a genuine startup deadlock.
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+            if replacement_owner == "alice" {
+                // Supersede during the actual prepared initializer while keeping
+                // the same Session owner AND generation, so only the ticket rejects it.
+                RuntimeAuthority::request(
+                    session.clone(),
+                    session.capture().unwrap(),
+                    node.clone(),
+                )
+                .unwrap();
+            } else {
+                session.publish("b".into(), fixture_user("bob"), "pw".into());
+            }
+            release_tx.send(()).unwrap();
+            assert!(prepare.await.unwrap().is_err());
+            assert!(node.0.lock().await.is_none());
+            drop(permit);
+            assert!(node.1.try_lock().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_preinstall_rejection_stops_runtime_before_releasing_startup_serialization() {
+        let root = tempfile::tempdir().unwrap();
+        let session = crate::state::SessionState::default();
+        let node = crate::chat_commands::NodeState::empty();
+        let lease = session.publish("a".into(), fixture_user("alice"), "pw".into());
+        let authority = RuntimeAuthority::request(session.clone(), lease, node.clone()).unwrap();
+        let permit = authority.begin().await.unwrap();
+        let runtime = mesh_talk_core::node::NodeRuntime::start_guarded(
+            root.path(),
+            "alice",
+            "old",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |launch| {
+                authority
+                    .current(|info| launch(&info.user.display_name))
+                    .map_err(|_| {
+                        mesh_talk_core::node::RuntimeError::Io(std::io::Error::from(
+                            std::io::ErrorKind::PermissionDenied,
+                        ))
+                    })
+            },
+        )
+        .await
+        .unwrap();
+        let port = runtime.listen_tcp_port();
+        let guard = node.0.lock().await;
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+        let install = tokio::spawn(async move {
+            queued_tx.send(()).unwrap();
+            permit.install(runtime).await
+        });
+        queued_rx.await.unwrap();
+        assert!(node.1.try_lock().is_err());
+        session.clear();
+        session.publish("new-a".into(), fixture_user("alice"), "pw".into());
+        drop(guard);
+        assert!(!install.await.unwrap());
+        assert!(node.1.try_lock().is_ok());
+        assert!(node.0.lock().await.is_none());
+        assert!(
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_begin_awaits_real_host_stop_and_latest_same_owner_ticket_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let session = crate::state::SessionState::default();
+        let node = crate::chat_commands::NodeState::empty();
+        let lease = session.publish("a".into(), fixture_user("alice"), "pw".into());
+        let old = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "alice",
+            "old",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let port = old.listen_tcp_port();
+        *node.0.lock().await = Some(old);
+        let stale =
+            RuntimeAuthority::request(session.clone(), lease.clone(), node.clone()).unwrap();
+        let latest = RuntimeAuthority::request(session.clone(), lease, node.clone()).unwrap();
+        assert!(stale.begin().await.is_err());
+        assert!(node.0.lock().await.is_some());
+        let permit = latest.begin().await.unwrap();
+        // Actual production coordinator + actual NodeRuntime::stop. Core retirement
+        // tests independently prove blocked writers drain inside that awaited stop.
+        assert!(node.0.lock().await.is_none());
+        assert!(
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                .await
+                .is_err()
+        );
+        session.set_display_name("renamed during preparation".into());
+        let runtime = mesh_talk_core::node::NodeRuntime::start_guarded(
+            root.path(),
+            "alice",
+            &permit.display_name,
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |launch| {
+                latest
+                    .current(|info| launch(&info.user.display_name))
+                    .map_err(|_| {
+                        mesh_talk_core::node::RuntimeError::Io(std::io::Error::from(
+                            std::io::ErrorKind::PermissionDenied,
+                        ))
+                    })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(runtime.display_name(), "renamed during preparation");
+        session.set_display_name("renamed before install".into());
+        assert!(permit.install(runtime).await);
+        assert_eq!(
+            node.0.lock().await.as_ref().unwrap().display_name(),
+            "renamed before install"
+        );
+        let runtime = node.0.lock().await.take().unwrap();
+        runtime.stop().await;
+    }
     #[test]
     fn startup_error_redacts_account_paths_but_keeps_failure_context() {
         use mesh_talk_core::node::RuntimeError;

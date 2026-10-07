@@ -35,14 +35,32 @@ use std::path::{Path, PathBuf};
 /// the magic, and the path (retained so the log can be rewritten in place).
 pub struct EncryptedRecordLog<R> {
     file: File,
+    // Windows append handles lack FILE_WRITE_DATA, which set_len requires.
+    // Retain a separate handle to the same file for repair, never reopen by path.
+    #[cfg(windows)]
+    repair: File,
+    #[cfg(test)]
+    append_fault: Option<File>,
     key: EncryptionKey,
     salt: [u8; SALT_SIZE],
     magic: [u8; 6],
     path: PathBuf,
+    poisoned: bool,
+    #[cfg(test)]
+    pub(crate) before_rewrite_rename: Option<Box<dyn FnOnce() + Send + Sync>>,
     _marker: PhantomData<R>,
 }
 
 impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
+    #[cfg(test)]
+    pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.append_fault = if enabled {
+            Some(File::open(&self.path)?)
+        } else {
+            None
+        };
+        Ok(())
+    }
     /// Open the log at `path`, creating it (with a fresh random salt and `magic`
     /// header) if absent, else verifying the magic and loading + decrypting every
     /// stored record (tolerating a torn trailing record). Returns the writer plus
@@ -60,18 +78,28 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             .open(path)
         {
             Ok(mut file) => {
+                #[cfg(windows)]
+                let repair = OpenOptions::new().write(true).open(path)?;
                 let salt = generate_salt();
                 let key = EncryptionKey::from_password(password, &salt)?;
                 file.write_all(magic)?;
                 file.write_all(&salt)?;
-                file.flush()?;
+                file.sync_all()?;
+                sync_parent(path)?;
                 Ok((
                     Self {
                         file,
+                        #[cfg(windows)]
+                        repair,
+                        #[cfg(test)]
+                        append_fault: None,
                         key,
                         salt,
                         magic: *magic,
                         path: path.to_path_buf(),
+                        poisoned: false,
+                        #[cfg(test)]
+                        before_rewrite_rename: None,
                         _marker: PhantomData,
                     },
                     Vec::new(),
@@ -86,6 +114,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
 
     fn load(path: &Path, password: &str, magic: &[u8; 6]) -> Result<(Self, Vec<R>), LogError> {
         let mut file = OpenOptions::new().read(true).append(true).open(path)?;
+        #[cfg(windows)]
+        let repair = OpenOptions::new().write(true).open(path)?;
         let mut got_magic = [0u8; 6];
         file.read_exact(&mut got_magic)
             .map_err(|_| LogError::CorruptFile("missing magic".into()))?;
@@ -99,14 +129,29 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
 
         let mut rest = Vec::new();
         file.read_to_end(&mut rest)?;
-        let records = Self::parse_records(&rest, &key)?;
+        let (records, valid) = Self::parse_records(&rest, &key)?;
+        if valid != rest.len() {
+            #[cfg(windows)]
+            let repair_file = &repair;
+            #[cfg(not(windows))]
+            let repair_file = &file;
+            repair_file.set_len((6 + SALT_SIZE + valid) as u64)?;
+            repair_file.sync_all()?;
+        }
         Ok((
             Self {
                 file,
+                #[cfg(windows)]
+                repair,
+                #[cfg(test)]
+                append_fault: None,
                 key,
                 salt,
                 magic: *magic,
                 path: path.to_path_buf(),
+                poisoned: false,
+                #[cfg(test)]
+                before_rewrite_rename: None,
                 _marker: PhantomData,
             },
             records,
@@ -115,8 +160,9 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
 
     /// Parse the record region. A torn trailing record (crash mid-write) is
     /// dropped; a record that fails to decrypt (tampering) is an error.
-    fn parse_records(mut data: &[u8], key: &EncryptionKey) -> Result<Vec<R>, LogError> {
+    fn parse_records(mut data: &[u8], key: &EncryptionKey) -> Result<(Vec<R>, usize), LogError> {
         let mut records = Vec::new();
+        let mut valid = 0;
         loop {
             if data.len() < 4 {
                 break; // clean end, or a torn length prefix
@@ -141,8 +187,9 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             let value: R = bincode::deserialize(&plaintext)
                 .map_err(|e| LogError::CorruptFile(format!("record decode: {e}")))?;
             records.push(value);
+            valid += 4 + len;
         }
-        Ok(records)
+        Ok((records, valid))
     }
 
     /// Encrypt one record into its `[u32 len][nonce][ciphertext]` wire form.
@@ -161,9 +208,70 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
 
     /// Append one record as an encrypted, length-prefixed frame, flushing it.
     pub fn append(&mut self, record: &R) -> Result<(), LogError> {
+        self.append_inner(record, false)
+    }
+
+    /// Append and sync the complete encrypted frame before acknowledging success.
+    /// Unix also syncs the containing directory; other platforms do not provide
+    /// a directory durability guarantee here. Ancestor directories must already
+    /// be durable (for example, the host's existing profile directory).
+    pub fn append_durable(&mut self, record: &R) -> Result<(), LogError> {
+        self.append_inner(record, true)
+    }
+
+    /// Sync all successful appends. A poisoned handle must first be reopened.
+    pub fn sync(&self) -> Result<(), LogError> {
+        if self.poisoned {
+            return Err(LogError::CorruptFile("record log requires reopen".into()));
+        }
+        self.file.sync_all()?;
+        sync_parent(&self.path)?;
+        Ok(())
+    }
+
+    fn append_inner(&mut self, record: &R, durable: bool) -> Result<(), LogError> {
+        self.append_with(record, durable, |file, buf| file.write_all(buf))
+    }
+
+    fn append_with(
+        &mut self,
+        record: &R,
+        durable: bool,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), LogError> {
+        if self.poisoned {
+            return Err(LogError::CorruptFile("record log requires reopen".into()));
+        }
         let buf = self.encode_record(record)?;
-        self.file.write_all(&buf)?;
-        self.file.flush()?;
+        let boundary = self.file.metadata()?.len();
+        #[cfg(test)]
+        let write_result = match self.append_fault.as_mut() {
+            Some(readonly) => readonly.write_all(&buf),
+            None => write(&mut self.file, &buf),
+        };
+        #[cfg(not(test))]
+        let write_result = write(&mut self.file, &buf);
+        let result = write_result.and_then(|()| {
+            if durable {
+                self.file.sync_all().and_then(|()| sync_parent(&self.path))
+            } else {
+                self.file.flush()
+            }
+        });
+        if let Err(error) = result {
+            #[cfg(windows)]
+            let repair_file = &self.repair;
+            #[cfg(not(windows))]
+            let repair_file = &self.file;
+            if repair_file
+                .set_len(boundary)
+                .and_then(|()| repair_file.sync_all())
+                .is_err()
+            {
+                self.poisoned = true;
+            }
+            return Err(error.into());
+        }
         Ok(())
     }
 
@@ -192,13 +300,42 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         // Reopen before replacing the live path. If this fails, the original log is
         // untouched and the caller can safely retry the compaction.
         let f = OpenOptions::new().read(true).append(true).open(&tmp)?;
+        #[cfg(windows)]
+        let repair = OpenOptions::new().write(true).open(&tmp)?;
+        #[cfg(test)]
+        if let Some(hook) = self.before_rewrite_rename.take() {
+            hook();
+        }
         std::fs::rename(&tmp, &self.path)?;
         // Keep the already-open handle: it refers to the rewritten inode even after the
         // rename, so there is no post-rename reopen failure that could leave `self.file`
         // pointing at the unlinked old inode.
         self.file = f;
+        #[cfg(windows)]
+        {
+            self.repair = repair;
+        }
+        // Replacement has committed. Reporting failure here would leave callers'
+        // indexes describing the old file. Directory sync is best effort after rename.
+        if sync_parent(&self.path).is_err() {
+            log::warn!("record log replacement directory sync failed");
+        }
         Ok(())
     }
+}
+
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -219,6 +356,115 @@ mod tests {
             n,
             data: data.to_vec(),
         }
+    }
+
+    #[test]
+    fn readonly_write_fault_retries_without_poisoning_live_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.log");
+        let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        log.append_durable(&rec(1, b"before")).unwrap();
+        log.fail_appends_for_test(true).unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                log.append_durable(&rec(2, b"failed")),
+                Err(LogError::Io(_))
+            ));
+            assert!(!log.poisoned);
+        }
+        log.fail_appends_for_test(false).unwrap();
+        log.append_durable(&rec(3, b"after")).unwrap();
+        drop(log);
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(records, vec![rec(1, b"before"), rec(3, b"after")]);
+    }
+
+    #[test]
+    fn rewrite_replaces_repair_handle_and_preserves_native_append() {
+        use std::io::{Seek, SeekFrom};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.log");
+        let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        log.append_durable(&rec(1, b"old")).unwrap();
+        log.rewrite(&[rec(2, b"replacement")]).unwrap();
+        log.file.seek(SeekFrom::Start(0)).unwrap();
+        log.append_durable(&rec(3, b"appended")).unwrap();
+        assert!(log
+            .append_with(&rec(4, b"partial"), true, |file, bytes| {
+                file.write_all(&bytes[..7])?;
+                Err(std::io::Error::other("partial write"))
+            })
+            .is_err());
+        assert!(!log.poisoned);
+        log.append_durable(&rec(5, b"after rollback")).unwrap();
+        drop(log);
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(
+            records,
+            vec![
+                rec(2, b"replacement"),
+                rec(3, b"appended"),
+                rec(5, b"after rollback")
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_write_failure_rolls_back_before_next_durable_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.log");
+        let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        log.append_durable(&rec(1, b"before")).unwrap();
+        assert!(log
+            .append_with(&rec(2, b"failed"), true, |file, buf| {
+                file.write_all(&buf[..7])?;
+                Err(std::io::Error::other("injected partial write"))
+            })
+            .is_err());
+        log.append_durable(&rec(3, b"after")).unwrap();
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(records, vec![rec(1, b"before"), rec(3, b"after")]);
+    }
+
+    #[test]
+    fn failed_rollback_poison_fails_closed_until_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.log");
+        let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        log.append_durable(&rec(1, b"before")).unwrap();
+        log.file = File::open(&path).unwrap();
+        #[cfg(windows)]
+        {
+            log.repair = File::open(&path).unwrap();
+        }
+        assert!(log.append(&rec(2, b"failed")).is_err());
+        assert!(log.poisoned);
+        assert!(log.append_durable(&rec(3, b"poisoned")).is_err());
+        assert!(log.sync().is_err());
+        drop(log);
+        let (mut log, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(records, vec![rec(1, b"before")]);
+        log.append_durable(&rec(4, b"after reopen")).unwrap();
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(records, vec![rec(1, b"before"), rec(4, b"after reopen")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_parent_at_durable_boundary_rolls_back_and_allows_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("original");
+        let moved = dir.path().join("moved");
+        let path = parent.join("t.log");
+        let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        log.append_durable(&rec(1, b"before")).unwrap();
+        std::fs::rename(&parent, &moved).unwrap();
+        assert!(log.append_durable(&rec(2, b"failed")).is_err());
+        assert!(log.sync().is_err());
+        std::fs::rename(&moved, &parent).unwrap();
+        log.append_durable(&rec(3, b"after")).unwrap();
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(records, vec![rec(1, b"before"), rec(3, b"after")]);
     }
 
     #[test]
@@ -310,9 +556,13 @@ mod tests {
             file.write_all(&100u32.to_be_bytes()).unwrap();
             file.write_all(&[0u8; 10]).unwrap();
         }
-        let (_log, records): (EncryptedRecordLog<Rec>, _) =
+        let (mut log, records): (EncryptedRecordLog<Rec>, _) =
             EncryptedRecordLog::open(&path, "pw", TEST_MAGIC).unwrap();
         assert_eq!(records, vec![rec(1, b"good")]);
+        log.append(&rec(2, b"after")).unwrap();
+        drop(log);
+        let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
+        assert_eq!(records, vec![rec(1, b"good"), rec(2, b"after")]);
     }
 
     #[test]

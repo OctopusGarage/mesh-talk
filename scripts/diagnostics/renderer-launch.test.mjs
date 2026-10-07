@@ -36,8 +36,8 @@ test("AppRun launch still verifies the actual packaged ELF instead of the shell 
     NATIVE_RENDERER_EXECUTABLE: "/tmp/package/usr/bin/mesh-talk",
     NATIVE_RENDERER_SOURCE: "published-appimage",
   });
-  assert.equal(config.launcher, "/tmp/package/AppRun");
-  assert.equal(config.executable, "/tmp/package/usr/bin/mesh-talk");
+  assert.equal(config.launcher, resolve("/tmp/package/AppRun"));
+  assert.equal(config.executable, resolve("/tmp/package/usr/bin/mesh-talk"));
   assert.equal(config.source, "published-appimage");
 });
 test("rejects missing launcher and unrecognized package provenance", () => {

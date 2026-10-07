@@ -812,12 +812,13 @@ export function Sidebar() {
           data-testid="lan-online-count"
           className="flex shrink-0 items-center gap-1 tabular-nums"
           title={t("sidebar.peopleOnLan", { count: onlinePeople })}
+          aria-label={t("sidebar.peopleOnLan", { count: onlinePeople })}
         >
           <PresenceDot
             status={onlinePeople > 0 ? "online" : "offline"}
             size="sm"
           />
-          {onlinePeople}
+          {t("sidebar.onlineShort", { count: onlinePeople })}
         </span>
         {/* App's own brand mark — always present (kept distinct from the theme crest above). */}
         <Logo

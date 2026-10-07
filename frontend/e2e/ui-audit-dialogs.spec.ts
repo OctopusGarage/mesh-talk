@@ -76,6 +76,10 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
       ready: async () => {
         await expect(page.getByTestId("invisible-switch")).toBeEnabled();
         await expect(page.getByTestId("settings-dialog")).toContainText(
+          "Privacy, appearance, background behavior, files, and chat history.",
+        );
+        await expect(page.getByTestId("settings-scroll-more")).toBeVisible();
+        await expect(page.getByTestId("settings-dialog")).toContainText(
           "/home/tester/Downloads",
         );
       },
@@ -116,6 +120,24 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
 
     await expect(surface).toHaveCount(0);
   }
+});
+
+test("settings scroll cue reveals more controls", async ({ page }) => {
+  await enterChat(page);
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-settings").click();
+
+  const cue = page.getByTestId("settings-scroll-more");
+  await expect(cue).toBeVisible();
+  await cue.click();
+  await expect
+    .poll(() =>
+      page.getByTestId("settings-dialog").evaluate((dialog) => {
+        const scroller = dialog.querySelector(".overflow-y-auto");
+        return scroller?.scrollTop ?? 0;
+      }),
+    )
+    .toBeGreaterThan(0);
 });
 
 async function expectSurfaceMotionSettled(surface: Locator) {

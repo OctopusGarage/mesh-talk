@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bell,
   BellRing,
+  ChevronDown,
   FlaskConical,
   FolderOpen,
   History,
@@ -123,6 +124,8 @@ export function SettingsDialog() {
   const [retentionDays, setRetentionDays] = useState(0);
   const [callsEnabled, setCallsEnabled] = useState(false);
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
+  const settingsScroll = useRef<HTMLDivElement>(null);
+  const [moreBelow, setMoreBelow] = useState(true);
 
   // Load current state whenever the dialog opens.
   useEffect(() => {
@@ -145,53 +148,32 @@ export function SettingsDialog() {
     );
   }, [open]);
 
-  // Persist the toggles. Re-read the current settings first so we don't clobber fields the
-  // dialog doesn't manage (e.g. download_dir, set in the Files tray).
-  const persist = (next: {
-    minimize_to_tray: boolean;
-    notifications: boolean;
-  }) => {
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, ...next }))
-      .catch(() => {});
-  };
-
   const onMinimize = (v: boolean) => {
     setMinimizeToTray(v);
-    persist({ minimize_to_tray: v, notifications });
+    void settingsApi.update({ minimize_to_tray: v }).catch(() => {});
   };
   const onNotifications = (v: boolean) => {
     setNotifications(v);
-    persist({ minimize_to_tray: minimizeToTray, notifications: v });
+    void settingsApi.update({ notifications: v }).catch(() => {});
   };
   // Toggling "stay signed in" off makes the backend immediately forget the saved
   // keychain secret (see set_app_settings), so the next launch shows the login screen.
   const onStaySignedIn = (v: boolean) => {
     setStaySignedIn(v);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, stay_signed_in: v }))
-      .catch(() => {});
+    void settingsApi.update({ stay_signed_in: v }).catch(() => {});
   };
   // Persisting retention triggers an immediate backend prune of older messages (see
   // set_app_settings), so a tightened window takes effect at once.
   const onRetention = (days: number) => {
     setRetentionDays(days);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, retention_days: days }))
-      .catch(() => {});
+    void settingsApi.update({ retention_days: days }).catch(() => {});
   };
   // Opt into the experimental calls feature. Update the reactive store immediately so the
   // conversation header's call buttons appear/disappear without waiting for a reload.
   const onCalls = (v: boolean) => {
     setCallsEnabled(v);
     useSettings.getState().setCallsEnabled(v);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, calls_enabled: v }))
-      .catch(() => {});
+    void settingsApi.update({ calls_enabled: v }).catch(() => {});
   };
   // Pick a ringtone: persist it, reflect it in the reactive store, and play a preview so the
   // user hears the choice immediately.
@@ -199,10 +181,7 @@ export function SettingsDialog() {
     setRingtone(id);
     useSettings.getState().setRingtone(id);
     previewRingtone(id);
-    void settingsApi
-      .get()
-      .then((cur) => settingsApi.set({ ...cur, ringtone: id }))
-      .catch(() => {});
+    void settingsApi.update({ ringtone: id }).catch(() => {});
   };
   const onLaunch = async (v: boolean) => {
     setAutostartBusy(true);
@@ -225,8 +204,7 @@ export function SettingsDialog() {
         defaultPath: downloadDir || undefined,
       });
       if (typeof dir === "string") {
-        const cur = await settingsApi.get();
-        await settingsApi.set({ ...cur, download_dir: dir });
+        await settingsApi.update({ download_dir: dir });
         setDownloadDir(dir);
       }
     } catch {
@@ -239,7 +217,13 @@ export function SettingsDialog() {
   const currentLang = resolveLanguage(i18n.language) ?? "en";
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) setMoreBelow(true);
+      }}
+    >
       <DialogTrigger asChild>
         <Button
           variant="ghost"
@@ -250,13 +234,27 @@ export function SettingsDialog() {
           <Settings className="h-4 w-4" />
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-md" data-testid="settings-dialog">
+      <DialogContent
+        className="max-w-md overflow-hidden"
+        data-testid="settings-dialog"
+      >
         <DialogHeader>
           <DialogTitle>{t("settings.title")}</DialogTitle>
           <DialogDescription>{t("settings.description")}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid max-h-[70vh] gap-5 overflow-y-auto pr-0.5">
+        <div
+          ref={settingsScroll}
+          onScroll={() => {
+            const element = settingsScroll.current;
+            if (element)
+              setMoreBelow(
+                element.scrollTop + element.clientHeight <
+                  element.scrollHeight - 4,
+              );
+          }}
+          className="grid h-[min(65vh,calc(100vh-12rem))] min-h-0 gap-5 overflow-y-auto pr-0.5"
+        >
           <PrivacySettings />
           <Section title={t("contactVisibility.section")}>
             <Row
@@ -481,6 +479,22 @@ export function SettingsDialog() {
             )}
           </Section>
         </div>
+        {moreBelow && (
+          <button
+            type="button"
+            data-testid="settings-scroll-more"
+            onClick={() =>
+              settingsScroll.current?.scrollBy({
+                top: settingsScroll.current.clientHeight * 0.8,
+                behavior: "smooth",
+              })
+            }
+            className="flex min-h-8 w-full items-center justify-center gap-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {t("settings.scrollMore")}
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+        )}
       </DialogContent>
     </Dialog>
   );

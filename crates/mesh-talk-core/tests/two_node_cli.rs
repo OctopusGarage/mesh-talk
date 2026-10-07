@@ -13,6 +13,8 @@
 //! Nodes are also started SEQUENTIALLY (start A, await its line, then start B) so a
 //! slow machine never has to run two KDF-heavy cold starts concurrently.
 
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -90,8 +92,7 @@ impl CliNode {
 
 impl Drop for CliNode {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        support::stop_cli(&mut self.child, &mut self.stdin);
     }
 }
 

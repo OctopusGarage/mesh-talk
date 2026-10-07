@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { auth, chat, contactPolicy } from "./api";
+import { auth, chat, contactPolicy, settings } from "./api";
 
 beforeEach(() => {
   invoke.mockReset();
@@ -25,6 +25,66 @@ describe("contact visibility command mapping", () => {
       hidden: true,
       name: "Name",
     });
+  });
+});
+
+describe("settings updates", () => {
+  it("preserves both fields when two updates are requested before the first write finishes", async () => {
+    const persisted = { calls_enabled: false, notifications: true };
+    let releaseFirst!: () => void;
+    let writes = 0;
+    invoke.mockImplementation(
+      (command: string, args?: { settings: typeof persisted }) => {
+        if (command === "get_app_settings")
+          return Promise.resolve({ ...persisted });
+        if (command === "set_app_settings") {
+          writes++;
+          if (writes === 1)
+            return new Promise<void>((resolve) => {
+              releaseFirst = () => {
+                Object.assign(persisted, args!.settings);
+                resolve();
+              };
+            });
+          Object.assign(persisted, args!.settings);
+          return Promise.resolve();
+        }
+        return Promise.resolve();
+      },
+    );
+
+    const first = settings.update({ calls_enabled: true });
+    const second = settings.update({ notifications: false });
+    await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(persisted).toMatchObject({
+      calls_enabled: true,
+      notifications: false,
+    });
+  });
+
+  it("continues applying later updates after an earlier write fails", async () => {
+    const persisted = { notifications: true };
+    let writes = 0;
+    invoke.mockImplementation(
+      (command: string, args?: { settings: typeof persisted }) => {
+        if (command === "get_app_settings")
+          return Promise.resolve({ ...persisted });
+        if (command === "set_app_settings") {
+          if (++writes === 1) return Promise.reject(new Error("disk full"));
+          Object.assign(persisted, args!.settings);
+        }
+        return Promise.resolve();
+      },
+    );
+
+    const failed = settings.update({ notifications: false });
+    const later = settings.update({ notifications: false });
+    await expect(failed).rejects.toThrow("disk full");
+    await later;
+    expect(persisted.notifications).toBe(false);
   });
 });
 

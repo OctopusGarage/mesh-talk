@@ -34,5 +34,7 @@ Build/verify with `nice -n 10 cargo ...` and throttle tests (`-- --test-threads=
 
 - Group findings as **Must-fix** (correctness/security), **Should-fix** (tests/robustness), and
   **Nits** (clearly separated, few). Each: file:line, the issue, and a concrete suggestion.
+- Verify every finding against the changed lines and the relevant surrounding code path. Cite
+  the evidence that makes the issue real; omit claims you cannot substantiate.
 - Lead with a 2-3 line verdict: is it safe to merge, and the single most important thing.
 - If it's clean, say so — don't manufacture nits. Quote command output for any claim that it builds/tests pass.

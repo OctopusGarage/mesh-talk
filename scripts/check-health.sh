@@ -57,6 +57,18 @@ if [ ! -f "Makefile" ] || [ ! -d "src-tauri" ] || [ ! -d "frontend" ]; then
     exit 1
 fi
 
+# A full gate must not silently skip its scans and still claim everything passed.
+if [ "$FAST" != "1" ]; then
+    for tool in cargo-deny cargo-machete typos gitleaks shellcheck actionlint; do
+        if ! command_exists "$tool"; then
+            print_status "error" "Required full-health tool missing: $tool. Install it or use --fast for a partial local check."
+            exit 1
+        fi
+    done
+    print_status "success" "Validating GitHub Actions workflows (actionlint)..."
+    actionlint
+fi
+
 print_status "success" "Running delivery / AI eval smoke..."
 if ! scripts/ai-eval-smoke.sh; then
     print_status "error" "Delivery / AI eval smoke failed. Fix the missing coverage or trigger wiring."
@@ -108,6 +120,17 @@ make frontend-install >/dev/null 2>&1 || true
 if [ "$FAST" = "1" ] && [ ! -d "frontend/dist" ]; then
     print_status "success" "Creating frontend/dist placeholder for Tauri context generation..."
     mkdir -p frontend/dist
+fi
+
+# A fresh checkout has no frontendDist. Build before Tauri's generate_context!
+# runs in Clippy/tests; stale local dist must not hide this dependency.
+if [ "$FAST" != "1" ]; then
+    print_status "success" "Building the frontend before Tauri checks..."
+    if ! { cd frontend && npm run build; }; then
+        print_status "error" "Frontend build failed."
+        exit 1
+    fi
+    cd ..
 fi
 
 # Check code formatting (Rust)
@@ -209,7 +232,7 @@ fi
 # Shellcheck scripts — mirrors CI.
 print_status "success" "Linting shell scripts (shellcheck)..."
 if command_exists shellcheck; then
-    if ! shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh hooks/* 2>/dev/null; then
+    if ! shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/* 2>/dev/null; then
         print_status "error" "shellcheck found warnings."
         exit 1
     fi
@@ -228,10 +251,24 @@ if ! { cd frontend && npm run lint; }; then
 fi
 cd ..
 
-# Run frontend unit tests (Vitest)
+# Type-check application and E2E sources. Vite and Playwright transpilation alone
+# do not establish that the scenario/helper TypeScript contracts are valid.
+print_status "success" "Checking frontend and E2E TypeScript..."
+if ! { cd frontend && npm run typecheck; }; then
+    print_status "error" "Frontend or E2E TypeScript errors found."
+    exit 1
+fi
+cd ..
+
+# Run frontend unit tests (Vitest); full health also enforces the store coverage floor.
 print_status "success" "Running frontend tests..."
-if ! { cd frontend && npm test; }; then
-    print_status "error" "Frontend tests failed. Please fix the failing tests."
+if [ "$FAST" = "1" ]; then
+    FRONTEND_TEST_SCRIPT="test"
+else
+    FRONTEND_TEST_SCRIPT="test:coverage"
+fi
+if ! { cd frontend && npm run "$FRONTEND_TEST_SCRIPT"; }; then
+    print_status "error" "Frontend tests or coverage failed. Please fix the failing gate."
     exit 1
 fi
 cd ..
@@ -250,8 +287,16 @@ if [ "$FAST" = "1" ]; then
 fi
 if [ "$RUN_UI_E2E" = "1" ]; then
     print_status "success" "Running UI E2E (Playwright)..."
-    ( cd frontend && npx playwright install chromium >/dev/null 2>&1 || true )
-    if ! { cd frontend && npx playwright test --project=chromium; }; then
+    # All scenarios here are headless. Avoid downloading the unused headed
+    # browser, and never hide setup failures behind a successful shell result.
+    if ! ( cd frontend && npx playwright install --only-shell chromium ); then
+        print_status "error" "Chromium runtime installation failed."
+        exit 1
+    fi
+    # Match CI's bounded worker budget; keep failures visible without retries.
+    # Parallel local browsers can exhaust a scenario's total time budget while
+    # competing for rendering resources, rather than exposing a UI regression.
+    if ! { cd frontend && npx playwright test --project=chromium --workers=1 --retries=0; }; then
         print_status "error" "UI E2E failed. Please fix the browser e2e regressions."
         exit 1
     fi
@@ -311,14 +356,6 @@ cd ..
 print_status "success" "Building the project..."
 if ! { cd src-tauri && cargo build --workspace --verbose; }; then
     print_status "error" "Build failed. Please fix build issues."
-    exit 1
-fi
-cd ..
-
-# Build the frontend
-print_status "success" "Building the frontend..."
-if ! { cd frontend && npm run build; }; then
-    print_status "error" "Frontend build failed. Please fix build issues."
     exit 1
 fi
 cd ..

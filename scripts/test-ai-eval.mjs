@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,8 +29,9 @@ test("ai eval fails loudly when no model provider is configured", () => {
   assert.match(result.stderr, /AI_EVAL_COMMAND|OPENAI_API_KEY|ANTHROPIC_API_KEY/);
 });
 
-test("ai eval command provider runs every stable case and writes a report", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "mesh-talk-ai-eval-"));
+test("ai eval command provider runs every stable case and writes a report", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "mesh talk-ai-eval-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const reportPath = join(tmp, "report.json");
   const evaluatorPath = join(tmp, "fake-evaluator.mjs");
 
@@ -55,7 +56,7 @@ process.stdin.on("end", () => {
   );
 
   const result = runEval(["--report", reportPath], {
-    AI_EVAL_COMMAND: `${process.execPath} ${evaluatorPath}`,
+    AI_EVAL_COMMAND: `"${process.execPath}" "${evaluatorPath}"`,
   });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -63,6 +64,18 @@ process.stdin.on("end", () => {
   assert.ok(report.cases.length >= 5);
   assert.equal(report.summary.failed, 0);
   assert.equal(report.summary.provider, "command");
+});
+
+test("ai eval resolves its suite from checkout paths containing spaces", (t) => {
+  const checkout = mkdtempSync(join(tmpdir(), "mesh talk-checkout-"));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  mkdirSync(join(checkout, "scripts"));
+  mkdirSync(join(checkout, "docs", "evals"), { recursive: true });
+  copyFileSync(new URL("ai-eval.mjs", import.meta.url), join(checkout, "scripts", "ai-eval.mjs"));
+  copyFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), join(checkout, "docs", "evals", "ai-eval-suite.json"));
+  const result = spawnSync(process.execPath, [join(checkout, "scripts", "ai-eval.mjs"), "--list"], { encoding: "utf8", cwd: tmpdir() });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /MT-AI-001/);
 });
 
 test("module coverage manifest includes every core module advertised in AGENTS.md", () => {

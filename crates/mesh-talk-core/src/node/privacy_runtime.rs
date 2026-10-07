@@ -22,6 +22,7 @@ pub(in crate::node) struct PrivacyState {
     pub routes: super::privacy_routes::RouteCache,
     pub sent_manifest_scopes: crate::storage::record_log::EncryptedRecordLog<StoredManifestScope>,
     pub scope_repair_needed: bool,
+    pub legacy_scope_ids: std::collections::HashSet<crate::eventlog::EventId>,
     pub file_scopes: std::collections::HashMap<crate::eventlog::ConversationId, Vec<ManifestScope>>,
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -85,6 +86,11 @@ impl Node {
             .rewrite(&stored_scopes)
             .map_err(io::Error::other)?;
         let mut file_scopes: std::collections::HashMap<_, Vec<ManifestScope>> = Default::default();
+        let mut legacy_scope_ids = std::collections::HashSet::new();
+        if stored_scopes.len() > super::delivery_store::DeliveryLimits::default().completed_receipts
+        {
+            return Err(io::Error::other("legacy file scope capacity exhausted"));
+        }
         {
             let records = self
                 .received_files
@@ -115,6 +121,7 @@ impl Node {
                         event: scope.event,
                     };
                     if !scopes.contains(&restored) {
+                        legacy_scope_ids.insert(restored.event);
                         scopes.push(restored);
                     }
                 }
@@ -145,6 +152,7 @@ impl Node {
             routes,
             sent_manifest_scopes,
             scope_repair_needed: false,
+            legacy_scope_ids,
             file_scopes,
         };
         let mut state = self.privacy.state.write().map_err(|_| denied())?;
@@ -152,6 +160,9 @@ impl Node {
             return Err(denied());
         }
         *state = Some(next);
+        drop(state);
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.reseed_live_file_book(&delivery);
         Ok(())
     }
     /// Return current local policy; unconfigured SDK nodes report the public default.
@@ -237,6 +248,25 @@ impl Node {
     pub async fn initiate_contact(&self, account: &str) -> io::Result<()> {
         self.initiate_contact_if(account, || Ok(())).await
     }
+    /// The enqueue acceptance path commits permission locally; its outbox owns
+    /// transport scheduling, including publication of signed return presence.
+    pub(in crate::node) async fn initiate_contact_locally(&self, account: &str) -> io::Result<()> {
+        self.change_allowed(account, true, PermissionSource::Initiated, || Ok(()))
+            .await
+    }
+    /// Await policy serialization without holding the host session. Then enclose
+    /// the complete synchronous local grant in the owner's operation guard.
+    pub(in crate::node) async fn initiate_contact_locally_if(
+        &self,
+        account: &str,
+        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let _operation = self.privacy.gate.write().await;
+        authorize(&mut || {
+            self.change_allowed_locked(account, true, PermissionSource::Initiated, || Ok(()))
+                .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))
+        })
+    }
     /// Recheck the active owner under the policy gate before committing an initiated grant.
     /// A prior manual grant is retained rather than demoted to initiated permission.
     pub async fn initiate_contact_if(
@@ -257,6 +287,17 @@ impl Node {
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
         let _operation = self.privacy.gate.write().await;
+        self.change_allowed_locked(account, allowed, source, authorize)
+    }
+    /// Caller holds the privacy gate. Keep the legacy authorization/validation
+    /// ordering; owner enqueue wraps this entire body before taking state locks.
+    fn change_allowed_locked(
+        &self,
+        account: &str,
+        allowed: bool,
+        source: PermissionSource,
+        authorize: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
         let announcements = self
             .roster
             .lock()
@@ -344,6 +385,19 @@ impl Node {
         .await;
     }
     pub(in crate::node) async fn initiate_device(&self, public: &PublicIdentity) -> io::Result<()> {
+        self.initiate_device_with_presence(public, true).await
+    }
+    pub(in crate::node) async fn initiate_device_locally(
+        &self,
+        public: &PublicIdentity,
+    ) -> io::Result<()> {
+        self.initiate_device_with_presence(public, false).await
+    }
+    async fn initiate_device_with_presence(
+        &self,
+        public: &PublicIdentity,
+        publish: bool,
+    ) -> io::Result<()> {
         if self.privacy.state.read().map_err(|_| denied())?.is_none() {
             return Ok(());
         }
@@ -371,7 +425,11 @@ impl Node {
                 Ok(())
             };
         };
-        self.initiate_contact(&account).await
+        if publish {
+            self.initiate_contact(&account).await
+        } else {
+            self.initiate_contact_locally(&account).await
+        }
     }
     pub(in crate::node) fn account_allowed(
         &self,
@@ -497,6 +555,13 @@ impl Node {
                 .get(&file)
                 .is_some_and(|scopes| scopes.contains(&scope))
             {
+                if state.legacy_scope_ids.len()
+                    >= super::delivery_store::DeliveryLimits::default().completed_receipts
+                {
+                    return Err(crate::eventlog::LogError::CorruptFile(
+                        "legacy file scope capacity exhausted".into(),
+                    ));
+                }
                 if state.scope_repair_needed {
                     let valid = state
                         .file_scopes
@@ -522,6 +587,7 @@ impl Node {
                     state.scope_repair_needed = true;
                     return Err(error);
                 }
+                state.legacy_scope_ids.insert(event);
                 state.file_scopes.entry(file).or_default().push(scope);
             }
         }
@@ -617,6 +683,10 @@ impl Node {
             return Err(TransportError::IdentityMismatch);
         }
         let group_member = self.group_member(public);
+        #[cfg(test)]
+        if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
+            hook();
+        }
         {
             let mut state = self
                 .privacy
@@ -624,15 +694,18 @@ impl Node {
                 .write()
                 .expect("privacy lock not poisoned");
             if let Some(state) = state.as_mut() {
-                if announce
-                    .account_id()
-                    .is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
-                    || group_member
-                {
+                if announce.account_id().is_some() {
                     state
                         .proofs
                         .record(announce)
                         .map_err(|_| TransportError::AdmissionDenied)?;
+                }
+                if !state.policy.snapshot().invisible
+                    || announce
+                        .account_id()
+                        .is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
+                    || group_member
+                {
                     state
                         .routes
                         .record(public, ip)
@@ -646,6 +719,92 @@ impl Node {
             .update(announce, ip, &self.user_id());
         Ok(())
     }
+
+    /// Persist a verified discovery snapshot outside the roster lock. Historical
+    /// proofs grant no permissions and never restore online presence.
+    pub(in crate::node) fn cache_discovered_peers(&self) -> io::Result<()> {
+        self.cached_peer_snapshot().map(|_| ())
+    }
+
+    fn discovery_snapshot(&self) -> (Vec<Announce>, Vec<crate::discovery::PeerRecord>) {
+        let roster = self.roster.lock().expect("roster lock not poisoned");
+        (roster.announcements(), roster.peers())
+    }
+
+    /// Return the captured peers whose certified identities were durably cached.
+    /// Public accountless legacy peers retain verified in-memory compatibility;
+    /// they are not persisted. Later arrivals belong to the next query.
+    pub fn cached_peer_snapshot(&self) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        Self::persist_discovery_snapshot(&self.privacy, self.discovery_snapshot())
+    }
+
+    /// Async hosts persist the captured snapshot on the blocking pool. No roster
+    /// guard or Node reference is carried into the filesystem operation.
+    pub async fn cached_peer_snapshot_async(
+        &self,
+    ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        let snapshot = self.discovery_snapshot();
+        let privacy = self.privacy.clone();
+        let work = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| io::Error::other("node runtime retired"))?;
+        #[cfg(test)]
+        let hook = self.peer_snapshot_hook.lock().unwrap().take();
+        tokio::task::spawn_blocking(move || {
+            let _work = work;
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook();
+            }
+            Self::persist_discovery_snapshot(&privacy, snapshot)
+        })
+        .await
+        .map_err(|_| io::Error::other("peer cache task failed"))?
+    }
+
+    fn persist_discovery_snapshot(
+        privacy: &PrivacyControl,
+        (proofs, peers): (Vec<Announce>, Vec<crate::discovery::PeerRecord>),
+    ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
+        let mut guard = privacy.state.write().map_err(|_| denied())?;
+        let Some(state) = guard.as_mut() else {
+            return Ok(peers);
+        };
+        let mut successful = Vec::new();
+        for proof in proofs {
+            if proof.account_id().is_none() {
+                if !state.policy.snapshot().invisible
+                    && proof.verify()
+                    && proof.tcp_port != 0
+                    && proof.name.len() <= 1024
+                    && state.proofs.by_author(&proof.ed25519_pub).is_none()
+                {
+                    successful.push(proof);
+                }
+                continue;
+            }
+            if state.proofs.record(&proof).is_err() {
+                log::warn!("discovered peer proof was not cached");
+                continue;
+            }
+            if let Some(peer) = peers.iter().find(|p| p.public == proof.public()) {
+                if state.routes.record(&peer.public, peer.addr.ip()).is_err() {
+                    log::warn!("discovered peer route was not cached");
+                    continue;
+                }
+            }
+            successful.push(proof);
+        }
+        Ok(peers
+            .into_iter()
+            .filter(|peer| {
+                successful.iter().any(|proof| {
+                    proof.public() == peer.public && proof.account_id() == peer.account_id
+                })
+            })
+            .collect())
+    }
     fn guard_channel(&self, channel: &mut SecureChannel<TcpStream>, generation: u64) {
         let control = self.privacy.clone();
         channel.set_io_admission(
@@ -658,10 +817,16 @@ impl Node {
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        #[cfg(test)]
+        let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
         let mut addr = addr;
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         let own = self.own_presence();
+        #[cfg(test)]
+        timing.phase("dial-privacy-gate");
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        timing.phase("dial-admission");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         let announce = self
             .roster
@@ -673,7 +838,14 @@ impl Node {
             return Err(TransportError::AdmissionDenied);
         }
         let mut channel = tokio::time::timeout(super::transport::HANDSHAKE_TIMEOUT, async {
+            #[cfg(test)]
+            timing.phase("dial-tcp-connect");
             let stream = TcpStream::connect(addr).await?;
+            #[cfg(test)]
+            {
+                timing.socket(&stream);
+                timing.phase("dial-noise-presence");
+            }
             stream.set_nodelay(true)?;
             SecureChannel::connect_with_presence(
                 stream,
@@ -685,6 +857,8 @@ impl Node {
         })
         .await
         .map_err(|_| TransportError::Noise("dial timed out".into()))??;
+        #[cfg(test)]
+        timing.phase("dial-proof-validation");
         if let Some(new) = channel.peer_announcement() {
             let state = self
                 .privacy
@@ -699,21 +873,36 @@ impl Node {
                 }
             }
         }
+        #[cfg(test)]
+        timing.phase("dial-remember-peer");
         self.remember_peer(
             channel.peer_identity(),
             channel.peer_announcement(),
             addr.ip(),
         )?;
         self.guard_channel(&mut channel, generation);
+        #[cfg(test)]
+        timing.finish();
         Ok(channel)
     }
     pub(in crate::node) async fn privacy_accept(
         &self,
         stream: TcpStream,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        #[cfg(test)]
+        let mut timing = super::delivery_runtime::TestTiming::new("accept-tcp-ready");
+        #[cfg(test)]
+        timing.socket(&stream);
         let ip = stream.peer_addr()?.ip();
+        stream.set_nodelay(true)?;
+        #[cfg(test)]
+        timing.phase("accept-own-presence");
         let own = self.own_presence();
+        #[cfg(test)]
+        timing.phase("accept-privacy-gate");
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        timing.phase("accept-noise-presence");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         let mut channel = tokio::time::timeout(
             super::transport::HANDSHAKE_TIMEOUT,
@@ -723,8 +912,12 @@ impl Node {
         )
         .await
         .map_err(|_| TransportError::Noise("accept timed out".into()))??;
+        #[cfg(test)]
+        timing.phase("accept-remember-peer");
         self.remember_peer(channel.peer_identity(), channel.peer_announcement(), ip)?;
         self.guard_channel(&mut channel, generation);
+        #[cfg(test)]
+        timing.finish();
         Ok(channel)
     }
 }

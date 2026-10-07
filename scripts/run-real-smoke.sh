@@ -14,6 +14,7 @@ run_step() {
 run_step "delivery / AI contract smoke" make eval-smoke
 run_step "AI eval harness tests" node --test scripts/test-ai-eval.mjs
 run_step "workspace Rust tests" make test
+run_step "frontend unit tests and coverage" bash -lc 'cd frontend && npm run test:coverage'
 run_step "backend multi-process E2E" make e2e
 run_step "frontend Playwright E2E" bash -lc 'cd frontend && npm run e2e'
 

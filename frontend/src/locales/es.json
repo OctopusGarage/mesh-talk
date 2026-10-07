@@ -111,6 +111,7 @@
     "localNetwork": "Red local",
     "peopleOnLan_one": "{{count}} persona en línea en la LAN",
     "peopleOnLan_other": "{{count}} personas en línea en la LAN",
+    "onlineShort": "{{count}} en línea",
     "pin": "Fijar arriba",
     "unpin": "Dejar de fijar",
     "rename": "Renombrar",
@@ -156,11 +157,20 @@
     "offline": "Desconectado"
   },
   "message": {
+    "delivery": {
+      "awaiting": "Esperando recibo",
+      "delivered": "Entregado",
+      "help": "Recibo automático de la cuenta destinataria. No confirma lectura.",
+      "fileHelp": "Tarjeta del archivo entregada. La descarga y la lectura son independientes.",
+      "metadataPending": "Detalles del archivo pendientes"
+    },
     "sending": "enviando…",
     "reply": "Responder",
     "react": "Reaccionar",
     "retry": "Reintentar",
     "fail": {
+      "invalid-input": "Mensaje no válido",
+      "authorization": "La sesión cambió",
       "peer-unknown": "No se pudo enviar: el destinatario aún no es accesible",
       "relay-unreachable": "No se pudo enviar: red inaccesible",
       "crypto": "No se pudo enviar: error de cifrado",
@@ -197,7 +207,8 @@
   },
   "settings": {
     "title": "Ajustes",
-    "description": "Apariencia, comportamiento en segundo plano y dónde se guardan los archivos recibidos.",
+    "description": "Privacidad, apariencia, comportamiento en segundo plano, archivos e historial de chat.",
+    "scrollMore": "Desplázate para ver más ajustes",
     "sectionAppearance": "Apariencia",
     "sectionBackground": "Segundo plano",
     "sectionFiles": "Archivos",

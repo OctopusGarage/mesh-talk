@@ -104,6 +104,13 @@ export const test = base.extend({
         recalled?: boolean;
         recalled_text?: string | null;
         sticker?: string | null;
+        file?: {
+          name: string;
+          size: number;
+          mime: string;
+          file_conv: string;
+          media: boolean;
+        };
       };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
@@ -303,8 +310,68 @@ export const test = base.extend({
         );
       };
 
+      // Presentation projection control, not a cryptographic receipt oracle.
+      // Enqueue is Awaiting only; tests explicitly advance delivery independently.
+      const delivery: Record<
+        string,
+        Record<string, "awaiting" | "delivered">
+      > = {};
+      const acceptLast = (account: string) => {
+        const history = msgs[`acc:${account}`];
+        const id = history[history.length - 1].id!;
+        if (account !== SELF.account)
+          (delivery[account] ||= {})[id] = "awaiting";
+        return id;
+      };
+      (window as unknown as Record<string, unknown>).__mockSetDelivery = (
+        account: string,
+        id: string,
+        status: "awaiting" | "delivered",
+      ) => {
+        (delivery[account] ||= {})[id] = status;
+      };
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
+          owner_node_identity: (a) => ({
+            owner: a.owner,
+            device_id: SELF.device,
+            account_id: SELF.account,
+          }),
+          owner_account_history: (a) => msgs[`acc:${a.account}`] ?? [],
+          owner_delivery_statuses: (a) =>
+            (a.ids as string[]).flatMap((id) => {
+              const status = delivery[String(a.account)]?.[id];
+              return status ? [{ id, status }] : [];
+            }),
+          owner_enqueue_text: (a) => {
+            recordSend(`acc:${a.account}`, String(a.text), a.replyTo);
+            return acceptLast(String(a.account));
+          },
+          owner_enqueue_sticker: (a) => {
+            recordSticker(
+              `acc:${a.account}`,
+              String(a.stickerId),
+              String(a.fallback),
+            );
+            return acceptLast(String(a.account));
+          },
+          owner_enqueue_file: (a) => {
+            const fileConv = `fc_${++mid}`;
+            (msgs[`acc:${a.account}`] ||= []).push(
+              msg({
+                from_me: true,
+                who: SELF.device,
+                file: {
+                  name: String(a.path).split(/[\\/]/).pop() || "file",
+                  size: 123,
+                  mime: "application/octet-stream",
+                  file_conv: fileConv,
+                  media: Boolean(a.media),
+                },
+              }),
+            );
+            return { id: acceptLast(String(a.account)), fileConv };
+          },
           // auth
           register: () => ({
             success: true,

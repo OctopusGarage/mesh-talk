@@ -15,7 +15,7 @@ import { chat, settings as settingsApi } from "@/lib/api";
 import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
-import { useChat } from "@/store/chat";
+import { useChat, captureChatOwnership } from "@/store/chat";
 import { TransferBar } from "./TransferBar";
 import { fileGlyph } from "./mediaFile";
 
@@ -53,18 +53,21 @@ export function FilesTray() {
 
   // Pick (and persist) the remembered default download folder.
   const chooseDir = async () => {
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
     try {
       const dir = await openDialog({
         directory: true,
         defaultPath: downloadDir || undefined,
       });
-      if (typeof dir === "string") {
-        const cur = await settingsApi.get();
-        await settingsApi.set({ ...cur, download_dir: dir });
-        setDownloadDir(dir);
+      if (lease.current() && typeof dir === "string") {
+        if (!lease.current()) return;
+        await settingsApi.update({ download_dir: dir });
+        if (lease.current()) setDownloadDir(dir);
       }
     } catch (e) {
-      setError(t("files.couldntSave", { error: errorMessage(e) }));
+      if (lease.current())
+        setError(t("files.couldntSave", { error: errorMessage(e) }));
     }
   };
 
@@ -98,33 +101,40 @@ export function FilesTray() {
   // the OS Downloads folder (the common default). Only falls back to a Save-as dialog if no
   // folder is resolvable at all.
   const saveToDefault = async (fileConv: string, name: string) => {
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
     try {
       const dir = await effectiveDownloadDir();
+      if (!lease.current()) return;
       if (dir) {
         const path = await chat.saveFileToDir(fileConv, dir);
-        remember(fileConv, path);
+        if (lease.current()) remember(fileConv, path);
         return;
       }
       const dest = await save({ defaultPath: name });
-      if (typeof dest === "string") {
+      if (lease.current() && typeof dest === "string") {
         await chat.saveFile(fileConv, dest);
-        remember(fileConv, dest);
+        if (lease.current()) remember(fileConv, dest);
       }
     } catch (e) {
-      handleSaveError(e);
+      if (lease.current()) handleSaveError(e);
     }
   };
 
   // Always-prompt "Save as…" override; the dialog opens at the Downloads folder.
   const saveAs = async (fileConv: string, name: string) => {
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
     try {
-      const dest = await save({ defaultPath: await defaultSavePath(name) });
-      if (typeof dest === "string") {
+      const defaultPath = await defaultSavePath(name);
+      if (!lease.current()) return;
+      const dest = await save({ defaultPath });
+      if (lease.current() && typeof dest === "string") {
         await chat.saveFile(fileConv, dest);
-        remember(fileConv, dest);
+        if (lease.current()) remember(fileConv, dest);
       }
     } catch (e) {
-      handleSaveError(e);
+      if (lease.current()) handleSaveError(e);
     }
   };
 
@@ -141,10 +151,13 @@ export function FilesTray() {
   };
 
   const reveal = async (path: string) => {
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
     try {
       await revealItemInDir(path);
     } catch (e) {
-      setError(t("files.couldntOpen", { error: errorMessage(e) }));
+      if (lease.current())
+        setError(t("files.couldntOpen", { error: errorMessage(e) }));
     }
   };
 
@@ -153,12 +166,13 @@ export function FilesTray() {
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
-          size="icon"
           data-testid="sidebar-action-files"
           title={t("files.received")}
-          className="relative"
+          aria-label={t("files.received")}
+          className="relative h-9 min-w-0 gap-2 px-2.5 text-xs font-medium"
         >
-          <Download className="h-4 w-4" />
+          <Download className="h-4 w-4 shrink-0" />
+          <span className="truncate">{t("files.received")}</span>
           {files.length > 0 && (
             <Badge className="absolute -right-0.5 -top-0.5 h-4 min-w-4 justify-center bg-primary px-1 text-primary-foreground">
               {files.length}

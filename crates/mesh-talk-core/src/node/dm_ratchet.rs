@@ -9,6 +9,7 @@ use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::ratchet_sessions::RatchetSessions;
 use crate::ratchet::{init_alice, init_bob, Header};
 use hkdf::Hkdf;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -51,6 +52,14 @@ pub struct DmRatchet {
     sessions: RatchetSessions,
 }
 
+/// Secret transition intended only for encrypted local transaction journals.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PreparedRatchet {
+    pub(crate) peer: String,
+    pub(crate) state: Vec<u8>,
+    previous: Option<Vec<u8>>,
+}
+
 impl DmRatchet {
     pub fn new(sessions: RatchetSessions) -> Self {
         DmRatchet { sessions }
@@ -64,6 +73,17 @@ impl DmRatchet {
         peer: &PublicIdentity,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, LogError> {
+        let (wire, prepared) = self.prepare_encrypt(me, peer, plaintext)?;
+        self.commit_prepared(&prepared)?;
+        Ok(wire)
+    }
+
+    pub(crate) fn prepare_encrypt(
+        &self,
+        me: &DeviceIdentity,
+        peer: &PublicIdentity,
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, PreparedRatchet), LogError> {
         let peer_id = peer.user_id();
         let mut state = match self.sessions.get(&peer_id) {
             Some(s) => s,
@@ -72,8 +92,7 @@ impl DmRatchet {
         let (header, ct) = state
             .ratchet_encrypt(plaintext)
             .map_err(|_| LogError::Serialization("ratchet encrypt".into()))?;
-        self.sessions.put(&peer_id, &state)?;
-        Ok(frame(&header, &ct))
+        Ok((frame(&header, &ct), self.prepared(peer_id, &state)))
     }
 
     /// Decrypt a wire blob from `peer`. Bootstraps as responder on first contact;
@@ -84,6 +103,17 @@ impl DmRatchet {
         peer: &PublicIdentity,
         wire: &[u8],
     ) -> Result<Vec<u8>, LogError> {
+        let (plain, prepared) = self.prepare_decrypt(me, peer, wire)?;
+        self.commit_prepared(&prepared)?;
+        Ok(plain)
+    }
+
+    pub(crate) fn prepare_decrypt(
+        &self,
+        me: &DeviceIdentity,
+        peer: &PublicIdentity,
+        wire: &[u8],
+    ) -> Result<(Vec<u8>, PreparedRatchet), LogError> {
         let (header, ct) =
             unframe(wire).ok_or_else(|| LogError::Serialization("bad wire".into()))?;
         let peer_id = peer.user_id();
@@ -94,10 +124,7 @@ impl DmRatchet {
             None => init_bob(&shared_root(me, peer), my_secret),
         };
         match state.ratchet_decrypt(&header, ct) {
-            Ok(pt) => {
-                self.sessions.put(&peer_id, &state)?;
-                Ok(pt)
-            }
+            Ok(pt) => Ok((pt, self.prepared(peer_id, &state))),
             Err(_) => {
                 // Possible simultaneous init: we set up as initiator, but the peer's
                 // message expects us to be the responder. Tie-break: the LOWER user-id
@@ -108,13 +135,34 @@ impl DmRatchet {
                     let pt = fresh
                         .ratchet_decrypt(&header, ct)
                         .map_err(|_| LogError::Serialization("ratchet decrypt".into()))?;
-                    self.sessions.put(&peer_id, &fresh)?;
-                    Ok(pt)
+                    Ok((pt, self.prepared(peer_id, &fresh)))
                 } else {
                     Err(LogError::Serialization("ratchet decrypt".into()))
                 }
             }
         }
+    }
+
+    fn prepared(&self, peer: String, state: &crate::ratchet::RatchetState) -> PreparedRatchet {
+        let previous = self.sessions.get(&peer).map(|s| s.serialize());
+        PreparedRatchet {
+            peer,
+            state: state.serialize(),
+            previous,
+        }
+    }
+
+    pub(crate) fn commit_prepared(&mut self, prepared: &PreparedRatchet) -> Result<(), LogError> {
+        let state = crate::ratchet::RatchetState::deserialize(&prepared.state)
+            .ok_or_else(|| LogError::Serialization("invalid prepared ratchet".into()))?;
+        let current = self.sessions.get(&prepared.peer).map(|s| s.serialize());
+        if current.as_deref() == Some(prepared.state.as_slice()) {
+            return self.sessions.sync();
+        }
+        if current != prepared.previous {
+            return Err(LogError::Serialization("stale prepared ratchet".into()));
+        }
+        self.sessions.put_durable(&prepared.peer, &state)
     }
 
     pub fn has_session(&self, peer: &PublicIdentity) -> bool {
@@ -154,6 +202,68 @@ mod tests {
     }
 
     #[test]
+    fn prepared_transitions_leave_sessions_unchanged_until_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let mut am = manager(dir.path(), "a.sess");
+        let mut bm = manager(dir.path(), "b.sess");
+        let before = std::fs::read(dir.path().join("a.sess")).unwrap();
+        let (wire, prepared) = am
+            .prepare_encrypt(&alice, &bob.public(), b"prepared")
+            .unwrap();
+        assert!(!am.has_session(&bob.public()));
+        assert_eq!(std::fs::read(dir.path().join("a.sess")).unwrap(), before);
+        let (plain, received) = bm.prepare_decrypt(&bob, &alice.public(), &wire).unwrap();
+        assert_eq!(plain, b"prepared");
+        assert!(!bm.has_session(&alice.public()));
+        assert!(!manager(dir.path(), "a.sess").has_session(&bob.public()));
+        assert!(!manager(dir.path(), "b.sess").has_session(&alice.public()));
+        am.commit_prepared(&prepared).unwrap();
+        bm.commit_prepared(&received).unwrap();
+        am.commit_prepared(&prepared).unwrap();
+        let mut am = manager(dir.path(), "a.sess");
+        am.commit_prepared(&prepared).unwrap();
+        let reply = bm.encrypt(&bob, &alice.public(), b"reply").unwrap();
+        assert_eq!(am.decrypt(&alice, &bob.public(), &reply).unwrap(), b"reply");
+        assert!(am.commit_prepared(&prepared).is_err());
+        let before_disk = std::fs::read(dir.path().join("a.sess")).unwrap();
+        let before_live = am
+            .sessions
+            .get(&bob.public().user_id())
+            .unwrap()
+            .serialize();
+        am.prepare_encrypt(&alice, &bob.public(), b"uncommitted")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("a.sess")).unwrap(),
+            before_disk
+        );
+        assert_eq!(
+            am.sessions
+                .get(&bob.public().user_id())
+                .unwrap()
+                .serialize(),
+            before_live
+        );
+        let (_, mut bad) = am.prepare_encrypt(&alice, &bob.public(), b"bad").unwrap();
+        let before = am
+            .sessions
+            .get(&bob.public().user_id())
+            .unwrap()
+            .serialize();
+        bad.state = vec![255; 3];
+        assert!(am.commit_prepared(&bad).is_err());
+        assert_eq!(
+            am.sessions
+                .get(&bob.public().user_id())
+                .unwrap()
+                .serialize(),
+            before
+        );
+    }
+
+    #[test]
     fn out_of_order_delivery_opens() {
         let dir = tempfile::tempdir().unwrap();
         let alice = DeviceIdentity::generate();
@@ -166,6 +276,24 @@ mod tests {
         assert_eq!(bm.decrypt(&bob, &alice.public(), &w2).unwrap(), b"m2");
         assert_eq!(bm.decrypt(&bob, &alice.public(), &w0).unwrap(), b"m0");
         assert_eq!(bm.decrypt(&bob, &alice.public(), &w1).unwrap(), b"m1");
+    }
+
+    #[test]
+    fn prepared_receive_replay_preserves_buffered_skipped_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let mut am = manager(dir.path(), "a.sess");
+        let mut bm = manager(dir.path(), "b.sess");
+        let first = am.encrypt(&alice, &bob.public(), b"first").unwrap();
+        let later = am.encrypt(&alice, &bob.public(), b"later").unwrap();
+        let (plain, prepared) = bm.prepare_decrypt(&bob, &alice.public(), &later).unwrap();
+        assert_eq!(plain, b"later");
+        bm.commit_prepared(&prepared).unwrap();
+        drop(bm);
+        let mut bm = manager(dir.path(), "b.sess");
+        bm.commit_prepared(&prepared).unwrap();
+        assert_eq!(bm.decrypt(&bob, &alice.public(), &first).unwrap(), b"first");
     }
 
     #[test]

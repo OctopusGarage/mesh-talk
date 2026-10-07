@@ -99,9 +99,16 @@ pub fn retention_cutoff_ms(days: u32) -> Option<u64> {
 /// Managed Tauri state wrapping [`AppSettings`] so the close-handler and the
 /// notification path can read it cheaply behind a `Mutex`.
 #[derive(Clone, Default)]
-pub struct SettingsState(Arc<Mutex<AppSettings>>);
+pub struct SettingsState(
+    Arc<Mutex<AppSettings>>,
+    #[cfg(test)] Option<std::path::PathBuf>,
+);
 
 impl SettingsState {
+    #[cfg(test)]
+    pub(crate) fn isolated(path: std::path::PathBuf) -> Self {
+        Self(Arc::new(Mutex::new(AppSettings::default())), Some(path))
+    }
     pub fn get(&self) -> AppSettings {
         self.0.lock().unwrap().clone()
     }
@@ -134,6 +141,12 @@ pub fn record_last_user<R: tauri::Runtime>(
 ) {
     let mut settings = state.get();
     settings.last_user = last_user;
+    #[cfg(test)]
+    if let Some(path) = state.1.as_ref() {
+        std::fs::write(path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        state.set(settings);
+        return;
+    }
     save(app, &settings);
     state.set(settings);
 }

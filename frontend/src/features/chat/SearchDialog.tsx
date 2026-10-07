@@ -138,12 +138,14 @@ export function SearchDialog() {
       <DialogTrigger asChild>
         <Button
           variant="ghost"
-          size="icon"
           data-testid="sidebar-action-search"
           title={t("search.title")}
+          aria-label={t("search.title")}
           disabled={!ready}
+          className="h-9 min-w-0 gap-2 px-2.5 text-xs font-medium"
         >
-          <Search className="h-4 w-4" />
+          <Search className="h-4 w-4 shrink-0" />
+          <span className="truncate">{t("search.title")}</span>
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-lg" data-testid="search-dialog">

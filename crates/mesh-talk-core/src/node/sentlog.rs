@@ -30,22 +30,70 @@ pub struct SentEntry {
 pub struct SentLog {
     file: EncryptedRecordLog<SentEntry>,
     by_conversation: HashMap<ConversationId, Vec<SentEntry>>,
+    keys: HashMap<SentKey, (ConversationId, usize)>,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+enum SentKey {
+    Account(ConversationId, [u8; 32]),
+    Legacy(ConversationId, u64),
+}
+
+fn key(entry: &SentEntry) -> SentKey {
+    match super::dm_envelope::DmEnvelope::decode(&entry.plaintext) {
+        Some(envelope) => SentKey::Account(entry.conversation, envelope.msg_id),
+        None => SentKey::Legacy(entry.conversation, entry.seq),
+    }
 }
 
 impl SentLog {
+    #[cfg(test)]
+    pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.file.fail_appends_for_test(enabled)
+    }
+    /// Install an exact transaction record durably, including an already installed
+    /// record. A logical account id (or legacy conversation/sequence) cannot be
+    /// reused for different history; recovery fails closed on such conflicts.
+    #[allow(dead_code)] // Used by the delivery transaction integration in the next phase.
+    pub fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError> {
+        let entry_key = key(entry);
+        if let Some((conversation, index)) = self.keys.get(&entry_key) {
+            let existing = &self.by_conversation[conversation][*index];
+            if existing != entry {
+                return Err(LogError::CorruptFile("conflicting sent transaction".into()));
+            }
+            return self.file.sync();
+        }
+        self.file.append_durable(entry)?;
+        let entries = self.by_conversation.entry(entry.conversation).or_default();
+        self.keys
+            .insert(entry_key, (entry.conversation, entries.len()));
+        entries.push(entry.clone());
+        Ok(())
+    }
+
     /// Open (or create) the sent log at `path`, replaying stored entries.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, entries) = EncryptedRecordLog::<SentEntry>::open(path, password, MAGIC)?;
         let mut by_conversation: HashMap<ConversationId, Vec<SentEntry>> = HashMap::new();
+        let mut keys = HashMap::new();
         for entry in entries {
-            by_conversation
-                .entry(entry.conversation)
-                .or_default()
-                .push(entry);
+            let entry_key = key(&entry);
+            if let Some((conversation, index)) = keys.get(&entry_key) {
+                let existing = &by_conversation[conversation][*index];
+                if existing != &entry {
+                    return Err(LogError::CorruptFile("conflicting sent transaction".into()));
+                }
+                continue;
+            }
+            let entries = by_conversation.entry(entry.conversation).or_default();
+            keys.insert(entry_key, (entry.conversation, entries.len()));
+            entries.push(entry);
         }
         Ok(Self {
             file,
             by_conversation,
+            keys,
         })
     }
 
@@ -64,10 +112,11 @@ impl SentLog {
             plaintext: plaintext.to_vec(),
         };
         self.file.append(&entry)?;
-        self.by_conversation
-            .entry(conversation)
-            .or_default()
-            .push(entry);
+        let entries = self.by_conversation.entry(conversation).or_default();
+        self.keys
+            .entry(key(&entry))
+            .or_insert((conversation, entries.len()));
+        entries.push(entry);
         Ok(())
     }
 
@@ -95,11 +144,12 @@ impl SentLog {
         }
         self.file.rewrite(&kept)?;
         self.by_conversation.clear();
+        self.keys.clear();
         for entry in kept {
-            self.by_conversation
-                .entry(entry.conversation)
-                .or_default()
-                .push(entry);
+            let entries = self.by_conversation.entry(entry.conversation).or_default();
+            self.keys
+                .insert(key(&entry), (entry.conversation, entries.len()));
+            entries.push(entry);
         }
         Ok(removed)
     }
@@ -137,6 +187,134 @@ mod tests {
 
     fn conv(n: u8) -> ConversationId {
         ConversationId::new([n; 32])
+    }
+
+    #[test]
+    fn durable_recovery_is_idempotent_and_rejects_conflicting_logical_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sent.log");
+        let envelope = super::super::dm_envelope::DmEnvelope::new(
+            "a".into(),
+            "b".into(),
+            [7; 32],
+            b"original".to_vec(),
+        );
+        let entry = SentEntry {
+            conversation: conv(1),
+            seq: 1,
+            wall_clock: 10,
+            plaintext: envelope.encode(),
+        };
+        let mut log = SentLog::open(&path, "pw").unwrap();
+        log.record_durable(&entry).unwrap();
+        log.record_durable(&entry).unwrap();
+        drop(log);
+        let mut log = SentLog::open(&path, "pw").unwrap();
+        log.record_durable(&entry).unwrap();
+        assert_eq!(log.entries(&conv(1)).len(), 1);
+        let mut conflict = entry.clone();
+        conflict.seq = 2;
+        assert!(log.record_durable(&conflict).is_err());
+        assert_eq!(log.entries(&conv(1)), vec![entry]);
+    }
+
+    #[test]
+    fn durable_recovery_legacy_key_is_conversation_and_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sent.log");
+        let mut log = SentLog::open(&path, "pw").unwrap();
+        let entry = SentEntry {
+            conversation: conv(1),
+            seq: 1,
+            wall_clock: 10,
+            plaintext: b"legacy".to_vec(),
+        };
+        log.record_durable(&entry).unwrap();
+        log.record_durable(&entry).unwrap();
+        let mut conflict = entry.clone();
+        conflict.plaintext = b"different".to_vec();
+        assert!(log.record_durable(&conflict).is_err());
+        assert_eq!(log.entries(&conv(1)), vec![entry]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_duplicate_retries_sync_even_if_record_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("profile");
+        let moved = dir.path().join("moved");
+        let mut log = SentLog::open(&parent.join("sent"), "pw").unwrap();
+        let entry = SentEntry {
+            conversation: conv(1),
+            seq: 1,
+            wall_clock: 10,
+            plaintext: b"saved".to_vec(),
+        };
+        log.record_durable(&entry).unwrap();
+        std::fs::rename(&parent, &moved).unwrap();
+        assert!(
+            log.record_durable(&entry).is_err(),
+            "an existing record must still cross the durable boundary"
+        );
+        std::fs::rename(&moved, &parent).unwrap();
+        log.record_durable(&entry).unwrap();
+        assert_eq!(log.entries(&conv(1)), vec![entry]);
+    }
+
+    #[test]
+    fn replay_deduplicates_matching_records_and_rejects_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sent.log");
+        let mut log = SentLog::open(&path, "pw").unwrap();
+        log.record(conv(1), 1, 10, b"legacy").unwrap();
+        log.record(conv(1), 1, 10, b"legacy").unwrap();
+        drop(log);
+        let mut log = SentLog::open(&path, "pw").unwrap();
+        assert_eq!(log.entries(&conv(1)).len(), 1);
+        log.record(conv(1), 1, 10, b"conflict").unwrap();
+        drop(log);
+        assert!(SentLog::open(&path, "pw").is_err());
+    }
+
+    #[test]
+    fn account_log_reopens_after_deletion_and_sequence_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sent.log");
+        let mut log = SentLog::open(&path, "pw").unwrap();
+        let a = super::super::dm_envelope::DmEnvelope::new(
+            "a".into(),
+            "b".into(),
+            [1; 32],
+            b"first".to_vec(),
+        )
+        .encode();
+        let b = super::super::dm_envelope::DmEnvelope::new(
+            "a".into(),
+            "b".into(),
+            [2; 32],
+            b"second".to_vec(),
+        )
+        .encode();
+        let c = super::super::dm_envelope::DmEnvelope::new(
+            "a".into(),
+            "b".into(),
+            [3; 32],
+            b"third".to_vec(),
+        )
+        .encode();
+        log.record(conv(1), 1, 10, &a).unwrap();
+        log.record(conv(1), 2, 11, &b).unwrap();
+        log.remove_where(|entry| entry.seq == 1).unwrap();
+        log.record(conv(1), 2, 12, &c).unwrap();
+        drop(log);
+        let log = SentLog::open(&path, "pw").unwrap();
+        assert_eq!(
+            log.entries(&conv(1))
+                .iter()
+                .map(|e| e.plaintext.clone())
+                .collect::<Vec<_>>(),
+            vec![b, c]
+        );
     }
 
     #[test]

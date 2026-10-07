@@ -69,9 +69,13 @@ impl DmEnvelope {
     /// Recover an envelope from opened plaintext, or `None` if the bytes are not a
     /// framed envelope (a legacy device-addressed message — caller falls back).
     pub fn decode(bytes: &[u8]) -> Option<DmEnvelope> {
+        if bytes.len() > 256 * 1024 {
+            return None;
+        }
         let rest = bytes.strip_prefix(DM_ENV_MAGIC)?;
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
+            .with_limit(256 * 1024)
             .reject_trailing_bytes()
             .deserialize::<DmEnvelope>(rest)
             .ok()

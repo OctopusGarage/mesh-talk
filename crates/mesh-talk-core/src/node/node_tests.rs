@@ -889,7 +889,7 @@ async fn reopen_retries_unsurfaced_file_manifest_after_restart() {
         )
         .unwrap();
         rf.record(
-            surfaced_m.file_conv,
+            conv,
             alice.public().user_id(),
             1000,
             &surfaced_m.encode(),
@@ -1550,6 +1550,11 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
     );
 
     // The owner renames; the change converges on Bob.
+    let empty_name = alice_node.rename_channel(channel, "   ").await.unwrap_err();
+    assert!(
+        empty_name.to_string().starts_with("invalid input:"),
+        "local name rejection must be typed invalid input"
+    );
     alice_node.rename_channel(channel, "renamed").await.unwrap();
     // A message after the rename carries the new name — a deterministic barrier proving
     // Bob processed the rename's MembershipChange.
@@ -1967,8 +1972,14 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
     let dir = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bob_addr = listener.local_addr().unwrap();
+    let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let alice_roster = seed_roster(&bob, "Bob", bob_addr.port(), &alice.public().user_id());
-    let bob_roster = seed_roster(&alice, "Alice", 1, &bob.public().user_id());
+    let bob_roster = seed_roster(
+        &alice,
+        "Alice",
+        alice_listener.local_addr().unwrap().port(),
+        &bob.public().user_id(),
+    );
 
     let (a_dm, _a) = mpsc::unbounded_channel();
     let (a_ch, _b) = mpsc::unbounded_channel();
@@ -1999,8 +2010,6 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
         "pw",
     )
     .unwrap();
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
-
     // ~5 chunks → the file_conv batch far exceeds one frame → multiple rounds.
     let payload = vec![0x5Au8; crate::file::CHUNK_SIZE * 4 + 999];
     let src = dir.path().join("big.bin");
@@ -2011,6 +2020,32 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
         .send_file_dm(&bob_uid, &src, crate::file::FileKind::File)
         .await
         .unwrap();
+
+    // The initial best-effort dial has no accepting worker. Resume the durable
+    // pending work rather than depending on it fitting the 400ms operation.
+    assert_eq!(
+        alice_node
+            .delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .unwrap()
+            .0
+            .file_conversation,
+        file_conv
+    );
+    let original_chunks: Vec<_> = alice_node
+        .log
+        .lock()
+        .unwrap()
+        .events(&file_conv)
+        .into_iter()
+        .cloned()
+        .collect();
+    assert_eq!(original_chunks.len(), 5);
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    workers.spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
 
     let rf = tokio::time::timeout(std::time::Duration::from_secs(10), b_f_r.recv())
         .await
@@ -2028,9 +2063,22 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    workers.shutdown().await;
     assert!(saved, "bob saved the multi-chunk file");
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
-    let _ = file_conv;
+    assert_eq!(rf.file_conv, file_conv);
+    assert_eq!(
+        alice_node
+            .log
+            .lock()
+            .unwrap()
+            .events(&file_conv)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        original_chunks,
+        "worker retries preserve the original signed chunks"
+    );
 }
 
 #[tokio::test]
@@ -2268,6 +2316,17 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
         .expect("receiver sees the channel file in history");
     assert!(!bob_file.from_me);
     assert_eq!(bob_file.file.as_ref().unwrap().file_conv, file_conv);
+    assert_eq!(alice_node.delivery_status(alice_file.id), None);
+    assert_eq!(bob_node.delivery_status(bob_file.id), None);
+    assert!(
+        bob_node
+            .delivery
+            .lock()
+            .unwrap()
+            .retry_receipts(1)
+            .is_empty(),
+        "channel file cards must not generate DM delivery receipts"
+    );
 
     let dest = dir.path().join("saved.bin");
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -2281,6 +2340,10 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     .await
     .expect("bob saved the channel file within 5s");
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert!(
+        bob_node.log.lock().unwrap().events(&file_conv).is_empty(),
+        "untracked channel export reclaims completed chunks"
+    );
 
     // Reverse direction: Bob -> Alice. Bob is a non-creator member; his
     // send_file_channel must distribute his own sender key first so Alice can

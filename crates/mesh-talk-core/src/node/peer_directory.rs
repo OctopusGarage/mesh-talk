@@ -188,6 +188,15 @@ impl PeerDirectory {
     pub(crate) fn announcements(&self) -> Vec<Announce> {
         self.records.clone()
     }
+    pub(crate) fn next_after(&self, cursor: Option<&str>) -> Option<Announce> {
+        let index = cursor.map_or(0, |id| {
+            self.records.partition_point(|a| a.user_id.as_str() <= id)
+        });
+        self.records
+            .get(index)
+            .or_else(|| self.records.first())
+            .cloned()
+    }
     fn save(&self, records: &[Announce]) -> io::Result<()> {
         let plaintext = codec().serialize(&(1u32, records)).map_err(invalid_error)?;
         let (ciphertext, nonce) = encrypt_data(&plaintext, &self.key).map_err(invalid_error)?;

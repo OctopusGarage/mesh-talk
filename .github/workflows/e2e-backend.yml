@@ -19,13 +19,22 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  backend-e2e:
-    name: Multi-process E2E
-    runs-on: ubuntu-latest
+  backend-platform:
+    name: Backend core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,10 +43,51 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install evidence runner
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
-      # Runs the `#[ignore]`d integration rigs serially (--test-threads=1) under nice,
-      # exactly as a contributor runs `make e2e` locally.
+      - name: Configure hosted macOS multicast route
+        if: runner.os == 'macOS'
+        run: |
+          sudo route -n add -host 224.0.0.167 -interface 127.0.0.1
+          node scripts/diagnostics/native-multicast-probe.mjs --require
+
+      # Native CLI processes, signed discovery, encrypted TCP, restart, relay,
+      # channels and byte-for-byte file transfer; never pass on zero selected tests.
       - name: Run multi-process E2E
-        run: make e2e
+        run: node scripts/evals/backend-runner.mjs
+        env:
+          EVAL_SOURCE_SHA: ${{ github.sha }}
+          EVAL_OUTPUT_DIR: ${{ runner.temp }}/backend-eval-results
+
+      - name: Preserve backend evaluation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-core-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backend-eval-results/
+          if-no-files-found: error
+          retention-days: 14
+
+  native-core:
+    uses: ./.github/workflows/hidden-contacts-native.yml
+
+  backend-e2e:
+    # Preserve the existing protected check while requiring every platform.
+    name: Multi-process E2E
+    needs: [backend-platform, native-core]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require complete successful platform matrix
+        env:
+          RESULT: ${{ needs.backend-platform.result }}
+          NATIVE_RESULT: ${{ needs.native-core.result }}
+        run: |
+          test "$RESULT" = success
+          test "$NATIVE_RESULT" = success

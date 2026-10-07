@@ -211,7 +211,18 @@ impl Node {
         loop {
             tokio::time::sleep(PROFILE_COMPACTION_INTERVAL).await;
             let node = Arc::clone(&self);
-            match tokio::task::spawn_blocking(move || node.drain_profile_compaction()).await {
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
+            match tokio::task::spawn_blocking(move || {
+                let _work = work;
+                if node.cache_discovered_peers().is_err() {
+                    log::warn!("verified discovery cache update failed; will retry");
+                }
+                node.drain_profile_compaction()
+            })
+            .await
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
                     log::warn!("profile log compaction failed; will retry: {error}");

@@ -150,6 +150,12 @@ impl PostOffice {
 }
 
 impl SyncStore for PostOffice {
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+        self.log
+            .get(id)
+            .is_some_and(|e| e.conversation_id == *conversation)
+            && self.log.sync().is_ok()
+    }
     fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
         SyncStore::event_ids(&self.log, conversation)
     }

@@ -1,29 +1,34 @@
 name: Code Quality and Health Check
 
-# Deep, cross-platform health check (macOS + Windows) that runs the full
-# scripts/check-health.sh. Per-push/PR gating lives in ci.yml (Linux + macOS);
-# this runs on main, on a weekly schedule, and on demand to avoid duplicating a
-# heavy build on every branch push.
+# Full native health checks run before merging, as well as on main and on demand.
+# Branch pushes use the lighter CI matrix; PRs require complete scanner evidence.
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   schedule:
     - cron: '0 6 * * 1' # Mondays 06:00 UTC
   workflow_dispatch:
 
+concurrency:
+  group: health-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  # Node 20+ required: vite 8 needs >=20.19 and uses CustomEvent (a Node 20 global).
-  NODE_VERSION: '20'
+  # Node 22+ required: Vitest 5 needs Node >=22.12.
+  NODE_VERSION: '22'
 
 jobs:
   check:
     name: Code Quality and Health Check
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
 
@@ -31,13 +36,13 @@ jobs:
       # 1️⃣ Checkout code
       - name: Checkout code
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       # 2️⃣ Install Rust toolchain
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
           components: clippy, rustfmt
 
       # 3️⃣ Install system dependencies (macOS)
@@ -73,6 +78,25 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install required Rust and shell scanners
+        uses: taiki-e/install-action@v2.87.20
+        with:
+          tool: cargo-deny,cargo-machete,typos-cli,shellcheck
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: Install pinned secret and workflow scanners
+        shell: bash
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       # 7️⃣ Cache Node.js dependencies
       - name: Cache Node.js dependencies
         uses: actions/cache@v6
@@ -94,6 +118,6 @@ jobs:
 
       # 🔟 Run unified health check
       - name: Run unified health check
+        shell: bash
         run: |
-          chmod +x scripts/check-health.sh
-          ./scripts/check-health.sh
+          bash scripts/check-health.sh

@@ -115,6 +115,7 @@
     "localNetwork": "區域網路",
     "peopleOnLan_one": "區域網路 {{count}} 人在線",
     "peopleOnLan_other": "區域網路 {{count}} 人在線",
+    "onlineShort": "{{count}} 人在線",
     "pin": "釘選至頂端",
     "unpin": "取消釘選",
     "rename": "重新命名",
@@ -160,11 +161,20 @@
     "offline": "離線"
   },
   "message": {
+    "delivery": {
+      "awaiting": "等待回執",
+      "delivered": "已送達",
+      "help": "目標帳戶的自動回執，不代表已讀。",
+      "fileHelp": "檔案卡片已送達，檔案下載與閱讀另行進行。",
+      "metadataPending": "等待檔案資訊"
+    },
     "sending": "傳送中…",
     "reply": "回覆",
     "react": "回應",
     "retry": "重試",
     "fail": {
+      "invalid-input": "訊息無效",
+      "authorization": "登入工作階段已變更",
       "peer-unknown": "傳送失敗——暫時無法聯絡到接收方",
       "relay-unreachable": "傳送失敗——網路無法連線",
       "crypto": "傳送失敗——加密錯誤",
@@ -201,7 +211,8 @@
   },
   "settings": {
     "title": "設定",
-    "description": "外觀、背景行為，以及接收檔案的儲存位置。",
+    "description": "管理隱私、外觀、背景行為、檔案及聊天記錄。",
+    "scrollMore": "捲動查看更多設定",
     "sectionAppearance": "外觀",
     "sectionBackground": "背景",
     "sectionFiles": "檔案",

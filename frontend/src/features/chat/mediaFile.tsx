@@ -12,6 +12,8 @@ import {
   File as FileIcon,
 } from "lucide-react";
 import { chat } from "@/lib/api";
+import { useAuth } from "@/store/auth";
+import { useChat, captureChatOwnership } from "@/store/chat";
 
 // Single source of truth for media extensions — the type predicates, the MIME map, AND the
 // image-button file-dialog filter (ConversationView) are all derived from these, so the three
@@ -222,43 +224,78 @@ export function useVideoPoster(
   }, [url, cacheKey]);
   return { poster, failed };
 }
-
-/** Lazily fetch a received file's decrypted bytes and expose them as a short-lived object
- * URL, revoked on unmount (and never refetched on re-render). Returns null until loaded. */
+/** Serial durable-first reads keep retrying missing bytes while this identity is mounted.
+ * Cleanup prevents later fallback/blob creation; already-admitted native reads may finish. */
 export function useFileObjectUrl(
   fileConv: string,
   enabled: boolean,
   mime?: string,
 ): string | null {
-  const [url, setUrl] = useState<string | null>(null);
+  const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
+  const run = useChat((s) => s.runEpoch);
+  const identityEpoch = useChat((s) => s.identityEpoch);
+  const ready = useChat((s) => s.ready);
+  const key = JSON.stringify([
+    owner,
+    generation,
+    run,
+    identityEpoch,
+    fileConv,
+    mime,
+  ]);
+  const [result, setResult] = useState<{
+    key: string;
+    url: string;
+    ownership: { alive: boolean };
+  } | null>(null);
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !owner || !ready || !fileConv) return;
+    const lease = captureChatOwnership();
     let alive = true;
+    const ownership = { alive: true };
     let objectUrl: string | null = null;
-    const show = (buf: ArrayBuffer) => {
-      if (!alive) return;
-      // The blob MUST carry a MIME type or macOS WKWebView won't play an inline <video>.
-      objectUrl = URL.createObjectURL(
-        new Blob([buf], mime ? { type: mime } : {}),
-      );
-      setUrl(objectUrl);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const current = () =>
+      alive && lease.current() && useChat.getState().runEpoch === run;
+    const read = async () => {
+      if (!current()) return;
+      try {
+        let bytes: ArrayBuffer;
+        try {
+          bytes = await chat.readMedia(fileConv);
+        } catch {
+          if (!current()) return;
+          bytes = await chat.readFile(fileConv);
+        }
+        if (!current()) return;
+        objectUrl = URL.createObjectURL(
+          new Blob([bytes], mime ? { type: mime } : {}),
+        );
+        setResult({ key, url: objectUrl, ownership });
+      } catch {
+        if (!current()) return;
+        const delay = Math.min(200 * 2 ** failures, 2000);
+        failures = Math.min(failures + 1, 4);
+        timer = setTimeout(() => {
+          void read();
+        }, delay);
+      }
     };
-    // Load from the DURABLE chat-media store first (survives chunk prune + restart); fall
-    // back to reassembling the transient chunks only if the store has no copy yet (a
-    // just-arrived media file before its receive-complete persist, or legacy history).
-    chat
-      .readMedia(fileConv)
-      .then(show)
-      .catch(() =>
-        chat
-          .readFile(fileConv)
-          .then(show)
-          .catch(() => {}),
-      );
+    void read();
     return () => {
       alive = false;
+      ownership.alive = false;
+      if (timer !== undefined) clearTimeout(timer);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileConv, enabled, mime]);
-  return url;
+  }, [key, enabled, owner, ready, fileConv, mime, run]);
+  return enabled &&
+    owner &&
+    ready &&
+    result?.key === key &&
+    result.ownership.alive
+    ? result.url
+    : null;
 }

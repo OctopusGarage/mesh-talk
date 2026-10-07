@@ -17,22 +17,29 @@ events.
 ## 1. Process & layers
 
 ```
-React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.rs)
-        ▲   ──listen() events──                         │
-        │                                               ▼
-        │                                   NodeRuntime (node/runtime.rs)
-        │                                   starts 7 bg tasks per login:
-        │                                   UDP listen / UDP multicast announce /
-        └────────── on_dm/on_channel/on_file callbacks ── TCP accept / PO drain /
-                                                          DM·channel·file forwarders
-                                                               │
-                                                          Node (node/node.rs) — orchestration
+React UI ── lib/api/*.ts ──invoke()──▶ Tauri IPC (chat_commands/)
+   ▲                                    │
+   │ Tauri events                       ▼
+   └─────────────── RuntimeEvents ← NodeRuntime (node/runtime.rs)
+                                           │ discovery, accept, maintenance
+                                           ▼
+                                   Node (node/node.rs) — orchestration
         ┌──────────────┬───────────────┬──────────────┬───────┴──────┐
    identity/      transport/        eventlog/       discovery/    postoffice/
    ratchet/       (Noise XX)        (DAG + sync)    (signed UDP)  (elect+relay)
    channel/ dm/
         └────────────── storage/encryption.rs (PBKDF2-600k + AES-256-GCM at rest) ──┘
 ```
+
+`mesh-talk-core` owns protocol state, network tasks, and encrypted persistence.
+The desktop shell composes it using `RuntimeConfig` and `RuntimeEvents` in
+`src-tauri/src/commands.rs`. `NodeRuntime::start` remains a compatibility
+constructor for SDK callers. The shell owns the session and translates inbound
+events to Tauri events; it does not own protocol or wire types. Desktop IPC
+commands live in `src-tauri/src/chat_commands/`, grouped by account, messaging,
+channels, files, platform, and diagnostics. `mod.rs` re-exports the established
+command names for Tauri registration. Commands clone a node handle from
+`NodeState` before asynchronous node work, releasing the session lock first.
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
@@ -58,7 +65,8 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   forward secrecy + post-compromise recovery; bounded out-of-order (1000/2000); lower
   `user_id` is the canonical initiator (simultaneous-init tie-break); state encrypted on
   disk (`node/ratchet_sessions.rs`). The `dm.rs` X3DH sealed-box (no FS) is now used only
-  to distribute channel keys and seal file manifests.
+  to distribute channel keys, seal file manifests and encrypt delivery-control
+  metadata (the latter has no forward secrecy and contains no message text).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
@@ -89,7 +97,42 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   loop shared by desktop, CLI, and SDK hosts: every 3 seconds it drains at most one
   conversation on the blocking pool, with a 10-second per-conversation cooldown.
   Dropping the accept-loop future stops scheduling maintenance; an already-running
-  blocking rewrite finishes atomically. The log mutex serializes rewrites with appends.
+  blocking rewrite finishes atomically. The log mutex serializes rewrites with appends
+  within one Node, but is not shared with a replacement Node opening the same files.
+  Hosts must await consuming `NodeRuntime::stop` before reopening a runtime profile:
+  it closes producer admission, aborts and joins the runtime tasks, cancels owned
+  accepted connections and private-route probe children and waits for their actual
+  termination, and waits for admitted
+  blocking profile rewrites, delivery recovery and peer-cache writes to finish.
+  Runtime Drop only requests cancellation and cannot provide that retirement barrier.
+  This is in-process runtime ownership; external SDK operations and host file staging
+  require the host's own lifecycle serialization, and no cross-process lease is implied.
+
+  The desktop host serializes authentication operations separately from runtime
+  replacement. Every published session has a private owner/generation lease; a
+  valid startup request receives a monotonically increasing ticket under that
+  session guard. Replacement awaits the old runtime's consuming stop before
+  opening any new profile. Guarded startup joins all already-started initializer
+  writers on errors and authorizes the synchronous producer launch, installation,
+  and each inbound callback against the current lease/ticket. A late rename cannot
+  change a replacement session or runtime; startup uses the current matching name.
+  Successful logout forgets the original login credential before awaiting teardown.
+
+  New `owner_*` delivery IPC captures the lease before waiting for the runtime
+  lock. Local text/sticker/file enqueue keeps that lifecycle admission through
+  privacy updates and staging. Waiting for the privacy gate holds no session guard;
+  once admitted, the matching session guard encloses the entire synchronous local
+  grant (including verified bindings and routes), and separately the final WAL
+  append. The grant and later staging/WAL are not one rollback transaction: a
+  legitimately admitted grant can remain if the owner changes during staging.
+  Admitted host enqueue tasks retain the lifecycle lock even if their IPC caller is
+  cancelled; this does not extend that guarantee to legacy IPC or arbitrary SDK
+  operations. Stable file results include the original card ID and file conversation.
+  Owner-sensitive identity queries atomically inspect session plus runtime; status
+  queries accept at most 256 IDs and project only the exact account conversation.
+  Own-device synchronization, device-addressed legacy history and incoming rows
+  have no external delivery status. Existing SDK and legacy IPC response shapes
+  remain available; new frontend flows must use the owner-sensitive surface.
 
 ## 4. Networking & delivery (`discovery/`, `node/`, `postoffice/`)
 
@@ -100,11 +143,116 @@ React UI (features/chat/*.tsx) ──invoke()──▶ Tauri IPC (chat_commands.
   interface, plus a unicast announce/response reply, a /24 unicast scan fallback, a startup
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
   + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
-- **Delivery** — `send_*` appends the sealed event, then `deliver_direct` (Noise dial +
+- **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
+
+Tracked DMs are accepted into an encrypted, bounded transaction journal and
+immutable outbox before transport. Retries reuse the original logical message ID,
+ratchet transition and signed device events. A receiver saves decrypted plaintext
+durably before publishing an automatic encrypted delivery receipt in a separate,
+domain-derived device-pair conversation. These controls never produce chat
+callbacks or receipts of their own. Only a validated receipt from an exact target
+device/account marks a tracked message Delivered; successful sessions, online
+presence, relay custody and own-device copies leave it Awaiting.
+DM file cards use the same authenticated delivery controls, without a ratchet
+transition. FileManifest wire layouts remain unchanged: the receiver confirms its
+exact per-device manifest event, and the sender's bounded original-event index
+resolves that confirmation to the first manifest event's stable canonical card ID.
+An outgoing transaction journals the immutable fanout manifests, canonical local
+file row and bounded destination/scope metadata before publication. Incoming
+transactions install the file row before appending their immutable receipt.
+Live recovery publishes callbacks once after durable installation; startup replay
+only reconstructs history and pending controls. Enqueue APIs perform local durable
+acceptance only; existing send APIs additionally attempt immediate transport.
+
+Card delivery is not file download or read confirmation. Independent immutable
+chunk work survives an early card receipt and sender restart. The worker also
+rotates one file destination, sends its manifest before chunks, and retires chunk
+work only after the exact target confirms the final event in the validated
+dense signed chunk chain. A receiver may instead confirm historical verified
+completion after saving all content and reclaiming chunks: it verifies the entire
+original-author chain, chunk AEAD/hashes and whole-file checksum, synchronizes the
+saved file, rename and Unix parent directory, then durably journals a bounded
+completion record associated with the live file card before pruning. Acceptance
+reserves both completion and future local erasure metadata. Failed persistence
+keeps chunks; active source fanout also keeps the original signed chunks.
+Historical completion is available only to the exact authenticated origin device,
+with its current full identity and certificate/account binding when present, the
+current local owner, retained signed manifest/local row and current permission.
+Legacy public SDK peers without account certificates retain device-only origin
+binding; a later account rebind invalidates it and invisible mode cannot authorize
+an account-less origin. This boolean storage proof does not mark a card Delivered.
+Post offices confirm current events only; past relay custody never retires source
+file work. Chunk ciphertext stays in the event log rather than being duplicated
+in the journal, and staging
+synchronizes the whole log at acceptance rather than synchronizing every chunk.
+Existing manifests and new message/sticker events must fit both bounded single-
+event sync frames before acceptance. MFM3 hash-list size is preflighted before
+staging; files whose manifests cannot fit are rejected despite the nominal 4 GiB
+file-size ceiling. Empty files retain their existing one-empty-chunk encoding.
+
+File progress counts currently held chunks; historical completion does not
+pretend that exported bytes remain on this node. The CLI keeps bounded pending
+and recent-save queues and runs readiness checks and one export at a time on the
+blocking pool. A retained managed-media copy can be exported after pruning;
+every export verifies its size and checksum and synchronizes its output. Group
+and own-device media use retained signed manifest/local-row references only for
+local export, never for a historical network probe or a delivery receipt. Legacy
+v1 exports keep their prior in-memory path and retain chunks rather than creating
+new completion proofs.
+
+Local file erasure reserves permanent bounded metadata before card acceptance.
+The erased immutable manifest ID remains suppressed across restart, sync and
+account adoption, without a wire tombstone or remote recall. File keys and private
+scopes are rebuilt only from remaining durable aliases and validated retained
+fanout references. A full erasure-metadata store refuses legacy-row deletion
+before removing the row; erasure markers are never evicted to make room.
+All local event allocations and own-author sync backfill first recover accepted
+intents under the delivery lock, so generic reactions/manifests cannot consume
+an immutable intent's reserved sequence. Failed recovery blocks competing writes.
+
+`run_accept_loop` also owns the shared recurring delivery worker for desktop,
+CLI and SDK hosts. It wakes on local acceptance and periodically retries missed
+wakes, selects one destination and one receipt per iteration, and rotates logical
+messages and their independent destination cursors. It takes owned bounded
+snapshots after local recovery on the blocking pool, releases store locks before
+network awaits, and bounds each network operation to 400 ms. Dropping the accept
+loop cancels its worker and the worker's outstanding network operations. Historical DM and
+control pulls use a receive-only reconciliation projection; controls can be pulled
+directly or through the relay while the original sender is offline.
+
+Immutable file retries retain at most eight authenticated connections across
+complete protocol exchanges, with a ten-second idle limit. A rotating admission
+cursor fills available slots; each worker pass runs at most eight round-robin
+file steps before continuing ordinary control work. Clean progress still retained
+at pass end schedules another pass; failed attempts free slots without self-waking.
+Dialing, fingerprinting, reconciliation and custody checking each have their
+own clean exchange boundary under the same 400 ms operation budget. Each step
+rechecks the current private authorization and exact destination binding; a
+timeout discards the connection and any partial frame, resuming from durable
+remote state on a fresh connection. Only final, target-qualified chunk custody
+retires source file work. The SDK's immediate best-effort flush remains a
+disposable, bounded attempt rather than retaining worker-owned state.
+
+An optional, fixed-size exact-event storage probe follows ordinary reconciliation
+on its disposable connection. New durable nodes and post offices synchronize
+their store and check the current authorized projection before confirming custody.
+Existing sync discriminants and ordinary frames are unchanged; legacy endpoints
+reject only the optional probe, and their unqualified Have sets never retire work.
+Qualified custody retires queued controls or already-confirmed unfinished fanout,
+but never implies recipient delivery. Retained immutable controls remain available
+to authorized pulls after a relay evicts them or disappears. New compact receipt
+metadata retains the exact destination identity/account; old compact metadata
+without that binding remains deduplicated but cannot be projected automatically.
+Private post offices relay other-peer control pairs only with verified identities,
+manual permission for both participants, participant authors and parent closure.
+Local deletion/retention cancels retry metadata and disables its control projection;
+it remains a local erase, not remote recall or removal of encrypted log history.
+Successful cancellation invalidates subsequent guarded frame admission, including
+previously snapshotted controls; it cannot retract a write already admitted.
 
 **Invisible mode and account permissions:**
 `node::PrivacyPolicy` stores a bounded, encrypted, atomically replaced local
@@ -163,8 +311,9 @@ proof protocol or event format is introduced.
 ## 5. Frontend (`frontend/`)
 
 **React 18 + TypeScript + Tailwind + shadcn/ui**, state in **zustand**, built with Vite.
-`lib/api.ts` exposes typed `auth` + `chat` wrappers over `invoke()` (every command);
-`lib/events.ts` subscribes to `dm-received`/`channel-message`/`file-received`.
+`lib/api.ts` keeps the stable typed exports; `lib/api/` owns the feature-specific
+`invoke()` wrappers and command payloads. `lib/events.ts` subscribes to
+`dm-received`/`channel-message`/`file-received`.
 `store/auth.ts` holds the session; `store/chat.ts` holds per-conversation message/
 reaction/unread state and routes incoming DMs to the sender's *account* (one conversation
 per multi-device contact). `features/chat/` is the 3-pane app (sidebar · messages ·

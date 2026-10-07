@@ -1,46 +1,36 @@
-//! Direct + account-addressed message sends and DM reactions. Split out of node.rs (one `impl Node` block per domain).
-
+//! Durable direct and account-addressed DM enqueue and compatibility send APIs.
+use super::conversation::{account_conversation_id, dm_conversation_id};
+use super::delivery_store::{DeliveryDestination, DeliveryTransaction, OutgoingDelivery};
 use super::node::{now_millis, random_msg_id};
+use super::sentlog::SentEntry;
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, Event, EventId, EventKind};
-use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 
 impl Node {
-    /// The deduped set of devices an account-addressed message fans out to: every known
-    /// device of `target_account_id` PLUS our own account's other devices, never ourselves,
-    /// de-duped by user-id. (Note-to-self makes target/own overlap; the dedup collapses it,
-    /// so a device never receives — or surfaces — the same message twice.) Callers that
-    /// require the target to be reachable check for a target device in the result themselves.
     pub(in crate::node) fn account_fanout_targets(
         &self,
         target_account_id: &str,
     ) -> Vec<PeerRecord> {
-        let my_account = self.account.account_id();
-        let me = self.identity.public().user_id();
+        let my_account = self.account_id();
+        let me = self.user_id();
         let mut seen = std::collections::HashSet::new();
         self.routing_peers()
             .into_iter()
             .filter(|p| {
-                let a = p.account_id.as_deref();
-                a == Some(target_account_id) || a == Some(my_account.as_str())
+                p.account_id.as_deref() == Some(target_account_id)
+                    || p.account_id.as_deref() == Some(my_account.as_str())
             })
-            .filter(|p| p.public.user_id() != me) // never seal to ourselves
-            .filter(|p| seen.insert(p.public.user_id())) // dedup by user-id
+            .filter(|p| p.public.user_id() != me)
+            .filter(|p| seen.insert(p.public.user_id()))
             .collect()
     }
 
-    /// Send a DM to `recipient` (a known peer): seal it, append the Message event
-    /// locally, then deliver it. Delivery is best-effort DIRECT (the recipient may
-    /// be offline) plus ALWAYS replicating to the elected post office (so an
-    /// offline recipient can retrieve it later). Succeeds if EITHER the direct
-    /// delivery or a post office accepted the event; errors only if the recipient
-    /// is unreachable and no post office is available.
     pub async fn send_dm(&self, recipient: &str, text: &[u8]) -> Result<(), NodeError> {
         self.send_dm_reply(recipient, text, None).await
     }
 
-    /// Send a DM that replies to `reply_to` (or `None` for a normal message).
+    /// Preserves the SDK return type. Durable acceptance succeeds even offline.
     pub async fn send_dm_reply(
         &self,
         recipient: &str,
@@ -50,175 +40,256 @@ impl Node {
         let peer = self
             .routing_peer(recipient)
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
-
         self.initiate_device(&peer.public)
             .await
             .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
-        let wrapped = MessageBody::new(text.to_vec(), reply_to).encode();
-        let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        // Seal the wrapped body with the Double Ratchet (forward-secret). Compute the
-        // wire OUTSIDE the log lock so no lock spans the seal.
-        let wire = {
-            let mut r = self
-                .dm_ratchet
-                .lock()
-                .expect("dm_ratchet mutex not poisoned");
-            r.encrypt(&self.identity, &peer.public, &wrapped)
-                .map_err(NodeError::Log)?
-        };
-        let wall_clock = now_millis();
-        let seq;
+        let id = self.enqueue_encoded(
+            vec![peer],
+            None,
+            MessageBody::new(text.to_vec(), reply_to).encode(),
+            None,
+        )?;
+        self.flush_delivery(id).await;
+        Ok(())
+    }
+
+    /// Accept one logical account message durably without waiting for TCP.
+    pub async fn enqueue_to_account(
+        &self,
+        target: &str,
+        text: &[u8],
+        reply_to: Option<EventId>,
+    ) -> Result<EventId, NodeError> {
+        self.enqueue_to_account_if(target, text, reply_to, |accept| accept())
+            .await
+    }
+
+    /// Calls `authorize` initially, around the synchronous local privacy grant,
+    /// and at final WAL acceptance.
+    /// For each successful invocation, the callback must execute the supplied
+    /// synchronous operation exactly once and propagate its result. The final
+    /// operation is single-use; retaining a synchronous owner guard through it
+    /// makes authorization and durable acceptance atomic.
+    pub async fn enqueue_to_account_if(
+        &self,
+        target: &str,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        self.enqueue_account_inner(
+            target,
+            MessageBody::new(text.to_vec(), reply_to).encode(),
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn enqueue_sticker_to_account(
+        &self,
+        target: &str,
+        sticker_id: &str,
+        fallback: &[u8],
+    ) -> Result<EventId, NodeError> {
+        self.enqueue_sticker_to_account_if(target, sticker_id, fallback, |accept| accept())
+            .await
+    }
+
+    /// Calls `authorize` initially, around the synchronous local privacy grant,
+    /// and at final WAL acceptance.
+    /// For each successful invocation, execute the supplied synchronous operation
+    /// exactly once and propagate its result; the final WAL operation is single-use.
+    pub async fn enqueue_sticker_to_account_if(
+        &self,
+        target: &str,
+        sticker_id: &str,
+        fallback: &[u8],
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        self.enqueue_account_inner(
+            target,
+            MessageBody::sticker(sticker_id.to_owned(), fallback.to_vec()).encode(),
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn send_to_account(
+        &self,
+        target: &str,
+        text: &[u8],
+        reply_to: Option<EventId>,
+    ) -> Result<(), NodeError> {
+        let id = self.enqueue_to_account(target, text, reply_to).await?;
+        self.flush_delivery(id).await;
+        Ok(())
+    }
+
+    pub async fn send_sticker_to_account(
+        &self,
+        target: &str,
+        sticker_id: &str,
+        fallback: &[u8],
+    ) -> Result<(), NodeError> {
+        let id = self
+            .enqueue_sticker_to_account(target, sticker_id, fallback)
+            .await?;
+        self.flush_delivery(id).await;
+        Ok(())
+    }
+
+    async fn enqueue_account_inner(
+        &self,
+        target: &str,
+        inner: Vec<u8>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        authorize(&mut || Ok(()))?;
+        let dests = self.account_fanout_targets(target);
+        if !dests
+            .iter()
+            .any(|p| p.account_id.as_deref() == Some(target))
         {
-            let mut log = self.log.lock().expect("log mutex not poisoned");
+            return Err(NodeError::UnknownPeer(target.to_string()));
+        }
+        self.initiate_contact_locally_if(target, &mut authorize)
+            .await?;
+        let msg_id = random_msg_id();
+        let envelope =
+            DmEnvelope::new(self.account_id(), target.to_owned(), msg_id, inner).encode();
+        self.enqueue_encoded_if(
+            dests,
+            Some(target.to_owned()),
+            envelope,
+            Some(EventId::new(msg_id)),
+            &mut authorize,
+        )
+    }
+
+    fn enqueue_encoded(
+        &self,
+        dests: Vec<PeerRecord>,
+        target: Option<String>,
+        plaintext: Vec<u8>,
+        logical: Option<EventId>,
+    ) -> Result<EventId, NodeError> {
+        self.enqueue_encoded_if(dests, target, plaintext, logical, &mut |accept| accept())
+    }
+
+    fn enqueue_encoded_if(
+        &self,
+        dests: Vec<PeerRecord>,
+        target: Option<String>,
+        plaintext: Vec<u8>,
+        logical: Option<EventId>,
+        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        let mut store = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut store).map_err(NodeError::Log)?;
+        store
+            .check_capacity(dests.len(), plaintext.len() as u64)
+            .map_err(NodeError::Log)?;
+        let bindings: Vec<_> = dests
+            .into_iter()
+            .map(|peer| {
+                let proof_account = self
+                    .historical_author(&peer.public.ed25519_pub)
+                    .filter(|p| p.public() == peer.public)
+                    .and_then(|p| p.account_id());
+                (peer, proof_account)
+            })
+            .collect();
+        let ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
+        let log = self.log.lock().expect("log lock not poisoned");
+        let own = self.identity.public();
+        let account = self.account_id();
+        let author = Author::from_ed25519(own.ed25519_pub);
+        let clock = now_millis();
+        let mut destinations = Vec::with_capacity(bindings.len());
+        let mut prepared = Vec::with_capacity(bindings.len());
+        for (peer, proof_account) in bindings {
+            let conv = dm_conversation_id(&own, &peer.public);
+            let (wire, transition) = ratchet
+                .prepare_encrypt(&self.identity, &peer.public, &plaintext)
+                .map_err(NodeError::Log)?;
             let (parents, lamport) = log.prepare(&conv);
-            seq = log
-                .version_vector(&conv)
-                .get(&self_author)
-                .copied()
-                .unwrap_or(0)
-                + 1;
+            let seq = log.version_vector(&conv).get(&author).copied().unwrap_or(0) + 1;
             let event = Event::new(
                 &self.identity,
                 conv,
                 seq,
                 parents,
                 lamport,
-                wall_clock,
+                clock,
                 EventKind::Message,
                 wire,
             );
-            log.append(event).map_err(NodeError::Log)?;
-        }
-
-        // Keep a local plaintext copy of what we sent (the ratchet wire key is
-        // single-use and not self-decryptable). Best-effort: a sidecar write error
-        // doesn't fail a message that was sealed, appended, and about to be delivered.
-        let _ = self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .record(conv, seq, wall_clock, &wrapped);
-
-        // Best-effort direct delivery (the recipient may be offline) plus always
-        // replicating to the elected post office (store-and-forward).
-        let direct = self.deliver_direct(&peer, conv).await;
-        let replicated = self.replicate_to_post_office(conv).await;
-        // Either round may also have pulled events back to us.
-        self.emit_new_messages(conv);
-
-        match (direct, replicated) {
-            (Ok(()), _) => Ok(()),                             // delivered directly
-            (Err(_), Ok(true)) => Ok(()),                      // a post office holds it
-            (Err(e), Ok(false)) => Err(NodeError::Session(e)), // offline peer, no PO
-            (Err(_), Err(e)) => Err(NodeError::Session(e)),    // both paths failed
-        }
-    }
-
-    /// Send a DM to an ACCOUNT: fan out a per-device ratcheted copy to every known
-    /// device of `target_account_id`, and self-sync a copy to this user's own other
-    /// devices. Records ONE sent entry under the account conversation (so own history
-    /// shows it once). Best-effort delivery per device (direct, else post office).
-    /// Errors only if there is no known device of the target account to send to.
-    pub async fn send_to_account(
-        &self,
-        target_account_id: &str,
-        text: &[u8],
-        reply_to: Option<EventId>,
-    ) -> Result<(), NodeError> {
-        self.send_account_inner(
-            target_account_id,
-            MessageBody::new(text.to_vec(), reply_to).encode(),
-        )
-        .await
-    }
-
-    /// Send an animated sticker to an account: `sticker_id` is the bundled sticker's
-    /// codepoint id, `fallback` the emoji char shown if the peer lacks it. Same fan-out /
-    /// self-sync / history-record path as a text message.
-    pub async fn send_sticker_to_account(
-        &self,
-        target_account_id: &str,
-        sticker_id: &str,
-        fallback: &[u8],
-    ) -> Result<(), NodeError> {
-        self.send_account_inner(
-            target_account_id,
-            MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
-        )
-        .await
-    }
-
-    /// Fan an already-encoded message body out to every device of `target_account_id` (and
-    /// our own other devices), recording one local copy under the account conversation.
-    async fn send_account_inner(
-        &self,
-        target_account_id: &str,
-        inner: Vec<u8>,
-    ) -> Result<(), NodeError> {
-        let my_account = self.account.account_id();
-        // A stable logical id shared by every per-device copy, so reactions/replies
-        // can target this message account-wide.
-        let msg_id = random_msg_id();
-        let envelope = DmEnvelope::new(
-            my_account.clone(),
-            target_account_id.to_string(),
-            msg_id,
-            inner.clone(),
-        )
-        .encode();
-
-        // Resolve destinations: the target account's devices + our OWN other devices (deduped).
-        let dests = self.account_fanout_targets(target_account_id);
-        if !dests
-            .iter()
-            .any(|p| p.account_id.as_deref() == Some(target_account_id))
-        {
-            return Err(NodeError::UnknownPeer(target_account_id.to_string()));
-        }
-        self.initiate_contact(target_account_id)
-            .await
-            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
-
-        // Record one plaintext copy for our own account history (the from_me side).
-        let conv_account = account_conversation_id(&my_account, target_account_id);
-        let wall_clock = now_millis();
-        {
-            // Store the full envelope (carries msg_id) so account history surfaces a
-            // stable id for reactions/replies.
-            let mut sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            let seq = sentlog.entries(&conv_account).len() as u64 + 1;
-            let _ = sentlog.record(conv_account, seq, wall_clock, &envelope);
-        }
-
-        // Fan out: seal+append+deliver one copy per (deduped) destination device.
-        for peer in &dests {
-            self.deliver_enveloped(peer, &envelope).await;
-        }
-        Ok(())
-    }
-
-    /// Seal `plaintext` to `peer`'s device ratchet, append it to the device-pair
-    /// conversation's event log, and deliver it (direct, then post office). Best-effort:
-    /// transport failures are swallowed (the event is durably logged and syncs later).
-    /// The conversation id here is the per-DEVICE-pair id (the transport layer).
-    pub(in crate::node) async fn deliver_enveloped(&self, peer: &PeerRecord, plaintext: &[u8]) {
-        let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-        let wire = {
-            let mut r = self
-                .dm_ratchet
-                .lock()
-                .expect("dm_ratchet mutex not poisoned");
-            match r.encrypt(&self.identity, &peer.public, plaintext) {
-                Ok(w) => w,
-                Err(_) => return,
+            if !super::session::event_fits_frame(&event) {
+                return Err(NodeError::InvalidInput(
+                    "message exceeds transport frame".into(),
+                ));
             }
-        };
-        if self.append_event(conv, EventKind::Message, wire).is_err() {
-            return;
+            let eligible =
+                proof_account.is_some() && proof_account.as_deref() != Some(account.as_str());
+            destinations.push(DeliveryDestination {
+                device: peer.public,
+                account: proof_account,
+                event,
+                receipt_eligible: eligible,
+            });
+            prepared.push(transition);
         }
-        let _ = self.deliver_direct(peer, conv).await;
-        let _ = self.replicate_to_post_office(conv).await;
-        self.emit_new_messages(conv);
+        let id = logical.unwrap_or(destinations[0].event.id);
+        let conv = target
+            .as_ref()
+            .map_or(destinations[0].event.conversation_id, |t| {
+                account_conversation_id(&account, t)
+            });
+        let recipient = target.or_else(|| destinations[0].account.clone());
+        let seq = if logical.is_some() {
+            self.sentlog
+                .lock()
+                .expect("sent lock not poisoned")
+                .entries(&conv)
+                .iter()
+                .map(|e| e.seq)
+                .max()
+                .unwrap_or(0)
+                + 1
+        } else {
+            destinations[0].event.seq
+        };
+        log.sync().map_err(NodeError::Log)?;
+        drop(log);
+        drop(ratchet);
+        let mut transaction = Some(DeliveryTransaction::Outgoing {
+            message: OutgoingDelivery {
+                logical_id: id,
+                sender_account: account,
+                recipient_account: recipient,
+                conversation: conv,
+                wall_clock: clock,
+                destinations,
+            },
+            sent: SentEntry {
+                conversation: conv,
+                seq,
+                wall_clock: clock,
+                plaintext,
+            },
+            ratchets: prepared,
+        });
+        authorize(&mut || {
+            store
+                .begin(transaction.take().expect("accept is single-use"))
+                .map(|_| ())
+                .map_err(NodeError::Log)
+        })?;
+        // WAL acceptance cannot turn into a failed send inviting duplicates.
+        if self.recover_delivery(&mut store).is_err() {
+            log::warn!("accepted delivery awaits local recovery");
+        }
+        self.delivery_notify.notify_one();
+        Ok(id)
     }
 }

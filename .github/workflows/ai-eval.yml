@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
       - name: Eval smoke
         run: make eval-smoke
       - name: AI eval harness tests
@@ -35,6 +35,8 @@ jobs:
 
   real-ai-eval:
     name: Real model-backed AI eval
+    needs: [provider-status]
+    if: needs.provider-status.outputs.configured == 'true'
     runs-on: ubuntu-latest
     env:
       AI_EVAL_COMMAND: ${{ secrets.AI_EVAL_COMMAND }}
@@ -42,18 +44,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
       - name: Run real AI eval when provider is configured
-        run: |
-          if [ -z "${AI_EVAL_COMMAND:-}" ]; then
-            echo "::warning::AI_EVAL_COMMAND is not configured; real model-backed eval was not run."
-            exit 0
-          fi
-          make ai-eval
+        run: make ai-eval
       - name: Upload AI eval report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ai-eval-report
           path: target/ai-eval/
-          if-no-files-found: ignore
+          if-no-files-found: error
+
+  provider-status:
+    name: Report AI provider availability (not an eval result)
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.provider.outputs.configured }}
+    steps:
+      - name: Disclose whether real model evaluation can run
+        id: provider
+        env:
+          AI_EVAL_COMMAND: ${{ secrets.AI_EVAL_COMMAND }}
+        run: |
+          if [ -n "${AI_EVAL_COMMAND:-}" ]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+            echo 'Real-model provider configured; evaluation verdict comes from the separate job.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo 'Real-model evaluation NOT RUN: provider unavailable. Deterministic contracts are not model-backed eval evidence.' >> "$GITHUB_STEP_SUMMARY"
+          fi

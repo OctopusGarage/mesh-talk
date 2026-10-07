@@ -4,6 +4,16 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      diagnostic_timing:
+        description: Full-workspace test-only delivery phase timings
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 # Read-only: every job just checks out and runs tooling — nothing writes back.
 permissions:
@@ -11,6 +21,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MESH_TALK_TEST_TIMING: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/feat/automatic-delivery-receipts') || inputs.diagnostic_timing) && '1' || '0' }}
 
 jobs:
   checks:
@@ -49,7 +60,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -61,12 +72,31 @@ jobs:
           npm ci
           npm run build
 
+      - name: Frontend unit tests and coverage
+        working-directory: frontend
+        run: npm run test:coverage
+
+      - name: Upload frontend coverage
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-coverage-${{ github.run_attempt }}
+          path: frontend/coverage/
+          if-no-files-found: warn
+
       - name: Delivery and AI eval smoke
         if: matrix.os == 'ubuntu-latest'
         run: |
           make eval-smoke
           node --test scripts/test-ai-eval.mjs
-          node --test scripts/diagnostics/*.test.mjs
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Diagnostic and release gate regressions (all platforms)
+        shell: bash
+        run: node --test scripts/diagnostics/*.test.mjs
 
       - name: Validate release checksum generation
         shell: bash
@@ -92,7 +122,14 @@ jobs:
       - name: Test (macOS + Windows)
         if: matrix.os != 'ubuntu-latest'
         working-directory: src-tauri
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
+            cargo test --workspace -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+          else
+            cargo test --workspace
+          fi
 
       # Capture loader evidence when Windows cannot even start the test harness.
       # This diagnostic never turns a failed test step into a successful check.
@@ -107,7 +144,10 @@ jobs:
             Write-Host "Harness exit code: $LASTEXITCODE"
             if ($LASTEXITCODE -ne 0) { $test = $candidate; break }
           }
-          if (-not $test) { throw 'No application test executable found' }
+          if (-not $test) {
+            Write-Host 'All application test harnesses start successfully; inspect the failed test above.'
+            exit 0
+          }
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
@@ -137,14 +177,29 @@ jobs:
       - name: Test + coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
+            cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+          else
+            cargo llvm-cov --workspace --lcov --output-path lcov.info
+          fi
+
+      - name: Upload test timing diagnostics
+        if: always() && env.MESH_TALK_TEST_TIMING == '1'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timing-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mesh-talk-test-timing.log
+          if-no-files-found: warn
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: src-tauri/lcov.info
+          files: frontend/coverage/lcov.info,src-tauri/lcov.info
           fail_ci_if_error: false
 
       - name: Spelling (typos)
@@ -153,7 +208,14 @@ jobs:
 
       - name: Shellcheck scripts
         if: matrix.os == 'ubuntu-latest'
-        run: shellcheck --severity=warning scripts/*.sh .claude/hooks/*.sh hooks/*
+        run: shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/*
+
+      - name: Validate GitHub Actions workflows
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint"
 
       - name: Install supply-chain tools
         if: matrix.os == 'ubuntu-latest'

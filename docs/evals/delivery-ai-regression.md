@@ -42,14 +42,16 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
   changes that affect AI-assisted behavior. If a model provider is unavailable locally, run
   the `AI Eval` workflow with `AI_EVAL_COMMAND` configured and record the run URL.
 - `make smoke-full` is the complete real smoke command for release-critical changes. It
-  runs deterministic eval contracts, AI eval harness tests, workspace Rust tests, backend
-  multi-process E2E, and frontend Playwright E2E.
+  runs deterministic eval contracts, AI eval harness tests, workspace Rust tests,
+  frontend unit tests with coverage, backend multi-process E2E, and frontend Playwright E2E.
 - `./scripts/check-health.sh --fast` must pass before commit.
 - `./scripts/check-health.sh` must pass before review or release.
 - Backend networking / relay / sync / crypto changes must run `make e2e` or document why
   the environment cannot run multicast/TCP tests.
 - UI behavior or layout changes must run the relevant Playwright spec, and visual snapshot
   updates require human review of the diff images.
+- AI-assisted UI reviews use the screenshot evidence and interaction checks described in
+  `docs/evals/ui-ux-ai-review.md`; the agent-contract eval does not assess app usability.
 
 ## Trigger Rules
 
