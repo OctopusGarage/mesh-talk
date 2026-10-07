@@ -62,6 +62,7 @@ export interface ReactionInfo {
 export interface ChannelMemberInfo {
   user_id: string;
   name: string;
+  account_id?: string | null;
 }
 
 // A channel's membership plus its owner. The owner is the only principal allowed to

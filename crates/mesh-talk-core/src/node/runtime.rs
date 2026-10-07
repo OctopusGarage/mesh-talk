@@ -768,6 +768,11 @@ impl NodeRuntime {
         self.node.channel_members(channel)
     }
 
+    /// Resolve a member's certified account even after discovery expires.
+    pub fn account_id_for_device(&self, device: &PublicIdentity) -> Option<String> {
+        self.node.account_id_for_device(device)
+    }
+
     /// The owner (creator) of a channel — the only principal allowed to change membership.
     pub fn channel_owner(&self, channel: crate::eventlog::event::ConversationId) -> String {
         self.node.channel_owner(channel)

@@ -58,7 +58,16 @@ pub async fn channel_members(
                 rt.display_name_for(&user_id)
                     .unwrap_or_else(|| user_id.clone())
             };
-            ChannelMemberInfo { user_id, name }
+            let account_id = if user_id == self_uid {
+                Some(rt.account_id().to_string())
+            } else {
+                rt.account_id_for_device(&p)
+            };
+            ChannelMemberInfo {
+                user_id,
+                name,
+                account_id,
+            }
         })
         .collect();
     Ok(ChannelMembersInfo {
