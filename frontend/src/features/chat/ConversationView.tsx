@@ -561,8 +561,9 @@ export function ConversationView() {
             aria-label={t("conversation.jumpToLatest")}
             onClick={() =>
               virtuosoRef.current?.scrollToIndex({
-                index: messages.length - 1,
-                behavior: "smooth",
+                index: "LAST",
+                align: "end",
+                behavior: "auto",
               })
             }
             className="absolute bottom-3 right-4 z-10 rounded-full border bg-background/90 p-2 shadow-md backdrop-blur hover:bg-accent"
