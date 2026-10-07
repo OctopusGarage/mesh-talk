@@ -8,6 +8,43 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[test]
+fn channel_member_account_stays_known_without_a_live_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bob, _) = node(&dir.path().join("bob"));
+    let (alice, _) = node(&dir.path().join("alice"));
+    bob.configure_privacy(
+        &dir.path().join("bob"),
+        "pw",
+        &bob.signed_announce("Bob", 1234),
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    let proof = alice.signed_announce("Alice", 1234);
+    bob.privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .proofs
+        .record(&proof)
+        .unwrap();
+
+    assert!(bob.roster.lock().unwrap().peers().is_empty());
+    assert_eq!(
+        bob.account_id_for_device(&alice.identity.public()),
+        Some(alice.account_id())
+    );
+    let mut mismatched = alice.identity.public();
+    mismatched.x25519_pub[0] ^= 1;
+    assert_eq!(bob.account_id_for_device(&mismatched), None);
+    assert_eq!(
+        bob.account_id_for_device(&DeviceIdentity::generate().public()),
+        None
+    );
+}
+
 #[tokio::test]
 async fn accepted_privacy_socket_disables_nagle_after_authenticated_handshake() {
     let dir = tempfile::tempdir().unwrap();

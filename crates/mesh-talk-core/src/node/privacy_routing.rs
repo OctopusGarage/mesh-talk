@@ -9,6 +9,16 @@ use std::{
 };
 
 impl Node {
+    /// A verified account binding for a channel member, including members no longer in
+    /// the live roster. Match the full device identity before trusting the stored proof.
+    pub fn account_id_for_device(
+        &self,
+        device: &crate::identity::device::PublicIdentity,
+    ) -> Option<String> {
+        self.historical_author(&device.ed25519_pub)
+            .filter(|proof| proof.public() == *device)
+            .and_then(|proof| proof.account_id())
+    }
     /// Identity resolution has no endpoint requirement. Configured nodes use the
     /// durable signed binding; legacy SDK nodes retain only bounded memory history.
     pub(in crate::node) fn historical_peer_proofs(&self) -> Vec<crate::discovery::Announce> {
