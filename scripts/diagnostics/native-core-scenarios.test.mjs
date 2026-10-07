@@ -85,6 +85,23 @@ test("native attachment rendering uses the visible jump-to-latest control when h
   assert.equal(observations, 3);
 });
 
+test("native attachment rendering retries the same button when WebDriver click does not move the list", async () => {
+  const { revealLatestNativeMessage } = await import("./native-core-scenarios.mjs");
+  let clock = 0, domClicks = 0;
+  const commands = [];
+  await revealLatestNativeMessage({
+    now: () => clock,
+    execute: async script => {
+      if (script.includes("b.click()")) { domClicks++; return true; }
+      return { visible: domClicks > 0, jump: domClicks === 0 };
+    },
+    command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": "jump" }; },
+    until: async (_label, poll) => { for (let i = 0; i < 5; i++) { clock += 1000; if (await poll()) return true; } throw new Error("not visibly rendered"); },
+  }, "attachment.txt");
+  assert.equal(commands.length, 2, "WebDriver still tries the real button first");
+  assert.equal(domClicks, 1, "the fallback activates the same button only once");
+});
+
 test("native attachment rendering still fails if no visible message or jump control exists", async () => {
   const { revealLatestNativeMessage } = await import("./native-core-scenarios.mjs");
   await assert.rejects(revealLatestNativeMessage({ execute: async () => ({ visible: false, jump: false }), command: async () => { throw new Error("unexpected action"); }, until: async (_label, poll) => { if (await poll()) return true; throw new Error("not visibly rendered"); } }, "attachment.txt"), /not visibly rendered/);
