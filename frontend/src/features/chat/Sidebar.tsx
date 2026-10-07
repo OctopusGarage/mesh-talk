@@ -87,18 +87,24 @@ function Row({
   const { t } = useTranslation();
   const active = useChat((s) => s.active);
   const unread = useChat((s) => s.unread[convKey(conv)] ?? 0);
+  const history = useChat((s) => s.messages[convKey(conv)]);
   const open = useChat((s) => s.open);
   const isActive = active != null && convKey(active) === convKey(conv);
   // Presence is read from the isolated store and keyed by id, so a presence tick only
   // re-renders the rows whose snapshot actually changed.
   const presence = usePresenceFor(conv.id);
   const status = presenceStatus(presence);
+  const latest = history?.[history.length - 1];
+  const summary =
+    latest?.text ||
+    latest?.file?.name ||
+    (channel ? subtitle : presenceLabel(presence, t));
 
   const row = (
     <div
       role="listitem"
       className={cn(
-        "group relative flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 ease-out",
+        "group relative flex w-full items-center gap-3 rounded-md px-2.5 py-2.5 text-left transition-colors duration-150 ease-out",
         isActive ? "bg-accent" : "hover:bg-accent/60",
       )}
     >
@@ -114,7 +120,7 @@ function Row({
         data-conv-option
         data-testid={`conversation-row-${conv.id}`}
         aria-current={isActive ? "true" : undefined}
-        aria-label={`${conv.name}${subtitle ? `, ${subtitle}` : ""}`}
+        aria-label={`${conv.name}${summary ? `, ${summary}` : ""}`}
         className="flex min-w-0 flex-1 items-center gap-3 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <div className="relative">
@@ -134,11 +140,16 @@ function Row({
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate font-display text-sm font-medium tracking-tight">
+          <div
+            className={cn(
+              "truncate text-[13px] leading-5",
+              unread ? "font-semibold" : "font-medium",
+            )}
+          >
             {conv.name}
           </div>
-          <div className="truncate font-mono text-xs text-muted-foreground">
-            {subtitle}
+          <div className="truncate text-xs leading-4 text-muted-foreground">
+            {summary}
           </div>
         </div>
       </button>
@@ -147,37 +158,32 @@ function Row({
           {unread}
         </Badge>
       )}
-      <button
-        type="button"
-        onClick={onRename}
-        data-testid={`conversation-rename-${conv.id}`}
-        title={t("sidebar.rename")}
-        aria-label={`${t("sidebar.rename")} ${conv.name}`}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-[background-color,color,opacity] hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100"
-      >
-        <Pencil className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        onClick={onTogglePin}
-        data-testid={`conversation-pin-${conv.id}`}
-        title={pinned ? t("sidebar.unpin") : t("sidebar.pin")}
-        aria-label={`${pinned ? t("sidebar.unpin") : t("sidebar.pin")} ${
-          conv.name
-        }`}
-        className={cn(
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-[background-color,color,opacity] hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          pinned
-            ? "text-signal opacity-100"
-            : "text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100",
-        )}
-      >
-        {pinned ? (
-          <PinOff className="h-3.5 w-3.5" />
-        ) : (
-          <Pin className="h-3.5 w-3.5" />
-        )}
-      </button>
+      <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center rounded-md bg-card/95 opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        <button
+          type="button"
+          onClick={onRename}
+          data-testid={`conversation-rename-${conv.id}`}
+          title={t("sidebar.rename")}
+          aria-label={`${t("sidebar.rename")} ${conv.name}`}
+          className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={onTogglePin}
+          data-testid={`conversation-pin-${conv.id}`}
+          title={pinned ? t("sidebar.unpin") : t("sidebar.pin")}
+          aria-label={`${pinned ? t("sidebar.unpin") : t("sidebar.pin")} ${conv.name}`}
+          className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {pinned ? (
+            <PinOff className="h-3.5 w-3.5" />
+          ) : (
+            <Pin className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
     </div>
   );
   return channel ? (
@@ -207,7 +213,7 @@ function SectionLabel({
 // Sidebar width: user-resizable via the right-edge drag handle, persisted to localStorage,
 // clamped to a sensible range, double-click to reset. Default mirrors the old `w-72`.
 const WIDTH_KEY = "mesh-talk-sidebar-width";
-const DEFAULT_WIDTH = 288; // w-72
+const DEFAULT_WIDTH = 304;
 const MIN_WIDTH = 230;
 const MAX_WIDTH = 460;
 
@@ -536,10 +542,7 @@ export function Sidebar() {
         id,
         conv: accountConv(a, name),
         pinned: favorites[id]?.pinned ?? false,
-        subtitle:
-          a.device_count > 1
-            ? t("sidebar.devices", { count: a.device_count })
-            : shortId(id, 12),
+        subtitle: t("sidebar.devices", { count: a.device_count }),
       };
     });
     const channelRows = channels.map((c) => {
@@ -550,7 +553,7 @@ export function Sidebar() {
         id,
         conv: channelConv(c, name),
         pinned: favorites[id]?.pinned ?? false,
-        subtitle: shortId(id, 12),
+        subtitle: t("conversation.members", { count: c.member_count }),
       };
     });
 
@@ -571,7 +574,7 @@ export function Sidebar() {
     <aside
       data-testid="sidebar"
       style={{ width }}
-      className="relative flex shrink-0 flex-col border-r bg-card/40"
+      className="relative flex shrink-0 flex-col border-r bg-card"
     >
       {/* Identity header — own glyph + name (display) + own short mono id, plus the one
           primary action (Search). `data-tauri-drag-region` makes the strip a window-drag
@@ -639,7 +642,7 @@ export function Sidebar() {
         </div>
         {/* Primary actions up top: Search + Received files. Other utilities live in the
             bottom-left overflow menu. */}
-        <div className="mt-2.5 flex items-center gap-0.5">
+        <div className="mt-2.5 flex items-center gap-1">
           <SearchDialog />
           <FilesTray />
         </div>

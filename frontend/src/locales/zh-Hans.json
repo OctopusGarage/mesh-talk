@@ -150,7 +150,8 @@
     "list": "会话列表",
     "dropToSend": "拖放以发送给 {{name}}",
     "clearHistory": "清空聊天记录",
-    "clearHistoryConfirm": "这会永久删除本机上这个会话的消息,无法恢复,且不影响对方的记录。"
+    "clearHistoryConfirm": "这会永久删除本机上这个会话的消息,无法恢复,且不影响对方的记录。",
+    "noPeersHint": "Mesh-Talk 会搜索本地网络。请让两台设备连接到同一个局域网。"
   },
   "presence": {
     "online": "在线",
@@ -184,7 +185,10 @@
     "recall": "撤回",
     "recalledByYou": "你撤回了一条消息",
     "recalledBy": "{{name}} 撤回了一条消息",
-    "reEdit": "重新编辑"
+    "reEdit": "重新编辑",
+    "mentionedYou": "提及了你",
+    "reactionAdd": "添加 {{emoji}} 表情回应",
+    "reactionRemove": "移除你的 {{emoji}} 表情回应"
   },
   "transfer": {
     "sending": "正在发送文件…",
@@ -200,7 +204,9 @@
     "insertEmoji": "插入 {{emoji}}",
     "couldntOpenFile": "无法打开文件：{{error}}",
     "stickers": "贴纸",
-    "sendSticker": "发送 {{emoji}} 贴纸"
+    "sendSticker": "发送 {{emoji}} 贴纸",
+    "cancelReply": "取消回复",
+    "tools": "消息工具"
   },
   "screenshot": {
     "trigger": "截图",
@@ -473,5 +479,11 @@
     "username": "登录用户名",
     "accountId": "账号 ID",
     "usernameHint": "用这个用户名登录,不可更改。上方的昵称只是显示名,可以随时修改。"
+  },
+  "errorBoundary": {
+    "title": "Mesh-Talk 界面发生错误。",
+    "description": "重新加载应用以继续。消息保存在本机。",
+    "reload": "重新加载",
+    "details": "技术详情"
   }
 }

@@ -36,7 +36,9 @@ async function enterChat(page: Page, user = "tester") {
 async function openBobDm(page: Page) {
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
-  await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+  await expect(
+    page.getByRole("log").getByText("hey, welcome to the mesh"),
+  ).toBeVisible();
 }
 
 test.describe("Mesh-Talk UI flow", () => {
@@ -81,7 +83,9 @@ test.describe("Mesh-Talk UI flow", () => {
     // Open the DM, then switch to the channel — header + history follow.
     await openBobDm(page);
     await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-    await expect(page.getByText("channel kickoff")).toBeVisible();
+    await expect(
+      page.getByRole("log").getByText("channel kickoff"),
+    ).toBeVisible();
     // Back to a DM.
     await page.getByTestId(`conversation-row-${CAROL.account}`).click();
     await expect(page.getByTestId("conversation-empty")).toBeVisible();
@@ -95,7 +99,7 @@ test.describe("Mesh-Talk UI flow", () => {
     const box = page.getByTestId("composer-input");
     await box.fill("hello e2e");
     await page.getByTestId("composer-send").click();
-    await expect(page.getByText("hello e2e")).toBeVisible();
+    await expect(page.getByRole("log").getByText("hello e2e")).toBeVisible();
   });
 
   test("jump to latest reveals a message after an oversized bubble", async ({
@@ -113,14 +117,18 @@ test.describe("Mesh-Talk UI flow", () => {
     await log.evaluate((element) => {
       element.scrollTop = element.scrollHeight;
     });
-    await expect(page.getByText("latest-after-long-message")).toBeInViewport();
+    await expect(
+      page.getByRole("log").getByText("latest-after-long-message"),
+    ).toBeInViewport();
     await log.evaluate((element) => {
       element.scrollTop = 0;
     });
     const jump = page.getByRole("button", { name: "Jump to latest messages" });
     await expect(jump).toBeVisible();
     await jump.click();
-    await expect(page.getByText("latest-after-long-message")).toBeInViewport();
+    await expect(
+      page.getByRole("log").getByText("latest-after-long-message"),
+    ).toBeInViewport();
     await expect
       .poll(() =>
         log.evaluate(
@@ -145,7 +153,7 @@ test.describe("Mesh-Talk UI flow", () => {
     // Enter sends and clears the composer.
     await box.press("Enter");
     await expect(box).toHaveValue("");
-    await expect(page.getByText("line one")).toBeVisible();
+    await expect(page.getByRole("log").getByText("line one")).toBeVisible();
   });
 
   test("URLs in messages render as clickable links", async ({ page }) => {
@@ -245,7 +253,9 @@ test.describe("Mesh-Talk UI flow", () => {
     await enterChat(page);
     // The channel has members (bob, carol) to mention.
     await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-    await expect(page.getByText("channel kickoff")).toBeVisible();
+    await expect(
+      page.getByRole("log").getByText("channel kickoff"),
+    ).toBeVisible();
     const box = page.getByTestId("composer-input");
     await box.fill("@ca");
     await expect(page.getByTestId("mention-popover")).toBeVisible();
@@ -267,7 +277,7 @@ test.describe("Mesh-Talk UI flow", () => {
     // Send the reply; the new bubble carries a parent snippet.
     await page.getByTestId("composer-input").fill("replying now");
     await page.getByTestId("composer-send").click();
-    await expect(page.getByText("replying now")).toBeVisible();
+    await expect(page.getByRole("log").getByText("replying now")).toBeVisible();
     await expect(
       page.getByTestId("message-parent-snippet").first(),
     ).toBeVisible();
@@ -318,6 +328,10 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("verify-trigger")).toHaveAttribute(
       "data-trust",
       "verified",
+    );
+    await expect(page.getByTestId("verify-trigger")).toHaveAttribute(
+      "aria-label",
+      "Verified",
     );
   });
 
@@ -447,7 +461,9 @@ test.describe("Mesh-Talk UI flow", () => {
         reply_to: null,
       });
     });
-    await expect(page.getByText("ping from bob")).toBeVisible();
+    await expect(
+      page.getByRole("log").getByText("ping from bob"),
+    ).toBeVisible();
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
   });
 

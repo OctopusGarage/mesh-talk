@@ -31,7 +31,9 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
   await page.getByTestId("sticker-option-1f602").click();
   await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(2);
   await page.getByTestId("composer-attach").click();
-  await expect(page.getByText("card.txt")).toBeVisible();
+  await expect(
+    page.getByTestId("message-bubble").filter({ hasText: "card.txt" }),
+  ).toBeVisible();
   await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(3);
   await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(0);
   // This is a UI presentation mock, not authenticated receipt protocol evidence.

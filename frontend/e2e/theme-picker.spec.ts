@@ -18,6 +18,12 @@ test("theme picker applies + persists a brand palette, and clears it for base mo
   page,
 }) => {
   await login(page);
+  const onlineColor = () =>
+    page
+      .locator('[data-testid="lan-online-count"] [role="status"] > span')
+      .last()
+      .evaluate((dot) => getComputedStyle(dot).backgroundColor);
+  const darkOnline = await onlineColor();
   await page.getByTestId("sidebar-overflow").click();
   await page.getByTestId("sidebar-action-settings").click();
   await expect(page.getByTestId("theme-picker")).toBeVisible();
@@ -29,6 +35,7 @@ test("theme picker applies + persists a brand palette, and clears it for base mo
   ).toBe("barcelona");
   // The brand crest surfaces in the footer mark while the theme is active.
   await expect(page.getByTestId("theme-crest")).toBeVisible();
+  expect(await onlineColor()).toBe(darkOnline);
 
   await page.getByTestId("theme-dark").click();
   await expect.poll(() => palette(page)).toBe(null); // base mode clears the palette

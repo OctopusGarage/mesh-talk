@@ -6,15 +6,15 @@ import type { PresenceStatus } from "@/components/identity";
 import { captureOwner } from "./ownership";
 
 /**
- * Isolated presence slice. Kept deliberately separate from the chat store so the slow
- * (~5s) presence poll never re-renders the (expensive, virtualized) message list — only
+ * Isolated presence slice. Kept deliberately separate from the chat store so the
+ * presence poll never re-renders the (expensive, virtualized) message list — only
  * the small Sidebar rows / Conversation header that read presence subscribe here.
  *
  * Online = the account/channel has ≥1 relevant device seen within the backend TTL.
  * Derived status: online (breathing teal) → recent (dim amber) → offline (muted).
  */
 
-const POLL_MS = 5000;
+const POLL_MS = 2000;
 /** Anything fresher than this (but past the online TTL) reads as "recently seen". */
 const RECENT_SECS = 5 * 60;
 

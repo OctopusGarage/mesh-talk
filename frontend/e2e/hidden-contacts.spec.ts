@@ -53,7 +53,9 @@ test("hide requires confirmation, persists across restart and restores history",
   await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
   await page.getByTestId(`conversation-row-${bob}`).click();
   await expect(
-    page.getByText("hey, welcome to the mesh", { exact: true }),
+    page
+      .getByRole("log")
+      .getByText("hey, welcome to the mesh", { exact: true }),
   ).toBeVisible();
 });
 test("settings offers searchable keyboard-accessible hide and restore", async ({
@@ -121,7 +123,7 @@ test("hidden DMs are omitted from search, groups and inbound history remain inta
   await expect(page.getByTestId("search-result")).toHaveCount(1);
   await page.getByTestId("search-result").click();
   await expect(
-    page.getByText("channel kickoff", { exact: true }),
+    page.getByRole("log").getByText("channel kickoff", { exact: true }),
   ).toBeVisible();
   await page.evaluate(() => {
     const w = window as unknown as {
@@ -149,7 +151,7 @@ test("hidden DMs are omitted from search, groups and inbound history remain inta
   await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
   await page.getByTestId(`conversation-row-${bob}`).click();
   await expect(
-    page.getByText("received while hidden", { exact: true }),
+    page.getByRole("log").getByText("received while hidden", { exact: true }),
   ).toBeVisible();
 });
 

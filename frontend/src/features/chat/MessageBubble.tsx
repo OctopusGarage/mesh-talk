@@ -98,7 +98,7 @@ function FileBubble({
         {fileGlyph(file.name)}
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm">{file.name}</div>
-          <div className="font-mono text-[10px] opacity-70">
+          <div className="font-mono text-[11px] tabular-nums opacity-70">
             {metadataPending
               ? t("message.delivery.metadataPending")
               : humanSize(file.size)}
@@ -321,8 +321,8 @@ export function MessageBubble({
         )}
 
         {mentioned && !mine && (
-          <span className="mb-1 rounded-full bg-signal/10 px-2 py-0.5 text-[10px] font-medium text-signal">
-            提及了你
+          <span className="mb-1 rounded-full bg-signal/10 px-2 py-0.5 text-[11px] font-medium text-signal">
+            {t("message.mentionedYou")}
           </span>
         )}
 
@@ -354,10 +354,10 @@ export function MessageBubble({
                   isSticker
                     ? ""
                     : cn(
-                        "rounded-2xl px-3.5 py-2",
+                        "rounded-xl px-3.5 py-2",
                         mine
-                          ? "rounded-br-md bg-bubble-own text-[hsl(var(--bubble-own-foreground))] shadow-sm"
-                          : "rounded-bl-md border border-border bg-muted text-foreground shadow-elevation",
+                          ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
+                          : "rounded-bl-sm border border-border bg-muted text-foreground",
                       ),
                   mentioned && "border-l-2 border-signal",
                   m.pending && "opacity-60",
@@ -482,7 +482,10 @@ export function MessageBubble({
                   key={`${r.target}:${r.emoji}`}
                   type="button"
                   data-testid="reaction-chip"
-                  aria-label={`${me ? "Remove your" : "Add"} ${r.emoji} reaction`}
+                  aria-label={t(
+                    me ? "message.reactionRemove" : "message.reactionAdd",
+                    { emoji: r.emoji },
+                  )}
                   onClick={() => m.id && onReact(m.id, r.emoji)}
                   className={cn(
                     "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -492,7 +495,9 @@ export function MessageBubble({
                   )}
                 >
                   <span>{r.emoji}</span>
-                  <span className="font-mono text-[10px]">{r.who.length}</span>
+                  <span className="font-mono text-[11px] tabular-nums">
+                    {r.who.length}
+                  </span>
                 </button>
               );
             })}
@@ -504,7 +509,7 @@ export function MessageBubble({
         {m.failed && (
           <span
             className={cn(
-              "mt-0.5 flex items-center gap-1.5 px-1 text-[10px] text-destructive",
+              "mt-0.5 flex items-center gap-1.5 px-1 text-[11px] text-destructive",
               mine && "flex-row-reverse",
             )}
           >

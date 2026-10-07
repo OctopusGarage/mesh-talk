@@ -108,19 +108,24 @@ export function VerifyContactDialog({
   const verified = trust?.verified ?? false;
   const changed = trust?.fingerprint_changed ?? false;
   const trusted = verified && !changed;
+  const trustLabel = changed
+    ? t("verify.changedTitle")
+    : trusted
+      ? t("verify.verified")
+      : t("verify.title");
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button
           variant="ghost"
-          size="icon"
           data-testid="verify-trigger"
           data-trust={
             changed ? "changed" : verified ? "verified" : "unverified"
           }
-          title={t("verify.trigger")}
-          aria-label={t("verify.trigger")}
+          title={trustLabel}
+          aria-label={trustLabel}
+          className="h-9 gap-1.5 px-2.5"
         >
           {changed ? (
             <ShieldAlert className="h-4 w-4 text-destructive" />
@@ -129,6 +134,9 @@ export function VerifyContactDialog({
           ) : (
             <ShieldQuestion className="h-4 w-4" />
           )}
+          <span className="hidden text-xs font-medium lg:inline">
+            {changed ? t("verify.reverify") : trustLabel}
+          </span>
         </Button>
       </DialogTrigger>
       <DialogContent data-testid="verify-dialog">

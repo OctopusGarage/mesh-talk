@@ -6,6 +6,7 @@ use crate::discovery::announce::{decode, encode, Announce};
 use crate::discovery::roster::{Roster, UpdateOutcome};
 use crate::discovery::DiscoveryVisibility;
 use crate::transport::net::{ipv4_interface_addrs, join_discovery_group_all_ifaces};
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -167,9 +168,24 @@ async fn run_broadcast_with_visibility(
     trigger: Option<Arc<Notify>>,
     visibility: Arc<DiscoveryVisibility>,
 ) {
-    // Startup burst: a few staggered announces to beat early UDP loss.
+    // Startup offsets are measured from launch, not added to one another. Manual
+    // requests remain responsive even while the burst is in progress.
+    let started = tokio::time::Instant::now();
     for offset_ms in BROADCAST_STARTUP_BURST_MS {
-        tokio::time::sleep(Duration::from_millis(offset_ms)).await;
+        let deadline = started + Duration::from_millis(offset_ms);
+        loop {
+            if let Some(notify) = &trigger {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    _ = notify.notified() => {}
+                }
+            } else {
+                tokio::time::sleep_until(deadline).await;
+                break;
+            }
+            let bytes = current_announce(&announce);
+            let _ = visibility.send_announce(&socket, &bytes, target).await;
+        }
         let bytes = current_announce(&announce);
         let _ = visibility.send_announce(&socket, &bytes, target).await;
     }
@@ -193,19 +209,20 @@ async fn run_broadcast_with_visibility(
     }
 }
 
-/// The discovery port unicast-scan cadence: a few quick bursts at startup so a
-/// peer that came up just before us is found fast, then a steady slow interval
-/// (multicast/broadcast carry the steady-state load; the scan is the fallback for
-/// when those are blocked but unicast is allowed).
+/// The discovery port unicast-scan cadence: offsets from launch for quick startup
+/// sweeps so a peer that came up just before us is found fast, then a steady
+/// slow interval (multicast/broadcast carry the steady-state load; the scan is
+/// the fallback for when those are blocked but unicast is allowed).
 const SCAN_STARTUP_DELAYS_SECS: [u64; 3] = [1, 3, 7];
 const SCAN_STEADY_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Unicast-UDP /24 scan fallback (the analog of LocalSend's HTTP /24 scan, adapted
 /// to our fixed UDP discovery port). For each local non-loopback IPv4 interface,
 /// derive its /24 and send our `announce` to `x.y.z.1..=254` at `discovery_port`,
-/// skipping our own address. The receiver's normal listen loop records us directly
-/// (and, on first sight, replies), so two scanning sides converge symmetrically
-/// even when multicast/broadcast is dropped. Send errors are ignored per-target.
+/// deduplicating shared subnets and skipping all of our addresses. The receiver's
+/// normal listen loop records us directly (and, on first sight, replies), so two
+/// scanning sides converge symmetrically even when multicast/broadcast is dropped.
+/// Send errors are ignored per-target.
 pub async fn run_scan(
     socket: Arc<UdpSocket>,
     announce: SharedAnnounce,
@@ -229,8 +246,22 @@ async fn run_scan_with_visibility(
     trigger: Option<Arc<Notify>>,
     visibility: Arc<DiscoveryVisibility>,
 ) {
+    let started = tokio::time::Instant::now();
     for delay in SCAN_STARTUP_DELAYS_SECS {
-        tokio::time::sleep(Duration::from_secs(delay)).await;
+        let deadline = started + Duration::from_secs(delay);
+        loop {
+            if let Some(notify) = &trigger {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    _ = notify.notified() => {}
+                }
+            } else {
+                tokio::time::sleep_until(deadline).await;
+                break;
+            }
+            let bytes = current_announce(&announce);
+            scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility).await;
+        }
         let bytes = current_announce(&announce);
         scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility).await;
     }
@@ -264,8 +295,18 @@ fn scan_targets(own: Ipv4Addr) -> Vec<Ipv4Addr> {
         .collect()
 }
 
+fn scan_targets_for_interfaces(own: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
+    let local: BTreeSet<_> = own.iter().copied().collect();
+    own.iter()
+        .flat_map(|addr| scan_targets(*addr))
+        .filter(|target| !local.contains(target))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// One sweep: enumerate interfaces fresh (they may change) and unicast `bytes` to
-/// every host in each /24 except our own address. Fire-and-forget; errors ignored.
+/// each unique /24 host except our own addresses. Fire-and-forget; errors ignored.
 #[cfg(test)]
 async fn scan_once(socket: &UdpSocket, bytes: &[u8], discovery_port: u16) {
     scan_once_with_visibility(
@@ -283,14 +324,10 @@ async fn scan_once_with_visibility(
     discovery_port: u16,
     visibility: &DiscoveryVisibility,
 ) {
-    for own in ipv4_interface_addrs() {
-        let targets = scan_targets(own)
-            .into_iter()
-            .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port));
-        if !scan_addresses(socket, bytes, targets, visibility).await {
-            return;
-        }
-    }
+    let targets = scan_targets_for_interfaces(&ipv4_interface_addrs())
+        .into_iter()
+        .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port));
+    let _ = scan_addresses(socket, bytes, targets, visibility).await;
 }
 
 async fn scan_addresses(
@@ -652,6 +689,78 @@ mod tests {
                     .unwrap();
             assert_eq!(decode(&buf[..n]).expect("decodes"), announce);
         }
+    }
+
+    #[tokio::test]
+    async fn broadcast_finishes_startup_burst_within_its_documented_offsets() {
+        let id = DeviceIdentity::generate();
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let target = receiver.local_addr().unwrap();
+        let started = tokio::time::Instant::now();
+        let task = tokio::spawn(run_broadcast(
+            sender,
+            shared_announce(&Announce::new(&id, "Alice", 4000)),
+            target,
+            Duration::from_secs(3600),
+            None,
+        ));
+        let mut buf = [0; 2048];
+        for _ in 0..BROADCAST_STARTUP_BURST_MS.len() {
+            tokio::time::timeout_at(
+                started + Duration::from_millis(2350),
+                receiver.recv_from(&mut buf),
+            )
+            .await
+            .expect("all startup announces arrive close to 100, 500, and 2000ms")
+            .unwrap();
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn manual_broadcast_trigger_works_during_startup_burst() {
+        let id = DeviceIdentity::generate();
+        let receiver = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let target = receiver.local_addr().unwrap();
+        let trigger = Arc::new(Notify::new());
+        let task = tokio::spawn(run_broadcast(
+            sender,
+            shared_announce(&Announce::new(&id, "Alice", 4000)),
+            target,
+            Duration::from_secs(3600),
+            Some(Arc::clone(&trigger)),
+        ));
+        let mut buf = [0; 2048];
+        receiver.recv_from(&mut buf).await.unwrap(); // first scheduled send at 100ms
+        trigger.notify_waiters();
+        tokio::time::timeout(Duration::from_millis(250), receiver.recv_from(&mut buf))
+            .await
+            .expect("manual trigger should not wait for the next startup send")
+            .unwrap();
+        task.abort();
+    }
+
+    #[test]
+    fn scan_targets_for_interfaces_deduplicates_subnets_and_excludes_local_addresses() {
+        let own = [
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(192, 168, 1, 11),
+            Ipv4Addr::new(10, 0, 0, 5),
+        ];
+        let targets = scan_targets_for_interfaces(&own);
+        assert_eq!(targets.len(), 505);
+        assert!(!targets.contains(&own[0]));
+        assert!(!targets.contains(&own[1]));
+        assert!(!targets.contains(&own[2]));
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|ip| **ip == Ipv4Addr::new(192, 168, 1, 9))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -311,11 +311,11 @@ export function Composer({
   };
 
   return (
-    <div data-testid="composer" className="border-t bg-card/40 p-3">
+    <div data-testid="composer" className="border-t bg-card px-4 py-3">
       {replyTo && (
         <div
           data-testid="composer-reply-banner"
-          className="mb-2 flex items-center gap-2 rounded-lg border-l-2 border-signal bg-muted/50 px-3 py-1.5 text-sm"
+          className="mx-auto mb-2 flex max-w-[880px] items-center gap-2 rounded-md border-l-2 border-signal bg-muted/50 px-3 py-1.5 text-sm"
         >
           <CornerUpLeft className="h-3.5 w-3.5 shrink-0 text-signal" />
           <span className="min-w-0 flex-1 truncate text-muted-foreground">
@@ -326,14 +326,16 @@ export function Composer({
           </span>
           <button
             onClick={onCancelReply}
-            className="rounded p-0.5 text-muted-foreground hover:bg-accent"
+            type="button"
+            aria-label={t("composer.cancelReply")}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
       )}
 
-      <div className="relative">
+      <div className="relative mx-auto max-w-[880px]">
         {suggestions.length > 0 && (
           <div
             data-testid="mention-popover"
@@ -355,6 +357,7 @@ export function Composer({
 
         {showEmoji && (
           <div
+            id="composer-emoji-panel"
             data-testid="emoji-picker"
             data-composer-popover=""
             className="absolute bottom-full left-0 mb-2 max-h-72 w-64 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
@@ -378,6 +381,7 @@ export function Composer({
 
         {showStickers && onSendSticker && (
           <div
+            id="composer-sticker-panel"
             data-testid="sticker-panel"
             data-composer-popover=""
             className="absolute bottom-full left-0 mb-2 max-h-72 w-80 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
@@ -405,6 +409,7 @@ export function Composer({
 
         {showShot && onScreenshot && (
           <div
+            id="composer-screenshot-panel"
             data-testid="screenshot-menu"
             data-composer-popover=""
             className="absolute bottom-full left-0 mb-2 w-56 max-w-full overflow-hidden rounded-xl border bg-popover p-1 shadow-elevation"
@@ -436,16 +441,25 @@ export function Composer({
 
         {/* Action toolbar — kept ABOVE the input so the buttons aren't crammed onto the
             typing line (screenshot · attach · image · emoji). */}
-        <div className="mb-1.5 flex items-center gap-1">
+        <div
+          className="mb-2 flex items-center gap-1"
+          role="toolbar"
+          aria-label={t("composer.tools")}
+        >
           {onScreenshot && (
             <Button
               variant="ghost"
               size="icon"
               data-testid="composer-screenshot"
               data-composer-popover=""
-              className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
+              className={cn(
+                "h-9 w-9 shrink-0 rounded-md text-muted-foreground",
+                showShot && "bg-accent text-foreground",
+              )}
               title={t("screenshot.trigger")}
               aria-label={t("screenshot.trigger")}
+              aria-expanded={showShot}
+              aria-controls="composer-screenshot-panel"
               onClick={() => {
                 setShowEmoji(false);
                 setShowStickers(false);
@@ -460,7 +474,7 @@ export function Composer({
               variant="ghost"
               size="icon"
               data-testid="composer-attach"
-              className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
+              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
               title={t("composer.attach")}
               aria-label={t("composer.attach")}
               onClick={onAttach}
@@ -473,7 +487,7 @@ export function Composer({
               variant="ghost"
               size="icon"
               data-testid="composer-image"
-              className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
+              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
               title={t("composer.image")}
               aria-label={t("composer.image")}
               onClick={onImage}
@@ -486,9 +500,14 @@ export function Composer({
             size="icon"
             data-testid="composer-emoji"
             data-composer-popover=""
-            className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
+            className={cn(
+              "ml-1 h-9 w-9 shrink-0 rounded-md border-l text-muted-foreground",
+              showEmoji && "bg-accent text-foreground",
+            )}
             title={t("composer.emoji")}
             aria-label={t("composer.emoji")}
+            aria-expanded={showEmoji}
+            aria-controls="composer-emoji-panel"
             onClick={() => {
               setShowShot(false);
               setShowStickers(false);
@@ -503,9 +522,14 @@ export function Composer({
               size="icon"
               data-testid="composer-stickers"
               data-composer-popover=""
-              className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground"
+              className={cn(
+                "h-9 w-9 shrink-0 rounded-md text-muted-foreground",
+                showStickers && "bg-accent text-foreground",
+              )}
               title={t("composer.stickers")}
               aria-label={t("composer.stickers")}
+              aria-expanded={showStickers}
+              aria-controls="composer-sticker-panel"
               onClick={() => {
                 setShowEmoji(false);
                 setShowShot(false);
@@ -517,7 +541,7 @@ export function Composer({
           )}
         </div>
 
-        <div className="flex items-end gap-2 rounded-2xl border bg-background p-2 transition-colors focus-within:border-signal focus-within:ring-2 focus-within:ring-signal/30">
+        <div className="flex items-end gap-2 rounded-xl border bg-background p-2 transition-colors focus-within:border-signal focus-within:ring-2 focus-within:ring-signal/30">
           <textarea
             ref={ref}
             rows={1}

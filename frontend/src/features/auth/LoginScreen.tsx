@@ -14,10 +14,8 @@ import { useAuth } from "@/store/auth";
 
 /**
  * The hero. Opening on the most characteristic thing in mesh-talk's world: a
- * cryptographic identity forming on a serverless mesh. A calm ink backdrop with a very
- * restrained living "signal" ambient, the Mesh-Talk brand mark above the app name in
- * the display font, and a quiet, confident unlock form — unlocking a secure instrument,
- * not filling in a generic auth card.
+ * cryptographic identity on a calm ink surface. The locally bundled brand mark and
+ * clear sign-in form keep first run focused on the account the user is unlocking.
  */
 export function LoginScreen() {
   const { t } = useTranslation();
@@ -75,27 +73,17 @@ export function LoginScreen() {
           className="absolute inset-x-0 top-0 z-10 h-8"
         />
       )}
-      {/* Living "signal" ambient — very restrained: two slow teal blooms over deep ink,
-          plus a faint mesh grid. Halts under reduced motion (the global CSS neutralizes
-          the keyframe; the framer drift is gated on useMotionOK). */}
-      <MeshAmbient animate={ok} />
-
       <div className="relative w-full max-w-sm">
         <motion.div
-          initial={ok ? "hidden" : false}
+          initial={false}
           animate="visible"
           variants={fadeSlideUp}
           className="mb-8 flex flex-col items-center text-center"
         >
-          {/* The app's brand mark — the first thing the user sees, framed by a soft
-              teal halo. (The per-user IdentityGlyph remains the avatar everywhere else.) */}
+          {/* The app mark opens the first-run screen; IdentityGlyph remains the avatar. */}
           <div className="relative mb-5">
-            <div
-              aria-hidden
-              className="absolute inset-0 -z-10 rounded-[28%] bg-signal/25 blur-2xl"
-            />
             <motion.div
-              initial={ok ? { opacity: 0, scale: 0.85 } : false}
+              initial={false}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
             >
@@ -113,11 +101,11 @@ export function LoginScreen() {
         </motion.div>
 
         <motion.div
-          initial={ok ? "hidden" : false}
+          initial={false}
           animate="visible"
           variants={fadeSlideUp}
           transition={{ delay: ok ? 0.06 : 0 }}
-          className="rounded-2xl border bg-card/70 p-6 shadow-elevation-lg backdrop-blur-xl"
+          className="rounded-xl border bg-card p-6 shadow-elevation"
         >
           <Tabs value={tab} onValueChange={onTab}>
             <TabsList className="grid w-full grid-cols-2">
@@ -208,50 +196,6 @@ export function LoginScreen() {
           {t("login.footer")}
         </p>
       </div>
-    </div>
-  );
-}
-
-/** A restrained living backdrop: a faint mesh grid + two slow teal "signal" blooms. */
-function MeshAmbient({ animate }: { animate: boolean }) {
-  return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute inset-0 overflow-hidden"
-    >
-      {/* Faint mesh grid — the "mesh" of mesh-talk, kept to a whisper. */}
-      <div
-        className="absolute inset-0 opacity-[0.06]"
-        style={{
-          backgroundImage:
-            "linear-gradient(hsl(var(--signal)) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--signal)) 1px, transparent 1px)",
-          backgroundSize: "44px 44px",
-          maskImage:
-            "radial-gradient(ellipse 70% 60% at 50% 42%, black, transparent 75%)",
-          WebkitMaskImage:
-            "radial-gradient(ellipse 70% 60% at 50% 42%, black, transparent 75%)",
-        }}
-      />
-      {/* Two slow teal blooms — the "signal". Drift gated on reduced-motion. */}
-      <motion.div
-        className="absolute -top-32 left-1/2 h-[28rem] w-[28rem] -translate-x-1/2 rounded-full bg-signal/15 blur-3xl"
-        animate={
-          animate ? { y: [0, 18, 0], opacity: [0.6, 1, 0.6] } : undefined
-        }
-        transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
-      />
-      <motion.div
-        className="absolute bottom-[-8rem] right-[-4rem] h-80 w-80 rounded-full bg-signal/10 blur-3xl"
-        animate={
-          animate ? { y: [0, -16, 0], opacity: [0.5, 0.85, 0.5] } : undefined
-        }
-        transition={{
-          duration: 11,
-          repeat: Infinity,
-          ease: "easeInOut",
-          delay: 1.2,
-        }}
-      />
     </div>
   );
 }

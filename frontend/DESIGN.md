@@ -12,8 +12,9 @@ presence. **Dark is the hero**; light is a calm cool-paper; OLED is true-black d
 
 ## Palette
 
-Tokens live in `src/index.css` as shadcn HSL CSS-vars (`hsl(var(--x))`). Three themes are
-toggled by `lib/theme.ts` via the `.dark` / `.oled` classes on `<html>`. Use the Tailwind
+Tokens live in `src/index.css` as shadcn HSL CSS-vars (`hsl(var(--x))`). Three base themes
+and three optional color palettes are selected by `lib/theme.ts` via the `.dark` / `.oled`
+classes or `data-palette` on `<html>`. Every palette uses a solid message canvas. Use the Tailwind
 color utilities (`bg-card`, `text-muted-foreground`, …) — never hard-code hex.
 
 | Var                                    | Role                | Dark (hero)                  | Light                    |
@@ -29,11 +30,13 @@ color utilities (`bg-card`, `text-muted-foreground`, …) — never hard-code he
 
 Custom signature accents (tuned per theme for contrast):
 
-| Var          | Tailwind                          | Use                                                         |
-| ------------ | --------------------------------- | ----------------------------------------------------------- |
-| `--signal`   | `bg-signal` `text-signal`         | the teal accent; online presence; primary actions           |
-| `--verified` | `text-verified` `border-verified` | crypto **verified** state — safety numbers, verified badges |
-| `--mention`  | `text-mention` `bg-mention`       | @mentions, away/recent presence (amber)                     |
+| Var                 | Tailwind                          | Use                                                         |
+| ------------------- | --------------------------------- | ----------------------------------------------------------- |
+| `--signal`          | `bg-signal` `text-signal`         | the palette accent; primary actions                         |
+| `--presence-online` | CSS variable                      | stable online teal across palettes                          |
+| `--presence-recent` | CSS variable                      | stable recent amber across palettes                         |
+| `--verified`        | `text-verified` `border-verified` | crypto **verified** state — safety numbers, verified badges |
+| `--mention`         | `text-mention` `bg-mention`       | @mentions                                                   |
 
 OLED overrides only the surface/border/input hues to true-black + cooler ink greys.
 
@@ -104,8 +107,7 @@ Props: `seed: string` (id/fingerprint), `size?: number` (default 40), `verified?
 
 ### `PresenceDot`
 
-Status dot with a soft "breathing" pulse when online (halts under reduced motion). Online
-= signal teal, away/recent = mention amber, offline = dim muted.
+Status dot with a stable color. Online = teal, away/recent = amber, offline = dim muted.
 
 ```tsx
 <PresenceDot status="online" size="md" />
@@ -163,3 +165,33 @@ popovers). Notables:
 - **Tabs / Switch / Badge / Label** — token-aligned, unchanged APIs.
 
 Elevation tokens: `shadow-elevation` (cards/popovers), `shadow-elevation-lg` (dialogs/sheets).
+
+---
+
+## Messaging surfaces
+
+The sidebar emphasizes names, the latest loaded message, unread count, and presence. IDs
+remain available in identity details and use the mono font. The message log and composer
+share a restrained content width, with solid surfaces across all themes. Delivery labels
+describe an account receipt, not a read receipt; awaiting messages show text as well as
+an icon. The contact verification control shows its state in the header when space allows.
+Empty discovery offers the existing direct-connect guide.
+
+## Everyday messaging refinements
+
+- The sidebar gives search the available width. Received files stays one icon away, with an
+  accessible name and tooltip. Peer row actions appear over the row on hover or keyboard
+  focus, leaving names and previews more room at rest.
+- Settings uses a wider dialog and a section navigation strip. The existing scroll cue
+  remains available at short window heights; all controls and persistence behavior stay
+  in their original sections.
+- An empty conversation centers its prompt above the composer. When no peers are known,
+  the main pane explains LAN discovery and links to the direct-connect guide. Errors
+  appear away from the composer, and a render failure offers reload with technical
+  details behind disclosure.
+- Message time, delivery, and failure metadata use at least 11px text with tabular
+  figures. Account delivery remains distinct from reading. Composer panels show their
+  open state visually and through `aria-expanded`; its toolbar and reply-dismiss action
+  have accessible names.
+- Visual regression coverage includes no-peer, empty-conversation, and failed-send
+  states alongside the populated theme and viewport matrix.

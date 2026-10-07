@@ -146,7 +146,8 @@
     "list": "Conversaciones",
     "dropToSend": "Suelta para enviar a {{name}}",
     "clearHistory": "Borrar historial",
-    "clearHistoryConfirm": "Esto borra permanentemente los mensajes de esta conversación en este dispositivo. No se puede deshacer y no afecta la copia de la otra persona."
+    "clearHistoryConfirm": "Esto borra permanentemente los mensajes de esta conversación en este dispositivo. No se puede deshacer y no afecta la copia de la otra persona.",
+    "noPeersHint": "Mesh-Talk busca en tu red local. Mantén ambos dispositivos en la misma red LAN."
   },
   "presence": {
     "online": "En línea",
@@ -180,7 +181,10 @@
     "recall": "Retirar",
     "recalledByYou": "Retiraste un mensaje",
     "recalledBy": "{{name}} retiró un mensaje",
-    "reEdit": "Reeditar"
+    "reEdit": "Reeditar",
+    "mentionedYou": "Te mencionó",
+    "reactionAdd": "Añadir reacción {{emoji}}",
+    "reactionRemove": "Quitar tu reacción {{emoji}}"
   },
   "transfer": {
     "sending": "Enviando archivo…",
@@ -196,7 +200,9 @@
     "insertEmoji": "Insertar {{emoji}}",
     "couldntOpenFile": "No se pudo abrir el archivo: {{error}}",
     "stickers": "Stickers",
-    "sendSticker": "Enviar sticker {{emoji}}"
+    "sendSticker": "Enviar sticker {{emoji}}",
+    "cancelReply": "Cancelar respuesta",
+    "tools": "Herramientas de mensaje"
   },
   "screenshot": {
     "trigger": "Captura de pantalla",
@@ -469,5 +475,11 @@
     "username": "Usuario de acceso",
     "accountId": "ID de cuenta",
     "usernameHint": "Inicias sesión con este usuario y no se puede cambiar. El nombre visible de arriba es solo un apodo y puedes cambiarlo cuando quieras."
+  },
+  "errorBoundary": {
+    "title": "Mesh-Talk encontró un error de visualización.",
+    "description": "Vuelve a cargar la aplicación para continuar. Tus mensajes se guardan localmente.",
+    "reload": "Volver a cargar",
+    "details": "Detalles técnicos"
   }
 }

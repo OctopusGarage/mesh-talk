@@ -13,7 +13,9 @@ async function enterBobDm(page: Page) {
   }
   await expect(page.getByTestId("chat-shell")).toBeVisible();
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
-  await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+  await expect(
+    page.getByRole("log").getByText("hey, welcome to the mesh"),
+  ).toBeVisible();
 }
 
 test.use({ viewport: { width: 1100, height: 800 } });
@@ -25,7 +27,7 @@ test("recall a freshly-sent message → it becomes a placeholder", async ({
   // Send a fresh message (recall-eligible because it's "now").
   await page.getByTestId("composer-input").fill("oops typo");
   await page.getByTestId("composer-send").click();
-  const bubble = page.getByText("oops typo");
+  const bubble = page.getByRole("log").getByText("oops typo");
   await expect(bubble).toBeVisible();
 
   // Recall it via the context menu.
@@ -34,7 +36,7 @@ test("recall a freshly-sent message → it becomes a placeholder", async ({
   await page.getByTestId("msg-recall").click();
 
   // The content is gone, replaced by the "you recalled a message" placeholder.
-  await expect(page.getByText("oops typo")).toHaveCount(0);
+  await expect(page.getByRole("log").getByText("oops typo")).toHaveCount(0);
   await expect(page.getByTestId("message-recalled")).toBeVisible();
   await expect(page.getByText("You recalled a message")).toBeVisible();
 
@@ -47,12 +49,12 @@ test("delete a message removes it locally", async ({ page }) => {
   await enterBobDm(page);
   await page.getByTestId("composer-input").fill("delete me");
   await page.getByTestId("composer-send").click();
-  const bubble = page.getByText("delete me");
+  const bubble = page.getByRole("log").getByText("delete me");
   await expect(bubble).toBeVisible();
 
   await bubble.click({ button: "right" });
   await page.getByTestId("msg-delete").click();
-  await expect(page.getByText("delete me")).toHaveCount(0);
+  await expect(page.getByRole("log").getByText("delete me")).toHaveCount(0);
 });
 
 test("a seeded (old) message offers delete but not recall", async ({
@@ -60,7 +62,10 @@ test("a seeded (old) message offers delete but not recall", async ({
 }) => {
   await enterBobDm(page);
   // My seeded reply is older than the 2-minute window → no recall, but delete is allowed.
-  await page.getByText("thanks! glad to be here").click({ button: "right" });
+  await page
+    .getByRole("log")
+    .getByText("thanks! glad to be here")
+    .click({ button: "right" });
   await expect(page.getByTestId("message-context-menu")).toBeVisible();
   await expect(page.getByTestId("msg-delete")).toBeVisible();
   await expect(page.getByTestId("msg-recall")).toHaveCount(0);
@@ -77,7 +82,9 @@ test("clear chat history (from the history dialog) empties the conversation", as
   await expect(page.getByTestId("clear-history-dialog")).toBeVisible();
   await page.getByTestId("clear-history-confirm").click();
   // The history dialog closes and the seeded messages are gone.
-  await expect(page.getByText("hey, welcome to the mesh")).toHaveCount(0);
+  await expect(
+    page.getByRole("log").getByText("hey, welcome to the mesh"),
+  ).toHaveCount(0);
   await expect(page.getByTestId("message-bubble")).toHaveCount(0);
 });
 
