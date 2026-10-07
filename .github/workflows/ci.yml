@@ -200,7 +200,8 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: frontend/coverage/lcov.info,src-tauri/lcov.info
-          fail_ci_if_error: false
+          # Branch protection requires codecov/patch; surface upload failures in CI too.
+          fail_ci_if_error: true
 
       - name: Spelling (typos)
         if: matrix.os == 'ubuntu-latest'
