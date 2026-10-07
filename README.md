@@ -163,7 +163,7 @@ Windows); Linux is always prompt-free.
 ### Prerequisites
 
 - **Rust** (stable, edition 2021) + Cargo
-- **Node.js 20+** (frontend toolchain)
+- **Node.js 22+** (frontend toolchain)
 - **Tauri CLI** — `cargo install tauri-cli`
 - **Linux only** — the GTK/WebKit stack:
   `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf`

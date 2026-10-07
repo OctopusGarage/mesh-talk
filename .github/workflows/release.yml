@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
       - name: Validate source, version and draft state
         id: inputs
         env:
@@ -73,7 +73,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
 
       # 3️⃣ Install Rust
       - name: Install Rust
@@ -292,7 +292,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
@@ -359,7 +359,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
       - name: Require successful checks for this exact source
         run: node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
       - uses: actions/download-artifact@v8
