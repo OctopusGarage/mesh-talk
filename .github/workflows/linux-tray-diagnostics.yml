@@ -11,7 +11,7 @@ on:
       - src-tauri/src/tray.rs
       - src-tauri/src/lib.rs
       - src-tauri/src/window_visibility.rs
-      - src-tauri/src/chat_commands.rs
+      - src-tauri/src/chat_commands/**
 
 permissions:
   contents: read

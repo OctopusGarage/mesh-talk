@@ -9,7 +9,7 @@ on:
       - scripts/diagnostics/network-console*.mjs
       - scripts/diagnostics/windows-console-observer.ps1
       - scripts/diagnostics/console-fixture.rs
-      - src-tauri/src/chat_commands.rs
+      - src-tauri/src/chat_commands/**
       - src-tauri/src/main.rs
       - src-tauri/build.rs
       - src-tauri/windows.manifest
@@ -80,7 +80,7 @@ jobs:
       - name: Verify baseline and fixed production application on the same native runner
         shell: pwsh
         run: |
-          $source = 'src-tauri/src/chat_commands.rs'
+          $source = 'src-tauri/src/chat_commands/platform.rs'
           $original = [System.IO.File]::ReadAllBytes((Resolve-Path $source))
           $text = [System.Text.Encoding]::UTF8.GetString($original)
           $needle = 'const CREATE_NO_WINDOW: u32 = 0x0800_0000;'
