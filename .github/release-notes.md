@@ -5,23 +5,15 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.1.5
+### What's new in v0.1.6
 
-- Fixed desktop window-button permissions on Windows and Linux (#136).
-- Fixed window position restoration after hiding to the tray on Linux X11 (#137).
-- Added account-scoped hidden contacts, with search, restore, and persistent local settings
-  (#134). This hides contacts locally; it does not block network communication.
-- Added invisible mode and an account permission list (#135). Explicitly contacting a peer
-  allows replies; permissions can be revoked and survive restarts. Invisible mode suppresses
-  public presence announcements, but does not provide IP anonymity. Settings are local to
-  each device; legacy relay delivery to previously unknown devices remains limited.
-- Added an opt-in Linux rendering compatibility launch option, `--linux-renderer-compat`
-  (#133). The original VMware/Xorg blank-window report is not yet confirmed resolved.
-- Prevented Windows Wi-Fi queries from opening console windows (#138). The reported
-  periodic whole-screen flicker is not yet confirmed resolved.
+- Fixed the narrow window drag area before selecting a conversation on Windows (#161).
+- Prevented conversation and channel controls from overlapping the Windows caption buttons
+  (#162).
+- Fixed scrolling to the latest message in long conversations, including attachment access.
 
-For #133 and #138, please try this release and report whether the original symptom remains.
-Both issues remain open pending confirmation in the affected environments.
+The duplicate tray icon (#151), VMware blank window (#133), and periodic screen flicker
+(#138) remain open pending confirmation or further fixes in affected environments.
 
 ### Downloads
 
