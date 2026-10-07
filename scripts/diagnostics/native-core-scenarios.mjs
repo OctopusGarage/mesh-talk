@@ -49,6 +49,7 @@ public static class NativeKeyboard {
   delegate bool EnumWindowsProc(IntPtr window, IntPtr state);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int length);
   [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
   [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
   [DllImport("user32.dll", SetLastError=true)] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
@@ -60,7 +61,9 @@ public static class NativeKeyboard {
     EnumWindows((window, state) => {
       uint process;
       GetWindowThreadProcessId(window, out process);
-      if (process == ownedPid && IsWindowVisible(window)) { target = window; return false; }
+      var name = new System.Text.StringBuilder(64);
+      GetClassName(window, name, name.Capacity);
+      if (process == ownedPid && IsWindowVisible(window) && name.ToString() == "Tauri Window") { target = window; return false; }
       return true;
     }, IntPtr.Zero);
     if (target == IntPtr.Zero) throw new InvalidOperationException("Owned application window not found");

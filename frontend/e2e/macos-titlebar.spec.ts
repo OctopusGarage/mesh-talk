@@ -53,11 +53,11 @@ for (const [platform, userAgent] of [
 ]) {
   test.describe(`${platform} sidebar`, () => {
     test.use({ userAgent });
-    test("does not add macOS top spacing", async ({ page }) => {
+    test("leaves a drag band above sidebar actions", async ({ page }) => {
       await enterChat(page);
       await expect(page.getByTestId("self-identity")).toHaveCSS(
         "padding-top",
-        "12px",
+        "40px",
       );
       await page.getByTestId("open-profile").click();
       await expect(page.getByRole("dialog")).toBeVisible();

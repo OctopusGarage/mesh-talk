@@ -380,15 +380,6 @@
     background: transparent;
   }
 
-  /* Frameless chrome (Windows/Linux: native title bar dropped, custom controls top-right —
-     see lib/platform.ts + WindowControls). Reserve room on the right of the top header bar
-     (the conversation header, which spans to the window's right edge) so its actions don't
-     sit under the min/max/close buttons. The sidebar header is top-LEFT, so it's untouched. */
-  html[data-os="frameless"]
-    [data-titlebar-inset]:not([data-titlebar-inset="left"]) {
-    padding-right: 9rem;
-  }
-
   /* Respect the OS "reduce motion" preference: neutralize animations & transitions
      globally (covers Radix/shadcn dialog/popover enter-exit animations, spinners,
      hover transitions, smooth scrolling, and the presence breathing pulse). JS-driven
@@ -403,6 +394,12 @@
       scroll-behavior: auto !important;
     }
   }
+}
+
+/* The custom window controls occupy the first 32px on Windows/Linux. Keep both
+   header action rows below them, while leaving a 40px drag band across the top. */
+html[data-os="frameless"] [data-titlebar-inset] {
+  padding-top: 2.5rem;
 }
 
 /* macOS overlay title bar: reserve the 28px native traffic-light / drag-strip band
