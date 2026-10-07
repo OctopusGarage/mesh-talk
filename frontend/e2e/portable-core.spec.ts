@@ -39,6 +39,7 @@ test("portable authentication rejects the wrong password", async ({ page }) => {
 });
 
 test("portable registration sign in and sign out", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto("/");
   await page.evaluate(() => {
     const internals = (
@@ -83,6 +84,14 @@ test("portable registration sign in and sign out", async ({ page }) => {
   await page.getByTestId("sidebar-sign-out").click();
   await expect(page.getByTestId("login-form")).toBeVisible();
   await expect(page.getByTestId("chat-shell")).toHaveCount(0);
+  expect(
+    await page
+      .getByTestId("login-form")
+      .evaluate((form) =>
+        Number(getComputedStyle(form.closest(".bg-card")!).opacity),
+      ),
+    "sign-out must reveal the sign-in form immediately",
+  ).toBe(1);
 });
 
 async function settings(page: Page) {

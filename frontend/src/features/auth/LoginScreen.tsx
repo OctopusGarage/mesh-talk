@@ -75,7 +75,7 @@ export function LoginScreen() {
       )}
       <div className="relative w-full max-w-sm">
         <motion.div
-          initial={ok ? "hidden" : false}
+          initial={false}
           animate="visible"
           variants={fadeSlideUp}
           className="mb-8 flex flex-col items-center text-center"
@@ -83,7 +83,7 @@ export function LoginScreen() {
           {/* The app mark opens the first-run screen; IdentityGlyph remains the avatar. */}
           <div className="relative mb-5">
             <motion.div
-              initial={ok ? { opacity: 0, scale: 0.85 } : false}
+              initial={false}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
             >
@@ -101,7 +101,7 @@ export function LoginScreen() {
         </motion.div>
 
         <motion.div
-          initial={ok ? "hidden" : false}
+          initial={false}
           animate="visible"
           variants={fadeSlideUp}
           transition={{ delay: ok ? 0.06 : 0 }}
