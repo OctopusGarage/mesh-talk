@@ -11,6 +11,7 @@ import {
 } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { useTheme } from "@/lib/theme";
+import { needsCustomWindowControls } from "@/lib/platform";
 import { THEME_CREST } from "@/lib/themeCrest";
 import { Composer } from "./Composer";
 import {
@@ -405,6 +406,14 @@ export function ConversationView() {
   if (!active) {
     return (
       <main className="flex min-w-0 flex-1 flex-col">
+        {needsCustomWindowControls() && (
+          <div
+            aria-hidden
+            data-testid="empty-chat-drag-region"
+            data-tauri-drag-region
+            className="h-10 shrink-0"
+          />
+        )}
         {ready ? <EmptyState /> : <UnlockingState />}
       </main>
     );
