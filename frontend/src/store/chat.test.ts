@@ -74,6 +74,31 @@ it("keeps unchanged discovery snapshots referentially stable", async () => {
   expect(second.channels).toBe(first.channels);
 });
 
+it("refreshes channel member snapshots for group avatars", async () => {
+  const members = [{ user_id: "peer", name: "Alice", account_id: "account" }];
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_channels")
+      return Promise.resolve([
+        { channel_id: "team", name: "Team", owner: "me", member_count: 1 },
+      ]);
+    if (command === "channel_members")
+      return Promise.resolve({ owner: "me", members });
+    return Promise.resolve([]);
+  });
+
+  await useChat.getState().refreshRoster();
+  expect(useChat.getState().channelMembersById.team).toEqual(members);
+  const first = useChat.getState().channelMembersById;
+  await useChat.getState().refreshRoster();
+  expect(useChat.getState().channelMembersById).toBe(first);
+});
+
 it("shows a newly discovered peer on the next two-second roster poll", async () => {
   vi.useFakeTimers();
   let stop: (() => void) | undefined;

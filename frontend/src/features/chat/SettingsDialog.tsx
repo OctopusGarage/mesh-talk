@@ -46,6 +46,10 @@ import {
 import { ThemePicker } from "./ThemePicker";
 import { HiddenContactsDialog } from "./HiddenContactsDialog";
 import { PrivacySettings } from "./PrivacySettings";
+import {
+  scrollToSettingsSection,
+  settingsScrollBehavior,
+} from "./settingsScroll";
 
 /** A section group: a small display-font label over a stack of rows. */
 function Section({
@@ -101,11 +105,6 @@ function Row({
 
 const SELECT_CLASS =
   "h-9 rounded-md border border-input bg-background px-2 text-sm transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
-const settingsScrollBehavior = (): ScrollBehavior =>
-  window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    ? "auto"
-    : "smooth";
 
 const LANGUAGE_LABELS: Record<Language, string> = {
   en: "English",
@@ -267,12 +266,7 @@ export function SettingsDialog() {
               key={id}
               type="button"
               onClick={() =>
-                settingsScroll.current
-                  ?.querySelector(`#settings-${id}`)
-                  ?.scrollIntoView({
-                    block: "start",
-                    behavior: settingsScrollBehavior(),
-                  })
+                scrollToSettingsSection(settingsScroll.current, id)
               }
               className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
