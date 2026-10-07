@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { getReleaseByTag } from "./release-api.mjs";
 
 export function releaseInputs({ ref, runId, version, desktopVersion, existingRelease, publishRelease = false }) {
   assert.match(version, /^\d+\.\d+\.\d+$/, "workspace version must be a stable release");
@@ -31,11 +32,7 @@ function main() {
     releaseInputs({ ref, runId, version, desktopVersion, existingRelease });
     const comparison = JSON.parse(execFileSync("gh", ["api", `repos/${repo}/compare/main...${sha}`], { encoding: "utf8" }));
     assert.ok(["identical", "behind"].includes(comparison.status), "release source must already be merged into main");
-    try {
-      existingRelease = JSON.parse(execFileSync("gh", ["api", `repos/${repo}/releases/tags/${ref.slice(10)}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-    } catch (error) {
-      if (!/HTTP 404/.test(error.stderr?.toString() ?? "")) throw error;
-    }
+    existingRelease = getReleaseByTag(repo, ref.slice(10));
   }
   const result = releaseInputs({ ref, runId, version, desktopVersion, existingRelease, publishRelease: process.env.RELEASE_PUBLICATION === "true" });
   appendFileSync(process.env.GITHUB_OUTPUT, `version=${result.version}\ntag=${result.tag}\n`);
