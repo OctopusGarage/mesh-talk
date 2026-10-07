@@ -49,6 +49,7 @@ public static class NativeKeyboard {
   delegate bool EnumWindowsProc(IntPtr window, IntPtr state);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int length);
   [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
   [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
   [DllImport("user32.dll", SetLastError=true)] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
@@ -60,7 +61,9 @@ public static class NativeKeyboard {
     EnumWindows((window, state) => {
       uint process;
       GetWindowThreadProcessId(window, out process);
-      if (process == ownedPid && IsWindowVisible(window)) { target = window; return false; }
+      var name = new System.Text.StringBuilder(64);
+      GetClassName(window, name, name.Capacity);
+      if (process == ownedPid && IsWindowVisible(window) && name.ToString() == "Tauri Window") { target = window; return false; }
       return true;
     }, IntPtr.Zero);
     if (target == IntPtr.Zero) throw new InvalidOperationException("Owned application window not found");
@@ -189,18 +192,25 @@ export async function signedPeerObservation({ peer, userId, peerName, observe, u
 }
 
 export async function revealLatestNativeMessage({ execute, until, command }, text) {
-  await until("incoming attachment visibly rendered in native message log", async () => {
+  let jumpRequested = false;
+  try { await until("incoming attachment visibly rendered in native message log", async () => {
     const state = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect(),b=document.querySelector('button[aria-label=\"Jump to latest messages\"]'),q=b?.getBoundingClientRect();return {visible:!!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right,jump:!!q&&q.width>0&&q.height>0};", [text]);
     if (state.visible) return true;
     // The production virtual list deliberately preserves a history reader's
     // position. Reveal new content through its real user-facing control, not
     // by replacing IPC or directly mutating the scroll position.
-    if (state.jump) {
+    if (state.jump && !jumpRequested) {
       const button = await command("POST", "/element", { using: "css selector", value: 'button[aria-label="Jump to latest messages"]' });
       await command("POST", `/element/${button["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
+      // Repeated clicks restart Virtuoso's smooth scroll, which can keep a
+      // large preceding message in view until the whole probe times out.
+      jumpRequested = true;
     }
     return false;
-  });
+  }); } catch (error) {
+    const state = await execute("const log=document.querySelector('[role=log]'),bubbles=Array.from(document.querySelectorAll('[data-testid=message-bubble]')),jump=document.querySelector('button[aria-label=\"Jump to latest messages\"]');return {count:bubbles.length,tails:bubbles.slice(-3).map(e=>e.textContent.slice(-120)),scrollTop:log?.scrollTop,scrollHeight:log?.scrollHeight,clientHeight:log?.clientHeight,jump:!!jump,targetInDom:bubbles.some(e=>e.textContent.includes(arguments[0]))};", [text]);
+    throw new Error(`${error.message}; native log state ${JSON.stringify({ ...state, jumpRequested })}`);
+  }
 }
 
 export async function revealHistoricalNativeMessage({ execute, until, command, key }, text) {

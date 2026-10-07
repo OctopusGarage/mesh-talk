@@ -32,6 +32,7 @@ pub mod settings;
 pub mod state;
 pub mod tray;
 pub mod trust;
+mod window_geometry;
 mod window_visibility;
 
 use crate::settings::SettingsState;
@@ -220,9 +221,33 @@ pub fn run_tauri_configured(
             // lights float over our content via `titleBarStyle: Overlay`), but Windows/Linux
             // would otherwise show the traditional title bar. Drop their native decorations
             // so the app provides its own (custom window controls live in the frontend).
-            #[cfg(not(target_os = "macos"))]
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(not(target_os = "macos"))]
                 let _ = window.set_decorations(false);
+                // The window-state plugin restores saved pixel sizes without
+                // enforcing the configured minimum. A damaged state file can
+                // otherwise leave only a title-bar-height window visible.
+                if let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") {
+                    let scale = window.scale_factor()?;
+                    let restored = window.inner_size()?.to_logical::<f64>(scale);
+                    let minimum = tauri::LogicalSize::new(
+                        config.min_width.unwrap_or(0.0),
+                        config.min_height.unwrap_or(0.0),
+                    );
+                    let preferred = tauri::LogicalSize::new(config.width, config.height);
+                    if let Some(repaired) =
+                        crate::window_geometry::repaired_startup_size(restored, minimum, preferred)
+                    {
+                        log::warn!(
+                            "Repairing restored main window size from {}x{} to {}x{}",
+                            restored.width,
+                            restored.height,
+                            repaired.width,
+                            repaired.height
+                        );
+                        window.set_size(repaired)?;
+                    }
+                }
             }
 
             // The window is created hidden in `tauri.conf.json`, then explicitly shown only

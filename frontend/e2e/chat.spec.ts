@@ -252,7 +252,9 @@ test.describe("Mesh-Talk UI flow", () => {
     await result.click();
     // Navigated into the conversation containing the hit.
     await expect(page.getByTestId("conversation-header")).toBeVisible();
-    await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+    await expect(
+      page.getByTestId("message-bubble").getByText("hey, welcome to the mesh"),
+    ).toBeVisible();
   });
 
   test("Files tray opens", async ({ page }) => {

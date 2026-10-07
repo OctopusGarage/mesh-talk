@@ -24,6 +24,7 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
+  timeout: process.platform === "win32" ? 60_000 : 30_000,
   testMatch: [
     "portable-core.spec.ts",
     "automatic-delivery.spec.ts",

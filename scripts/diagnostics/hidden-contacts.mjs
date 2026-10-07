@@ -359,9 +359,11 @@ try {
   await click(`hide-contact-menu-${account}`);
   await until("cancel receives default focus", () => execute("return document.activeElement?.getAttribute('data-testid')==='hide-contact-cancel';"));
   const confirmationCopy = await execute("return document.querySelector('[data-testid=hide-contact-dialog]').textContent;");
-  assert.match(confirmationCopy, /History is kept/);
-  assert.match(confirmationCopy, /Messages and calls can still arrive/);
-  assert.match(confirmationCopy, /signed-in user on this device/);
+  // The real webview uses the host's locale; verify the same safety promises
+  // in either shipped language instead of assuming an English OS.
+  assert.match(confirmationCopy, /History is kept|聊天历史保留/);
+  assert.match(confirmationCopy, /Messages and calls can still arrive|仍可收到消息和来电/);
+  assert.match(confirmationCopy, /signed-in user on this device|本设备当前登录用户/);
   await key("\uE007");
   await until("Enter cancels confirmation", async () => !await exists("hide-contact-dialog"));
   assert.equal(await exists(row()), true);
