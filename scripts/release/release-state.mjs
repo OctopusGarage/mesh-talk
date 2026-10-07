@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { getReleaseByTag } from "./release-api.mjs";
 
 export function draftSnapshot(release, tag) {
   assert.ok(release?.draft === true, "release must still be a draft");
@@ -37,17 +38,13 @@ async function main() {
   assert.match(repo, /^[\w.-]+\/[\w.-]+$/);
   assert.match(tag, /^v\d+\.\d+\.\d+$/);
   assert.ok(["guard", "record", "publish"].includes(mode), "unsupported release-state operation");
-  let release;
-  try {
-    release = JSON.parse(execFileSync("gh", ["api", `repos/${repo}/releases/tags/${tag}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  } catch (error) {
-    if (mode === "guard" && /HTTP 404/.test(error.stderr?.toString() ?? "")) return;
-    throw error;
-  }
+  const release = getReleaseByTag(repo, tag);
   if (mode === "guard") {
+    if (release === null) return;
     assert.equal(release.draft, true, "cannot upload to a published release");
     return;
   }
+  assert.ok(release !== null, "release not found");
   if (mode === "record") {
     const snapshot = draftSnapshot(release, tag);
     assert.deepEqual(snapshot.assets.map((asset) => asset.name).sort(), readdirSync(directory).sort(), "downloaded release asset set changed");
