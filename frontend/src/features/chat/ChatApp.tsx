@@ -72,14 +72,14 @@ export function ChatApp() {
       {error && (
         <div
           role="alert"
-          className="absolute bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-md bg-destructive px-4 py-2 text-sm text-destructive-foreground shadow-lg"
+          className="absolute right-4 top-4 z-50 flex max-w-[min(26rem,calc(100vw-2rem))] items-start gap-3 rounded-md border border-destructive/35 bg-card px-3 py-2.5 text-sm text-foreground shadow-elevation-lg"
         >
           <span>{error}</span>
           <button
             type="button"
             onClick={clearError}
             aria-label={t("conversation.dismissError")}
-            className="font-bold opacity-80 hover:opacity-100"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             ×
           </button>

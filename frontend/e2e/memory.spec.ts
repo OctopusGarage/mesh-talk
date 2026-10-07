@@ -67,7 +67,9 @@ test.describe("Frontend memory-growth guardrails", () => {
     await enterChat(page);
     await page.getByTestId(`conversation-row-${BOB.account}`).click();
     await expect(page.getByTestId("conversation-header")).toBeVisible();
-    await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+    await expect(
+      page.getByRole("log").getByText("hey, welcome to the mesh"),
+    ).toBeVisible();
 
     // Inject 400 synthetic inbound messages into the open conversation's store,
     // then nudge the view to reload by emitting an inbound event for the last one.
@@ -95,7 +97,9 @@ test.describe("Frontend memory-growth guardrails", () => {
     }, N);
 
     // The newest message renders (list followed output to the bottom)...
-    await expect(page.getByText(`synthetic message ${N - 1}`)).toBeVisible();
+    await expect(
+      page.getByRole("log").getByText(`synthetic message ${N - 1}`),
+    ).toBeVisible();
     // ...but the DOM holds only the on-screen window, NOT all N bubbles.
     const rendered = await bubbleCount(page);
     expect(rendered).toBeGreaterThan(0);
@@ -128,7 +132,9 @@ test.describe("Frontend memory-growth guardrails", () => {
       await page.getByTestId(`conversation-row-${BOB.account}`).click();
       await expect(page.getByTestId("conversation-header")).toBeVisible();
       await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-      await expect(page.getByText("channel kickoff")).toBeVisible();
+      await expect(
+        page.getByRole("log").getByText("channel kickoff"),
+      ).toBeVisible();
       await page.getByTestId(`conversation-row-${CAROL.account}`).click();
       await expect(page.getByTestId("conversation-empty")).toBeVisible();
     }

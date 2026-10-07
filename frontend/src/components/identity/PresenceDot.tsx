@@ -3,9 +3,9 @@ import { cn } from "@/lib/utils";
 export type PresenceStatus = "online" | "away" | "recent" | "offline";
 
 const COLOR: Record<PresenceStatus, string> = {
-  online: "hsl(var(--signal))",
-  away: "hsl(var(--mention))",
-  recent: "hsl(var(--mention))",
+  online: "hsl(var(--presence-online))",
+  away: "hsl(var(--presence-recent))",
+  recent: "hsl(var(--presence-recent))",
   offline: "hsl(var(--muted-foreground))",
 };
 
@@ -20,10 +20,8 @@ export interface PresenceDotProps {
 }
 
 /**
- * PresenceDot — a small status dot with a soft "breathing" pulse when online (a living
- * LAN-presence signal). Steady dim when offline; the away/recent state uses the amber
- * mention hue. The pulse halts under reduced motion (the keyframe is neutralized by the
- * global `prefers-reduced-motion` rule in index.css).
+ * PresenceDot — a stable status marker. Online keeps the same teal meaning across
+ * palettes; offline is dimmed and recent uses the secondary status hue.
  */
 export function PresenceDot({
   status = "offline",
@@ -33,7 +31,6 @@ export function PresenceDot({
 }: PresenceDotProps) {
   const px = SIZE[size];
   const color = COLOR[status];
-  const online = status === "online";
   return (
     <span
       role="status"
@@ -41,16 +38,6 @@ export function PresenceDot({
       className={cn("relative inline-flex shrink-0", className)}
       style={{ width: px, height: px }}
     >
-      {online && (
-        <span
-          aria-hidden
-          className="absolute inset-0 rounded-full"
-          style={{
-            backgroundColor: color,
-            animation: "presence-breathe 2.4s ease-in-out infinite",
-          }}
-        />
-      )}
       <span
         aria-hidden
         className="relative inline-block rounded-full ring-2 ring-background"

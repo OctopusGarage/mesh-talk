@@ -71,6 +71,11 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
     page,
     page.getByTestId(`conversation-row-${BOB.account}`),
   );
+
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await expect(
+    page.getByTestId(`conversation-row-${BOB.account}`),
+  ).toContainText("thanks! glad to be here");
 });
 
 test("stranded prompt dismiss target meets interaction invariants", async ({
@@ -126,14 +131,16 @@ for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
       const search = document.querySelector(
         '[data-testid="sidebar-action-search"]',
       );
+      const searchLabel = search?.querySelector("span");
       const files = document.querySelector(
         '[data-testid="sidebar-action-files"]',
       );
-      if (!sidebar || !search || !files)
+      if (!sidebar || !search || !searchLabel || !files)
         throw new Error("Sidebar action missing");
       return {
         sidebar: sidebar.getBoundingClientRect().right,
         search: search.getBoundingClientRect().right,
+        searchLabelFits: searchLabel.scrollWidth <= searchLabel.clientWidth + 1,
         files: files.getBoundingClientRect().right,
       };
     });
@@ -145,5 +152,8 @@ for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
       bounds.files,
       `${language}: files exceeds sidebar`,
     ).toBeLessThanOrEqual(bounds.sidebar + 0.5);
+    expect(bounds.searchLabelFits, `${language}: search label is clipped`).toBe(
+      true,
+    );
   });
 }

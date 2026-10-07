@@ -17,6 +17,22 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
+it("refreshes online status within two seconds of discovery", async () => {
+  getPresence
+    .mockResolvedValueOnce({ bob: { online: false, last_seen_secs: 31 } })
+    .mockResolvedValueOnce({ bob: { online: true, last_seen_secs: 0 } });
+  const stop = usePresence.getState().start();
+  try {
+    await vi.waitFor(() =>
+      expect(usePresence.getState().map.bob).toBeDefined(),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(usePresence.getState().map.bob.online).toBe(true);
+  } finally {
+    stop();
+  }
+});
+
 it("keeps unchanged records stable and removes peers absent from the next poll", async () => {
   getPresence
     .mockResolvedValueOnce({ a: { online: true, last_seen_secs: 0 } })
@@ -29,10 +45,10 @@ it("keeps unchanged records stable and removes peers absent from the next poll",
   try {
     await vi.waitFor(() => expect(usePresence.getState().map.a).toBeDefined());
     const first = usePresence.getState().map.a;
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(usePresence.getState().map.a).toBe(first);
     expect(usePresence.getState().map.b).toBeDefined();
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(usePresence.getState().map).toEqual({ a: first });
   } finally {
     stop();
@@ -58,7 +74,7 @@ it("does not let an older poll overwrite a newer presence snapshot", async () =>
   const stop = usePresence.getState().start();
   try {
     expect(pending).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(pending).toHaveLength(2);
     pending[1]({ bob: { online: true, last_seen_secs: 0 } });
     await Promise.resolve();

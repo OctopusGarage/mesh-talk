@@ -150,7 +150,8 @@
     "list": "Conversations",
     "dropToSend": "Drop to send to {{name}}",
     "clearHistory": "Clear chat history",
-    "clearHistoryConfirm": "This permanently erases this conversation's messages on this device. It can't be undone and doesn't affect the other person's copy."
+    "clearHistoryConfirm": "This permanently erases this conversation's messages on this device. It can't be undone and doesn't affect the other person's copy.",
+    "noPeersHint": "Mesh-Talk searches your local network. Keep both devices on the same LAN."
   },
   "presence": {
     "online": "Online",
@@ -184,7 +185,10 @@
     "recall": "Recall",
     "recalledByYou": "You recalled a message",
     "recalledBy": "{{name}} recalled a message",
-    "reEdit": "Re-edit"
+    "reEdit": "Re-edit",
+    "mentionedYou": "Mentioned you",
+    "reactionAdd": "Add {{emoji}} reaction",
+    "reactionRemove": "Remove your {{emoji}} reaction"
   },
   "transfer": {
     "sending": "Sending file…",
@@ -200,7 +204,9 @@
     "insertEmoji": "Insert {{emoji}}",
     "couldntOpenFile": "Couldn't open file: {{error}}",
     "stickers": "Stickers",
-    "sendSticker": "Send {{emoji}} sticker"
+    "sendSticker": "Send {{emoji}} sticker",
+    "cancelReply": "Cancel reply",
+    "tools": "Message tools"
   },
   "screenshot": {
     "trigger": "Screenshot",
@@ -473,5 +479,11 @@
     "username": "Login username",
     "accountId": "Account ID",
     "usernameHint": "You sign in with this username — it can't be changed. The display name above is just a nickname and can be changed anytime."
+  },
+  "errorBoundary": {
+    "title": "Mesh-Talk hit a display error.",
+    "description": "Reload the app to continue. Your messages are stored locally.",
+    "reload": "Reload",
+    "details": "Technical details"
   }
 }

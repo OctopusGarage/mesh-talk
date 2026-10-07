@@ -150,7 +150,8 @@
     "list": "對話",
     "dropToSend": "拖放至這裡即可發送給 {{name}}",
     "clearHistory": "清除聊天記錄",
-    "clearHistoryConfirm": "此操作將永久刪除本地端此對話的訊息，無法恢復，亦不會影響對方的記錄。"
+    "clearHistoryConfirm": "此操作將永久刪除本地端此對話的訊息，無法恢復，亦不會影響對方的記錄。",
+    "noPeersHint": "Mesh-Talk 會搜尋本地網絡。請將兩部裝置連接到同一個區域網絡。"
   },
   "presence": {
     "online": "在線",
@@ -184,7 +185,10 @@
     "recall": "收回",
     "recalledByYou": "你收回了一條訊息",
     "recalledBy": "{{name}} 收回了一條訊息",
-    "reEdit": "重新編輯"
+    "reEdit": "重新編輯",
+    "mentionedYou": "提及咗你",
+    "reactionAdd": "加入 {{emoji}} 表情回應",
+    "reactionRemove": "移除你嘅 {{emoji}} 表情回應"
   },
   "transfer": {
     "sending": "正在傳送檔案…",
@@ -200,7 +204,9 @@
     "insertEmoji": "插入 {{emoji}}",
     "couldntOpenFile": "無法開啟檔案：{{error}}",
     "stickers": "貼圖",
-    "sendSticker": "傳送 {{emoji}} 貼圖"
+    "sendSticker": "傳送 {{emoji}} 貼圖",
+    "cancelReply": "取消回覆",
+    "tools": "訊息工具"
   },
   "screenshot": {
     "trigger": "截圖",
@@ -473,5 +479,11 @@
     "username": "登入用戶名",
     "accountId": "帳戶 ID",
     "usernameHint": "使用此用戶名登入，不可更改。上方的暱稱僅作顯示用途，可隨時更改。"
+  },
+  "errorBoundary": {
+    "title": "Mesh-Talk 畫面發生錯誤。",
+    "description": "重新載入程式繼續使用。訊息儲存喺呢部裝置。",
+    "reload": "重新載入",
+    "details": "技術詳情"
   }
 }

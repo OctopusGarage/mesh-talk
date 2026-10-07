@@ -1,9 +1,6 @@
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm } from "./helpers/session";
-import {
-  prepareForScreenshot,
-  snapshotName,
-} from "./helpers/visual-snapshot";
+import { prepareForScreenshot, snapshotName } from "./helpers/visual-snapshot";
 import {
   expectElementsWithin,
   expectMinTargetSize,
@@ -33,10 +30,18 @@ test("composer controls and popovers stay usable at narrow width", async ({
   }
 
   await page.getByTestId("composer-emoji").click();
+  await expect(page.getByTestId("composer-emoji")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
   await expect(page.getByTestId("emoji-picker")).toBeVisible();
   await expectElementsWithin(page, '[data-testid="emoji-picker"]', "body");
   await expectVisibleFocus(page, page.getByTestId("emoji-option-😀"));
   await page.keyboard.press("Escape");
+  await expect(page.getByTestId("composer-emoji")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
 
   await page.getByTestId("composer-stickers").click();
   await expect(page.getByTestId("sticker-panel")).toBeVisible();

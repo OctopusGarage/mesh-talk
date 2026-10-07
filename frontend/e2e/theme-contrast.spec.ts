@@ -94,6 +94,10 @@ test("message text and links stay readable across every theme", async ({
 
         const sentBubbleStyle = getComputedStyle(sentBubble);
         const receivedBubbleStyle = getComputedStyle(receivedBubble);
+        const deliveryFooter = document.querySelector(
+          '[data-delivery="awaiting"]',
+        )?.parentElement;
+        if (!deliveryFooter) throw new Error("Missing delivery footer");
 
         const logRect = log.getBoundingClientRect();
         const bodyOverflows =
@@ -111,6 +115,8 @@ test("message text and links stay readable across every theme", async ({
           sentLinkColor: getComputedStyle(sentLink).color,
           receivedLinkColor: getComputedStyle(receivedLink).color,
           receivedBubbleBackground: receivedBubbleStyle.backgroundColor,
+          deliveryColor: getComputedStyle(deliveryFooter).color,
+          canvasBackground: getComputedStyle(document.body).backgroundColor,
           bodyOverflows,
           bubbleOverflows,
         };
@@ -140,6 +146,10 @@ test("message text and links stay readable across every theme", async ({
     expect(
       contrastRatio(check.receivedLinkColor, check.receivedBubbleBackground),
       `${check.theme} received link`,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+    expect(
+      contrastRatio(check.deliveryColor, check.canvasBackground),
+      `${check.theme} delivery metadata`,
     ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
     expect(check.bodyOverflows, `${check.theme} body overflow`).toBe(false);
     expect(check.bubbleOverflows, `${check.theme} bubble overflow`).toBe(false);

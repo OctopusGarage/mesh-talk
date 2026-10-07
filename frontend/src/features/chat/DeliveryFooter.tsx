@@ -22,12 +22,12 @@ export function DeliveryFooter({
     ? t(`message.delivery.${message.file ? "fileHelp" : "help"}`)
     : "";
   return (
-    <span className="mt-0.5 flex items-center gap-1 px-1 font-mono text-[10px] text-muted-foreground">
+    <span className="mt-0.5 flex items-center gap-1 px-1 font-mono text-[11px] tabular-nums text-muted-foreground">
       {formatTime(message.wallClock)}
       {message.pending && <span>{` · ${t("message.sending")}`}</span>}
       {delivery && (
         <span
-          className="group relative inline-flex"
+          className="group relative inline-flex items-center gap-1"
           tabIndex={0}
           role="img"
           aria-label={label}
@@ -35,6 +35,7 @@ export function DeliveryFooter({
           data-delivery={delivery}
         >
           <span aria-hidden="true">{delivery === "delivered" ? "✓" : "◷"}</span>
+          {delivery === "awaiting" && <span aria-hidden="true">{label}</span>}
           <span
             id={tooltip}
             role="tooltip"

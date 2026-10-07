@@ -526,7 +526,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         void get().refreshRoster();
         void get().refreshStatuses();
       } else if (lease.current() && !get().bootBusy) get().retryBoot();
-    }, 4000);
+    }, 2000);
 
     const unlisten = subscribeNodeEvents({
       onDm: (e) => {
@@ -606,7 +606,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         chat.listChannels(),
       ]);
       if (!lease.current() || get().rosterRequest !== request) return;
-      set({ peers, accounts, channels });
+      // Polling returns fresh arrays even when discovery has not changed. Preserve
+      // the previous references so sidebar subscribers do not redraw every tick.
+      const previous = get();
+      if (
+        JSON.stringify([
+          previous.peers,
+          previous.accounts,
+          previous.channels,
+        ]) !== JSON.stringify([peers, accounts, channels])
+      )
+        set({ peers, accounts, channels });
       // Cache each channel's members for the composite group avatar (best-effort per
       // channel; a single failure just leaves that channel's montage on its fallback).
       const memberEntries = await Promise.all(
@@ -621,8 +631,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           }
         }),
       );
-      if (get().rosterRequest === request)
-        set({ channelMembersById: Object.fromEntries(memberEntries) });
+      if (get().rosterRequest === request) {
+        const channelMembersById = Object.fromEntries(memberEntries);
+        if (
+          JSON.stringify(get().channelMembersById) !==
+          JSON.stringify(channelMembersById)
+        )
+          set({ channelMembersById });
+      }
     } catch {
       // node may still be starting; ignore
     }

@@ -5,11 +5,11 @@
   "Ink & Signal" design tokens.
   Dark is the hero (sustained ink surfaces); light is a calm cool-paper.
   ONE confident teal "signal" accent (--primary / --signal). Boldness is spent on the
-  SIGNATURE — cryptographic identity (--verified) and presence (--signal) — everything
+  SIGNATURE — cryptographic identity (--verified) and presence (--presence-online) — everything
   else stays quiet and disciplined.
 
   shadcn CSS-var NAMES are preserved so existing components inherit automatically;
-  only the values changed + a few custom vars (--signal / --verified / --mention) added.
+  only the values changed + a few custom vars added.
 */
 @layer base {
   :root {
@@ -36,6 +36,8 @@
 
     /* Signature accents — the only place we spend boldness. */
     --signal: 174 72% 33%; /* = primary teal */
+    --presence-online: 174 72% 33%;
+    --presence-recent: 38 70% 37%;
     --verified: 154 64% 34%;
     --mention: 174 80% 45%; /* brighter teal — legible on bg-muted bubble */
 
@@ -72,6 +74,8 @@
     --ring: 172 66% 50%;
 
     --signal: 172 66% 50%; /* = primary teal */
+    --presence-online: 172 66% 50%;
+    --presence-recent: 38 72% 62%;
     --verified: 154 60% 52%;
     --mention: 172 66% 50%; /* teal, same hue as --signal */
 
@@ -197,116 +201,6 @@
     --bubble-own-link: 0 0% 100%;
     --message-link: 214 90% 38%;
   }
-
-  /* ── Brand-theme ambient wallpaper ────────────────────────────────────────────
-     A fixed, dimmed photo behind everything (body::before) plus a faint crest watermark
-     (body::after); the brand-tinted gradient keeps text readable. The app's panels are
-     already translucent (sidebar/composer bg-card/40, the message canvas transparent), so
-     the wallpaper glows through for a frosted, premium feel. */
-  html[data-palette] body {
-    background-color: transparent;
-  }
-  html[data-palette] body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: -2;
-    background-size: cover;
-    background-position: center;
-    background-repeat: no-repeat;
-  }
-  html[data-palette] body::after {
-    content: "";
-    position: fixed;
-    z-index: -1;
-    pointer-events: none;
-    width: 46vmin;
-    height: 46vmin;
-    right: -6vmin;
-    bottom: -7vmin;
-    background-repeat: no-repeat;
-    background-position: center;
-    background-size: contain;
-    opacity: 0.06;
-  }
-  /* Each wallpaper is layered: a vignette (cinematic depth) over a directional scrim
-     (readable text) over the photo. The dark themes dim to ink; the LIGHT themes
-     (Argentina, Messi) lift the photo into a bright, airy field instead. */
-  /* Argentina (light) — a light sky scrim so the celebration glows pale-blue, not dimmed. */
-  html[data-palette="argentina"] body::before {
-    background-image:
-      radial-gradient(
-        125% 92% at 50% 34%,
-        transparent 26%,
-        hsl(205 55% 96% / 0.55) 100%
-      ),
-      linear-gradient(165deg, hsl(205 55% 95% / 0.64), hsl(202 55% 97% / 0.82)),
-      url("./assets/themes/argentina-bg.webp");
-  }
-  html[data-palette="argentina"] body::after {
-    background-image: url("./assets/themes/argentina-crest.png");
-    opacity: 0.08;
-  }
-  html[data-palette="barcelona"] body::before {
-    background-image:
-      radial-gradient(
-        125% 90% at 50% 32%,
-        transparent 30%,
-        hsl(226 48% 5% / 0.62) 100%
-      ),
-      linear-gradient(165deg, hsl(224 46% 9% / 0.74), hsl(226 44% 11% / 0.9)),
-      url("./assets/themes/barcelona-bg.jpg");
-  }
-  html[data-palette="barcelona"] body::after {
-    background-image: url("./assets/themes/barcelona-crest.svg");
-    opacity: 0.07;
-  }
-  /* Light theme → a LIGHT scrim: the blue scenes lift into a bright, airy field (edges fade
-     to paper via the vignette) instead of being dimmed to black. */
-  html[data-palette="messi"] body::before {
-    background-image:
-      radial-gradient(
-        125% 92% at 50% 34%,
-        transparent 26%,
-        hsl(208 50% 96% / 0.55) 100%
-      ),
-      linear-gradient(165deg, hsl(208 46% 95% / 0.66), hsl(206 50% 97% / 0.82)),
-      url("./assets/themes/messi-bg.jpg");
-  }
-  /* Messi: the montage already brands it — no crest watermark. */
-  html[data-palette="messi"] body::after {
-    display: none;
-  }
-
-  /* Base themes (Ink / Daylight / OLED): a faint LIVING-MESH ambient — the peer dot-grid
-     that is the app's own signature (it echoes the IdentityGlyph), lit by a soft signal glow.
-     Painted between the body fill and the content, so the translucent panels diffuse it and
-     the big chat canvas gains quiet depth without any photo. */
-  html:not([data-palette]) body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    background-image:
-      radial-gradient(
-        62% 52% at 50% 26%,
-        hsl(var(--signal) / 0.07),
-        transparent 70%
-      ),
-      radial-gradient(hsl(var(--signal) / 0.05) 1px, transparent 1.6px);
-    background-size:
-      100% 100%,
-      26px 26px;
-    background-position: center, center;
-  }
-
-  /* Frost the translucent panels so the wallpaper diffuses behind them (glassy depth). */
-  html[data-palette] [data-testid="sidebar"],
-  html[data-palette] [data-testid="conversation-header"],
-  html[data-palette] [data-testid="composer"] {
-    backdrop-filter: blur(18px) saturate(1.15);
-  }
 }
 
 @layer base {
@@ -417,18 +311,4 @@ html[data-os="macos"] [data-titlebar-inset] {
 :is(button, [role="button"], a[href]):focus-visible {
   outline: 2px solid hsl(var(--ring)) !important;
   outline-offset: 2px !important;
-}
-
-/* Presence "breathing" pulse for the online status dot. Halts under reduced-motion
-   via the global media query above. */
-@keyframes presence-breathe {
-  0%,
-  100% {
-    opacity: 0.55;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.15;
-    transform: scale(2.4);
-  }
 }

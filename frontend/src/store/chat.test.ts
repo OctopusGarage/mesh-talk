@@ -41,6 +41,79 @@ it("old roster identity failure cannot undo newer readiness", async () => {
   expect(useChat.getState().ready).toBe(true);
 });
 
+it("keeps unchanged discovery snapshots referentially stable", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        {
+          user_id: "peer",
+          account_id: "account",
+          name: "Alice",
+          addr: "192.168.1.2:47474",
+          post_office: false,
+        },
+      ]);
+    if (command === "list_accounts")
+      return Promise.resolve([
+        { account_id: "account", device_count: 1, names: ["Alice"] },
+      ]);
+    return Promise.resolve([]);
+  });
+  await useChat.getState().refreshRoster();
+  const first = useChat.getState();
+  await useChat.getState().refreshRoster();
+  const second = useChat.getState();
+  expect(second.peers).toBe(first.peers);
+  expect(second.accounts).toBe(first.accounts);
+  expect(second.channels).toBe(first.channels);
+});
+
+it("shows a newly discovered peer on the next two-second roster poll", async () => {
+  vi.useFakeTimers();
+  let stop: (() => void) | undefined;
+  try {
+    let discovered = false;
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (command === "list_peers")
+        return Promise.resolve(
+          discovered
+            ? [
+                {
+                  user_id: "peer",
+                  account_id: "account",
+                  name: "Alice",
+                  addr: "192.168.1.2:47474",
+                  post_office: false,
+                },
+              ]
+            : [],
+        );
+      return Promise.resolve([]);
+    });
+    stop = useChat.getState().start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().peers).toEqual([]);
+    discovered = true;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(useChat.getState().peers).toHaveLength(1);
+  } finally {
+    stop?.();
+    vi.useRealTimers();
+  }
+});
+
 it.each(["text", "sticker", "file"] as const)(
   "deleted early history ID cannot return through delayed %s enqueue completion",
   async (kind) => {

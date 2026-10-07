@@ -140,6 +140,23 @@ test("settings scroll cue reveals more controls", async ({ page }) => {
     .toBeGreaterThan(0);
 });
 
+test("settings section navigation reaches the requested controls", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await enterChat(page);
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-settings").click();
+  const dialog = page.getByTestId("settings-dialog");
+  await dialog
+    .getByRole("navigation", { name: "Settings" })
+    .getByRole("button", { name: "Chat history" })
+    .click();
+  await expect(
+    dialog.getByTestId("settings-retention-select"),
+  ).toBeInViewport();
+});
+
 async function expectSurfaceMotionSettled(surface: Locator) {
   await expect
     .poll(async () =>

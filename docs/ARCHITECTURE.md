@@ -143,6 +143,8 @@ command names for Tauri registration. Commands clone a node handle from
   interface, plus a unicast announce/response reply, a /24 unicast scan fallback, a startup
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
   + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
+  Startup burst and scan times are measured from launch; a manual trigger works during
+  startup. The fallback scan visits each /24 once and omits every local interface address.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
@@ -319,6 +321,8 @@ reaction/unread state and routes incoming DMs to the sender's *account* (one con
 per multi-device contact). `features/chat/` is the 3-pane app (sidebar · messages ·
 members) with replies, reactions, @mentions, file send + a received-files tray, search,
 and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
+The chat roster and presence snapshot poll every 2 s. Unchanged roster snapshots
+retain their existing references so a poll does not redraw conversation rows.
 
 **Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
 the signed-in local user's hidden account IDs and last-known names are stored separately

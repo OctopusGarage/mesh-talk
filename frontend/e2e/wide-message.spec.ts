@@ -37,7 +37,7 @@ test("a very wide message stays inside its bubble (no overflow)", async ({
     const log = document.querySelector('[role="log"]') as HTMLElement;
     const rows = document.querySelectorAll('[data-testid="message-bubble"]');
     const last = rows[rows.length - 1] as HTMLElement;
-    const bubble = last.querySelector(".rounded-2xl") as HTMLElement;
+    const bubble = last.querySelector("[data-context-menu]") as HTMLElement;
     const lr = log.getBoundingClientRect();
     const br = bubble.getBoundingClientRect();
     return {

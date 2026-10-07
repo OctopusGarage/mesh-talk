@@ -83,6 +83,12 @@ export const test = base.extend({
         },
       ];
 
+      (window as unknown as Record<string, unknown>).__mockClearRoster = () => {
+        peers.length = 0;
+        accounts.length = 0;
+        channels.length = 0;
+      };
+
       const channelMembers = [
         // Self is a member of its own channel. We never appear in our own discovery
         // roster, so the backend can only fall back to our raw user_id for the name and
@@ -297,6 +303,12 @@ export const test = base.extend({
       };
 
       const ok = () => null;
+      let failNextCommand: string | null = null;
+      (window as unknown as Record<string, unknown>).__mockFailNext = (
+        command: string,
+      ) => {
+        failNextCommand = command;
+      };
 
       // --- Event listener registry (for __mockEmit) -------------------------
       const listeners: Record<
@@ -725,6 +737,10 @@ export const test = base.extend({
             return id;
           },
           async invoke(cmd: string, args: Record<string, unknown>) {
+            if (cmd === failNextCommand) {
+              failNextCommand = null;
+              throw new Error("network unreachable");
+            }
             // Tauri event plugin: register the JS callback against the event name so
             // __mockEmit can deliver a payload to it (mirrors `listen`).
             if (cmd === "plugin:event|listen") {

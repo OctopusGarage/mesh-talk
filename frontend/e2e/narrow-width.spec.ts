@@ -33,7 +33,7 @@ test("conversation pane adapts to a narrow window (no clipped messages)", async 
     const main = document.querySelector("main") as HTMLElement;
     const rows = document.querySelectorAll('[data-testid="message-bubble"]');
     const bubble = (rows[rows.length - 1] as HTMLElement).querySelector(
-      ".rounded-2xl",
+      "[data-context-menu]",
     ) as HTMLElement;
     const mr = main.getBoundingClientRect();
     const br = bubble.getBoundingClientRect();

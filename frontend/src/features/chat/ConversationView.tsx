@@ -10,9 +10,7 @@ import {
   AvatarEditMenu,
 } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
-import { useTheme } from "@/lib/theme";
 import { needsCustomWindowControls } from "@/lib/platform";
-import { THEME_CREST } from "@/lib/themeCrest";
 import { Composer } from "./Composer";
 import { jumpToLatest } from "./jumpToLatest";
 import {
@@ -27,6 +25,7 @@ import { VerifyContactDialog } from "./VerifyContactDialog";
 import { CallButtons } from "./CallDialog";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { TransferBar } from "./TransferBar";
+import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { chat as chatApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { mentionsName } from "@/lib/mentions";
@@ -60,36 +59,46 @@ function captureComposer() {
 
 function EmptyState() {
   const { t } = useTranslation();
-  // On a brand theme, greet with that crest/emblem instead of the generic chat glyph.
-  const crest = THEME_CREST[useTheme((s) => s.theme)];
+  const hasConversations = useChat(
+    (s) => s.accounts.length + s.channels.length > 0,
+  );
+  const [guideOpen, setGuideOpen] = useState(false);
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-      <div className="relative">
-        <div
-          aria-hidden
-          className="absolute inset-0 -z-10 rounded-2xl bg-signal/15 blur-2xl"
-        />
-        {crest ? (
-          <img
-            src={crest}
-            alt=""
-            data-testid="empty-crest"
-            className="h-20 w-20 object-contain drop-shadow-lg"
-          />
-        ) : (
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl border bg-card text-signal shadow-elevation">
-            <MessagesSquare className="h-8 w-8" />
-          </div>
-        )}
+    <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-xl border bg-card text-signal">
+        <MessagesSquare className="h-6 w-6" />
       </div>
       <div>
         <p className="font-display text-lg font-semibold tracking-tight">
-          {t("conversation.noneSelectedTitle")}
+          {t(
+            hasConversations
+              ? "conversation.noneSelectedTitle"
+              : "sidebar.noContacts",
+          )}
         </p>
-        <p className="text-sm text-muted-foreground">
-          {t("conversation.noneSelectedDesc")}
-        </p>
+        {hasConversations && (
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t("conversation.noneSelectedDesc")}
+          </p>
+        )}
+        {!hasConversations && (
+          <p className="mt-1 max-w-sm text-sm leading-relaxed text-muted-foreground">
+            {t("conversation.noPeersHint")}
+          </p>
+        )}
       </div>
+      {!hasConversations && (
+        <>
+          <button
+            type="button"
+            onClick={() => setGuideOpen(true)}
+            className="rounded-md px-2 py-1 text-sm font-medium text-signal underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {t("sidebar.strandedAlone")}
+          </button>
+          <OfflineConnectDialog open={guideOpen} onOpenChange={setGuideOpen} />
+        </>
+      )}
     </div>
   );
 }
@@ -102,10 +111,6 @@ function UnlockingState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
       <div className="relative flex h-16 w-16 items-center justify-center">
-        <span
-          aria-hidden
-          className="absolute inset-0 animate-ping rounded-full bg-signal/20"
-        />
         <Loader2 className="h-7 w-7 animate-spin text-signal" />
       </div>
       <div>
@@ -123,7 +128,7 @@ function UnlockingState() {
 /** A quiet centered date separator between days in the message log. */
 function DaySeparator({ label }: { label: string }) {
   return (
-    <div className="flex items-center gap-3 px-4 py-3">
+    <div className="mx-auto flex max-w-[880px] items-center gap-3 px-5 py-4">
       <span className="h-px flex-1 bg-border" />
       <span className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
         {label}
@@ -445,7 +450,7 @@ export function ConversationView() {
         data-testid="conversation-header"
         data-tauri-drag-region
         data-titlebar-inset
-        className="flex items-center gap-3 border-b px-5 py-3"
+        className="flex min-h-[72px] items-center gap-3 border-b bg-card px-5 py-2.5"
       >
         {isChannel ? (
           <ChannelHeader
@@ -479,12 +484,16 @@ export function ConversationView() {
           </p>
         )}
         {!loading && messages.length === 0 && (
-          <p
+          <div
             data-testid="conversation-empty"
-            className="py-8 text-center text-sm text-muted-foreground"
+            className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground"
           >
-            {t("conversation.noMessages")}
-          </p>
+            <MessagesSquare
+              aria-hidden="true"
+              className="h-6 w-6 text-signal"
+            />
+            <p>{t("conversation.noMessages")}</p>
+          </div>
         )}
         {messages.length > 0 && (
           <Virtuoso
@@ -526,7 +535,7 @@ export function ConversationView() {
               const mentioned =
                 isChannel && !m.fromMe && mentionsName(m.text, myName);
               return (
-                <div className="px-0 pb-0.5">
+                <div className="mx-auto max-w-[880px] px-0 pb-1">
                   {showDay && <DaySeparator label={formatDay(m.wallClock)} />}
                   <MessageBubble
                     m={m}

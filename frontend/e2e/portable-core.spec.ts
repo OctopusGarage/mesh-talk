@@ -203,7 +203,7 @@ for (const viewport of [
       await page.getByTestId("composer-input").fill("bounded send");
       await page.getByTestId("composer-send").click();
       await expect(
-        page.getByText("bounded send", { exact: true }),
+        page.getByRole("log").getByText("bounded send", { exact: true }),
       ).toBeVisible();
     });
     test("DM sends and renders incoming event delivery", async ({ page }) => {
@@ -212,19 +212,27 @@ for (const viewport of [
       await page.getByTestId("composer-input").fill("portable outbound DM");
       await page.getByTestId("composer-send").click();
       await expect(
-        page.getByText("portable outbound DM", { exact: true }),
+        page
+          .getByRole("log")
+          .getByText("portable outbound DM", { exact: true }),
       ).toBeVisible();
       await inject(page, false, "portable incoming DM");
       await expect(
-        page.getByText("portable incoming DM", { exact: true }),
+        page
+          .getByRole("log")
+          .getByText("portable incoming DM", { exact: true }),
       ).toBeVisible();
       await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
       await page.getByTestId(`conversation-row-${BOB.account}`).click();
       await expect(
-        page.getByText("portable outbound DM", { exact: true }),
+        page
+          .getByRole("log")
+          .getByText("portable outbound DM", { exact: true }),
       ).toBeVisible();
       await expect(
-        page.getByText("portable incoming DM", { exact: true }),
+        page
+          .getByRole("log")
+          .getByText("portable incoming DM", { exact: true }),
       ).toBeVisible();
       await boundedShell(page);
     });
@@ -234,16 +242,20 @@ for (const viewport of [
       await enterChat(page);
       await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
       await expect(
-        page.getByText("channel kickoff", { exact: true }),
+        page.getByRole("log").getByText("channel kickoff", { exact: true }),
       ).toBeVisible();
       await page.getByTestId("composer-input").fill("portable group outbound");
       await page.getByTestId("composer-send").click();
       await expect(
-        page.getByText("portable group outbound", { exact: true }),
+        page
+          .getByRole("log")
+          .getByText("portable group outbound", { exact: true }),
       ).toBeVisible();
       await inject(page, true, "portable group incoming");
       await expect(
-        page.getByText("portable group incoming", { exact: true }),
+        page
+          .getByRole("log")
+          .getByText("portable group incoming", { exact: true }),
       ).toBeVisible();
       await boundedShell(page);
     });
@@ -285,7 +297,7 @@ for (const viewport of [
       await page.getByTestId("composer-input").fill("浅色中文消息 👋");
       await page.getByTestId("composer-send").click();
       await expect(
-        page.getByText("浅色中文消息 👋", { exact: true }),
+        page.getByRole("log").getByText("浅色中文消息 👋", { exact: true }),
       ).toBeVisible();
       await page.getByTestId("open-profile").click();
       await expectDialogFitsViewport(page, "profile-dialog");
@@ -318,7 +330,7 @@ for (const viewport of [
         last.locator("span.whitespace-pre-wrap").filter({ hasText: "你好" }),
       ).toHaveCSS("white-space", "pre-wrap");
       const geometry = await last.evaluate((el) => {
-        const bubble = el.querySelector(".rounded-2xl")!;
+        const bubble = el.querySelector("[data-context-menu]")!;
         const log = document.querySelector('[role="log"]')!;
         const b = bubble.getBoundingClientRect(),
           l = log.getBoundingClientRect();

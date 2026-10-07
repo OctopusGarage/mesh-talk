@@ -49,14 +49,16 @@ import { PrivacySettings } from "./PrivacySettings";
 
 /** A section group: a small display-font label over a stack of rows. */
 function Section({
+  id,
   title,
   children,
 }: {
+  id?: string;
   title: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="space-y-2">
+    <section id={id} className="scroll-mt-2 space-y-2">
       <h3 className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {title}
       </h3>
@@ -80,7 +82,7 @@ function Row({
   control: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
+    <div className="flex items-center justify-between gap-4 border-b px-0.5 py-3 last:border-b-0">
       <div className="flex min-w-0 items-start gap-3">
         <div className="mt-0.5 text-muted-foreground">{icon}</div>
         <div className="min-w-0">
@@ -99,6 +101,11 @@ function Row({
 
 const SELECT_CLASS =
   "h-9 rounded-md border border-input bg-background px-2 text-sm transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
+
+const settingsScrollBehavior = (): ScrollBehavior =>
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
 
 const LANGUAGE_LABELS: Record<Language, string> = {
   en: "English",
@@ -235,13 +242,44 @@ export function SettingsDialog() {
         </Button>
       </DialogTrigger>
       <DialogContent
-        className="max-w-md overflow-hidden"
+        className="max-w-2xl overflow-hidden"
         data-testid="settings-dialog"
       >
         <DialogHeader>
           <DialogTitle>{t("settings.title")}</DialogTitle>
           <DialogDescription>{t("settings.description")}</DialogDescription>
         </DialogHeader>
+
+        <nav
+          aria-label={t("settings.title")}
+          className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1"
+        >
+          {[
+            ["privacy", t("privacy.section")],
+            ["contacts", t("contactVisibility.section")],
+            ["appearance", t("settings.sectionAppearance")],
+            ["background", t("settings.sectionBackground")],
+            ["files", t("settings.sectionFiles")],
+            ["chat", t("settings.sectionChat")],
+            ["experimental", t("settings.sectionExperimental")],
+          ].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() =>
+                settingsScroll.current
+                  ?.querySelector(`#settings-${id}`)
+                  ?.scrollIntoView({
+                    block: "start",
+                    behavior: settingsScrollBehavior(),
+                  })
+              }
+              className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
 
         <div
           ref={settingsScroll}
@@ -253,10 +291,15 @@ export function SettingsDialog() {
                   element.scrollHeight - 4,
               );
           }}
-          className="grid h-[min(65vh,calc(100vh-12rem))] min-h-0 gap-5 overflow-y-auto pr-0.5"
+          className="grid h-[min(62vh,calc(100vh-13rem))] min-h-0 gap-6 overflow-y-auto pr-2"
         >
-          <PrivacySettings />
-          <Section title={t("contactVisibility.section")}>
+          <div id="settings-privacy" className="scroll-mt-2">
+            <PrivacySettings />
+          </div>
+          <Section
+            id="settings-contacts"
+            title={t("contactVisibility.section")}
+          >
             <Row
               icon={<EyeOff className="h-4 w-4" />}
               title={t("contactVisibility.title")}
@@ -264,7 +307,10 @@ export function SettingsDialog() {
               control={<HiddenContactsDialog />}
             />
           </Section>
-          <Section title={t("settings.sectionAppearance")}>
+          <Section
+            id="settings-appearance"
+            title={t("settings.sectionAppearance")}
+          >
             <div>
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Palette className="h-4 w-4 text-muted-foreground" />
@@ -299,7 +345,10 @@ export function SettingsDialog() {
             />
           </Section>
 
-          <Section title={t("settings.sectionBackground")}>
+          <Section
+            id="settings-background"
+            title={t("settings.sectionBackground")}
+          >
             <Row
               id="setting-launch-at-login"
               icon={<Rocket className="h-4 w-4" />}
@@ -359,7 +408,7 @@ export function SettingsDialog() {
             />
           </Section>
 
-          <Section title={t("settings.sectionFiles")}>
+          <Section id="settings-files" title={t("settings.sectionFiles")}>
             <Row
               icon={<FolderOpen className="h-4 w-4" />}
               title={t("settings.downloadFolder")}
@@ -392,7 +441,7 @@ export function SettingsDialog() {
             />
           </Section>
 
-          <Section title={t("settings.sectionChat")}>
+          <Section id="settings-chat" title={t("settings.sectionChat")}>
             <Row
               id="setting-retention"
               icon={<History className="h-4 w-4" />}
@@ -422,7 +471,10 @@ export function SettingsDialog() {
             />
           </Section>
 
-          <Section title={t("settings.sectionExperimental")}>
+          <Section
+            id="settings-experimental"
+            title={t("settings.sectionExperimental")}
+          >
             <Row
               id="setting-calls"
               icon={<FlaskConical className="h-4 w-4 text-amber-500" />}
@@ -486,7 +538,7 @@ export function SettingsDialog() {
             onClick={() =>
               settingsScroll.current?.scrollBy({
                 top: settingsScroll.current.clientHeight * 0.8,
-                behavior: "smooth",
+                behavior: settingsScrollBehavior(),
               })
             }
             className="flex min-h-8 w-full items-center justify-center gap-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
