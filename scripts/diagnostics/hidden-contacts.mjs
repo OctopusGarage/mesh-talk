@@ -148,7 +148,7 @@ async function key(value) {
   assert.ok(Number.isInteger(pid) && owned.has(app), "keyboard targets only the owned native application");
   async function input(binary, args) {
     const child = launch(binary, args);
-    try { await until("native keyboard helper completion", () => !owned.has(child), 10000); }
+    try { await until("native keyboard helper completion", () => !owned.has(child), process.platform === "win32" ? 60000 : 10000); }
     catch (error) { throw new Error(`${error.message}; helper pid=${child.pid}; output=${redact(child.output.slice(-2000))}`); }
     assert.equal(child.exitCode, 0, `native keyboard helper failed: ${child.output}`);
     return child.output.trim();
