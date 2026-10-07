@@ -14,7 +14,7 @@ test("Windows native helper only emits bounded owned-PID control keys with ABI-s
   for (const key of ["a", "{ESC}", "\uE008"]) assert.throws(() => nativeWindowsKeyboardScript(12345, key));
   const { readFile } = await import("node:fs/promises");
   const runner = await readFile(new URL("./hidden-contacts.mjs", import.meta.url), "utf8");
-  assert.ok(runner.includes('until("native keyboard helper completion", () => !owned.has(child), 10000)'));
+  assert.ok(runner.includes('until("native keyboard helper completion", () => !owned.has(child), process.platform === "win32" ? 60000 : 10000)'));
   assert.ok(runner.includes("redact(child.output.slice(-2000))"));
   assert.ok(runner.includes("nativeWindowsKeyboardScript(pid, value)"));
 });
