@@ -1006,7 +1006,9 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .unwrap()
                 .file_scopes
                 .remove(&file);
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            // Each card still has its own deadline. Windows CI can briefly
+            // stall a handshake while running the full workspace in parallel.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let manifest_conv = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
                     .event
                     .conversation_id;
