@@ -318,9 +318,10 @@ proof protocol or event format is introduced.
 `dm-received`/`channel-message`/`file-received`.
 `store/auth.ts` holds the session; `store/ownership.ts` validates owner and runtime epochs
 for asynchronous frontend work. `store/outgoingIntent.ts` owns optimistic send admission,
-acceptance, reconciliation with history and delivery-status projection. `store/chat.ts`
-holds per-conversation message/reaction/unread state and routes incoming DMs to the sender's *account* (one conversation
-per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
+acceptance, history loading, and delivery-status queries. `store/conversationState.ts`
+owns cache eviction, deletion protection, and history/status state transitions.
+`store/chat.ts` exposes the UI-facing state and routes incoming DMs to the sender's
+*account* (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
 message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,
 search, and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
 The sidebar keeps Chats, Files, Connection, and Settings visible; its footer shows

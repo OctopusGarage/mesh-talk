@@ -1,53 +1,19 @@
 import { chat } from "@/lib/api";
-import type { HistoryItem } from "@/lib/types";
 import { errorMessage, sendFailReason } from "@/lib/error";
 import { captureChatOwner } from "./ownership";
+import {
+  boundedConversationMap,
+  convKey,
+  fromHistoryItem,
+  reconcileMessages,
+  applyProjection,
+} from "./conversationState";
+export {
+  reconcileMessages,
+  applyProjection,
+  fromHistoryItem,
+} from "./conversationState";
 import type { ChatMessage, Conversation, Set, Get } from "./chat";
-
-// Cap how many conversations keep cached message/reaction arrays in memory at once.
-// Touching hundreds of conversations in a session would otherwise retain them all until
-// logout. Only the cached arrays for the least-recently-opened conversations beyond this
-// many are evicted; `unread` (tiny, drives sidebar badges) is never touched, and a reopen
-// repopulates from the log via reload(). Active conversation is always retained.
-export const CONV_CACHE_LIMIT = 50;
-
-export function boundedConversationMap<T>(
-  previous: Record<string, T>,
-  key: string,
-  value: T,
-): Record<string, T> {
-  return Object.fromEntries([
-    ...Object.entries(previous)
-      .filter(([k]) => k !== key)
-      .slice(-(CONV_CACHE_LIMIT - 1)),
-    [key, value],
-  ]);
-}
-
-export const convKey = (c: Conversation) => `${c.kind}:${c.id}`;
-
-export function fromHistoryItem(h: HistoryItem): ChatMessage {
-  return {
-    id: h.id,
-    fromMe: h.from_me,
-    who: h.who,
-    text: h.text,
-    wallClock: h.wall_clock,
-    replyTo: h.reply_to,
-    recalled: h.recalled,
-    recalledText: h.recalled_text,
-    sticker: h.sticker,
-    file: h.file
-      ? {
-          name: h.file.name,
-          size: h.file.size,
-          mime: h.file.mime,
-          fileConv: h.file.file_conv,
-          media: h.file.media,
-        }
-      : null,
-  };
-}
 
 export const SEND_INTENT_CAP = 256;
 export type SendPayload =
@@ -62,65 +28,6 @@ export interface SendIntent {
   deletedIds?: string[];
   /** Capacity fallback: accepted messages need canonical history, never an overlay. */
   acceptanceHistoryOnly?: boolean;
-}
-
-export function protectIntentDeletion(
-  intent: SendIntent,
-  id: string,
-): SendIntent {
-  if (
-    intent.message.id ||
-    intent.acceptanceHistoryOnly ||
-    intent.deletedIds?.includes(id)
-  )
-    return intent;
-  const deletedIds = intent.deletedIds ?? [];
-  return deletedIds.length < 256
-    ? { ...intent, deletedIds: [...deletedIds, id] }
-    : { ...intent, acceptanceHistoryOnly: true };
-}
-
-/** Exact event ID only. Never associate identical content, paths or filenames. */
-export function reconcileMessages(
-  history: ChatMessage[],
-  previous: ChatMessage[],
-  intents: SendIntent[],
-  deleted: string[],
-): ChatMessage[] {
-  const tombstones = new Set(deleted);
-  const overlays = intents
-    .filter((i) => !i.acceptanceHistoryOnly || !i.message.id)
-    .map((i) => i.message);
-  const known = [...previous, ...intents.map((i) => i.message)];
-  const result: ChatMessage[] = history
-    .filter((m) => !m.id || !tombstones.has(m.id))
-    .map((m) => {
-      const old = m.id ? known.find((p) => p.id === m.id) : undefined;
-      return {
-        ...m,
-        clientId: old?.clientId,
-        delivery: old?.delivery,
-        pending: false,
-        metadataPending: false,
-      };
-    });
-  for (const m of overlays) {
-    if (m.id && tombstones.has(m.id)) continue;
-    if (!m.id || !result.some((h) => h.id === m.id)) result.push(m);
-  }
-  return result;
-}
-
-export function applyProjection(
-  message: ChatMessage,
-  statuses: Map<string, "awaiting" | "delivered">,
-): ChatMessage {
-  if (!message.fromMe || !message.id) return message;
-  const projected = statuses.get(message.id);
-  return {
-    ...message,
-    delivery: message.delivery === "delivered" ? "delivered" : projected,
-  };
 }
 
 let clientIdCounter = 0;

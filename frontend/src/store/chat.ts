@@ -12,10 +12,6 @@ import {
   registerRuntimeSnapshot,
 } from "./ownership";
 import {
-  CONV_CACHE_LIMIT,
-  convKey,
-  boundedConversationMap,
-  protectIntentDeletion,
   type SendIntent,
   sendIntent,
   beginSendIntent,
@@ -23,7 +19,14 @@ import {
   reloadConversation,
   refreshDeliveryStatuses,
 } from "./outgoingIntent";
-export { convKey, fromHistoryItem } from "./outgoingIntent";
+import {
+  convKey,
+  openConversationState,
+  deleteConversationMessage,
+  clearConversationMessages,
+  invalidateConversationIdentity,
+} from "./conversationState";
+export { convKey, fromHistoryItem } from "./conversationState";
 import type {
   AccountInfo,
   ChannelInfo,
@@ -38,40 +41,6 @@ import type {
 
 /** Cap on the received-files tray list. */
 const INCOMING_FILES_CAP = 300;
-
-/**
- * Evict message/reaction caches for the least-recently-opened conversations, keeping at
- * most CONV_CACHE_LIMIT entries. `order` is most-recent-last; `keep` (the active key) is
- * never evicted. Returns the trimmed maps plus the pruned order list. Pure — no set().
- */
-function evictCaches(
-  messages: Record<string, ChatMessage[]>,
-  reactions: Record<string, ReactionInfo[]>,
-  order: string[],
-  keep: string,
-): {
-  messages: Record<string, ChatMessage[]>;
-  reactions: Record<string, ReactionInfo[]>;
-  order: string[];
-} {
-  if (order.length <= CONV_CACHE_LIMIT) return { messages, reactions, order };
-  const excess = order.length - CONV_CACHE_LIMIT;
-  const evicted = new Set<string>();
-  for (let i = 0; i < order.length && evicted.size < excess; i++) {
-    if (order[i] !== keep) evicted.add(order[i]);
-  }
-  const nextMessages: Record<string, ChatMessage[]> = {};
-  for (const k of Object.keys(messages))
-    if (!evicted.has(k)) nextMessages[k] = messages[k];
-  const nextReactions: Record<string, ReactionInfo[]> = {};
-  for (const k of Object.keys(reactions))
-    if (!evicted.has(k)) nextReactions[k] = reactions[k];
-  return {
-    messages: nextMessages,
-    reactions: nextReactions,
-    order: order.filter((k) => !evicted.has(k)),
-  };
-}
 
 export type ConvKind = "account" | "channel";
 
@@ -534,21 +503,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       ) {
         // Runtime/account replacement can happen without a host logout. Invalidate
         // old in-flight conversation work; the run's owned ticker performs fresh boot.
-        rawSet((s) => ({
-          identityEpoch: s.identityEpoch + 1,
-          ready: false,
-          messages: {},
-          searchTarget: null,
-          reactions: {},
-          intents: {},
-          deleted: {},
-          historyRequests: {},
-          cacheOrder: [],
-          members: [],
-          channelOwner: "",
-          statusBusy: false,
-          loading: false,
-          historyError: null,
+        rawSet((state) => ({
+          ...invalidateConversationIdentity(),
+          identityEpoch: state.identityEpoch + 1,
         }));
         get().retryBoot();
         return;
@@ -601,34 +558,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
-    const key = convKey(c);
     const request = get().activeRequest + 1;
-    set((s) => {
-      // Mark this conversation most-recently-opened, then evict the message/reaction
-      // caches of the least-recently-opened beyond the cap (never the active one).
-      const order = [...s.cacheOrder.filter((k) => k !== key), key];
-      const trimmed = evictCaches(s.messages, s.reactions, order, key);
-      return {
-        active: c,
-        searchTarget: target ? { ...target, key, request } : null,
-        historyError: null,
-        activeRequest: request,
-        unread: { ...s.unread, [key]: 0 },
-        members: [],
-        channelOwner: "",
-        messages: trimmed.messages,
-        reactions: trimmed.reactions,
-        cacheOrder: trimmed.order,
-        historyRequests: Object.fromEntries(
-          Object.entries(s.historyRequests).filter(([k]) =>
-            trimmed.order.includes(k),
-          ),
-        ),
-        deleted: Object.fromEntries(
-          Object.entries(s.deleted).filter(([k]) => trimmed.order.includes(k)),
-        ),
-      };
-    });
+    set((state) => openConversationState(state, c, target, request));
     await get().reload();
     if (!lease.current() || get().activeRequest !== request) return;
     if (c.kind === "channel") {
@@ -757,37 +688,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     try {
       await chat.deleteMessage(c.id, target, isChannelConv(c));
       if (!lease.current()) return;
-      set((s) => ({
-        deleted: boundedConversationMap(
-          s.deleted,
-          key,
-          [...(s.deleted[key] ?? []), target].slice(-256),
-        ),
-        historyRequests: boundedConversationMap(
-          s.historyRequests,
-          key,
-          (s.historyRequests[key] ?? 0) + 1,
-        ),
-        intents: Object.fromEntries(
-          Object.entries(s.intents)
-            .filter(
-              ([, i]) =>
-                convKey(i.conversation) !== key || i.message.id !== target,
-            )
-            .map(([id, i]) => [
-              id,
-              convKey(i.conversation) === key
-                ? protectIntentDeletion(i, target)
-                : i,
-            ]),
-        ),
-        messages: s.messages[key]
-          ? {
-              ...s.messages,
-              [key]: s.messages[key].filter((m) => m.id !== target),
-            }
-          : s.messages,
-      }));
+      set((state) => deleteConversationMessage(state, key, target));
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't delete message: ${errorMessage(e)}` });
@@ -820,29 +721,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     try {
       await chat.clearConversation(c.id, isChannelConv(c));
       if (!lease.current()) return;
-      set((s) => ({
-        deleted: boundedConversationMap(
-          s.deleted,
-          key,
-          [
-            ...new Set([
-              ...(s.deleted[key] ?? []),
-              ...(s.messages[key] ?? []).flatMap((m) => (m.id ? [m.id] : [])),
-            ]),
-          ].slice(-256),
-        ),
-        historyRequests: boundedConversationMap(
-          s.historyRequests,
-          key,
-          (s.historyRequests[key] ?? 0) + 1,
-        ),
-        intents: Object.fromEntries(
-          Object.entries(s.intents).filter(
-            ([, i]) => convKey(i.conversation) !== key,
-          ),
-        ),
-        messages: s.messages[key] ? { ...s.messages, [key]: [] } : s.messages,
-      }));
+      set((state) => clearConversationMessages(state, key));
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't clear history: ${errorMessage(e)}` });

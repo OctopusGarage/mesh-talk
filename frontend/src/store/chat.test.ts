@@ -614,6 +614,20 @@ describe("conversation cache LRU", () => {
     expect(useChat.getState().messages["account:a0"]).toHaveLength(1);
     expect(useChat.getState().messages["account:a0"][0].text).toBe("back");
   });
+
+  it("keeps unread counts while evicting cached conversation state", async () => {
+    invoke.mockResolvedValue([]);
+    await useChat.getState().open({ kind: "account", id: "a0", name: "x" });
+    useChat.setState({ unread: { "account:a0": 4 } });
+    for (let i = 1; i < 60; i++) {
+      await useChat
+        .getState()
+        .open({ kind: "account", id: `a${i}`, name: "x" });
+    }
+    const state = useChat.getState();
+    expect(state.messages["account:a0"]).toBeUndefined();
+    expect(state.unread["account:a0"]).toBe(4);
+  });
 });
 
 describe("send", () => {
