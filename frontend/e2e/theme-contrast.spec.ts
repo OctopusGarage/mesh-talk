@@ -8,6 +8,41 @@ const RECEIVED_URL = "https://received.example.test";
 const THEMES = ["light", "dark", "oled", "argentina", "barcelona", "messi"];
 const MIN_TEXT_CONTRAST = 4.5;
 
+test("attention text is readable on dialog surfaces in every theme", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const checks = await page.evaluate((themes) => {
+    const probe = document.createElement("span");
+    probe.style.color = "hsl(var(--attention))";
+    probe.style.backgroundColor = "hsl(var(--popover))";
+    document.body.append(probe);
+    return themes.map((theme) => {
+      const root = document.documentElement;
+      root.classList.toggle(
+        "dark",
+        ["dark", "oled", "barcelona"].includes(theme),
+      );
+      root.classList.toggle("oled", theme === "oled");
+      if (["argentina", "barcelona", "messi"].includes(theme))
+        root.dataset.palette = theme;
+      else delete root.dataset.palette;
+      const style = getComputedStyle(probe);
+      return {
+        theme,
+        foreground: style.color,
+        background: style.backgroundColor,
+      };
+    });
+  }, THEMES);
+  for (const check of checks) {
+    expect(
+      contrastRatio(check.foreground, check.background),
+      check.theme,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+  }
+});
+
 async function enterBobDm(page: Page) {
   await page.goto("/");
   for (const tab of ["register", "signin"]) {
@@ -153,5 +188,115 @@ test("message text and links stay readable across every theme", async ({
     ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
     expect(check.bodyOverflows, `${check.theme} body overflow`).toBe(false);
     expect(check.bubbleOverflows, `${check.theme} bubble overflow`).toBe(false);
+  }
+});
+
+test("destructive confirmation stays readable across every theme", async ({
+  page,
+}) => {
+  await enterBobDm(page);
+  await page
+    .getByRole("log")
+    .getByText("hey, welcome to the mesh")
+    .click({ button: "right" });
+  await page.getByTestId("msg-delete").click();
+  const checks = await page.evaluate((themes) => {
+    const root = document.documentElement;
+    const button = document.querySelector<HTMLElement>(
+      '[data-testid="delete-message-confirm"]',
+    );
+    if (!button) throw new Error("Missing delete confirmation");
+    return themes.map((theme) => {
+      const palette = ["argentina", "barcelona", "messi"].includes(theme);
+      root.classList.toggle(
+        "dark",
+        theme === "dark" || theme === "oled" || theme === "barcelona",
+      );
+      root.classList.toggle("oled", theme === "oled");
+      if (palette) root.setAttribute("data-palette", theme);
+      else root.removeAttribute("data-palette");
+      const style = getComputedStyle(button);
+      return {
+        theme,
+        foreground: style.color,
+        background: style.backgroundColor,
+      };
+    });
+  }, THEMES);
+  for (const check of checks) {
+    expect(
+      contrastRatio(check.foreground, check.background),
+      `${check.theme} destructive confirmation`,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+  }
+});
+
+test("changed identity warning stays readable across every theme", async ({
+  page,
+}) => {
+  await page.goto("/?data=changed");
+  for (const tab of ["register", "signin"]) {
+    await page.getByTestId(`login-tab-${tab}`).click();
+    await page.getByTestId("login-username").fill("tester");
+    await page.getByTestId("login-password").fill("password123");
+    await page.getByTestId("login-submit").click();
+  }
+  await page.getByTestId(`conversation-row-${BOB}`).click();
+  await expect(page.getByTestId("verify-trigger")).toHaveAttribute(
+    "data-trust",
+    "changed",
+  );
+  await page.getByTestId("verify-trigger").click();
+  const checks = await page.evaluate((themes) => {
+    const root = document.documentElement;
+    const dialog = document.querySelector<HTMLElement>(
+      '[data-testid="verify-dialog"]',
+    );
+    const title = Array.from(
+      dialog?.querySelectorAll<HTMLElement>("p") ?? [],
+    ).find((el) => el.textContent?.includes("safety number changed"));
+    const banner = title?.closest<HTMLElement>(".text-destructive");
+    const body = title?.nextElementSibling as HTMLElement | null;
+    if (!dialog || !banner || !title || !body)
+      throw new Error("Missing changed-identity warning");
+    // Measure the settled theme. The dialog's entrance transition otherwise
+    // leaves its background at the previous theme during this synchronous sweep.
+    dialog.style.transition = "none";
+    void getComputedStyle(dialog).backgroundColor;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Missing canvas context");
+    return themes.map((theme) => {
+      const palette = ["argentina", "barcelona", "messi"].includes(theme);
+      root.classList.toggle(
+        "dark",
+        theme === "dark" || theme === "oled" || theme === "barcelona",
+      );
+      root.classList.toggle("oled", theme === "oled");
+      if (palette) root.setAttribute("data-palette", theme);
+      else root.removeAttribute("data-palette");
+      context.fillStyle = getComputedStyle(dialog).backgroundColor;
+      context.fillRect(0, 0, 1, 1);
+      context.fillStyle = getComputedStyle(banner).backgroundColor;
+      context.fillRect(0, 0, 1, 1);
+      const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+      return {
+        theme,
+        title: getComputedStyle(title).color,
+        body: getComputedStyle(body).color,
+        background: `rgb(${r}, ${g}, ${b})`,
+      };
+    });
+  }, THEMES);
+  for (const check of checks) {
+    expect(
+      contrastRatio(check.title, check.background),
+      `${check.theme} changed-identity title`,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+    expect(
+      contrastRatio(check.body, check.background),
+      `${check.theme} changed-identity description`,
+    ).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
   }
 });

@@ -34,5 +34,16 @@ test("group avatar gallery offers the club pack", async ({ page }) => {
     .poll(async () =>
       page.getByTestId("avatar-gallery").locator("button").count(),
     )
-    .toBe(14); // 14 clubs
+    .toBeGreaterThanOrEqual(19);
+  for (const club of [
+    "Inter Miami CF",
+    "Tottenham Hotspur",
+    "Newcastle United",
+    "AS Roma",
+    "Napoli",
+  ]) {
+    await expect(
+      page.getByTestId("avatar-gallery").getByRole("button", { name: club }),
+    ).toBeVisible();
+  }
 });

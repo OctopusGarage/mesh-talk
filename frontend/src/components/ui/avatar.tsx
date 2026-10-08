@@ -28,7 +28,7 @@ export function Avatar({
         alt={name || id}
         width={size}
         height={size}
-        className={cn("shrink-0 rounded-full object-cover", className)}
+        className={cn("shrink-0 rounded-lg object-cover", className)}
       />
     );
   }

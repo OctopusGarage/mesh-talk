@@ -57,9 +57,14 @@
     "starting": "iniciando…",
     "copy": "Copiar",
     "copied": "copiado",
+    "copyFailed": "No se pudo copiar. Comprueba el acceso al portapapeles e inténtalo de nuevo.",
     "clear": "Borrar",
     "close": "Cerrar",
     "dismiss": "Descartar"
+  },
+  "windowControls": {
+    "minimize": "Minimizar",
+    "maximize": "Maximizar"
   },
   "avatar": {
     "set": "Establecer foto…",
@@ -77,8 +82,12 @@
       "confirm": "Establecer foto",
       "zoomLabel": "Zoom",
       "previewLabel": "Vista previa",
-      "viewportLabel": "Arrastra para reposicionar la foto"
-    }
+      "viewportLabel": "Arrastra para ajustar la foto o usa las flechas. Mantén Mayús para moverla más rápido"
+    },
+    "tabFootballStars": "⚽ Futbolistas",
+    "tabNbaStars": "🏀 Estrellas NBA",
+    "tabFootballClubs": "⚽ Clubes",
+    "tabNbaTeams": "🏀 Equipos NBA"
   },
   "login": {
     "tagline": "Sin servidor · cifrado de extremo a extremo",
@@ -93,11 +102,13 @@
     "accountCreated": "Cuenta creada: ya puedes iniciar sesión.",
     "staySignedIn": "Mantener la sesión iniciada",
     "resuming": "Reanudando tu sesión…",
-    "footer": "Tus claves nunca salen de este dispositivo. Los contactos se descubren en tu red local."
+    "footer": "Tus claves nunca salen de este dispositivo. Los contactos se descubren en tu red local.",
+    "signingIn": "Iniciando sesión…",
+    "creatingIdentity": "Creando identidad…"
   },
   "sidebar": {
     "you": "tú · {{id}}",
-    "nodeUnavailable": "nodo no disponible: reintentar",
+    "nodeUnavailable": "Nodo no disponible",
     "directMessages": "Mensajes directos",
     "channels": "Canales",
     "noContacts": "Aún no se han descubierto contactos…",
@@ -133,6 +144,8 @@
     "noneSelectedDesc": "Elige un contacto o canal para empezar a chatear.",
     "unlockingTitle": "Desbloqueando tus almacenes cifrados…",
     "unlockingDesc": "Descifrando claves e iniciando el descubrimiento de contactos.",
+    "startFailedTitle": "No se pudo iniciar Mesh-Talk",
+    "startFailedDesc": "El nodo local no terminó de iniciarse. Abre los registros para ver los detalles y reinicia la aplicación después de resolver el problema.",
     "channel": "canal",
     "members_one": "{{count}} miembro",
     "members_other": "{{count}} miembros",
@@ -177,7 +190,9 @@
       "crypto": "No se pudo enviar: error de cifrado",
       "unknown": "Error al enviar"
     },
-    "delete": "Eliminar",
+    "deleteLocalAction": "Eliminar en este dispositivo",
+    "deleteLocalTitle": "¿Eliminar este mensaje?",
+    "deleteLocalDescription": "Esto elimina el mensaje solo de este dispositivo. Los demás conservan sus copias y no puedes deshacer esta acción.",
     "recall": "Retirar",
     "recalledByYou": "Retiraste un mensaje",
     "recalledBy": "{{name}} retiró un mensaje",
@@ -194,6 +209,7 @@
     "replyingTo": "Respondiendo a",
     "message": "mensaje",
     "send": "Enviar",
+    "notQueued": "El mensaje no se puso en cola. Comprueba la conexión o los envíos pendientes e inténtalo de nuevo.",
     "attach": "Adjuntar un archivo",
     "image": "Enviar una imagen",
     "emoji": "Emoji",
@@ -213,7 +229,7 @@
   },
   "settings": {
     "title": "Ajustes",
-    "description": "Privacidad, apariencia, comportamiento en segundo plano, archivos e historial de chat.",
+    "description": "Gestiona privacidad, apariencia, mensajes, archivos y comportamiento de la aplicación.",
     "scrollMore": "Desplázate para ver más ajustes",
     "sectionAppearance": "Apariencia",
     "sectionBackground": "Segundo plano",
@@ -237,7 +253,7 @@
     "theme_barcelona": "Barcelona",
     "theme_messi": "Messi",
     "downloadFolder": "Carpeta de descargas",
-    "downloadFolderDesc": "Dónde se guardan los archivos recibidos. Déjalo sin definir para preguntar cada vez.",
+    "downloadFolderDesc": "Los archivos adjuntos se guardan en Descargas, salvo que elijas otra carpeta.",
     "downloadFolderSet": "Los archivos recibidos se guardan aquí automáticamente.",
     "chooseFolder": "Elegir carpeta",
     "changeFolder": "Cambiar",
@@ -251,13 +267,17 @@
     "callsDesc": "Activa las llamadas de voz y vídeo 1:1. Experimental: solo LAN y puede ser poco fiable.",
     "ringtone": "Tono de llamada",
     "ringtoneDesc": "El sonido de las llamadas entrantes. Elige uno para escucharlo.",
-    "ringtonePreview": "Escuchar"
+    "ringtonePreview": "Escuchar",
+    "loadFailed": "No se pudo cargar la configuración: {{error}}",
+    "saveFailed": "No se pudo guardar el cambio: {{error}}"
   },
   "search": {
     "title": "Buscar mensajes",
     "placeholder": "Buscar en todas las conversaciones…",
     "searching": "Buscando…",
     "noMatches": "Sin resultados.",
+    "failed": "No se pudo completar la búsqueda. Inténtalo de nuevo.",
+    "outsideRecent": "Este resultado no está entre los mensajes recientes. Abre el historial del chat para encontrarlo.",
     "empty": "Escribe para buscar en tus conversaciones."
   },
   "history": {
@@ -291,7 +311,12 @@
     "sentFile": "Envió un archivo: {{name}}",
     "videoUnsupported": "Este vídeo no se puede previsualizar aquí; usa Guardar para abrirlo en tu reproductor.",
     "playVideo": "Reproducir vídeo",
-    "imageUnsupported": "Esta imagen no se puede previsualizar aquí; usa Guardar para abrirla."
+    "imageUnsupported": "Esta imagen no se puede previsualizar aquí; usa Guardar para abrirla.",
+    "description": "Archivos adjuntos compartidos contigo en conversaciones.",
+    "searchPlaceholder": "Buscar archivos o remitentes…",
+    "noMatches": "No hay archivos que coincidan.",
+    "folderUnknown": "Carpeta no disponible",
+    "folderLoadFailed": "No se pudo cargar la carpeta de descargas: {{error}}"
   },
   "linkDevice": {
     "trigger": "Vincular un dispositivo",
@@ -304,6 +329,7 @@
     "enterCodeHint": "Introduce este código en tu otro dispositivo, abajo.",
     "haveCode": "¿Tienes un código de tu otro dispositivo?",
     "pickDevice": "Elige el dispositivo…",
+    "device": "Dispositivo",
     "pairingCode": "código de emparejamiento",
     "linked": "¡Vinculado! Este dispositivo ahora comparte esa cuenta.",
     "linkFailed": "Error al vincular: {{error}}",
@@ -411,14 +437,19 @@
     "macosFirewall": "Ajustes del Sistema → Red → Cortafuegos: permite las conexiones entrantes para Mesh-Talk, o desactiva el cortafuegos en una red local de confianza.",
     "rescan": "Anunciar ahora",
     "rescanned": "Anunciado",
-    "rescanHint": "Vuelve a anunciar este dispositivo y reescanea la red local inmediatamente."
+    "rescanHint": "Vuelve a anunciar este dispositivo y reescanea la red local inmediatamente.",
+    "loading": "Cargando detalles de conexión…",
+    "networkLoadFailed": "No se pudo cargar la red: {{error}}",
+    "environmentLoadFailed": "No se pudo cargar el entorno: {{error}}",
+    "peersLoadFailed": "No se pudieron actualizar los contactos: {{error}}",
+    "actionFailed": "La acción falló: {{error}}"
   },
   "verify": {
     "trigger": "Verificar número de seguridad",
     "title": "Verificar contacto",
-    "verified": "Verificado",
+    "verified": "Número de seguridad verificado",
     "description": "Compara este número de seguridad con {{name}} por un canal de confianza (en persona, una llamada). Si coincide, no hay nadie en el medio.",
-    "verifiedBanner": "Has verificado a {{name}}. Esta conversación es segura de extremo a extremo.",
+    "verifiedBanner": "Verificaste el número de seguridad actual de {{name}}.",
     "prompt": "Compara el número de seguridad de abajo con este contacto por un canal de confianza y luego márcalo como verificado.",
     "changedTitle": "El número de seguridad de este contacto ha cambiado.",
     "changedDesc": "La huella de su dispositivo difiere de la que viste por primera vez. Esto ocurre cuando añade o reemplaza un dispositivo, pero también podría ser un impostor. Vuelve a verificar antes de confiar.",
@@ -441,7 +472,8 @@
     "description": "Crea una conversación de grupo e invita a los contactos descubiertos.",
     "namePlaceholder": "Nombre del canal",
     "invite": "Invitar contactos",
-    "noPeers": "Todavía no hay contactos para invitar."
+    "noPeers": "Todavía no hay contactos para invitar.",
+    "failed": "No se pudo crear el canal: {{error}}. Inténtalo de nuevo."
   },
   "about": {
     "title": "Acerca de",
@@ -481,5 +513,46 @@
     "description": "Vuelve a cargar la aplicación para continuar. Tus mensajes se guardan localmente.",
     "reload": "Volver a cargar",
     "details": "Detalles técnicos"
+  },
+  "redesign": {
+    "ready": "Listo en este dispositivo",
+    "tools": "Herramientas",
+    "addTools": "Más formas de enviar",
+    "connectionReady": "Listo para encontrar personas",
+    "connectionStarting": "Iniciando conexión",
+    "noPeersTitle": "Buscando personas cercanas",
+    "noPeersBody": "Mesh-Talk busca personas en la misma red local. Mantén ambos dispositivos abiertos y conectados a esa red.",
+    "connectionHelp": "Ayuda de conexión",
+    "connectToSomeone": "Conectar con alguien",
+    "connectIntro": "Mesh-Talk encuentra personas en una red local compartida. Ambos dispositivos deben estar abiertos y conectados.",
+    "sameNetworkTitle": "En la misma red",
+    "sameNetworkBody": "Conecta ambos dispositivos a la misma red Wi-Fi o por cable y anuncia este dispositivo para que se encuentren ahora.",
+    "announceFeedback": "Este dispositivo se ha anunciado. Mantén Mesh-Talk abierto en ambos dispositivos mientras se detectan.",
+    "noSharedNetwork": "¿Sin red compartida?",
+    "emptyConversation": "Inicia la conversación con un mensaje.",
+    "settingsNav": "Categorías de ajustes",
+    "firstRun": "¿Eres nuevo? Crea una identidad en este dispositivo y encuentra personas en tu red local.",
+    "createIdentity": "Crear identidad",
+    "discoveryHint": "Este dispositivo conserva sus propias claves. Mesh-Talk encuentra personas en tu red local.",
+    "loadingHistory": "Cargando historial de conversación…",
+    "historyFailed": "No se pudo cargar el historial de la conversación.",
+    "connection": "Conexión",
+    "noNetworkStatus": "Sin conexión de red",
+    "actionFailed": "Esta acción requiere atención",
+    "localIdentity": "Tu identidad",
+    "personalThemes": "Temas personales",
+    "wallpaper": "Fondo de conversación",
+    "wallpaperDesc": "Mostrar la imagen detrás de los mensajes en los temas personales.",
+    "loadingContacts": "Cargando conversaciones…",
+    "returning": "Inicia sesión para desbloquear la identidad y las conversaciones de este dispositivo.",
+    "searchingStatus": "Buscando en esta red",
+    "slowStartup": "Abrir los almacenes cifrados está tardando más de lo habitual. Puedes consultar la conexión mientras Mesh-Talk sigue iniciándose.",
+    "openConnection": "Abrir detalles de conexión",
+    "keyboardHint": "Intro para enviar · Mayús+Intro para una línea nueva",
+    "appNotifications": "Aplicación y notificaciones",
+    "messagesFiles": "Mensajes y archivos",
+    "advanced": "Avanzado",
+    "identityStep": "Crea una identidad que permanece en este dispositivo.",
+    "discoveryStep": "Inicia sesión y encuentra personas en la misma red local."
   }
 }

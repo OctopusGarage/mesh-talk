@@ -22,7 +22,7 @@ Before deploying Mesh-Talk, ensure you have the following tools installed:
 - Installation: https://www.rust-lang.org/tools/install
 
 ### Node.js and npm
-- Node.js (version 16 or higher)
+- Node.js 22 or newer (the version used by CI)
 - npm (comes with Node.js)
 - Installation: https://nodejs.org/
 
@@ -38,7 +38,7 @@ Before deploying Mesh-Talk, ensure you have the following tools installed:
 
 #### Linux
 - Development packages for GTK and WebKit
-- For Debian/Ubuntu: `sudo apt install libwebkit2gtk-4.0-dev build-essential curl wget libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`
+- For Debian/Ubuntu builds: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf`
 
 ## Headless Node Deployment
 
@@ -57,7 +57,7 @@ testing on a server and for running an always-on **post office** relay.
    cargo build --release -p mesh-talk-core --bin mesh-talk-node
    ```
 
-3. The compiled binary will be located at:
+3. The compiled binary will be located at the workspace root:
    - macOS/Linux: `target/release/mesh-talk-node`
    - Windows: `target/release/mesh-talk-node.exe`
 
@@ -135,7 +135,7 @@ You can customize the build with the following options:
 
 ### Installation Packages
 
-After building, the installation packages will be located in `src-tauri/target/release/bundle/`:
+After building, the installation packages will be located in `target/release/bundle/`:
 
 - macOS: `.app` bundle and `.dmg` disk image
 - Windows: `.msi` installer
@@ -146,7 +146,6 @@ After building, the installation packages will be located in `src-tauri/target/r
 ### macOS
 
 #### Prerequisites
-- macOS 10.15 or higher
 - Xcode Command Line Tools
 
 #### Installation
@@ -172,15 +171,10 @@ codesign --force --deep --sign "Developer ID Application: YOUR_NAME" /path/to/me
 2. Run the installer and follow the installation wizard
 3. Launch from the Start menu
 
-#### System Requirements
-- Minimum: 2 GB RAM, 100 MB disk space
-- Recommended: 4 GB RAM, 200 MB disk space
-
 ### Linux
 
 #### Prerequisites
-- Most modern Linux distributions (Ubuntu 20.04+, Debian 11+, Fedora 34+)
-- Required system libraries (automatically installed with .deb package)
+- A distribution with the Tauri 2 WebKit/GTK runtime dependencies
 
 #### Installation Options
 
@@ -199,10 +193,8 @@ sudo apt-get install -f  # Fix any dependency issues
 3. Run directly or move to `/usr/local/bin/` for system-wide access
 
 #### System Integration
-The .deb package will automatically:
-- Install the application to `/opt/mesh-talk/`
-- Create a desktop entry
-- Add the application to the system menu
+The `.deb` package adds a desktop launcher; inspect the package contents if you
+need its exact installed paths on your distribution.
 
 ## Troubleshooting
 
@@ -216,10 +208,9 @@ xcode-select --install
 
 # Ubuntu/Debian
 sudo apt update
-sudo apt install libwebkit2gtk-4.0-dev build-essential curl wget libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-# Fedora
-sudo dnf install webkit2gtk4.0-devel openssl-devel clang
+# For other distributions, use the Tauri 2 prerequisites for your target.
 ```
 
 #### Rust Compilation Errors
@@ -231,7 +222,7 @@ rustup update
 #### Node.js Version Issues
 Ensure you're using a compatible Node.js version:
 ```bash
-node --version  # Should be 16 or higher
+node --version  # CI uses Node.js 22
 ```
 
 ### Runtime Issues
@@ -260,7 +251,7 @@ appears corrupt:
 #### macOS
 - If Gatekeeper prevents the app from opening:
   - Right-click the app and select "Open"
-  - Or temporarily disable Gatekeeper: `sudo spctl --master-disable`
+  - See the first-run instructions in the root README for an unsigned build
 
 #### Windows
 - If WebView2 is missing:
@@ -280,5 +271,5 @@ For additional help, please:
 2. Search existing issues on the project's GitHub repository
 3. Create a new issue with detailed information about your problem
 
-Version: 0.1.0
-Last Updated: 2026-06-22
+Version: 0.2.0
+Last Updated: 2026-10-08

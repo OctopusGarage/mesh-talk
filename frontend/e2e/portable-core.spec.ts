@@ -95,8 +95,7 @@ test("portable registration sign in and sign out", async ({ page }) => {
 });
 
 async function settings(page: Page) {
-  await page.getByTestId("sidebar-overflow").click();
-  await page.getByTestId("sidebar-action-settings").click();
+  await page.getByTestId("sidebar-nav-settings").click();
   await expect(page.getByTestId("settings-dialog")).toBeVisible();
 }
 

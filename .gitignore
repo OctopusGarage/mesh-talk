@@ -77,4 +77,18 @@ frontend/playwright-report/
 frontend/test-results/
 frontend/eval-results/
 .worktrees/
+# Personal design/spec work remains local; never commit generated superpowers plans.
 docs/superpowers/
+
+# Generated design critique reports are local review artifacts.
+.impeccable/critique/
+
+# Personal implementation plans stay outside the committed documentation set.
+/plans/
+
+# Local agent tools, skill packages, generated links, and their lock/config files.
+/.agents/
+/.claude/skills/
+/.codex/
+/.impeccable/
+/skills-lock.json

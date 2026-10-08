@@ -124,7 +124,7 @@ it("keeps a pinned active contact identifiable by its personal alias", () => {
 
   expect(html).toContain('aria-current="true"');
   expect(html).toContain('aria-label="Ally, See you on the LAN"');
-  expect(html).toContain('aria-label="Unpin Ally"');
+  expect(html).toContain('aria-label="More Ally"');
 });
 
 it("uses an attachment name as the latest peer preview", () => {

@@ -1,197 +1,46 @@
-# Ink & Signal — Mesh-Talk design system
+# Mesh-Talk visual system — Native direction
 
-The foundation visual contract for the React/TS/Tailwind/shadcn frontend. Screen-level
-agents restyle against what's documented here. Keep it cohesive: spend boldness on the
-SIGNATURE (cryptographic identity + LAN presence); keep everything else quiet.
+Mesh-Talk is a desktop messenger for sustained use. The interface should feel calm, direct, and technically trustworthy. Direction A in frontend/prototypes/mesh-talk is the visual reference: compact navigation, one clear conversation plane, restrained controls, and explicit status. Product language and behavior remain governed by the production app.
 
-Direction: a calm, premium, trust-forward secure messenger. Sustained ink surfaces, ONE
-confident teal "signal" accent, cryptographic identity rendered beautifully, living LAN
-presence. **Dark is the hero**; light is a calm cool-paper; OLED is true-black dark.
+## Foundations
 
----
+Tokens are in src/index.css; Tailwind mappings are in tailwind.config.js. Use semantic utilities and CSS variables. Dark, light, and OLED are base themes. The optional Argentina, Barcelona, and Messi palettes retain their identity; shared component geometry and hierarchy are the same in every theme.
 
-## Palette
+| Layer            | Token / treatment                                               | Purpose                                                    |
+| ---------------- | --------------------------------------------------------------- | ---------------------------------------------------------- |
+| Rail             | --shell-rail                                                    | Conversation navigation, slightly distinct from the canvas |
+| Canvas           | --conversation-surface                                          | Message reading area                                       |
+| Composer         | --composer-surface                                              | Stable writing surface                                     |
+| Floating surface | --popover, --card                                               | Menus and dialogs                                          |
+| Structure        | --border, --input                                               | Hairline separation                                        |
+| Action           | --signal, --primary                                             | Focus, selected actions, links                             |
+| Status           | --presence-online, --presence-recent, --verified, --destructive | Distinct meanings that also have text or icons             |
+| Own message      | --bubble-own                                                    | Quiet fill separate from the action accent                 |
 
-Tokens live in `src/index.css` as shadcn HSL CSS-vars (`hsl(var(--x))`). Three base themes
-and three optional color palettes are selected by `lib/theme.ts` via the `.dark` / `.oled`
-classes or `data-palette` on `<html>`. Every palette uses a solid message canvas. Use the Tailwind
-color utilities (`bg-card`, `text-muted-foreground`, …) — never hard-code hex.
+Avoid decorative gradients and blur on ordinary UI surfaces. Existing optional themed conversation wallpapers are a user preference and can be turned off. Use shadows only on floating menus and dialogs. The normal layout is defined by flat surfaces and borders.
 
-| Var                                    | Role                | Dark (hero)                  | Light                    |
-| -------------------------------------- | ------------------- | ---------------------------- | ------------------------ |
-| `--background`                         | app canvas          | deep ink `220 24% 7%`        | cool paper `210 20% 98%` |
-| `--foreground`                         | primary text        | `220 14% 92%`                | `220 28% 10%`            |
-| `--card` / `--popover`                 | raised surfaces     | `220 22% 10%` / `220 24% 9%` | white                    |
-| `--primary` / `--signal`               | **the teal accent** | `172 66% 50%`                | `174 72% 33%`            |
-| `--secondary` / `--muted` / `--accent` | quiet fills         | `220 18% 14–17%`             | `215 20–24% 92–95%`      |
-| `--muted-foreground`                   | secondary text      | `218 12% 62%`                | `220 10% 42%`            |
-| `--border` / `--input` / `--ring`      | structure / focus   | `220 18–20% 16–18%`          | `215 20% 86–88%`         |
-| `--destructive`                        | danger              | `0 72% 56%`                  | `0 72% 48%`              |
+## Type and spacing
 
-Custom signature accents (tuned per theme for contrast):
+Use the operating system UI font for body and headings, and the system monospaced font for fingerprints, safety numbers, IDs, ports, and progress values. Do not use monospaced type merely to look technical. Name and section hierarchy comes from weight and spacing.
 
-| Var                 | Tailwind                          | Use                                                         |
-| ------------------- | --------------------------------- | ----------------------------------------------------------- |
-| `--signal`          | `bg-signal` `text-signal`         | the palette accent; primary actions                         |
-| `--presence-online` | CSS variable                      | stable online teal across palettes                          |
-| `--presence-recent` | CSS variable                      | stable recent amber across palettes                         |
-| `--verified`        | `text-verified` `border-verified` | crypto **verified** state — safety numbers, verified badges |
-| `--mention`         | `text-mention` `bg-mention`       | @mentions                                                   |
+- Main body and messages: 13–14px; messages use 14px with approximately 1.55 line height.
+- Navigation names and control labels: 13px. Secondary text and timestamps: 11–12px with sufficient contrast.
+- Dialog titles and important empty-state headings: 16–18px. The sign-in product name may be 24px.
+- Use a 4px spacing unit. Common gaps are 8, 12, 16, and 24px. A conversation row is compact but has a full-width click target.
+- Radius is 8px at the large token, smaller for row controls. Message bubbles and dialogs use a restrained 8–12px radius.
 
-OLED overrides only the surface/border/input hues to true-black + cooler ink greys.
+## Component hierarchy
 
-Other tokens: `--radius: 0.625rem` (Tailwind `rounded-lg`/`md`/`sm` derive from it).
-`::selection` is teal-tinted. Scrollbars are subtle. `prefers-reduced-motion` neutralizes
-all CSS animation/transition globally (see Motion).
+The sidebar is 284px by default and user resizable. It groups conversations, search, utilities, network status, and account access. Selected conversations use a quiet surface change. Unread count, presence, and time remain legible at rest; row actions appear on hover or keyboard focus and stay available on touch devices. Arrow keys move through conversation options.
 
----
+The conversation header identifies the contact or channel and keeps history, membership, call, and verification actions adjacent to that identity. The message log and composer share an 820px maximum content width. Bubbles use different fills for sent and received messages; delivery means account receipt, never read receipt. Message metadata is quiet but readable. Replies, mentions, failed sends, pending sends, and file transfer have distinct visible states.
 
-## Typography
+The composer is a stable bottom surface with a clear writing field and compact attachment, media, sticker, and send controls. Composer menus use the same menu radius, elevation, and typography as sidebar menus. Dialogs use solid surfaces, one border, a short title, and a direct primary action. Settings are organized as a navigable list of sections with compact rows and consistent controls. Onboarding uses the same controls and type scale as the signed-in app.
 
-Bundled **locally** via `@fontsource-variable/*` (offline desktop app, CSP-safe — no CDN);
-imported in `main.tsx`. Wired in `tailwind.config.js` `fontFamily`.
+Empty, loading, error, connection, and offline states state what is happening and offer the existing next action where one exists. Do not rely on color alone for encryption, verification, or connection meaning. Keep fingerprints and safety numbers selectable and easy to compare. Technical diagnostics may use monospaced values, while explanatory text stays in the UI font.
 
-| Role    | Tailwind                          | Family        | When                                                                                                  |
-| ------- | --------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
-| Display | `font-display`                    | Space Grotesk | headings, dialog titles, names in crests                                                              |
-| Body    | `font-sans` (default on `<body>`) | Inter         | all running text, labels, UI                                                                          |
-| Mono    | `font-mono`                       | Geist Mono    | **everything cryptographic/identity** — fingerprints, safety numbers, IDs, ports, `host:port`, hashes |
+## Interaction
 
-Rule: **anything that is an identifier or crypto material is mono.** If a user might
-compare it character-by-character, it's mono.
+All interactive controls need a visible keyboard focus state and an accessible name. Hover adds affordance without being required to discover core actions. Enter and Space activate native buttons; Escape closes Radix dialogs and menus. Respect reduced-motion preferences. Use brief transitions only for state changes, and avoid entrance animation in the ordinary message reading path.
 
----
-
-## Motion
-
-`framer-motion`. Shared variants/transitions in `src/lib/motion.ts`. Restrained: durations
-120–260ms, tasteful eases. **Always gate JS-driven motion on `useMotionOK()`** — the global
-CSS covers CSS transitions/animations under reduced-motion, but framer animation must be
-disabled in JS too.
-
-```tsx
-import { motion } from "framer-motion";
-import { fadeSlideUp, listStagger, useMotionOK } from "@/lib/motion";
-
-const ok = useMotionOK();
-<motion.div
-  initial={ok ? "hidden" : false}
-  animate="visible"
-  variants={fadeSlideUp}
-/>;
-```
-
-Exports: `fadeSlideUp` (workhorse content entrance), `fade` (overlays), `listStagger`
-(list container; pair children with `fadeSlideUp`), `sheet` (edge panels), `popIn`
-(dialog/popover), plus `ease`, `spring`, `transition`, `transitionFast`, and the
-`useMotionOK()` hook.
-
----
-
-## Signature components — `src/components/identity/`
-
-Import from `@/components/identity`. Dependency-light, themed via the tokens.
-
-### `IdentityGlyph`
-
-Deterministic on-brand SVG sigil — a horizontally-symmetric "mesh-node" lattice, hue
-derived from the seed but harmonized into the teal/ink arc (never garish). Same seed →
-same glyph. This is the core avatar everywhere.
-
-```tsx
-<IdentityGlyph seed={fingerprint} size={40} verified />
-```
-
-Props: `seed: string` (id/fingerprint), `size?: number` (default 40), `verified?: boolean`,
-`className?`, `title?`.
-
-### `PresenceDot`
-
-Status dot with a stable color. Online = teal, away/recent = amber, offline = dim muted.
-
-```tsx
-<PresenceDot status="online" size="md" />
-```
-
-Props: `status?: "online" | "away" | "recent" | "offline"` (default offline),
-`size?: "sm" | "md" | "lg"`, `label?`, `className?`.
-
-### `IdentityCrest`
-
-Composes glyph + display-font name + short mono id (first 4 … last 4) + optional verified
-badge and presence overlay. `compact` for rows/headers, `large` for profile/verify panels.
-
-```tsx
-<IdentityCrest
-  id={fingerprint}
-  name="Alice"
-  verified
-  status="online"
-  variant="compact"
-/>
-```
-
-Props: `id: string`, `name: string`, `verified?: boolean`,
-`status?: PresenceStatus`, `variant?: "compact" | "large"`, `className?`.
-
-### `SafetyNumber`
-
-Reusable presentation of a fingerprint / safety number in grouped mono blocks with a
-verified visual state and optional word sequence. Pure presentation (computation stays in
-the backend / `VerifyContactDialog`).
-
-```tsx
-<SafetyNumber value={sn.grouped} words={sn.words} verified={trust.verified} />
-```
-
-Props: `value: string`, `words?: string[]`, `verified?: boolean`, `className?`.
-
----
-
-## Base primitives — `src/components/ui/`
-
-shadcn primitives refined under the new tokens. **APIs/props/exports unchanged** — only
-visual refinement (teal focus-visible rings, smooth `ease-out` hover/active transitions,
-subtle `active:scale` press, consistent radius, `shadow-elevation` on cards/dialogs/
-popovers). Notables:
-
-- **Button** — `shadow-sm` on solid variants, press scale, teal ring.
-- **Input** — hover border hint + teal focus border/ring.
-- **Dialog** — `shadow-elevation-lg`, title uses `font-display`, tuned zoom/fade.
-- **Popover** — `shadow-elevation`.
-- **Avatar** — renders `src` image when given; **falls back to `IdentityGlyph`** otherwise.
-  Existing `name`/`id`/`className` API intact; `src`/`size`/`verified` are additive. Size
-  via `className` (`h-9 w-9`) still works (CSS overrides the SVG dimensions).
-- **Tabs / Switch / Badge / Label** — token-aligned, unchanged APIs.
-
-Elevation tokens: `shadow-elevation` (cards/popovers), `shadow-elevation-lg` (dialogs/sheets).
-
----
-
-## Messaging surfaces
-
-The sidebar emphasizes names, the latest loaded message, unread count, and presence. IDs
-remain available in identity details and use the mono font. The message log and composer
-share a restrained content width, with solid surfaces across all themes. Delivery labels
-describe an account receipt, not a read receipt; awaiting messages show text as well as
-an icon. The contact verification control shows its state in the header when space allows.
-Empty discovery offers the existing direct-connect guide.
-
-## Everyday messaging refinements
-
-- The sidebar gives search the available width. Received files stays one icon away, with an
-  accessible name and tooltip. Peer row actions appear over the row on hover or keyboard
-  focus, leaving names and previews more room at rest.
-- Settings uses a wider dialog and a section navigation strip. The existing scroll cue
-  remains available at short window heights; all controls and persistence behavior stay
-  in their original sections.
-- An empty conversation centers its prompt above the composer. When no peers are known,
-  the main pane explains LAN discovery and links to the direct-connect guide. Errors
-  appear away from the composer, and a render failure offers reload with technical
-  details behind disclosure.
-- Message time, delivery, and failure metadata use at least 11px text with tabular
-  figures. Account delivery remains distinct from reading. Composer panels show their
-  open state visually and through `aria-expanded`; its toolbar and reply-dismiss action
-  have accessible names.
-- Visual regression coverage includes no-peer, empty-conversation, and failed-send
-  states alongside the populated theme and viewport matrix.
+At narrow widths, keep the existing responsive conversation behavior and make long names, identifiers, messages, and filenames wrap or truncate inside their panes. At short heights, tools remain accessible and dialog content scrolls. Native window drag regions and title-bar insets must remain clear on macOS, Windows, and Linux.

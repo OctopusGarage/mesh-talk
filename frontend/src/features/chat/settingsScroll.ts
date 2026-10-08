@@ -4,6 +4,12 @@ export function settingsScrollBehavior(): ScrollBehavior {
     : "smooth";
 }
 
+/** Related setting sections share one navigation destination. */
+export function settingsCategory(section: string): string {
+  if (section === "contacts") return "privacy";
+  return section;
+}
+
 export function scrollToSettingsSection(
   container: Pick<HTMLElement, "querySelector"> | null,
   id: string,

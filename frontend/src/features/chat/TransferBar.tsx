@@ -24,8 +24,10 @@ export function TransferBar({
       </div>
       <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
         <div
-          className="h-full rounded-full bg-signal transition-[width] duration-150"
-          style={{ width: `${pct}%` }}
+          className="h-full w-full origin-left rounded-full bg-signal"
+          style={{
+            transform: `scaleX(${Math.max(0, Math.min(1, tr.done / tr.total))})`,
+          }}
         />
       </div>
     </div>

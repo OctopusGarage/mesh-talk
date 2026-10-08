@@ -3,7 +3,7 @@
 A task is **done** only when all of the following hold:
 
 1. **Implementation** — the change matches its design (see `docs/ARCHITECTURE.md` and the
-   relevant plan/spec under `docs/superpowers/`), follows
+   relevant committed design or architecture doc), follows
    [`development_conventions.md`](development_conventions.md), and touches only what the
    task requires.
 2. **Tests** — unit + integration tests cover the normal and failure paths; the **full
@@ -17,7 +17,7 @@ A task is **done** only when all of the following hold:
    model provider. Release-critical flow changes require `make smoke-full` or a documented
    CI run of the equivalent backend/UI E2E workflows.
 4. **Docs** — any affected doc is updated (`docs/ARCHITECTURE.md` for architecture; the
-   relevant `docs/superpowers/` spec/plan; this `specifications/` set for conventions).
+   relevant committed design or architecture doc; this `specifications/` set for conventions).
 5. **Security** — no new advisory (cargo-deny/audit clean), no hard-coded secrets
    (gitleaks clean), and at-rest/in-transit data stays encrypted.
 

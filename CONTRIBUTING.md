@@ -18,7 +18,8 @@ Common loops:
 ```bash
 make tauri-dev      # run the desktop app (backend + frontend) with hot reload
 make frontend-dev   # frontend only (Vite dev server)
-cargo run --bin mesh-talk-node -- --name alice   # headless node (add --post-office for relay mode)
+cargo run -p mesh-talk-core --bin mesh-talk-node -- \
+  --keystore /tmp/alice.keystore --password pw --name alice
 ```
 
 ## Build, test, lint
@@ -41,8 +42,13 @@ cargo run --bin mesh-talk-node -- --name alice   # headless node (add --post-off
    history-across-restart, post-office offline delivery). Fast + reliable; CI runs them in
    `e2e-backend.yml`.
 3. **UI E2E** — `cd frontend && npm run e2e`: Playwright drives the real React app against
-   a mocked Tauri backend and walks the full business flow. Selectors use `data-testid` —
-   when you add UI, add a `data-testid` and a flow test. CI runs them in `e2e-ui.yml`.
+   mocked Tauri IPC and walks the full business flow. It includes large-roster stress,
+   keyboard and touch checks, six-theme snapshots, and representative WCAG A/AA scans.
+   Add stable `data-testid` selectors for controls exercised by browser tests. CI runs
+   them in `e2e-ui.yml`.
+4. **Fuzz** — `cargo check --manifest-path fuzz/Cargo.toml --bins` compiles the decoder
+   targets on stable Rust. The weekly or manual Fuzz workflow runs them under nightly
+   libFuzzer; see [`fuzz/README.md`](fuzz/README.md).
 
 > **CPU note.** `.cargo/config.toml` caps `jobs`/`RUST_TEST_THREADS` so a parallel build
 > doesn't saturate the machine; for ad-hoc runs prefer `cargo test -- --test-threads=2`.

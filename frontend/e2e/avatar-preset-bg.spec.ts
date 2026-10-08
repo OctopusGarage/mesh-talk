@@ -24,7 +24,7 @@ test("a chosen preset avatar has a light background (not black)", async ({
     .poll(async () =>
       page.evaluate(() => {
         const img = document.querySelector(
-          "header img, aside img",
+          '[data-testid="open-profile"] img',
         ) as HTMLImageElement | null;
         if (!img?.naturalWidth) return null;
         const c = document.createElement("canvas");

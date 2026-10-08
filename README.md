@@ -15,14 +15,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2021-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
-[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![platform: macOS | Windows | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000?logo=linux&logoColor=white)](#build-from-source)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-docs-8A2BE2)](https://deepwiki.com/OctopusGarage/mesh-talk)
 [![Release](https://img.shields.io/github/v/release/OctopusGarage/mesh-talk?sort=semver)](https://github.com/OctopusGarage/mesh-talk/releases)
 
 **A serverless, end-to-end-encrypted messenger for your local network.** Mesh-Talk peers find
-each other on the LAN and talk directly — no account, no cloud, no server in the middle. Your
-messages and files never leave the network, and they stay encrypted the whole way.
+each other on the LAN and talk directly. Accounts are created and kept locally; no cloud
+registration or central service is required. An optional peer-operated post office can hold
+encrypted events for offline peers.
 
 <p align="center">
   <a href="docs/README.md"><strong>Documentation</strong></a>
@@ -36,8 +37,10 @@ messages and files never leave the network, and they stay encrypted the whole wa
 
 <p align="center">
   <img src="docs/screenshots/hero-channel.webp" width="860"
-       alt="Mesh-Talk — a group channel with a selectable brand theme, inline media, reactions, and animated stickers">
+       alt="Mesh-Talk v0.2.0 channel conversation with compact navigation, message history, and composer">
 </p>
+
+<p align="center"><sub>Current v0.2.0 interface shown with deterministic demo identities and messages.</sub></p>
 
 ---
 
@@ -58,6 +61,7 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 - Reactions, @mentions, replies/threads, and full-text search over local history
 - Large-file transfer (up to ~4 GiB) — chunked, encrypted per chunk, with progress and resume
 - Persistent, offline-capable history; a "post office" relay delivers to peers that are away
+- Message recall, configurable history retention, per-contact visibility controls, and automatic delivery confirmation (not read receipts)
 
 **Security & privacy**
 
@@ -75,18 +79,20 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 
 - Multi-device accounts with QR/code device linking
 - Live presence (online / last-seen), pinned contacts, and an in-app diagnostics panel
-- Tray icon, launch-at-login, native notifications, light / dark / OLED themes, and English / 中文
+- Resizable conversation sidebar, keyboard navigation, and dialogs with focus and reduced-motion support
+- Built-in avatar gallery, custom profile and channel photos, optional conversation wallpaper
+- Tray icon, launch-at-login, native notifications, six themes, and English, Spanish, Japanese, Mandarin (Simplified/Traditional), and Cantonese
 
 ## Screenshots
 
 <table>
   <tr>
     <td width="50%" align="center">
-      <img src="docs/screenshots/stickers.webp" alt="The animated-sticker panel open in a direct message">
+      <img src="docs/screenshots/stickers.webp" alt="The sticker panel open in a direct message">
       <br><sub><b>Built-in animated stickers</b></sub>
     </td>
     <td width="50%" align="center">
-      <img src="docs/screenshots/themes.webp" alt="The theme picker with dark, light, OLED, and football-brand themes">
+      <img src="docs/screenshots/themes.webp" alt="The settings theme picker with Barcelona selected alongside dark, light, OLED, and other palettes">
       <br><sub><b>Selectable themes</b></sub>
     </td>
   </tr>
@@ -156,7 +162,7 @@ Windows); Linux is always prompt-free.
 
 > Two peers must be on the **same LAN** with the firewall allowing UDP `47474` (multicast
 > `224.0.0.167`) and the app's TCP port. If they can't see each other, the in-app **Diagnostics**
-> panel and the [troubleshooting guide](specifications/troubleshooting_guide.md) walk through it.
+> panel (under **Connection**) and the [troubleshooting guide](specifications/troubleshooting_guide.md) walk through it.
 
 ## Build from source
 
@@ -214,7 +220,7 @@ mesh-talk/
 │   │   └── bin/mesh-talk-node.rs   # headless node CLI (--post-office relay mode)
 │   └── tests/               # multi-process integration tests (real nodes over UDP/TCP)
 ├── src-tauri/               # Tauri desktop shell — a thin bridge over mesh-talk-core
-├── frontend/                # React + TS + Tailwind + shadcn ("Ink & Signal" design)
+├── frontend/                # React 19 + TypeScript + Tailwind (native desktop visual system)
 ├── docs/                    # architecture + documentation map
 ├── specifications/          # process, deployment, and convention docs
 └── Makefile                 # dev/build/test/e2e/lint shortcuts
@@ -243,7 +249,9 @@ make lint fix     # clippy -D warnings · auto-fix + format
 make check        # the full local health gate
 ```
 
-The UI flow is covered by a Playwright suite (`cd frontend && npm run e2e`). Quality is enforced in
+The UI flow is covered by a Playwright suite (`cd frontend && npm run e2e`), including
+worst-case content, six themes, keyboard and touch interactions, and automated WCAG A/AA scans
+of representative states. These scans complement manual accessibility review. Quality is enforced in
 CI across macOS/Windows/Linux — formatting, Clippy (`-D warnings`), tests + coverage, the frontend
 build + ESLint, supply-chain policy (`cargo deny`), unused-dep and spelling checks — plus fuzzing,
 mutation testing, secret scanning, and OpenSSF Scorecard. Commits are GPG-signed (the hooks set up

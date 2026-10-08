@@ -34,6 +34,9 @@ export const listStagger: Variants = {
   visible: { transition: { staggerChildren: 0.04, delayChildren: 0.02 } },
 };
 
+/** Keep list entrances within a short, visible window. Longer lists appear at once. */
+export const MAX_STAGGER_ITEMS = 6;
+
 /**
  * Returns `true` when JS-driven motion should run, `false` when the user prefers
  * reduced motion. Components should gate animation props on this:

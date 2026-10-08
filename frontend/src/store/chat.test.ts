@@ -15,6 +15,7 @@ vi.mock("@/lib/events", () => ({
 }));
 
 import { useChat, convKey } from "./chat";
+import { SEND_INTENT_CAP } from "./sendModel";
 import { useAuth } from "./auth";
 
 it("old roster identity failure cannot undo newer readiness", async () => {
@@ -133,6 +134,35 @@ it("shows a newly discovered peer on the next two-second roster poll", async () 
     discovered = true;
     await vi.advanceTimersByTimeAsync(2000);
     expect(useChat.getState().peers).toHaveLength(1);
+  } finally {
+    stop?.();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps a failed startup visible instead of starting another silent poll", async () => {
+  vi.useFakeTimers();
+  let stop: (() => void) | undefined;
+  try {
+    invoke.mockImplementation((command: string) =>
+      command === "owner_node_identity"
+        ? Promise.reject(new Error("node unavailable"))
+        : Promise.resolve([]),
+    );
+    stop = useChat.getState().start();
+    await vi.advanceTimersByTimeAsync(30_100);
+    expect(useChat.getState().bootFailed).toBe(true);
+    const attempts = invoke.mock.calls.filter(
+      ([command]) => command === "owner_node_identity",
+    ).length;
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(useChat.getState().bootFailed).toBe(true);
+    expect(
+      invoke.mock.calls.filter(
+        ([command]) => command === "owner_node_identity",
+      ),
+    ).toHaveLength(attempts);
   } finally {
     stop?.();
     vi.useRealTimers();
@@ -587,6 +617,32 @@ describe("conversation cache LRU", () => {
 });
 
 describe("send", () => {
+  it("refuses a full optimistic queue synchronously so the composer can retain its draft", () => {
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "owner_enqueue_text"
+        ? new Promise(() => {})
+        : Promise.resolve([]),
+    );
+    useChat.setState({
+      active: { kind: "account", id: "target", name: "Target" },
+      ready: true,
+    });
+    expect(useChat.getState().admitText("first", null)).toBe(true);
+    const existing = Object.values(useChat.getState().intents)[0];
+    const full = Object.fromEntries(
+      Array.from({ length: SEND_INTENT_CAP }, (_, i) => [
+        `full-${i}`,
+        existing,
+      ]),
+    );
+    useChat.setState({ intents: full });
+    expect(useChat.getState().admitText("keep this draft", null)).toBe(false);
+    expect(useChat.getState().messages["account:target"]).toHaveLength(1);
+    expect(
+      invoke.mock.calls.filter(([cmd]) => cmd === "owner_enqueue_text"),
+    ).toHaveLength(1);
+  });
+
   it("file retry uses its captured path and navigation cannot retarget completion", async () => {
     let failed = true;
     let finish!: (result: { id: string; fileConv: string }) => void;

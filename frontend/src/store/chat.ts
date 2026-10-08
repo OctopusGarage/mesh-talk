@@ -94,6 +94,12 @@ export interface Conversation {
   name: string;
 }
 
+export interface SearchTarget {
+  wallClock: number;
+  text: string;
+  fromMe: boolean;
+}
+
 export interface ChatMessage {
   delivery?: "awaiting" | "delivered";
   metadataPending?: boolean;
@@ -270,6 +276,7 @@ interface ChatState {
   /** Each channel's members (by channel_id), cached for the composite group avatar. */
   channelMembersById: Record<string, ChannelMemberInfo[]>;
   active: Conversation | null;
+  searchTarget: (SearchTarget & { key: string; request: number }) | null;
   messages: Record<string, ChatMessage[]>;
   reactions: Record<string, ReactionInfo[]>;
   unread: Record<string, number>;
@@ -284,6 +291,7 @@ interface ChatState {
   // on the Rust side; mirrored here so the sidebar can sort/rename without a roundtrip.
   favorites: Record<string, FavoriteInfo>;
   loading: boolean;
+  historyError: string | null;
   error: string | null; // transient action error (file/reaction send), surfaced to the user
   bootFailed: boolean; // the node never came up within the boot window
 
@@ -296,10 +304,11 @@ interface ChatState {
   clearError: () => void;
   setError: (msg: string) => void;
   refreshRoster: () => Promise<void>;
-  open: (c: Conversation) => Promise<void>;
+  open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   reload: () => Promise<void>;
   refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
+  admitText: (text: string, replyTo: string | null) => boolean;
   retry: (clientId: string) => Promise<void>;
   sendFile: (path: string, media: boolean) => Promise<void>;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
@@ -312,7 +321,7 @@ interface ChatState {
   clearConversation: () => Promise<void>;
   /** Send an animated sticker (by id) as its own message; `fallback` is its emoji char. */
   sendSticker: (stickerId: string, fallback: string) => Promise<void>;
-  createChannel: (name: string, memberIds: string[]) => Promise<void>;
+  createChannel: (name: string, memberIds: string[]) => Promise<boolean>;
   addMember: (memberId: string) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
   /** Rename a channel for everyone (owner-only; the new name syncs to all members). */
@@ -340,6 +349,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   channels: [],
   channelMembersById: {},
   active: null,
+  searchTarget: null,
   messages: {},
   reactions: {},
   unread: {},
@@ -349,6 +359,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   incomingFiles: [],
   favorites: NO_FAVORITES,
   loading: false,
+  historyError: null,
   error: null,
   bootFailed: false,
 
@@ -479,6 +490,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       channels: [],
       channelMembersById: {},
       active: null,
+      searchTarget: null,
       messages: {},
       reactions: {},
       unread: {},
@@ -493,6 +505,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       favoritesRequest: 0,
       loadingRequest: 0,
       loading: false,
+      historyError: null,
       identityEpoch: 0,
       bootBusy: true,
       bootRequest: 1,
@@ -525,7 +538,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       if (lease.current() && get().ready) {
         void get().refreshRoster();
         void get().refreshStatuses();
-      } else if (lease.current() && !get().bootBusy) get().retryBoot();
+      } else if (lease.current() && !get().bootBusy && !get().bootFailed)
+        get().retryBoot();
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
@@ -587,6 +601,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           identityEpoch: s.identityEpoch + 1,
           ready: false,
           messages: {},
+          searchTarget: null,
           reactions: {},
           intents: {},
           deleted: {},
@@ -596,6 +611,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           channelOwner: "",
           statusBusy: false,
           loading: false,
+          historyError: null,
         }));
         get().retryBoot();
         return;
@@ -644,7 +660,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }
   },
 
-  open: async (c) => {
+  open: async (c, target) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
@@ -657,6 +673,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       const trimmed = evictCaches(s.messages, s.reactions, order, key);
       return {
         active: c,
+        searchTarget: target ? { ...target, key, request } : null,
+        historyError: null,
         activeRequest: request,
         unread: { ...s.unread, [key]: 0 },
         members: [],
@@ -740,12 +758,19 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           ),
         ),
         reactions: { ...s.reactions, [key]: reacts },
-        ...(s.loadingRequest === loadingRequest ? { loading: false } : {}),
+        ...(s.loadingRequest === loadingRequest
+          ? { loading: false, historyError: null }
+          : {}),
       }));
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().refreshStatuses();
     } catch {
-      if (get().loadingRequest === loadingRequest) set({ loading: false });
+      if (
+        get().loadingRequest === loadingRequest &&
+        get().active &&
+        convKey(get().active!) === key
+      )
+        set({ loading: false, historyError: key });
     }
   },
 
@@ -830,6 +855,28 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return;
     await sendIntent(set, get, c, { kind: "text", text, replyTo });
+  },
+
+  // The composer needs an immediate admission answer so it never clears a draft that
+  // could not enter the local optimistic queue. Delivery still settles asynchronously.
+  admitText: (text, replyTo) => {
+    const lease = captureChat(get);
+    if (!lease.current()) return false;
+    const c = get().active;
+    if (!get().ready || !c || !text.trim()) return false;
+    const dispatch = beginSendIntent(
+      guardedSet(rawSet, lease.current),
+      get,
+      c,
+      {
+        kind: "text",
+        text,
+        replyTo,
+      },
+    );
+    if (!dispatch) return false;
+    void dispatch;
+    return true;
   },
 
   // Re-send a previously-failed optimistic bubble (reusing its clientId/text/replyTo).
@@ -1016,19 +1063,15 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   createChannel: async (name, memberIds) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return;
+    if (!lease.current()) return false;
     const request = get().activeRequest + 1;
     set({ activeRequest: request });
-    try {
-      const id = await chat.createChannel(name, memberIds);
-      if (!lease.current() || get().activeRequest !== request) return;
-      await get().refreshRoster();
-      if (!lease.current() || get().activeRequest !== request) return;
-      await get().open({ kind: "channel", id, name });
-    } catch (e) {
-      if (get().activeRequest === request)
-        set({ error: `Couldn't create channel: ${errorMessage(e)}` });
-    }
+    const id = await chat.createChannel(name, memberIds);
+    if (!lease.current() || get().activeRequest !== request) return false;
+    await get().refreshRoster();
+    if (!lease.current() || get().activeRequest !== request) return false;
+    await get().open({ kind: "channel", id, name });
+    return lease.current();
   },
 
   addMember: async (memberId) => {
@@ -1147,12 +1190,22 @@ async function sendIntent(
   c: Conversation,
   payload: SendPayload,
 ) {
+  const dispatch = beginSendIntent(set, get, c, payload);
+  if (dispatch) await dispatch;
+}
+
+function beginSendIntent(
+  set: Set,
+  get: Get,
+  c: Conversation,
+  payload: SendPayload,
+): Promise<void> | null {
   if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
     set({
       error:
         "Too many pending messages. Resolve a failed send before sending more.",
     });
-    return;
+    return null;
   }
   const clientId = nextClientId();
   const message: ChatMessage = {
@@ -1188,7 +1241,7 @@ async function sendIntent(
     intents: { ...s.intents, [clientId]: intent },
     messages: { ...s.messages, [key]: [...(s.messages[key] ?? []), message] },
   }));
-  await dispatchIntent(set, get, intent);
+  return dispatchIntent(set, get, intent);
 }
 
 async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {

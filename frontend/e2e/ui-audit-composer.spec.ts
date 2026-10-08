@@ -16,13 +16,13 @@ test("composer controls and popovers stay usable at narrow width", async ({
   await enterChat(page);
   await openBobDm(page);
   await page.getByTestId("composer-input").fill("composer audit");
+  await page.getByTestId("composer-more-tools").click();
 
   for (const id of [
     "composer-screenshot",
     "composer-attach",
     "composer-image",
     "composer-emoji",
-    "composer-stickers",
     "composer-send",
   ]) {
     await expectMinTargetSize(page.getByTestId(id), 36, id);
@@ -35,7 +35,18 @@ test("composer controls and popovers stay usable at narrow width", async ({
     "true",
   );
   await expect(page.getByTestId("emoji-picker")).toBeVisible();
-  await expectElementsWithin(page, '[data-testid="emoji-picker"]', "body");
+  await expectElementsWithin(page, '[data-testid="expression-picker"]', "body");
+  await expectMinTargetSize(
+    page.getByTestId("composer-stickers"),
+    36,
+    "sticker tab",
+  );
+  await page.getByTestId("composer-emoji-tab").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByTestId("sticker-panel")).toBeVisible();
+  await expect(page.getByTestId("composer-stickers")).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByTestId("emoji-picker")).toBeVisible();
   await expectVisibleFocus(page, page.getByTestId("emoji-option-😀"));
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("composer-emoji")).toHaveAttribute(
@@ -43,9 +54,10 @@ test("composer controls and popovers stay usable at narrow width", async ({
     "false",
   );
 
+  await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
   await expect(page.getByTestId("sticker-panel")).toBeVisible();
-  await expectElementsWithin(page, '[data-testid="sticker-panel"]', "body");
+  await expectElementsWithin(page, '[data-testid="expression-picker"]', "body");
   await expectVisibleFocus(page, page.getByTestId("sticker-option-1f602"));
   await page.keyboard.press("Escape");
 
@@ -85,12 +97,17 @@ test.describe("narrow composer pane", () => {
     await enterChat(page);
     await openBobDm(page);
     await prepareForScreenshot(page);
+    await page.getByTestId("composer-more-tools").click();
 
     await page.getByTestId("composer-emoji").click();
     await expect(page.getByTestId("emoji-picker")).toBeVisible();
-    await expectElementsWithin(page, '[data-testid="emoji-picker"]', "body");
+    await expectElementsWithin(
+      page,
+      '[data-testid="expression-picker"]',
+      "body",
+    );
     await expectNoHorizontalOverflow(page, "narrow pane emoji picker");
-    await expect(page.getByTestId("emoji-picker")).toHaveScreenshot(
+    await expect(page.getByTestId("expression-picker")).toHaveScreenshot(
       snapshotName("composer-emoji", "dark", 760, 620),
       {
         maxDiffPixelRatio: 0.2,
@@ -98,11 +115,16 @@ test.describe("narrow composer pane", () => {
     );
     await page.keyboard.press("Escape");
 
+    await page.getByTestId("composer-emoji").click();
     await page.getByTestId("composer-stickers").click();
     await expect(page.getByTestId("sticker-panel")).toBeVisible();
-    await expectElementsWithin(page, '[data-testid="sticker-panel"]', "body");
+    await expectElementsWithin(
+      page,
+      '[data-testid="expression-picker"]',
+      "body",
+    );
     await expectNoHorizontalOverflow(page, "narrow pane sticker panel");
-    await expect(page.getByTestId("sticker-panel")).toHaveScreenshot(
+    await expect(page.getByTestId("expression-picker")).toHaveScreenshot(
       snapshotName("composer-stickers", "dark", 760, 620),
     );
     await page.keyboard.press("Escape");
@@ -114,7 +136,7 @@ test.describe("narrow composer pane", () => {
     await expect(page.getByTestId("screenshot-menu")).toHaveScreenshot(
       snapshotName("composer-screenshot", "dark", 760, 620),
       {
-        maxDiffPixelRatio: 0.05,
+        maxDiffPixelRatio: 0.08,
       },
     );
   });

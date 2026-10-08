@@ -57,9 +57,14 @@
     "starting": "启动中…",
     "copy": "复制",
     "copied": "已复制",
+    "copyFailed": "无法复制。请检查剪贴板权限后重试。",
     "clear": "清空",
     "close": "关闭",
     "dismiss": "忽略"
+  },
+  "windowControls": {
+    "minimize": "最小化",
+    "maximize": "最大化"
   },
   "avatar": {
     "set": "设置头像…",
@@ -81,7 +86,7 @@
       "confirm": "设置头像",
       "zoomLabel": "缩放",
       "previewLabel": "预览",
-      "viewportLabel": "拖动以调整头像位置"
+      "viewportLabel": "拖动或使用方向键调整照片位置。按住 Shift 键可加快移动"
     }
   },
   "login": {
@@ -97,11 +102,13 @@
     "accountCreated": "账户已创建——现在可以登录了。",
     "staySignedIn": "保持登录",
     "resuming": "正在恢复你的会话…",
-    "footer": "你的密钥永远不会离开本设备。对端通过局域网发现。"
+    "footer": "你的密钥永远不会离开本设备。对端通过局域网发现。",
+    "signingIn": "正在登录…",
+    "creatingIdentity": "正在创建身份…"
   },
   "sidebar": {
     "you": "你 · {{id}}",
-    "nodeUnavailable": "节点不可用——重试",
+    "nodeUnavailable": "节点不可用",
     "directMessages": "私信",
     "channels": "频道",
     "noContacts": "尚未发现联系人…",
@@ -137,6 +144,8 @@
     "noneSelectedDesc": "选择一个联系人或频道开始聊天。",
     "unlockingTitle": "正在解锁你的加密存储…",
     "unlockingDesc": "正在解密密钥并启动对端发现。",
+    "startFailedTitle": "Mesh-Talk 无法启动",
+    "startFailedDesc": "本地节点未能启动。请查看日志了解原因，解决问题后重启应用。",
     "channel": "频道",
     "members_one": "{{count}} 名成员",
     "members_other": "{{count}} 名成员",
@@ -181,7 +190,9 @@
       "crypto": "发送失败——加密错误",
       "unknown": "发送失败"
     },
-    "delete": "删除",
+    "deleteLocalAction": "从此设备删除",
+    "deleteLocalTitle": "删除这条消息？",
+    "deleteLocalDescription": "消息只会从此设备删除。其他参与者仍保留各自的副本，且此操作无法撤销。",
     "recall": "撤回",
     "recalledByYou": "你撤回了一条消息",
     "recalledBy": "{{name}} 撤回了一条消息",
@@ -198,6 +209,7 @@
     "replyingTo": "正在回复",
     "message": "消息",
     "send": "发送",
+    "notQueued": "消息未加入发送队列。请检查连接或待发送消息后重试。",
     "attach": "附加文件",
     "image": "发送图片",
     "emoji": "表情",
@@ -217,7 +229,7 @@
   },
   "settings": {
     "title": "设置",
-    "description": "管理隐私、外观、后台行为、文件和聊天记录。",
+    "description": "管理隐私、外观、消息、文件和应用行为。",
     "scrollMore": "滚动查看更多设置",
     "sectionAppearance": "外观",
     "sectionBackground": "后台",
@@ -241,7 +253,7 @@
     "theme_barcelona": "巴塞罗那",
     "theme_messi": "梅西",
     "downloadFolder": "下载文件夹",
-    "downloadFolderDesc": "接收文件的保存位置。留空则每次询问。",
+    "downloadFolderDesc": "除非你选择其他文件夹，否则附件会保存在系统的下载文件夹中。",
     "downloadFolderSet": "接收的文件将自动保存到此处。",
     "chooseFolder": "选择文件夹",
     "changeFolder": "更改",
@@ -255,13 +267,17 @@
     "callsDesc": "启用 1:1 语音和视频通话。实验性：仅限局域网，可能不稳定。",
     "ringtone": "铃声",
     "ringtoneDesc": "来电时的提示音。选择即可试听。",
-    "ringtonePreview": "试听"
+    "ringtonePreview": "试听",
+    "loadFailed": "无法加载设置：{{error}}",
+    "saveFailed": "无法保存更改：{{error}}"
   },
   "search": {
     "title": "搜索消息",
     "placeholder": "在所有会话中搜索…",
     "searching": "搜索中…",
     "noMatches": "没有匹配项。",
+    "failed": "搜索未能完成，请重试。",
+    "outsideRecent": "这条结果不在最近的消息中。请打开上方的聊天记录查找。",
     "empty": "输入关键字以搜索你的会话。"
   },
   "history": {
@@ -295,7 +311,12 @@
     "sentFile": "发送了文件：{{name}}",
     "videoUnsupported": "这个视频无法在此预览,请用「保存」在你的播放器中打开。",
     "playVideo": "播放视频",
-    "imageUnsupported": "这张图片无法在此预览,请用「保存」打开。"
+    "imageUnsupported": "这张图片无法在此预览,请用「保存」打开。",
+    "description": "在对话中与你分享的附件。",
+    "searchPlaceholder": "搜索文件或发送者…",
+    "noMatches": "没有匹配的文件。",
+    "folderUnknown": "无法获取文件夹",
+    "folderLoadFailed": "无法加载下载文件夹：{{error}}"
   },
   "linkDevice": {
     "trigger": "关联设备",
@@ -308,6 +329,7 @@
     "enterCodeHint": "在你的另一台设备上输入下方的配对码。",
     "haveCode": "已有来自另一台设备的配对码？",
     "pickDevice": "选择设备…",
+    "device": "设备",
     "pairingCode": "配对码",
     "linked": "已关联！本设备现在共享该账户。",
     "linkFailed": "关联失败：{{error}}",
@@ -415,14 +437,19 @@
     "macosFirewall": "系统设置 → 网络 → 防火墙：允许 Mesh-Talk 接收传入连接，或在受信任的局域网中关闭防火墙。",
     "rescan": "立即广播",
     "rescanned": "已广播",
-    "rescanHint": "立即重新广播本设备并重新扫描局域网。"
+    "rescanHint": "立即重新广播本设备并重新扫描局域网。",
+    "loading": "正在加载连接信息…",
+    "networkLoadFailed": "无法加载网络信息：{{error}}",
+    "environmentLoadFailed": "无法加载环境信息：{{error}}",
+    "peersLoadFailed": "无法刷新节点：{{error}}",
+    "actionFailed": "操作失败：{{error}}"
   },
   "verify": {
     "trigger": "验证安全码",
     "title": "验证联系人",
-    "verified": "已验证",
+    "verified": "安全号码已验证",
     "description": "通过可信渠道（当面、电话）与 {{name}} 核对此安全码。若一致，则中间没有第三方。",
-    "verifiedBanner": "你已验证 {{name}}。本会话已端到端安全加密。",
+    "verifiedBanner": "你已验证 {{name}} 当前的安全号码。",
     "prompt": "通过可信渠道与该联系人核对下方的安全码，核对一致后将其标记为已验证。",
     "changedTitle": "该联系人的安全码已变更。",
     "changedDesc": "他们的设备指纹与你首次看到的不同。这通常发生在他们添加或更换设备时——但也可能是冒充者。请在信任之前重新验证。",
@@ -445,7 +472,8 @@
     "description": "创建群组会话并邀请已发现的对端。",
     "namePlaceholder": "频道名称",
     "invite": "邀请对端",
-    "noPeers": "暂无可邀请的对端。"
+    "noPeers": "暂无可邀请的对端。",
+    "failed": "无法创建频道：{{error}}。请重试。"
   },
   "about": {
     "title": "关于",
@@ -485,5 +513,46 @@
     "description": "重新加载应用以继续。消息保存在本机。",
     "reload": "重新加载",
     "details": "技术详情"
+  },
+  "redesign": {
+    "ready": "此设备已就绪",
+    "tools": "工具",
+    "addTools": "更多发送方式",
+    "connectionReady": "已准备好发现联系人",
+    "connectionStarting": "正在启动连接",
+    "noPeersTitle": "正在寻找附近的人",
+    "noPeersBody": "Mesh-Talk 会寻找同一局域网中的人。请保持两台设备打开并连接到同一网络。",
+    "connectionHelp": "连接帮助",
+    "connectToSomeone": "与其他人连接",
+    "connectIntro": "Mesh-Talk 会发现同一本地网络中的其他人。两台设备都需要保持打开并连接网络。",
+    "sameNetworkTitle": "连接到同一网络",
+    "sameNetworkBody": "将两台设备连接到同一 Wi-Fi 或有线网络，然后立即广播此设备以相互发现。",
+    "announceFeedback": "此设备已广播。请在两台设备上保持 Mesh-Talk 打开，等待相互发现。",
+    "noSharedNetwork": "没有共享网络？",
+    "emptyConversation": "发送一条消息，开始对话。",
+    "settingsNav": "设置分类",
+    "firstRun": "第一次使用？在此设备创建身份，然后寻找局域网中的人。",
+    "createIdentity": "创建身份",
+    "discoveryHint": "此设备保留自己的密钥。Mesh-Talk 会在本地网络中发现其他人。",
+    "loadingHistory": "正在加载对话记录…",
+    "historyFailed": "无法加载对话记录。",
+    "connection": "连接",
+    "noNetworkStatus": "未连接网络",
+    "actionFailed": "请检查此操作",
+    "localIdentity": "你的身份",
+    "personalThemes": "个性主题",
+    "wallpaper": "聊天壁纸",
+    "wallpaperDesc": "在个性主题中显示消息背景图片。",
+    "loadingContacts": "正在加载对话…",
+    "returning": "登录以解锁此设备上的身份和对话。",
+    "searchingStatus": "正在搜索此网络",
+    "slowStartup": "打开加密存储所需的时间比平时长。Mesh-Talk 继续启动时，你可以查看连接详情。",
+    "openConnection": "打开连接详情",
+    "keyboardHint": "按 Enter 发送 · 按 Shift+Enter 换行",
+    "appNotifications": "应用与通知",
+    "messagesFiles": "消息与文件",
+    "advanced": "高级设置",
+    "identityStep": "创建保存在此设备上的身份。",
+    "discoveryStep": "登录后，查找同一本地网络上的其他人。"
   }
 }

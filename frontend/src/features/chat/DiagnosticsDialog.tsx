@@ -13,6 +13,7 @@ import {
   Trash2,
   Wifi,
   WifiOff,
+  Loader2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -32,6 +33,8 @@ import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { diag, obs } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { formatAgo, formatTime, shortId } from "@/lib/format";
+import { useChat } from "@/store/chat";
+import { CONNECTION_LABEL, connectionState } from "./connectionState";
 import type { DiagNetworkInfo, DiagPeerInfo, EnvInfo } from "@/lib/types";
 
 const POLL_MS = 1500;
@@ -47,27 +50,43 @@ interface LogLine {
 /** A monospace value that copies itself to the clipboard when clicked. */
 function CopyValue({ value, label }: { value: string; label?: string }) {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    void navigator.clipboard?.writeText(value).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1000);
-      },
-      () => {},
-    );
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
+    null,
+  );
+  const copy = async () => {
+    setCopyStatus(null);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyStatus("copied");
+      setTimeout(
+        () =>
+          setCopyStatus((current) => (current === "copied" ? null : current)),
+        1200,
+      );
+    } catch {
+      setCopyStatus("failed");
+    }
   };
   return (
     <button
       type="button"
-      onClick={copy}
+      onClick={() => void copy()}
       title={t("common.copy")}
       className="group inline-flex max-w-full items-center gap-1 font-mono text-xs hover:text-foreground"
     >
       <span className="truncate">{label ?? value}</span>
       <Copy className="h-3 w-3 shrink-0 opacity-40 group-hover:opacity-100" />
-      {copied && (
-        <span className="text-[10px] text-signal">{t("common.copied")}</span>
+      {copyStatus && (
+        <span
+          role={copyStatus === "failed" ? "alert" : "status"}
+          className={
+            copyStatus === "failed"
+              ? "text-[10px] text-destructive"
+              : "text-[10px] text-signal"
+          }
+        >
+          {t(copyStatus === "failed" ? "common.copyFailed" : "common.copied")}
+        </span>
       )}
     </button>
   );
@@ -132,19 +151,64 @@ function diffPeers(
   return lines;
 }
 
-export function DiagnosticsDialog() {
+export function DiagnosticsDialog({
+  open: controlledOpen,
+  onOpenChange,
+  initialTab = "overview",
+}: {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  initialTab?: "overview" | "peers" | "logs" | "help";
+} = {}) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const ready = useChat((s) => s.ready);
+  const bootFailed = useChat((s) => s.bootFailed);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = onOpenChange ?? setInternalOpen;
   const [info, setInfo] = useState<DiagNetworkInfo | null>(null);
   const [peers, setPeers] = useState<DiagPeerInfo[]>([]);
   const [log, setLog] = useState<LogLine[]>([]);
   const [env, setEnv] = useState<EnvInfo | null>(null);
+  const [networkLoading, setNetworkLoading] = useState(true);
+  const [networkError, setNetworkError] = useState<string | null>(null);
+  const [environmentLoading, setEnvironmentLoading] = useState(true);
+  const [environmentError, setEnvironmentError] = useState<string | null>(null);
+  const [peersLoading, setPeersLoading] = useState(true);
+  const [peersError, setPeersError] = useState<string | null>(null);
   const [logTail, setLogTail] = useState<string | null>(null);
   const [error, setLocalError] = useState<string | null>(null);
   const [rescanned, setRescanned] = useState(false);
   const prevPeers = useRef<DiagPeerInfo[]>([]);
 
+  const loadNetwork = useCallback(async () => {
+    setNetworkLoading(true);
+    setNetworkError(null);
+    try {
+      setInfo(await diag.networkInfo());
+    } catch (e) {
+      setInfo(null);
+      setNetworkError(errorMessage(e));
+    } finally {
+      setNetworkLoading(false);
+    }
+  }, []);
+
+  const loadEnvironment = useCallback(async () => {
+    setEnvironmentLoading(true);
+    setEnvironmentError(null);
+    try {
+      setEnv(await obs.envInfo());
+    } catch (e) {
+      setEnv(null);
+      setEnvironmentError(errorMessage(e));
+    } finally {
+      setEnvironmentLoading(false);
+    }
+  }, []);
+
   const rescan = async () => {
+    setLocalError(null);
     try {
       await diag.rescan();
       setRescanned(true);
@@ -155,6 +219,7 @@ export function DiagnosticsDialog() {
   };
 
   const revealLogs = async () => {
+    setLocalError(null);
     try {
       await revealItemInDir(await obs.logFile());
     } catch (e) {
@@ -163,15 +228,17 @@ export function DiagnosticsDialog() {
   };
 
   const copyLogTail = async () => {
+    setLocalError(null);
     try {
       const tail = await obs.logTail();
-      await navigator.clipboard?.writeText(tail);
+      await navigator.clipboard.writeText(tail);
     } catch (e) {
       setLocalError(errorMessage(e));
     }
   };
 
   const showLogTail = async () => {
+    setLocalError(null);
     try {
       setLogTail(await obs.logTail());
     } catch (e) {
@@ -180,6 +247,7 @@ export function DiagnosticsDialog() {
   };
 
   const saveLogTail = async () => {
+    setLocalError(null);
     try {
       const dest = await saveDialog({ defaultPath: "mesh-talk-log.txt" });
       if (typeof dest === "string") await obs.saveLogTail(dest);
@@ -194,11 +262,14 @@ export function DiagnosticsDialog() {
       const lines = diffPeers(prevPeers.current, next, t);
       prevPeers.current = next;
       setPeers(next);
+      setPeersError(null);
       if (lines.length > 0) {
         setLog((l) => [...lines.reverse(), ...l].slice(0, LOG_CAP));
       }
-    } catch {
-      /* node may still be starting; ignore */
+    } catch (e) {
+      setPeersError(errorMessage(e));
+    } finally {
+      setPeersLoading(false);
     }
   }, [t]);
 
@@ -206,14 +277,19 @@ export function DiagnosticsDialog() {
     if (!open) return;
     // Reset the diff baseline each time the panel opens so we don't replay a stale snapshot.
     prevPeers.current = [];
-    void diag.networkInfo().then(setInfo, () => setInfo(null));
-    void obs.envInfo().then(setEnv, () => setEnv(null));
+    setInfo(null);
+    setEnv(null);
+    setPeers([]);
+    setPeersLoading(true);
+    setPeersError(null);
+    void loadNetwork();
+    void loadEnvironment();
     setLogTail(null);
     setLocalError(null);
     void poll();
     const id = setInterval(() => void poll(), POLL_MS);
     return () => clearInterval(id);
-  }, [open, poll]);
+  }, [open, poll, loadNetwork, loadEnvironment]);
 
   // Group discovered peers by account (devices sharing an account_id are one user).
   const grouped = new Map<string, DiagPeerInfo[]>();
@@ -227,26 +303,94 @@ export function DiagnosticsDialog() {
       solo.push(p);
     }
   }
+  const onlineAccounts = new Set(
+    peers
+      .filter(
+        (p) =>
+          !p.post_office &&
+          p.last_seen_secs <= ONLINE_SECS &&
+          p.account_id !== info?.account_id,
+      )
+      .map((p) => p.account_id ?? p.user_id),
+  ).size;
+  const connection = connectionState({
+    bootFailed,
+    ready,
+    noNetwork: info !== null && info.interfaces.length === 0,
+    onlinePeople: onlineAccounts,
+  });
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          data-testid="sidebar-action-diagnostics"
-          title={t("diagnostics.trigger")}
-        >
-          <Radar className="h-4 w-4" />
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-w-2xl" data-testid="diagnostics-dialog">
+      {controlledOpen === undefined && (
+        <DialogTrigger asChild>
+          <Button
+            variant="ghost"
+            data-testid="sidebar-nav-connection"
+            title={t("diagnostics.trigger")}
+            aria-label={t("redesign.connection")}
+            className="h-10 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-foreground"
+          >
+            <Radar className="h-4 w-4" />
+            <span className="sidebar-tool-label">
+              {t("redesign.connection")}
+            </span>
+          </Button>
+        </DialogTrigger>
+      )}
+      <DialogContent
+        className="max-w-[min(50rem,calc(100vw-2rem))]"
+        data-testid="diagnostics-dialog"
+      >
         <DialogHeader>
-          <DialogTitle>{t("diagnostics.title")}</DialogTitle>
+          <DialogTitle>{t("redesign.connection")}</DialogTitle>
           <DialogDescription>{t("diagnostics.description")}</DialogDescription>
         </DialogHeader>
+        <div
+          data-testid="diagnostics-status"
+          role="status"
+          className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm"
+        >
+          {connection === "starting" || connection === "searching" ? (
+            <Loader2
+              className="h-4 w-4 animate-spin text-signal motion-reduce:animate-none"
+              aria-hidden="true"
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              className={`h-2 w-2 shrink-0 rounded-full ${connection === "failed" ? "bg-destructive" : connection === "ready" ? "bg-signal" : connection === "no-network" ? "bg-attention" : "bg-muted-foreground"}`}
+            />
+          )}
+          <span
+            className={`font-medium ${connection === "no-network" ? "text-attention" : ""}`}
+          >
+            {t(CONNECTION_LABEL[connection])}
+          </span>
+          {connection === "ready" && (
+            <span className="ml-auto text-xs text-muted-foreground">
+              {t("sidebar.peopleOnLan", { count: onlineAccounts })}
+            </span>
+          )}
+        </div>
+        {error && (
+          <div
+            role="alert"
+            data-testid="diagnostics-action-error"
+            className="flex items-start justify-between gap-3 rounded-md border border-destructive/35 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+          >
+            <span>{t("diagnostics.actionFailed", { error })}</span>
+            <button
+              type="button"
+              onClick={() => setLocalError(null)}
+              className="shrink-0 font-medium underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {t("common.dismiss")}
+            </button>
+          </div>
+        )}
 
-        <Tabs defaultValue="overview" className="w-full">
+        <Tabs defaultValue={initialTab} className="w-full">
           <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger
               value="overview"
@@ -324,6 +468,28 @@ export function DiagnosticsDialog() {
                       )}
                     </dd>
                   </dl>
+                ) : networkLoading ? (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    {t("diagnostics.loading")}
+                  </p>
+                ) : networkError ? (
+                  <div
+                    role="alert"
+                    className="space-y-2 text-sm text-destructive"
+                  >
+                    <p>
+                      {t("diagnostics.networkLoadFailed", {
+                        error: networkError,
+                      })}
+                    </p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void loadNetwork()}
+                    >
+                      {t("contactVisibility.retry")}
+                    </Button>
+                  </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">
                     {t("diagnostics.nodeNotReady")}
@@ -364,6 +530,28 @@ export function DiagnosticsDialog() {
                       <CopyValue value={env.logs_dir} />
                     </dd>
                   </dl>
+                ) : environmentLoading ? (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    {t("diagnostics.loading")}
+                  </p>
+                ) : environmentError ? (
+                  <div
+                    role="alert"
+                    className="space-y-2 text-sm text-destructive"
+                  >
+                    <p>
+                      {t("diagnostics.environmentLoadFailed", {
+                        error: environmentError,
+                      })}
+                    </p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void loadEnvironment()}
+                    >
+                      {t("contactVisibility.retry")}
+                    </Button>
+                  </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">
                     {t("diagnostics.nodeNotReady")}
@@ -391,7 +579,17 @@ export function DiagnosticsDialog() {
                   </Button>
                 }
               >
-                {peers.length === 0 && (
+                {peersLoading && peers.length === 0 && (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    {t("diagnostics.loading")}
+                  </p>
+                )}
+                {peersError && (
+                  <p role="alert" className="text-sm text-destructive">
+                    {t("diagnostics.peersLoadFailed", { error: peersError })}
+                  </p>
+                )}
+                {!peersLoading && !peersError && peers.length === 0 && (
                   <p className="text-sm text-muted-foreground">
                     {t("diagnostics.noPeers")}
                   </p>
@@ -501,7 +699,6 @@ export function DiagnosticsDialog() {
                     {logTail || t("diagnostics.logEmpty")}
                   </pre>
                 )}
-                {error && <p className="text-xs text-destructive">{error}</p>}
               </Panel>
             </TabsContent>
 
@@ -519,16 +716,27 @@ export function DiagnosticsDialog() {
 /** A copyable shell command block, rendered as a mono code block. */
 function CommandLine({ cmd }: { cmd: string }) {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
+    null,
+  );
+  const copy = async () => {
+    setCopyStatus(null);
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopyStatus("copied");
+      setTimeout(
+        () =>
+          setCopyStatus((current) => (current === "copied" ? null : current)),
+        1200,
+      );
+    } catch {
+      setCopyStatus("failed");
+    }
+  };
   return (
     <button
       type="button"
-      onClick={() => {
-        void navigator.clipboard?.writeText(cmd).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1000);
-        });
-      }}
+      onClick={() => void copy()}
       title={t("common.copy")}
       className="group flex w-full items-start gap-2 rounded-md border bg-muted/50 p-2.5 text-left font-mono text-[11px] leading-relaxed hover:bg-muted"
     >
@@ -536,8 +744,17 @@ function CommandLine({ cmd }: { cmd: string }) {
         {cmd}
       </span>
       <Copy className="mt-0.5 h-3 w-3 shrink-0 opacity-40 group-hover:opacity-100" />
-      {copied && (
-        <span className="text-[10px] text-signal">{t("common.copied")}</span>
+      {copyStatus && (
+        <span
+          role={copyStatus === "failed" ? "alert" : "status"}
+          className={
+            copyStatus === "failed"
+              ? "text-[10px] text-destructive"
+              : "text-[10px] text-signal"
+          }
+        >
+          {t(copyStatus === "failed" ? "common.copyFailed" : "common.copied")}
+        </span>
       )}
     </button>
   );
@@ -608,14 +825,18 @@ function Troubleshoot({ info }: { info: DiagNetworkInfo | null }) {
   );
 }
 
-function PeerRow({ p }: { p: DiagPeerInfo }) {
+export function PeerRow({ p }: { p: DiagPeerInfo }) {
   const { t } = useTranslation();
   const status = p.last_seen_secs <= ONLINE_SECS ? "online" : "recent";
   return (
     <div className="flex items-center justify-between gap-2 py-1.5">
       <div className="flex min-w-0 items-center gap-2.5">
         <div className="relative shrink-0">
-          <IdentityGlyph seed={p.user_id} size={28} title={p.name} />
+          <IdentityGlyph
+            seed={p.account_id ?? p.user_id}
+            size={28}
+            title={p.name}
+          />
           <PresenceDot
             status={status}
             size="sm"

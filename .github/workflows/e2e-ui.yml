@@ -49,8 +49,24 @@ jobs:
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
+      - name: Prepare coverable line map
+        run: npm run test:coverage
+
       - name: Run UI E2E
         run: npx playwright test --workers=1 --retries=0
+        env:
+          MESH_TALK_E2E_COVERAGE: "1"
+
+      - name: Merge browser coverage
+        run: node scripts/merge-e2e-coverage.mjs
+
+      - name: Upload browser coverage
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5.5.1
+        with:
+          files: frontend/coverage/e2e.lcov
+          flags: ui-e2e
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
 
       - name: Upload UI evidence
         if: always()

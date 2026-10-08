@@ -11,9 +11,16 @@ stack is the entire product and is feature-complete:
   **multi-device** (account identity, device linking, account-addressed fan-out +
   self-sync, history backfill, re-key). ✅
 
-Architecture: **[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)**. Design specs +
-per-phase implementation plans: **`docs/superpowers/specs/`** and
-**`docs/superpowers/plans/`**. Detailed task history lives in git.
+The v0.2.0 desktop implementation adds the native-direction visual system,
+resizable and virtualized conversation navigation, large-roster member and channel
+pickers, consistent focus/touch feedback, optional wallpaper, and lazy avatar-gallery
+thumbnails. These are presentation and interaction changes; the protocol semantics above
+remain the same. Experimental calling remains labeled as such in Settings.
+
+Architecture: **[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)**. The current
+frontend visual system is in **[`frontend/DESIGN.md`](../frontend/DESIGN.md)**.
+Detailed task history lives in git; personal working plans under `docs/superpowers/`
+and the root `plans/` directory are intentionally untracked.
 
 ## Design notes & external constraints (not open work)
 

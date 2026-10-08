@@ -1,5 +1,10 @@
 import { test, expect } from "./helpers/portable-evidence";
-import { enterChat, openBobDm, BOB } from "./helpers/session";
+import {
+  enterChat,
+  openBobDm,
+  revealComposerTools,
+  BOB,
+} from "./helpers/session";
 
 test("text, sticker and file card stay Awaiting until explicit authoritative mock projection", async ({
   page,
@@ -27,9 +32,12 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
   await page.getByTestId("composer-input").fill("automatic delivery");
   await page.getByTestId("composer-send").click();
   await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(1);
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
   await page.getByTestId("sticker-option-1f602").click();
   await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(2);
+  await revealComposerTools(page);
   await page.getByTestId("composer-attach").click();
   await expect(
     page.getByTestId("message-bubble").filter({ hasText: "card.txt" }),
@@ -85,6 +93,7 @@ test("a native picker completed after conversation navigation cannot send to the
       return original(cmd, args);
     };
   });
+  await revealComposerTools(page);
   await page.getByTestId("composer-attach").click();
   await expect
     .poll(() =>

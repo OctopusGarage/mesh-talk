@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { scrollToSettingsSection } from "./settingsScroll";
+import { scrollToSettingsSection, settingsCategory } from "./settingsScroll";
+
+it("keeps related settings under a single navigation category", () => {
+  expect(settingsCategory("contacts")).toBe("privacy");
+  expect(settingsCategory("files")).toBe("files");
+  expect(settingsCategory("background")).toBe("background");
+});
 
 afterEach(() => vi.unstubAllGlobals());
 

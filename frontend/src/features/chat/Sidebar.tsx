@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LogOut,
+  Loader2,
   MoreHorizontal,
   Moon,
   Network,
@@ -13,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,7 +32,7 @@ import {
 import { IdentityGlyph, PresenceDot } from "@/components/identity";
 import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
-import { shortId } from "@/lib/format";
+import { formatTime, shortId } from "@/lib/format";
 import { useTheme } from "@/lib/theme";
 import { THEME_CREST } from "@/lib/themeCrest";
 import { CreateChannelDialog } from "./CreateChannelDialog";
@@ -57,6 +59,7 @@ import {
   usePresenceFor,
 } from "@/store/presence";
 import type { AccountInfo, ChannelInfo } from "@/lib/types";
+import { CONNECTION_LABEL, connectionState } from "./connectionState";
 
 function accountConv(a: AccountInfo, name: string): Conversation {
   return {
@@ -76,6 +79,9 @@ function Row({
   pinned,
   onTogglePin,
   onRename,
+  navIndex,
+  listPosition,
+  listSize,
 }: {
   conv: Conversation;
   subtitle: string;
@@ -83,8 +89,12 @@ function Row({
   pinned: boolean;
   onTogglePin: () => void;
   onRename: () => void;
+  navIndex?: number;
+  listPosition: number;
+  listSize: number;
 }) {
   const { t } = useTranslation();
+  const [actionsOpen, setActionsOpen] = useState(false);
   const active = useChat((s) => s.active);
   const unread = useChat((s) => s.unread[convKey(conv)] ?? 0);
   const history = useChat((s) => s.messages[convKey(conv)]);
@@ -95,6 +105,7 @@ function Row({
   const presence = usePresenceFor(conv.id);
   const status = presenceStatus(presence);
   const latest = history?.[history.length - 1];
+  const lastTime = latest ? formatTime(latest.wallClock) : null;
   const summary =
     latest?.text ||
     latest?.file?.name ||
@@ -102,28 +113,24 @@ function Row({
 
   const row = (
     <div
-      role="listitem"
+      role="group"
+      aria-label={`${listPosition} / ${listSize}`}
       className={cn(
-        "group relative flex w-full items-center gap-3 rounded-md px-2.5 py-2.5 text-left transition-colors duration-150 ease-out",
-        isActive ? "bg-accent" : "hover:bg-accent/60",
+        "group relative flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left",
+        isActive ? "bg-signal/10" : "hover:bg-accent/45",
       )}
     >
-      {/* Teal active rail. */}
-      {isActive && (
-        <span
-          aria-hidden
-          className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-signal"
-        />
-      )}
       <button
         onClick={() => open(conv)}
         data-conv-option
+        data-nav-position={listPosition}
+        data-virtual-index={navIndex}
         data-testid={`conversation-row-${conv.id}`}
         aria-current={isActive ? "true" : undefined}
         aria-label={`${conv.name}${summary ? `, ${summary}` : ""}`}
-        className="flex min-w-0 flex-1 items-center gap-3 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <div className="relative">
+        <div className="relative shrink-0">
           {channel ? (
             <GroupAvatar channelId={conv.id} size={36} title={conv.name} />
           ) : (
@@ -140,50 +147,85 @@ function Row({
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <div
-            className={cn(
-              "truncate text-[13px] leading-5",
-              unread ? "font-semibold" : "font-medium",
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span
+              title={conv.name}
+              className={cn(
+                "min-w-0 flex-1 truncate text-[13px] leading-5",
+                unread || isActive ? "font-semibold" : "font-medium",
+              )}
+            >
+              {conv.name}
+            </span>
+            {lastTime && (
+              <span className="sidebar-row-time shrink-0 text-[11px] tabular-nums text-muted-foreground group-hover:opacity-0 group-focus-within:opacity-0">
+                {lastTime}
+              </span>
             )}
-          >
-            {conv.name}
           </div>
-          <div className="truncate text-xs leading-4 text-muted-foreground">
+          <div
+            className="truncate text-[11px] leading-4 text-muted-foreground"
+            title={summary}
+          >
             {summary}
           </div>
         </div>
       </button>
       {unread > 0 && (
-        <Badge className="bg-signal font-mono text-[11px] text-primary-foreground">
+        <Badge className="bg-signal font-mono text-[11px] text-primary-foreground group-hover:opacity-0 group-focus-within:opacity-0">
           {unread}
         </Badge>
       )}
-      <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center rounded-md bg-card/95 opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-        <button
-          type="button"
-          onClick={onRename}
-          data-testid={`conversation-rename-${conv.id}`}
-          title={t("sidebar.rename")}
-          aria-label={`${t("sidebar.rename")} ${conv.name}`}
-          className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <Pencil className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={onTogglePin}
-          data-testid={`conversation-pin-${conv.id}`}
-          title={pinned ? t("sidebar.unpin") : t("sidebar.pin")}
-          aria-label={`${pinned ? t("sidebar.unpin") : t("sidebar.pin")} ${conv.name}`}
-          className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {pinned ? (
-            <PinOff className="h-3.5 w-3.5" />
-          ) : (
-            <Pin className="h-3.5 w-3.5" />
-          )}
-        </button>
-      </div>
+      <Popover open={actionsOpen} onOpenChange={setActionsOpen}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            data-testid={`conversation-actions-${conv.id}`}
+            title={t("sidebar.moreActions")}
+            aria-label={`${t("sidebar.moreActions")} ${conv.name}`}
+            className={cn(
+              "absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11 [@media(hover:none)]:opacity-100",
+              actionsOpen
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
+            )}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-44 p-1">
+          <button
+            type="button"
+            onClick={() => {
+              setActionsOpen(false);
+              onRename();
+            }}
+            data-testid={`conversation-rename-${conv.id}`}
+            aria-label={`${t("sidebar.rename")} ${conv.name}`}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            {t("sidebar.rename")}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActionsOpen(false);
+              onTogglePin();
+            }}
+            data-testid={`conversation-pin-${conv.id}`}
+            aria-label={`${t(pinned ? "sidebar.unpin" : "sidebar.pin")} ${conv.name}`}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {pinned ? (
+              <PinOff className="h-3.5 w-3.5" />
+            ) : (
+              <Pin className="h-3.5 w-3.5" />
+            )}
+            {t(pinned ? "sidebar.unpin" : "sidebar.pin")}
+          </button>
+        </PopoverContent>
+      </Popover>
     </div>
   );
   return channel ? (
@@ -203,7 +245,7 @@ function SectionLabel({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between px-2.5 pb-1 pt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+    <div className="flex items-center justify-between px-2.5 pb-1.5 pt-4 text-[11px] font-semibold text-muted-foreground">
       <span>{children}</span>
       {action}
     </div>
@@ -213,9 +255,12 @@ function SectionLabel({
 // Sidebar width: user-resizable via the right-edge drag handle, persisted to localStorage,
 // clamped to a sensible range, double-click to reset. Default mirrors the old `w-72`.
 const WIDTH_KEY = "mesh-talk-sidebar-width";
-const DEFAULT_WIDTH = 304;
+const DEFAULT_WIDTH = 284;
 const MIN_WIDTH = 230;
 const MAX_WIDTH = 460;
+const VIRTUALIZE_AT = 80;
+// The 36px avatar and 8px vertical padding make a conversation row 52px tall.
+const CONVERSATION_ROW_HEIGHT = 52;
 
 const clampWidth = (w: number) =>
   Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(w)));
@@ -228,7 +273,7 @@ function readWidth(): number {
 
 function useSidebarWidth() {
   const [width, setWidth] = useState(readWidth);
-  const dragging = useRef(false);
+  const dragCleanup = useRef<(() => void) | null>(null);
 
   const persist = useCallback((w: number) => {
     setWidth(w);
@@ -236,31 +281,55 @@ function useSidebarWidth() {
       localStorage.setItem(WIDTH_KEY, String(w));
   }, []);
 
-  // Drag-to-resize: track pointer moves on the document so the cursor can leave the thin
-  // handle without dropping the drag. Width = pointer x relative to the sidebar's left edge.
+  useEffect(() => () => dragCleanup.current?.(), []);
+
+  // Pointer capture keeps the drag continuous outside the narrow handle. Persist only
+  // the settled width so a long drag does not write storage on every pointer event.
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
+      if (e.button !== 0 || dragCleanup.current) return;
       e.preventDefault();
-      dragging.current = true;
+      const handle = e.currentTarget as HTMLElement;
+      const pointerId = e.pointerId;
       const aside = (e.currentTarget as HTMLElement).parentElement;
       const left = aside?.getBoundingClientRect().left ?? 0;
       const prevCursor = document.body.style.cursor;
       const prevSelect = document.body.style.userSelect;
+      let latest = clampWidth(e.clientX - left);
+      let done = false;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
+      handle.setPointerCapture(pointerId);
       const onMove = (ev: PointerEvent) => {
-        if (!dragging.current) return;
-        persist(clampWidth(ev.clientX - left));
+        if (ev.pointerId !== pointerId || done) return;
+        latest = clampWidth(ev.clientX - left);
+        setWidth(latest);
       };
-      const onUp = () => {
-        dragging.current = false;
+      const cleanup = () => {
+        if (done) return;
+        done = true;
         document.body.style.cursor = prevCursor;
         document.body.style.userSelect = prevSelect;
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onEnd);
+        handle.removeEventListener("pointercancel", onEnd);
+        handle.removeEventListener("lostpointercapture", onEnd);
+        window.removeEventListener("blur", onEnd);
+        if (handle.hasPointerCapture(pointerId))
+          handle.releasePointerCapture(pointerId);
+        if (dragCleanup.current === cleanup) dragCleanup.current = null;
       };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
+      const onEnd = (ev?: PointerEvent | Event) => {
+        if (ev instanceof PointerEvent && ev.pointerId !== pointerId) return;
+        cleanup();
+        persist(latest);
+      };
+      dragCleanup.current = cleanup;
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onEnd);
+      handle.addEventListener("pointercancel", onEnd);
+      handle.addEventListener("lostpointercapture", onEnd);
+      window.addEventListener("blur", onEnd);
     },
     [persist],
   );
@@ -281,9 +350,8 @@ function useSidebarWidth() {
   return { width, onPointerDown, reset, onKeyDown };
 }
 
-/** A tidy popover collecting the secondary/utility actions (files, link-device,
- *  diagnostics, settings, about, theme toggle, sign-out). Keeps the top clean; the
- *  primary Search stays up top. Each action keeps its existing `data-testid`. */
+/** Secondary actions stay labeled in the utility menu; files, diagnostics, and
+ * settings already have persistent places in the tool rail. */
 function UtilityMenu() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -309,19 +377,13 @@ function UtilityMenu() {
       <PopoverContent
         align="start"
         side="top"
-        className="w-auto p-1.5"
+        className="w-56 p-1.5"
         data-testid="sidebar-overflow-menu"
       >
-        {/* The dialog/popover trigger buttons keep their own testids + render their own
-            icon and open their dialog; collected here as a quiet utility toolbar. */}
         <div className="grid gap-0.5">
-          <div className="flex items-center gap-0.5">
-            <LinkDeviceDialog />
-            <DiagnosticsDialog />
-            {callsEnabled && <WebRtcTestDialog />}
-            <SettingsDialog />
-            <AboutDialog />
-          </div>
+          <LinkDeviceDialog menuItem />
+          {callsEnabled && <WebRtcTestDialog menuItem />}
+          <AboutDialog menuItem />
           <div className="my-1 h-px bg-border" />
           <button
             type="button"
@@ -372,9 +434,9 @@ export function Sidebar() {
   const channels = useChat((s) => s.channels);
   const peers = useChat((s) => s.peers);
   const favorites = useChat((s) => s.favorites);
+  const themeCrest = THEME_CREST[useTheme((s) => s.theme)];
   // The active theme's crest (a brand theme) replaces the app mark in the footer, so the
   // chosen club/national/Messi identity is always present without shouting.
-  const themeCrest = THEME_CREST[useTheme((s) => s.theme)];
   const togglePinned = useChat((s) => s.togglePinned);
   const setAlias = useChat((s) => s.setAlias);
   const renameChannel = useChat((s) => s.renameChannel);
@@ -413,7 +475,6 @@ export function Sidebar() {
     return online.size;
   }, [peers, presenceMap, myAccountId, hiddenContacts, policyLoaded]);
   const bootFailed = useChat((s) => s.bootFailed);
-  const retryBoot = useChat((s) => s.retryBoot);
   const username = useAuth((s) => s.user?.username ?? "");
   // The peer-facing display name (nickname) shown in the identity header; falls back to
   // the login username. `username` is kept as the stable last-resort id/avatar seed.
@@ -434,6 +495,12 @@ export function Sidebar() {
   // Whether this device has no usable (non-loopback) network interface at all — the strongest
   // "you're stranded" signal, which sharpens the offline-connect prompt's wording.
   const [noNetwork, setNoNetwork] = useState(false);
+  const connection = connectionState({
+    bootFailed,
+    ready,
+    noNetwork,
+    onlinePeople,
+  });
   useEffect(() => {
     let alive = true;
     const refresh = () => {
@@ -472,25 +539,55 @@ export function Sidebar() {
   // between the option buttons within the list (Enter/Space already open via the native
   // button). Scoped to the nav so it never traps the composer or other controls.
   const navRef = useRef<HTMLElement>(null);
+  const [navScrollParent, setNavScrollParent] = useState<HTMLElement | null>(
+    null,
+  );
+  const virtualPinnedRef = useRef<VirtuosoHandle>(null);
+  const virtualAccountsRef = useRef<VirtuosoHandle>(null);
+  const virtualChannelsRef = useRef<VirtuosoHandle>(null);
+  const pendingVirtualFocus = useRef<number | null>(null);
+  const attachNav = useCallback((node: HTMLElement | null) => {
+    navRef.current = node;
+    setNavScrollParent(node);
+  }, []);
   const onNavKeyDown = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-    const nav = navRef.current;
-    if (!nav) return;
-    const options = Array.from(
-      nav.querySelectorAll<HTMLButtonElement>("[data-conv-option]"),
+    if (
+      !(e.target instanceof HTMLButtonElement) ||
+      !e.target.matches("[data-conv-option]")
+    )
+      return;
+    const position = Number(e.target.dataset.navPosition);
+    const next = Math.max(
+      1,
+      Math.min(listSize, position + (e.key === "ArrowDown" ? 1 : -1)),
     );
-    if (options.length === 0) return;
-    const idx = options.indexOf(document.activeElement as HTMLButtonElement);
     e.preventDefault();
-    const next =
-      e.key === "ArrowDown"
-        ? idx < 0
-          ? 0
-          : Math.min(idx + 1, options.length - 1)
-        : idx <= 0
-          ? 0
-          : idx - 1;
-    options[next]?.focus();
+    const visible = navRef.current?.querySelector<HTMLButtonElement>(
+      `[data-nav-position="${next}"]`,
+    );
+    if (visible) {
+      pendingVirtualFocus.current = null;
+      visible.focus();
+      return;
+    }
+    pendingVirtualFocus.current = next;
+    if (next <= pinnedCount) {
+      virtualPinnedRef.current?.scrollToIndex({
+        index: next - 1,
+        align: "center",
+      });
+    } else if (next <= pinnedCount + unpinnedAccounts.length) {
+      virtualAccountsRef.current?.scrollToIndex({
+        index: next - pinnedCount - 1,
+        align: "center",
+      });
+    } else {
+      virtualChannelsRef.current?.scrollToIndex({
+        index: next - pinnedCount - unpinnedAccounts.length - 1,
+        align: "center",
+      });
+    }
   };
 
   // A channel I own: renaming it changes the shared (synced) name for everyone. A contact —
@@ -569,119 +666,134 @@ export function Sidebar() {
       hasPinned: pinnedAccounts.length + pinnedChannels.length > 0,
     };
   }, [accounts, channels, favorites, t]);
+  const listSize = accounts.length + channels.length;
+  const pinnedCount = pinnedAccounts.length + pinnedChannels.length;
+  const pinnedRows = useMemo(
+    () => [
+      ...pinnedAccounts.map((r) => ({
+        id: r.id,
+        conv: r.conv,
+        subtitle: r.subtitle,
+        channel: false,
+        renameName: r.a.names[0] || shortId(r.id),
+      })),
+      ...pinnedChannels.map((r) => ({
+        id: r.id,
+        conv: r.conv,
+        subtitle: r.subtitle,
+        channel: true,
+        renameName: r.c.name,
+      })),
+    ],
+    [pinnedAccounts, pinnedChannels],
+  );
+  const focusVirtualRow = (
+    {
+      startIndex,
+      endIndex,
+    }: {
+      startIndex: number;
+      endIndex: number;
+    },
+    firstPosition: number,
+  ) => {
+    const pending = pendingVirtualFocus.current;
+    if (
+      pending === null ||
+      pending < firstPosition + startIndex ||
+      pending > firstPosition + endIndex
+    )
+      return;
+    requestAnimationFrame(() => {
+      if (pendingVirtualFocus.current !== pending) return;
+      const target = navRef.current?.querySelector<HTMLButtonElement>(
+        `[data-nav-position="${pending}"]`,
+      );
+      if (
+        target &&
+        (document.activeElement === document.body ||
+          navRef.current?.contains(document.activeElement))
+      ) {
+        target.focus();
+        pendingVirtualFocus.current = null;
+      }
+    });
+  };
 
   return (
     <aside
       data-testid="sidebar"
       style={{ width }}
-      className="relative flex shrink-0 flex-col border-r bg-card"
+      className="sidebar-container relative flex shrink-0 flex-col border-r bg-[hsl(var(--shell-rail))]"
     >
-      {/* Identity header — own glyph + name (display) + own short mono id, plus the one
-          primary action (Search). `data-tauri-drag-region` makes the strip a window-drag
-          handle (interactive controls inside opt out via their own pointer handling);
-          `data-titlebar-inset` clears the macOS traffic-lights (no-op elsewhere). */}
+      {/* Conversation title and search live above the list. The drag region and
+          titlebar inset leave room for native window controls. */}
       <div
-        className="border-b px-4 py-3"
+        className="border-b px-3.5 pb-3 pt-4"
         data-testid="self-identity"
         data-tauri-drag-region
         data-titlebar-inset="left"
       >
-        <div className="flex items-center gap-3">
-          {/* Avatar opens the profile (where the photo + name are edited) — like tapping
-              your avatar in WeChat/Telegram. */}
-          <button
-            type="button"
-            data-testid="open-profile"
-            onClick={() => setProfileOpen(true)}
-            aria-label={t("profile.open")}
-            className="relative shrink-0 rounded-[28%] outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <IdentityGlyph
-              seed={myAccountId || myId || username}
-              size={38}
-              title={displayName}
-            />
-            <PresenceDot
-              status={ready ? "online" : "offline"}
-              size="md"
-              label={ready ? t("presence.online") : t("common.starting")}
-              className="pointer-events-none absolute -bottom-0.5 -right-0.5"
-            />
-          </button>
-          <div className="min-w-0 flex-1">
-            {/* The name also opens the profile. Kept separate from the status line below so
-                the boot-retry button never nests inside another button. */}
-            <button
-              type="button"
-              onClick={() => setProfileOpen(true)}
-              className="block max-w-full rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <span
-                data-testid="sidebar-own-name"
-                className="block truncate text-left font-display text-sm font-semibold tracking-tight"
-              >
-                {displayName}
-              </span>
-            </button>
-            <div className="truncate font-mono text-xs text-muted-foreground">
-              {ready ? (
-                t("sidebar.you", { id: shortId(myId) })
-              ) : bootFailed ? (
-                <button
-                  type="button"
-                  onClick={() => retryBoot()}
-                  className="text-destructive underline-offset-2 hover:underline"
-                >
-                  {t("sidebar.nodeUnavailable")}
-                </button>
-              ) : (
-                t("common.starting")
-              )}
-            </div>
-          </div>
+        <div className="mb-3 flex items-center gap-2.5 text-[15px] font-semibold tracking-tight">
+          <Logo size={27} />
+          <span>Mesh-Talk</span>
         </div>
-        {/* Primary actions up top: Search + Received files. Other utilities live in the
-            bottom-left overflow menu. */}
-        <div className="mt-2.5 flex items-center gap-1">
-          <SearchDialog />
-          <FilesTray />
-        </div>
+        <SearchDialog />
         <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
       </div>
 
       <nav
-        ref={navRef}
-        role="list"
+        data-testid="conversation-nav"
+        ref={attachNav}
         aria-label={t("conversation.list")}
         onKeyDown={onNavKeyDown}
-        className="flex-1 overflow-y-auto px-2 pb-4"
+        onPointerDownCapture={() => {
+          pendingVirtualFocus.current = null;
+        }}
+        className="flex-1 overflow-y-auto px-2 pb-3"
       >
         {hasPinned && (
           <>
             <SectionLabel>{t("sidebar.pinned")}</SectionLabel>
-            {pinnedAccounts.map((r) => (
-              <Row
-                key={r.id}
-                conv={r.conv}
-                subtitle={r.subtitle}
-                pinned
-                onTogglePin={() => void togglePinned(r.id, false)}
-                onRename={() =>
-                  startRename(r.id, r.a.names[0] || shortId(r.id))
-                }
+            {pinnedRows.length > VIRTUALIZE_AT ? (
+              <Virtuoso
+                ref={virtualPinnedRef}
+                data={pinnedRows}
+                customScrollParent={navScrollParent ?? undefined}
+                defaultItemHeight={CONVERSATION_ROW_HEIGHT}
+                overscan={250}
+                style={{ height: pinnedRows.length * CONVERSATION_ROW_HEIGHT }}
+                computeItemKey={(_, r) => r.id}
+                rangeChanged={(range) => focusVirtualRow(range, 1)}
+                itemContent={(index, r) => (
+                  <Row
+                    conv={r.conv}
+                    subtitle={r.subtitle}
+                    channel={r.channel}
+                    pinned
+                    navIndex={index}
+                    listPosition={index + 1}
+                    listSize={listSize}
+                    onTogglePin={() => void togglePinned(r.id, false)}
+                    onRename={() => startRename(r.id, r.renameName)}
+                  />
+                )}
               />
-            ))}
-            {pinnedChannels.map((r) => (
-              <Row
-                key={r.id}
-                conv={r.conv}
-                subtitle={r.subtitle}
-                channel
-                pinned
-                onTogglePin={() => void togglePinned(r.id, false)}
-                onRename={() => startRename(r.id, r.c.name)}
-              />
-            ))}
+            ) : (
+              pinnedRows.map((r, index) => (
+                <Row
+                  key={r.id}
+                  conv={r.conv}
+                  subtitle={r.subtitle}
+                  channel={r.channel}
+                  pinned
+                  listPosition={index + 1}
+                  listSize={listSize}
+                  onTogglePin={() => void togglePinned(r.id, false)}
+                  onRename={() => startRename(r.id, r.renameName)}
+                />
+              ))
+            )}
           </>
         )}
 
@@ -714,16 +826,47 @@ export function Sidebar() {
             )}
           </p>
         )}
-        {unpinnedAccounts.map((r) => (
-          <Row
-            key={r.id}
-            conv={r.conv}
-            subtitle={r.subtitle}
-            pinned={false}
-            onTogglePin={() => void togglePinned(r.id, true)}
-            onRename={() => startRename(r.id, r.a.names[0] || shortId(r.id))}
+        {unpinnedAccounts.length > VIRTUALIZE_AT ? (
+          <Virtuoso
+            ref={virtualAccountsRef}
+            data={unpinnedAccounts}
+            customScrollParent={navScrollParent ?? undefined}
+            defaultItemHeight={CONVERSATION_ROW_HEIGHT}
+            overscan={250}
+            style={{
+              height: unpinnedAccounts.length * CONVERSATION_ROW_HEIGHT,
+            }}
+            computeItemKey={(_, r) => r.id}
+            rangeChanged={(range) => focusVirtualRow(range, pinnedCount + 1)}
+            itemContent={(index, r) => (
+              <Row
+                conv={r.conv}
+                subtitle={r.subtitle}
+                pinned={false}
+                navIndex={index}
+                listPosition={pinnedCount + index + 1}
+                listSize={listSize}
+                onTogglePin={() => void togglePinned(r.id, true)}
+                onRename={() =>
+                  startRename(r.id, r.a.names[0] || shortId(r.id))
+                }
+              />
+            )}
           />
-        ))}
+        ) : (
+          unpinnedAccounts.map((r, index) => (
+            <Row
+              key={r.id}
+              conv={r.conv}
+              subtitle={r.subtitle}
+              pinned={false}
+              listPosition={pinnedCount + index + 1}
+              listSize={listSize}
+              onTogglePin={() => void togglePinned(r.id, true)}
+              onRename={() => startRename(r.id, r.a.names[0] || shortId(r.id))}
+            />
+          ))
+        )}
 
         <SectionLabel action={<CreateChannelDialog />}>
           {t("sidebar.channels")}
@@ -733,27 +876,78 @@ export function Sidebar() {
             {t("sidebar.noChannels")}
           </p>
         )}
-        {unpinnedChannels.map((r) => (
-          <Row
-            key={r.id}
-            conv={r.conv}
-            subtitle={r.subtitle}
-            channel
-            pinned={false}
-            onTogglePin={() => void togglePinned(r.id, true)}
-            onRename={() => startRename(r.id, r.c.name)}
+        {unpinnedChannels.length > VIRTUALIZE_AT ? (
+          <Virtuoso
+            ref={virtualChannelsRef}
+            data={unpinnedChannels}
+            customScrollParent={navScrollParent ?? undefined}
+            defaultItemHeight={CONVERSATION_ROW_HEIGHT}
+            overscan={250}
+            style={{
+              height: unpinnedChannels.length * CONVERSATION_ROW_HEIGHT,
+            }}
+            computeItemKey={(_, r) => r.id}
+            rangeChanged={(range) =>
+              focusVirtualRow(range, pinnedCount + unpinnedAccounts.length + 1)
+            }
+            itemContent={(index, r) => (
+              <Row
+                conv={r.conv}
+                subtitle={r.subtitle}
+                channel
+                pinned={false}
+                navIndex={index}
+                listPosition={pinnedCount + unpinnedAccounts.length + index + 1}
+                listSize={listSize}
+                onTogglePin={() => void togglePinned(r.id, true)}
+                onRename={() => startRename(r.id, r.c.name)}
+              />
+            )}
           />
-        ))}
+        ) : (
+          unpinnedChannels.map((r, index) => (
+            <Row
+              key={r.id}
+              conv={r.conv}
+              subtitle={r.subtitle}
+              channel
+              pinned={false}
+              listPosition={pinnedCount + unpinnedAccounts.length + index + 1}
+              listSize={listSize}
+              onTogglePin={() => void togglePinned(r.id, true)}
+              onRename={() => startRename(r.id, r.c.name)}
+            />
+          ))
+        )}
       </nav>
+
+      <div
+        className="sidebar-tools grid gap-0.5 border-t px-2 py-1.5"
+        aria-label={t("redesign.tools")}
+      >
+        <FilesTray navigation />
+        <DiagnosticsDialog />
+        <SettingsDialog />
+      </div>
 
       {/* Stranded prompt: nobody's online and the grace window has passed — offer the
           offline direct-connect guide. Quiet, dismissible, and only here when it's earned. */}
       {stranded && (
         <div
           data-testid="stranded-prompt"
-          className="flex items-center gap-2 border-t border-signal/20 bg-signal/[0.06] px-2.5 py-1.5 text-xs"
+          className={cn(
+            "flex items-center gap-2 border-t px-2.5 py-1.5 text-xs",
+            noNetwork
+              ? "border-attention/25 bg-attention/[0.07]"
+              : "border-signal/20 bg-signal/[0.06]",
+          )}
         >
-          <WifiOff className="h-3.5 w-3.5 shrink-0 text-signal" />
+          <WifiOff
+            className={cn(
+              "h-3.5 w-3.5 shrink-0",
+              noNetwork ? "text-attention" : "text-signal",
+            )}
+          />
           <button
             type="button"
             data-testid="stranded-open"
@@ -770,7 +964,7 @@ export function Sidebar() {
             onClick={() => setStrandedDismissed(true)}
             title={t("common.dismiss")}
             aria-label={t("common.dismiss")}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -782,53 +976,99 @@ export function Sidebar() {
         noNetwork={noNetwork}
       />
 
-      {/* Bottom-left footer: the utility overflow menu (settings/diagnostics/etc.) sits
-          first so the top stays clean, then the LAN status + brand mark. */}
-      <div className="flex items-center gap-1.5 border-t px-2 py-2 text-xs text-muted-foreground">
-        <UtilityMenu />
-        {/* Active theme's crest/logo — ADDED in the bottom-left corner (the app's own mark
-            stays at the far right; this is an addition, not a replacement). */}
-        {themeCrest && (
-          <img
-            src={themeCrest}
-            alt=""
-            data-testid="theme-crest"
-            title={t("settings.theme")}
-            className="h-[18px] w-[18px] shrink-0 object-contain"
-          />
-        )}
-        {ssid ? (
-          <Wifi className="h-3.5 w-3.5 shrink-0 text-signal" />
-        ) : (
-          <Network className="h-3.5 w-3.5 shrink-0 text-signal" />
-        )}
-        <span
-          className="flex-1 truncate"
-          title={ssid ?? t("sidebar.localNetwork")}
+      <div className="border-t px-2.5 py-2 text-[11px] text-muted-foreground">
+        <button
+          type="button"
+          data-testid="open-profile"
+          onClick={() => setProfileOpen(true)}
+          aria-label={t("profile.open")}
+          className="mb-1 flex min-h-10 w-full items-center gap-2.5 rounded-md px-1 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          {ssid ?? t("sidebar.localNetwork")}
-        </span>
-        {/* Live LAN headcount — restored from the old footer text; a breathing signal dot +
+          <IdentityGlyph
+            seed={myAccountId || myId || username}
+            size={34}
+            title={displayName}
+          />
+          <span className="min-w-0 flex-1">
+            <span
+              data-testid="sidebar-own-name"
+              className="block truncate text-sm font-semibold text-foreground"
+            >
+              {displayName}
+            </span>
+            <span className="block truncate text-xs text-muted-foreground">
+              {t("redesign.localIdentity")}
+            </span>
+          </span>
+        </button>
+        <div className="flex items-center gap-2 font-medium text-foreground">
+          {connection === "starting" || connection === "searching" ? (
+            <Loader2
+              aria-hidden="true"
+              className="h-3.5 w-3.5 shrink-0 animate-spin text-signal motion-reduce:animate-none"
+            />
+          ) : (
+            <PresenceDot
+              status={connection === "ready" ? "online" : "offline"}
+              size="sm"
+            />
+          )}
+          <span
+            data-testid="connection-status"
+            className={cn(
+              "min-w-0 flex-1 truncate",
+              connection === "failed" && "text-destructive",
+              connection === "no-network" && "text-attention",
+            )}
+            title={t(CONNECTION_LABEL[connection])}
+          >
+            {t(CONNECTION_LABEL[connection])}
+          </span>
+          <UtilityMenu />
+        </div>
+        <div className="mt-1 flex items-center gap-1.5 pl-4.5">
+          {ssid ? (
+            <Wifi className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <Network className="h-3.5 w-3.5 shrink-0" />
+          )}
+          <span
+            className="min-w-0 flex-1 truncate"
+            title={ssid ?? t("sidebar.localNetwork")}
+          >
+            {ssid ?? t("sidebar.localNetwork")}
+          </span>
+          {themeCrest && (
+            <img
+              src={themeCrest}
+              alt=""
+              data-testid="theme-crest"
+              title={t("settings.theme")}
+              className="h-4 w-4 shrink-0 object-contain"
+            />
+          )}
+          {/* Live LAN headcount — restored from the old footer text; a breathing signal dot +
             the number of people currently discovered around us. Always visible (the SSID can
             grow long and truncate), with the full phrase in the tooltip. */}
-        <span
-          data-testid="lan-online-count"
-          className="flex shrink-0 items-center gap-1 tabular-nums"
-          title={t("sidebar.peopleOnLan", { count: onlinePeople })}
-          aria-label={t("sidebar.peopleOnLan", { count: onlinePeople })}
-        >
-          <PresenceDot
-            status={onlinePeople > 0 ? "online" : "offline"}
-            size="sm"
+          <span
+            data-testid="lan-online-count"
+            className="flex shrink-0 items-center gap-1 tabular-nums"
+            title={t("sidebar.peopleOnLan", { count: onlinePeople })}
+            aria-label={t("sidebar.peopleOnLan", { count: onlinePeople })}
+          >
+            <PresenceDot
+              status={onlinePeople > 0 ? "online" : "offline"}
+              size="sm"
+            />
+            {t("sidebar.onlineShort", { count: onlinePeople })}
+          </span>
+          {/* App's own brand mark — always present (kept distinct from the theme crest above). */}
+          <Logo
+            size={16}
+            className="ml-1.5 shrink-0 opacity-60"
+            title="Mesh-Talk"
           />
-          {t("sidebar.onlineShort", { count: onlinePeople })}
-        </span>
-        {/* App's own brand mark — always present (kept distinct from the theme crest above). */}
-        <Logo
-          size={16}
-          className="ml-1.5 shrink-0 opacity-80"
-          title="Mesh-Talk"
-        />
+        </div>
       </div>
 
       {/* Right-edge resize handle: drag to resize (persisted), double-click to reset. The
@@ -837,16 +1077,20 @@ export function Sidebar() {
         role="separator"
         aria-orientation="vertical"
         aria-label={t("sidebar.resize")}
+        aria-valuemin={MIN_WIDTH}
+        aria-valuemax={MAX_WIDTH}
+        aria-valuenow={width}
+        aria-valuetext={`${width} px`}
         tabIndex={0}
         data-testid="sidebar-resize-handle"
         onPointerDown={onPointerDown}
         onDoubleClick={reset}
         onKeyDown={onKeyDown}
-        className="group absolute inset-y-0 right-0 z-20 w-1.5 translate-x-1/2 cursor-col-resize outline-none"
+        className="group absolute inset-y-0 right-0 z-20 w-1.5 translate-x-1/2 touch-none cursor-col-resize outline-none"
       >
         <span
           aria-hidden
-          className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-signal group-focus-visible:bg-signal"
+          className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-[background-color,width] group-hover:bg-signal group-focus-visible:w-[3px] group-focus-visible:bg-signal"
         />
       </div>
 

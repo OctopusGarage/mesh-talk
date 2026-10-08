@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { AnimatePresence, motion } from "framer-motion";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { ChevronDown, Loader2, MessagesSquare, Upload } from "lucide-react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  ChevronDown,
+  CircleAlert,
+  Loader2,
+  MessagesSquare,
+  Upload,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   IdentityCrest,
@@ -25,13 +33,25 @@ import { VerifyContactDialog } from "./VerifyContactDialog";
 import { CallButtons } from "./CallDialog";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { TransferBar } from "./TransferBar";
+import { DiagnosticsDialog } from "./DiagnosticsDialog";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
-import { chat as chatApi } from "@/lib/api";
+import { HiddenContactsDialog } from "./HiddenContactsDialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { chat as chatApi, obs } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { mentionsName } from "@/lib/mentions";
 import { formatDay } from "@/lib/format";
-import { useMotionOK } from "@/lib/motion";
+import { cn } from "@/lib/utils";
+import { ease, useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
+import { useContactPolicy } from "@/store/contactPolicy";
 import {
   convKey,
   displayName,
@@ -59,44 +79,88 @@ function captureComposer() {
 
 function EmptyState() {
   const { t } = useTranslation();
-  const hasConversations = useChat(
-    (s) => s.accounts.length + s.channels.length > 0,
-  );
+  const accounts = useChat((s) => s.accounts);
+  const channels = useChat((s) => s.channels);
+  const hidden = useContactPolicy((s) => s.contacts);
+  const policyLoaded = useContactPolicy((s) => s.loaded);
+  const policyError = useContactPolicy((s) => s.error);
+  const owner = useAuth((s) => s.user?.id);
+  const visibleCount =
+    channels.length +
+    (policyLoaded
+      ? accounts.filter((account) => !hidden[account.account_id]).length
+      : 0);
+  const hasConversations = visibleCount > 0;
+  const hiddenOnly = policyLoaded && !hasConversations && accounts.length > 0;
+  const policyUnavailable = !policyLoaded && !hasConversations;
   const [guideOpen, setGuideOpen] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
-      <div className="flex h-14 w-14 items-center justify-center rounded-xl border bg-card text-signal">
-        <MessagesSquare className="h-6 w-6" />
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-muted text-signal">
+        <MessagesSquare className="h-5 w-5" />
       </div>
       <div>
-        <p className="font-display text-lg font-semibold tracking-tight">
+        <p className="font-display text-base font-semibold tracking-tight">
           {t(
             hasConversations
               ? "conversation.noneSelectedTitle"
-              : "sidebar.noContacts",
+              : policyUnavailable
+                ? policyError
+                  ? "contactVisibility.loadError"
+                  : "redesign.loadingContacts"
+                : hiddenOnly
+                  ? "contactVisibility.allHidden"
+                  : "redesign.noPeersTitle",
           )}
         </p>
         {hasConversations && (
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
             {t("conversation.noneSelectedDesc")}
           </p>
         )}
-        {!hasConversations && (
-          <p className="mt-1 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            {t("conversation.noPeersHint")}
+        {!hasConversations && !hiddenOnly && !policyUnavailable && (
+          <p className="mt-1 max-w-sm text-[13px] leading-5 text-muted-foreground">
+            {t("redesign.noPeersBody")}
           </p>
         )}
       </div>
-      {!hasConversations && (
+      {policyUnavailable && policyError && owner && (
+        <button
+          type="button"
+          onClick={() => void useContactPolicy.getState().load(owner)}
+          className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {t("contactVisibility.retry")}
+        </button>
+      )}
+      {hiddenOnly && <HiddenContactsDialog />}
+      {!hasConversations && !hiddenOnly && !policyUnavailable && (
         <>
+          <Button
+            type="button"
+            data-testid="empty-connect"
+            onClick={() => setConnectOpen(true)}
+          >
+            {t("redesign.connectToSomeone")}
+          </Button>
           <button
             type="button"
             onClick={() => setGuideOpen(true)}
             className="rounded-md px-2 py-1 text-sm font-medium text-signal underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            {t("sidebar.strandedAlone")}
+            {t("redesign.connectionHelp")}
           </button>
-          <OfflineConnectDialog open={guideOpen} onOpenChange={setGuideOpen} />
+          <DiagnosticsDialog
+            open={guideOpen}
+            onOpenChange={setGuideOpen}
+            initialTab="help"
+          />
+          <OfflineConnectDialog
+            open={connectOpen}
+            onOpenChange={setConnectOpen}
+            includeSharedNetwork
+          />
         </>
       )}
     </div>
@@ -108,8 +172,17 @@ function EmptyState() {
 // this is a non-blocking "two-phase startup" state — not a frozen window.
 function UnlockingState() {
   const { t } = useTranslation();
+  const [slow, setSlow] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  useEffect(() => {
+    const id = window.setTimeout(() => setSlow(true), 15_000);
+    return () => window.clearTimeout(id);
+  }, []);
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+    <div
+      role="status"
+      className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
+    >
       <div className="relative flex h-16 w-16 items-center justify-center">
         <Loader2 className="h-7 w-7 animate-spin text-signal" />
       </div>
@@ -120,7 +193,81 @@ function UnlockingState() {
         <p className="text-sm text-muted-foreground">
           {t("conversation.unlockingDesc")}
         </p>
+        {slow && (
+          <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground">
+            {t("redesign.slowStartup")}
+          </p>
+        )}
       </div>
+      {slow && (
+        <>
+          <button
+            type="button"
+            onClick={() => setGuideOpen(true)}
+            className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {t("redesign.openConnection")}
+          </button>
+          <DiagnosticsDialog
+            open={guideOpen}
+            onOpenChange={setGuideOpen}
+            initialTab="help"
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function StartupFailureState() {
+  const { t } = useTranslation();
+  const setError = useChat((s) => s.setError);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const revealLogs = async () => {
+    try {
+      await revealItemInDir(await obs.logFile());
+    } catch (e) {
+      setError(t("diagnostics.actionFailed", { error: errorMessage(e) }));
+    }
+  };
+
+  return (
+    <div
+      role="alert"
+      className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
+    >
+      <div className="flex h-12 w-12 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 text-destructive">
+        <CircleAlert className="h-6 w-6" aria-hidden="true" />
+      </div>
+      <div className="max-w-md">
+        <p className="font-display text-lg font-semibold tracking-tight">
+          {t("conversation.startFailedTitle")}
+        </p>
+        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+          {t("conversation.startFailedDesc")}
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <button
+          type="button"
+          onClick={() => setGuideOpen(true)}
+          className="rounded-md bg-signal px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {t("redesign.openConnection")}
+        </button>
+        <button
+          type="button"
+          onClick={() => void revealLogs()}
+          className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {t("diagnostics.revealLogs")}
+        </button>
+      </div>
+      <DiagnosticsDialog
+        open={guideOpen}
+        onOpenChange={setGuideOpen}
+        initialTab="help"
+      />
     </div>
   );
 }
@@ -128,12 +275,10 @@ function UnlockingState() {
 /** A quiet centered date separator between days in the message log. */
 function DaySeparator({ label }: { label: string }) {
   return (
-    <div className="mx-auto flex max-w-[880px] items-center gap-3 px-5 py-4">
-      <span className="h-px flex-1 bg-border" />
-      <span className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+    <div className="mx-auto flex max-w-[820px] items-center justify-center px-5 py-4">
+      <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
-      <span className="h-px flex-1 bg-border" />
     </div>
   );
 }
@@ -171,10 +316,11 @@ function DmHeader({ id, name }: { id: string; name: string }) {
         id={id}
         name={name}
         verified={verified}
+        hideId
         status={status}
         variant="compact"
       />
-      <span className="pl-12 text-xs text-muted-foreground">
+      <span className="pl-12 text-[11px] text-muted-foreground">
         {presenceLabel(presence, t)}
       </span>
     </div>
@@ -211,7 +357,10 @@ function ChannelHeader({
         />
       </div>
       <div className="min-w-0">
-        <div className="truncate font-display font-semibold tracking-tight">
+        <div
+          className="truncate font-display font-semibold tracking-tight"
+          title={name}
+        >
           {name}
         </div>
         <div className="truncate text-xs text-muted-foreground">
@@ -235,12 +384,17 @@ export function ConversationView() {
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
   const favorites = useChat((s) => s.favorites);
-  const send = useChat((s) => s.send);
+  const admitText = useChat((s) => s.admitText);
   const retry = useChat((s) => s.retry);
   const sendFile = useChat((s) => s.sendFile);
   const setError = useChat((s) => s.setError);
   const toggleReaction = useChat((s) => s.toggleReaction);
   const deleteMessage = useChat((s) => s.deleteMessage);
+  const [pendingDelete, setPendingDelete] = useState<{
+    key: string;
+    id: string;
+  } | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
   const myId = useChat((s) => s.myId);
@@ -263,6 +417,15 @@ export function ConversationView() {
     return map;
   }, [peers, members]);
   const key = active ? convKey(active) : "";
+  useEffect(() => {
+    setPendingDelete(null);
+  }, [key]);
+  const drafts = useRef(new Map<string, string>());
+  const scrollPositions = useRef(new Map<string, number>());
+  const exactScrollPositions = useRef(new Map<string, number>());
+  const restoringScroll = useRef<string | null>(null);
+  const lastVisibleRows = useRef(new Map<string, number>());
+  const atBottom = useRef(new Map<string, boolean>());
   const messages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
   );
@@ -270,10 +433,45 @@ export function ConversationView() {
     active ? (s.reactions[key] ?? NO_REACTIONS) : NO_REACTIONS,
   );
   const loading = useChat((s) => s.loading);
+  const historyError = useChat((s) => s.historyError === key);
+  const searchTarget = useChat((s) => s.searchTarget);
   const ready = useChat((s) => s.ready);
+  const bootFailed = useChat((s) => s.bootFailed);
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!key || !exactScrollPositions.current.has(key)) return;
+    restoringScroll.current = key;
+    return () => {
+      if (restoringScroll.current === key) restoringScroll.current = null;
+    };
+  }, [key]);
+
+  useEffect(() => {
+    if (restoringScroll.current !== key || loading || messages.length === 0)
+      return;
+    const top = exactScrollPositions.current.get(key);
+    if (top === undefined) return;
+    let frame = 0;
+    let attempts = 0;
+    const restore = () => {
+      const scroller = scrollerRef.current;
+      const maxTop = scroller
+        ? scroller.scrollHeight - scroller.clientHeight
+        : 0;
+      if ((!scroller || maxTop < top) && attempts++ < 30) {
+        frame = requestAnimationFrame(restore);
+        return;
+      }
+      if (scroller) scroller.scrollTop = Math.min(top, Math.max(0, maxTop));
+      restoringScroll.current = null;
+    };
+    frame = requestAnimationFrame(restore);
+    return () => cancelAnimationFrame(frame);
+  }, [key, loading, messages.length]);
 
   // Native (Tauri) drag-and-drop: dropping file(s) onto the conversation sends them there.
   // The webview drag-drop event is global, so we subscribe once and read the latest
@@ -325,19 +523,31 @@ export function ConversationView() {
     };
   }, [t]);
 
-  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  const [reply, setReply] = useState<{
+    key: string;
+    message: ChatMessage;
+  } | null>(null);
+  const replyTo = reply?.key === key ? reply.message : null;
   // "Re-edit" a recalled message: a (text, bump-counter) pushed into the composer.
-  const [prefill, setPrefill] = useState<{ text: string; n: number } | null>(
-    null,
-  );
+  const [prefill, setPrefill] = useState<{
+    key: string;
+    text: string;
+    n: number;
+  } | null>(null);
   // `showJump` reveals the jump-to-bottom button whenever the user has scrolled up.
   // Virtuoso's `followOutput` only sticks to the newest message while already at the
   // bottom, so reading history is never interrupted by an inbound message.
   const [showJump, setShowJump] = useState(false);
+  const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
+  const [searchMiss, setSearchMiss] = useState(false);
+  const handledSearch = useRef<number | null>(null);
 
   useEffect(() => {
-    setReplyTo(null);
+    setReply(null);
+    setPrefill(null);
     setShowJump(false);
+    setSearchMiss(false);
+    setHighlightedKey(null);
   }, [key]);
 
   // Message-enter motion: animate ONLY messages that arrive after a conversation's
@@ -361,6 +571,41 @@ export function ConversationView() {
   }, [messages, key]);
   const isFresh = (m: ChatMessage, i: number) =>
     primed.current && !seenKeys.current.has(rowKey(m, i));
+
+  useEffect(() => {
+    if (!searchTarget || searchTarget.key !== key || loading || historyError)
+      return;
+    if (handledSearch.current === searchTarget.request) return;
+    const index = messages.findIndex(
+      (m) =>
+        m.wallClock === searchTarget.wallClock &&
+        m.text === searchTarget.text &&
+        m.fromMe === searchTarget.fromMe,
+    );
+    if (index < 0) {
+      handledSearch.current = searchTarget.request;
+      setSearchMiss(true);
+      return;
+    }
+    setSearchMiss(false);
+    const messageKey = rowKey(messages[index], index);
+    setHighlightedKey(messageKey);
+    const frame = requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({
+        index,
+        align: "center",
+        behavior: "auto",
+      });
+      handledSearch.current = searchTarget.request;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [searchTarget, key, loading, historyError, messages]);
+
+  useEffect(() => {
+    if (!highlightedKey) return;
+    const timer = window.setTimeout(() => setHighlightedKey(null), 2800);
+    return () => clearTimeout(timer);
+  }, [highlightedKey]);
 
   const byId = useMemo(() => {
     const m = new Map<string, ChatMessage>();
@@ -411,7 +656,12 @@ export function ConversationView() {
 
   if (!active) {
     return (
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main
+        className={cn(
+          "flex min-w-0 flex-1 flex-col",
+          ready && "conversation-canvas",
+        )}
+      >
         {needsCustomWindowControls() && (
           <div
             aria-hidden
@@ -420,7 +670,13 @@ export function ConversationView() {
             className="h-10 shrink-0"
           />
         )}
-        {ready ? <EmptyState /> : <UnlockingState />}
+        {ready ? (
+          <EmptyState />
+        ) : bootFailed ? (
+          <StartupFailureState />
+        ) : (
+          <UnlockingState />
+        )}
       </main>
     );
   }
@@ -435,22 +691,46 @@ export function ConversationView() {
     // min-w-0 lets this flex child shrink below its content's intrinsic width, so a wide
     // message/image wraps within the pane instead of pushing it past the window edge (and
     // getting clipped under the shell's overflow-hidden / behind the sidebar).
-    <main className="relative flex min-w-0 flex-1 flex-col">
-      {dragOver && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-signal/10 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-2 rounded-2xl border-2 border-dashed border-signal bg-background/90 px-8 py-6 shadow-elevation-lg">
-            <Upload className="h-8 w-8 text-signal" />
-            <p className="text-sm font-medium">
-              {t("conversation.dropToSend", { name: headerName })}
-            </p>
-          </div>
-        </div>
-      )}
+    <main className="conversation-canvas relative flex min-w-0 flex-1 flex-col">
+      <AnimatePresence>
+        {dragOver && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, pointerEvents: "none" }}
+            transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
+            className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-background/80"
+          >
+            <motion.div
+              initial={{
+                opacity: 0,
+                transform: motionOK ? "translateY(4px)" : "none",
+              }}
+              animate={{
+                opacity: 1,
+                transform: motionOK ? "translateY(0px)" : "none",
+              }}
+              exit={{
+                opacity: 0,
+                transform: motionOK ? "translateY(4px)" : "none",
+                pointerEvents: "none",
+              }}
+              transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
+              className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-signal bg-card px-8 py-6 shadow-elevation"
+            >
+              <Upload className="h-8 w-8 text-signal" />
+              <p className="text-sm font-medium">
+                {t("conversation.dropToSend", { name: headerName })}
+              </p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <header
         data-testid="conversation-header"
         data-tauri-drag-region
         data-titlebar-inset
-        className="flex min-h-[72px] items-center gap-3 border-b bg-card px-5 py-2.5"
+        className="flex min-h-[68px] items-center gap-3 border-b bg-card px-5 py-2.5"
       >
         {isChannel ? (
           <ChannelHeader
@@ -477,27 +757,71 @@ export function ConversationView() {
         )}
       </header>
 
-      <div className="relative flex-1 overflow-hidden">
-        {loading && messages.length === 0 && (
-          <p className="py-8 text-center text-sm text-muted-foreground">
-            {t("common.loading")}
-          </p>
+      <div className="conversation-log-surface relative flex-1 overflow-hidden">
+        {!loading && historyError && (
+          <div
+            role="alert"
+            className={cn(
+              "z-10 flex items-center justify-center gap-2 px-4 text-[13px]",
+              messages.length > 0
+                ? "absolute inset-x-4 top-3 mx-auto max-w-[38rem] rounded-md border bg-card py-2 shadow-elevation"
+                : "h-full flex-col text-center",
+            )}
+          >
+            <CircleAlert
+              className="h-4 w-4 shrink-0 text-destructive"
+              aria-hidden="true"
+            />
+            <span>{t("redesign.historyFailed")}</span>
+            <button
+              type="button"
+              onClick={() => void useChat.getState().reload()}
+              className="rounded-md px-2 py-1 font-medium text-signal hover:bg-accent"
+            >
+              {t("common.retry")}
+            </button>
+          </div>
         )}
-        {!loading && messages.length === 0 && (
+        {!loading && !historyError && searchMiss && (
+          <div
+            role="status"
+            className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
+          >
+            {t("search.outsideRecent")}
+          </div>
+        )}
+        {loading && messages.length === 0 && (
+          <div
+            role="status"
+            aria-busy="true"
+            className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground"
+          >
+            <Loader2
+              className="h-5 w-5 animate-spin text-signal motion-reduce:animate-none"
+              aria-hidden="true"
+            />
+            {t("redesign.loadingHistory")}
+          </div>
+        )}
+        {!loading && !historyError && messages.length === 0 && (
           <div
             data-testid="conversation-empty"
-            className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground"
+            className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground"
           >
             <MessagesSquare
               aria-hidden="true"
               className="h-6 w-6 text-signal"
             />
-            <p>{t("conversation.noMessages")}</p>
+            <p>{t("redesign.emptyConversation")}</p>
           </div>
         )}
         {messages.length > 0 && (
           <Virtuoso
             ref={virtuosoRef}
+            scrollerRef={(element) => {
+              scrollerRef.current =
+                element instanceof HTMLElement ? element : null;
+            }}
             // `key` resets all virtualization state (scroll pos, measured heights) when
             // switching conversations — equivalent to the old `[messages.length, key]` reset.
             key={key}
@@ -507,27 +831,74 @@ export function ConversationView() {
             role="log"
             aria-live="polite"
             aria-label={t("conversation.messageLog", { name: headerName })}
-            className="h-full py-4"
+            className="h-full py-3"
             // Keep a short conversation anchored to the bottom (just above the composer)
             // instead of floating at the top with a large empty gap below it.
             alignToBottom
             // Start pinned to the newest message (chat opens at the bottom).
-            initialTopMostItemIndex={messages.length - 1}
+            initialTopMostItemIndex={Math.min(
+              messages.length - 1,
+              scrollPositions.current.get(key) ?? messages.length - 1,
+            )}
             // Stick to the bottom on new messages only while the user is already there
             // (preserves scroll position when reading history / prepending older items).
             followOutput={(isAtBottom) => (isAtBottom ? "auto" : false)}
-            atBottomStateChange={(b) => setShowJump(!b)}
+            atBottomStateChange={(b) => {
+              atBottom.current.set(key, b);
+              if (restoringScroll.current === key) return;
+              if (b) {
+                scrollPositions.current.delete(key);
+                exactScrollPositions.current.delete(key);
+              } else
+                scrollPositions.current.set(
+                  key,
+                  lastVisibleRows.current.get(key) ?? 0,
+                );
+              setShowJump(!b);
+            }}
+            rangeChanged={({ startIndex }) => {
+              lastVisibleRows.current.set(key, startIndex);
+              if (atBottom.current.get(key) === false)
+                scrollPositions.current.set(key, startIndex);
+            }}
+            onScroll={(event) => {
+              if (restoringScroll.current === key) return;
+              const scroller = event.currentTarget;
+              if (
+                scroller.scrollHeight -
+                  scroller.clientHeight -
+                  scroller.scrollTop <=
+                48
+              ) {
+                exactScrollPositions.current.delete(key);
+                return;
+              }
+              exactScrollPositions.current.delete(key);
+              exactScrollPositions.current.set(key, scroller.scrollTop);
+              if (exactScrollPositions.current.size > 24)
+                exactScrollPositions.current.delete(
+                  exactScrollPositions.current.keys().next().value!,
+                );
+            }}
             // A little tolerance so "at bottom" isn't lost to sub-pixel rounding.
             atBottomThreshold={48}
             increaseViewportBy={400}
             itemContent={(i, m) => {
               const prev = messages[i - 1];
+              const next = messages[i + 1];
+              const joins = (neighbor?: ChatMessage) =>
+                !!neighbor &&
+                neighbor.who === m.who &&
+                neighbor.fromMe === m.fromMe &&
+                formatDay(neighbor.wallClock) === formatDay(m.wallClock) &&
+                Math.abs(neighbor.wallClock - m.wallClock) < 5 * 60_000;
+              const grouped = joins(prev) && !m.recalled && !prev?.recalled;
+              const showTime =
+                !joins(next) || !!next?.recalled || !!m.failed || !!m.pending;
               // Author name + avatar only earn their place in channels; in a 1:1 DM the
               // conversation header already says who you're talking to, so the per-message
               // author is redundant clutter (and would leak the raw device id).
-              const showAuthor =
-                isChannel &&
-                (!prev || prev.who !== m.who || prev.fromMe !== m.fromMe);
+              const showAuthor = isChannel && !grouped;
               // A date separator opens each new calendar day (and the very first item).
               const showDay =
                 !prev || formatDay(prev.wallClock) !== formatDay(m.wallClock);
@@ -535,12 +906,20 @@ export function ConversationView() {
               const mentioned =
                 isChannel && !m.fromMe && mentionsName(m.text, myName);
               return (
-                <div className="mx-auto max-w-[880px] px-0 pb-1">
+                <div
+                  className={cn(
+                    "mx-auto max-w-[820px] px-0 pb-1 transition-colors duration-500 motion-reduce:transition-none",
+                    highlightedKey === rowKey(m, i) &&
+                      "rounded-md bg-signal/10",
+                  )}
+                >
                   {showDay && <DaySeparator label={formatDay(m.wallClock)} />}
                   <MessageBubble
                     m={m}
                     parent={parent}
                     showAuthor={showAuthor}
+                    grouped={grouped}
+                    showTime={showTime}
                     isChannel={isChannel}
                     authorAvatarId={accountByDevice.get(m.who) ?? m.who}
                     authorName={nameByDevice.get(m.who)}
@@ -549,13 +928,19 @@ export function ConversationView() {
                     selfReactionId={selfReactionId}
                     myName={myName}
                     mentioned={mentioned}
-                    onReply={setReplyTo}
+                    onReply={(message) => setReply({ key, message })}
                     onReact={toggleReaction}
                     onRetry={retry}
-                    onDelete={(msg) => msg.id && void deleteMessage(msg.id)}
+                    onDelete={(msg) =>
+                      msg.id && setPendingDelete({ key, id: msg.id })
+                    }
                     onRecall={(msg) => msg.id && void recallMessage(msg.id)}
                     onReEdit={(text) =>
-                      setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }))
+                      setPrefill((p) => ({
+                        key,
+                        text,
+                        n: (p?.n ?? 0) + 1,
+                      }))
                     }
                   />
                 </div>
@@ -565,21 +950,82 @@ export function ConversationView() {
             computeItemKey={(i, m) => rowKey(m, i)}
           />
         )}
-        {showJump && (
-          <button
-            type="button"
-            aria-label={t("conversation.jumpToLatest")}
-            onClick={() => jumpToLatest(() => virtuosoRef.current)}
-            className="absolute bottom-3 right-4 z-10 rounded-full border bg-background/90 p-2 shadow-md backdrop-blur hover:bg-accent"
-          >
-            <ChevronDown className="h-4 w-4" />
-          </button>
-        )}
+        <AnimatePresence>
+          {showJump && (
+            <motion.button
+              type="button"
+              initial={{
+                opacity: 0,
+                transform: motionOK ? "translateY(4px)" : "none",
+              }}
+              animate={{
+                opacity: 1,
+                transform: motionOK ? "translateY(0px)" : "none",
+              }}
+              exit={{
+                opacity: 0,
+                transform: motionOK ? "translateY(4px)" : "none",
+              }}
+              transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
+              aria-label={t("conversation.jumpToLatest")}
+              onClick={() => jumpToLatest(() => virtuosoRef.current)}
+              className="absolute bottom-3 right-4 z-10 rounded-md border bg-card p-2 shadow-elevation hover:bg-accent"
+            >
+              <ChevronDown className="h-4 w-4" />
+            </motion.button>
+          )}
+        </AnimatePresence>
       </div>
 
       <TransferBar transferKey={active.id} />
 
+      <Dialog
+        open={pendingDelete?.key === key}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setPendingDelete(null);
+        }}
+      >
+        <DialogContent className="max-w-sm" data-testid="delete-message-dialog">
+          <DialogHeader>
+            <DialogTitle>{t("message.deleteLocalTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("message.deleteLocalDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              disabled={deleting}
+              onClick={() => setPendingDelete(null)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              data-testid="delete-message-confirm"
+              disabled={deleting}
+              onClick={() => {
+                if (!pendingDelete || pendingDelete.key !== key) return;
+                setDeleting(true);
+                void deleteMessage(pendingDelete.id).finally(() => {
+                  setDeleting(false);
+                  setPendingDelete(null);
+                });
+              }}
+            >
+              {deleting ? t("common.loading") : t("message.deleteLocalAction")}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Composer
+        key={key}
+        initialDraft={drafts.current.get(key) ?? ""}
+        onDraftChange={(text) => {
+          if (text) drafts.current.set(key, text);
+          else drafts.current.delete(key);
+        }}
         placeholder={
           isChannel
             ? t("conversation.messageChannel", { name: headerName })
@@ -588,9 +1034,9 @@ export function ConversationView() {
         mentionNames={mentionNames}
         myName={myName}
         replyTo={replyTo}
-        prefill={prefill}
+        prefill={prefill?.key === key ? prefill : null}
         onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
-        onCancelReply={() => setReplyTo(null)}
+        onCancelReply={() => setReply(null)}
         onAttach={async () => {
           const current = captureComposer();
           if (!current()) return;
@@ -632,8 +1078,12 @@ export function ConversationView() {
           }
         }}
         onSend={(t) => {
-          send(t, replyTo?.id ?? null);
-          setReplyTo(null);
+          const accepted = admitText(t, replyTo?.id ?? null);
+          if (accepted) {
+            setReply(null);
+            setPrefill(null);
+          }
+          return accepted;
         }}
         onPasteImage={sendImageBytes}
         onScreenshot={async (hideWindow) => {

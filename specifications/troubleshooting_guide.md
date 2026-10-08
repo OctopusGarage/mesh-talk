@@ -456,16 +456,12 @@ If you're unable to resolve your issue using this guide:
    - Debug logs if applicable
 
 3. **Community Support**
-   - Join the Mesh-Talk community discussions
-   - Ask questions on the project's GitHub Discussions page
-
-4. **Professional Support**
-   - For enterprise deployments, contact the development team
-   - Commercial support options are available
+   - Ask in the project's GitHub Discussions if that feature is enabled, or open an issue
+     for a reproducible non-security bug
 
 ## Version Information
 
-This troubleshooting guide applies to Mesh-Talk version 0.1.0.
-Last updated: June 22, 2026
+This troubleshooting guide applies to Mesh-Talk version 0.2.0.
+Last updated: October 8, 2026
 
 For the latest version of this guide, please refer to the official documentation.

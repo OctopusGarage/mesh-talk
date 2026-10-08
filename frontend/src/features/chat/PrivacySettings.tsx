@@ -98,10 +98,10 @@ export function PrivacySettings() {
   );
   return (
     <section className="space-y-2" aria-label={t("privacy.title")}>
-      <h3 className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <h3 className="text-[12px] font-semibold text-muted-foreground">
         {t("privacy.section")}
       </h3>
-      <div className="rounded-lg border p-3 space-y-3">
+      <div className="space-y-3 border-b pb-3">
         <div className="flex items-center justify-between gap-4">
           <div className="flex min-w-0 items-start gap-3">
             <EyeOff className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />

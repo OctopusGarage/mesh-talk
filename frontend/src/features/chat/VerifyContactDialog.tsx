@@ -51,8 +51,22 @@ export function VerifyContactDialog({
     peers.find((p) => p.account_id === accountId)?.user_id ?? "";
 
   const [open, setOpen] = useState(false);
-  const [trust, setTrust] = useState<TrustInfo | null>(null);
-  const [sn, setSn] = useState<SafetyNumberInfo | null>(null);
+  const [trustState, setTrustState] = useState<{
+    accountId: string;
+    fingerprint: string;
+    value: TrustInfo;
+  } | null>(null);
+  const [safetyState, setSafetyState] = useState<{
+    fingerprint: string;
+    value: SafetyNumberInfo;
+  } | null>(null);
+  const trust =
+    trustState?.accountId === accountId &&
+    trustState.fingerprint === fingerprint
+      ? trustState.value
+      : null;
+  const sn =
+    safetyState?.fingerprint === fingerprint ? safetyState.value : null;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -65,7 +79,7 @@ export function VerifyContactDialog({
     void chat
       .getTrust(accountId, fingerprint)
       .then((tr) => {
-        if (active) setTrust(tr);
+        if (active) setTrustState({ accountId, fingerprint, value: tr });
       })
       .catch(() => {});
     return () => {
@@ -81,7 +95,7 @@ export function VerifyContactDialog({
     void chat
       .safetyNumber(fingerprint)
       .then((s) => {
-        if (active) setSn(s);
+        if (active) setSafetyState({ fingerprint, value: s });
       })
       .catch((e) => {
         if (active) setErr(errorMessage(e));
@@ -97,7 +111,11 @@ export function VerifyContactDialog({
     setErr(null);
     try {
       await chat.markVerified(accountId, fingerprint);
-      setTrust(await chat.getTrust(accountId, fingerprint));
+      setTrustState({
+        accountId,
+        fingerprint,
+        value: await chat.getTrust(accountId, fingerprint),
+      });
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
@@ -134,7 +152,13 @@ export function VerifyContactDialog({
           ) : (
             <ShieldQuestion className="h-4 w-4" />
           )}
-          <span className="hidden text-xs font-medium lg:inline">
+          <span
+            className={
+              changed
+                ? "text-xs font-medium"
+                : "hidden text-xs font-medium lg:inline"
+            }
+          >
             {changed ? t("verify.reverify") : trustLabel}
           </span>
         </Button>
@@ -169,7 +193,7 @@ export function VerifyContactDialog({
                 <p className="font-display font-semibold">
                   {t("verify.changedTitle")}
                 </p>
-                <p className="text-xs leading-relaxed text-destructive/90">
+                <p className="text-xs leading-relaxed text-destructive">
                   {t("verify.changedDesc")}
                 </p>
               </div>
@@ -202,7 +226,7 @@ export function VerifyContactDialog({
               variants={fadeSlideUp}
               className="space-y-2"
             >
-              <p className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <p className="text-[12px] font-semibold text-muted-foreground">
                 {t("verify.safetyNumber")}
               </p>
               <SafetyNumber
@@ -213,7 +237,11 @@ export function VerifyContactDialog({
             </motion.div>
           )}
 
-          {err && <p className="text-sm text-destructive">{err}</p>}
+          {err && (
+            <p className="text-sm text-destructive [overflow-wrap:anywhere]">
+              {err}
+            </p>
+          )}
 
           <div className="flex justify-end">
             <Button

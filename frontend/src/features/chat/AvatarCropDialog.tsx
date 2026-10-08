@@ -137,29 +137,64 @@ export function AvatarCropDialog({
   );
 
   // --- Pointer drag (mouse + touch via Pointer Events) ----------------------
-  const dragRef = useRef<{ start: Vec; origin: Vec } | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    element: Element;
+    start: Vec;
+    origin: Vec;
+  } | null>(null);
+  const clearDrag = useCallback((pointerId?: number) => {
+    const drag = dragRef.current;
+    if (!drag || (pointerId !== undefined && drag.pointerId !== pointerId))
+      return;
+    dragRef.current = null;
+    if (drag.element.hasPointerCapture(drag.pointerId)) {
+      drag.element.releasePointerCapture(drag.pointerId);
+    }
+  }, []);
+  useEffect(() => {
+    const onBlur = () => clearDrag();
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      clearDrag();
+    };
+  }, [clearDrag, file]);
   const onPointerDown = (e: React.PointerEvent) => {
-    if (!img) return;
+    if (!img || e.button !== 0 || dragRef.current) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     dragRef.current = {
+      pointerId: e.pointerId,
+      element: e.currentTarget,
       start: { x: e.clientX, y: e.clientY },
       origin: offset,
     };
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
-    if (!d) return;
+    if (!d || d.pointerId !== e.pointerId) return;
     const next = {
       x: d.origin.x + (e.clientX - d.start.x),
       y: d.origin.y + (e.clientY - d.start.y),
     };
     setOffset(clamp(next, zoom));
   };
-  const endDrag = (e: React.PointerEvent) => {
-    if (dragRef.current && e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
-    dragRef.current = null;
+  const endDrag = (e: React.PointerEvent) => clearDrag(e.pointerId);
+  const onCropKeyDown = (e: React.KeyboardEvent) => {
+    if (!img) return;
+    const step = e.shiftKey ? 20 : 8;
+    const movement: Record<string, Vec> = {
+      ArrowLeft: { x: -step, y: 0 },
+      ArrowRight: { x: step, y: 0 },
+      ArrowUp: { x: 0, y: -step },
+      ArrowDown: { x: 0, y: step },
+    };
+    const delta = movement[e.key];
+    if (!delta) return;
+    e.preventDefault();
+    setOffset((current) =>
+      clamp({ x: current.x + delta.x, y: current.y + delta.y }, zoom),
+    );
   };
 
   // Wheel / trackpad pinch → zoom.
@@ -228,14 +263,17 @@ export function AvatarCropDialog({
         <div className="flex flex-col items-center gap-4">
           {/* Crop viewport */}
           <div
-            className="relative touch-none select-none overflow-hidden rounded-xl bg-muted"
+            className="relative touch-none select-none overflow-hidden rounded-lg bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring"
             style={{ width: VIEWPORT, height: VIEWPORT }}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
+            onLostPointerCapture={endDrag}
             onWheel={onWheel}
+            onKeyDown={onCropKeyDown}
             role="application"
+            tabIndex={img ? 0 : -1}
             aria-label={t("avatar.crop.viewportLabel")}
           >
             {img ? (

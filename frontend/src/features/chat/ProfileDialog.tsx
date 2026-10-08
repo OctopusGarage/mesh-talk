@@ -123,12 +123,12 @@ export function ProfileDialog({
               type="button"
               data-testid="profile-name"
               onClick={() => setEditing(true)}
-              className="group inline-flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-accent"
+              className="group inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 hover:bg-accent"
               title={t("profile.editName")}
             >
               <span
                 data-testid="profile-name-text"
-                className="font-display text-lg font-semibold tracking-tight"
+                className="min-w-0 font-display text-lg font-semibold tracking-tight [overflow-wrap:anywhere]"
               >
                 {displayName}
               </span>

@@ -1,13 +1,14 @@
 # Chat UI — manual smoke checklist
 
-This is a **supplementary** smoke checklist for the desktop chat UI (the "Ink & Signal"
-redesign). It is meant for a quick human walk-through of the real app; it is *not* the
+This is a **supplementary** smoke checklist for the v0.2.0 native-direction desktop UI.
+It is meant for a quick human walk-through of the real app; it is *not* the
 primary regression net:
 
 - The **front-end flow** (login → roster → DM/channel → react/mention/reply → search →
   files → verify → settings → diagnostics → pin → sign out) is covered by an automated
-  Playwright suite that drives the UI against a mocked Tauri backend, keyed off
-  `data-testid` attributes: `cd frontend && npm run e2e`.
+  Playwright suite against mocked Tauri IPC: `cd frontend && npm run e2e`. It also covers
+  worst-case names and histories, large virtualized rosters, touch targets, theme contrast,
+  and automated WCAG A/AA scans of representative states.
 - The **multi-process backend behavior** (real `mesh-talk-node` processes discovering each
   other over UDP and talking over TCP, persistence, post-office offline delivery) is
   covered by the end-to-end rigs: `make e2e`.
@@ -45,14 +46,16 @@ HOME=/tmp/mesh-po cargo run -p mesh-talk-core --bin mesh-talk-node -- \
    different account in each instance (e.g. `alice` / `bob`), then sign in. The app lands on
    the chat shell; no blank/black screen.
 2. **Roster + presence.** Within a few seconds each instance lists the other in the
-   **Sidebar** conversation list, with an identity glyph and a presence dot. A running post
-   office is tagged in Diagnostics → Peers.
+   **Sidebar** conversation list, with an identity glyph or received account photo and a
+   presence dot. Use Up/Down/Home/End to move through conversations; selection and focus
+   should remain visible. A running post office is tagged in Connection → Peers.
 3. **DM.** Select the peer to open the **ConversationView** (crest header). Type in the
    **Composer** and send: the bubble appears immediately on the sender (optimistic) and
    shortly after on the recipient (live). Reply back the other way.
    - `Enter` sends; `Shift+Enter` inserts a newline. URLs render as clickable links.
-4. **Channel.** Create a channel via **CreateChannel**, add the peer via **Members**, and
-   exchange messages there too.
+4. **Channel.** Use **New channel**, confirm peer photos and device IDs in its picker, add
+   peers, and exchange messages. Open **Members**, try its keyboard navigation with a large
+   roster, and confirm opening a member's DM returns focus to the conversation.
 5. **React.** Hover a message and add an emoji reaction; the chip appears for both sides.
 6. **@-mention.** In a channel, type `@` and pick a member from the autocomplete; the
    mention is highlighted, and the mentioned user sees a "mentioned you" marker.
@@ -60,19 +63,25 @@ HOME=/tmp/mesh-po cargo run -p mesh-talk-core --bin mesh-talk-node -- \
    sent message carries the parent snippet.
 8. **Search.** Open the **Search** dialog, query a known word, click a result, and confirm
    it navigates into the right conversation.
-9. **Files.** Attach a file in the Composer; watch transfer progress, and confirm the
-   recipient can save it. Open the **Files** tray to review shared files.
+9. **Files.** Expand the composer's **+** menu, attach a file, watch transfer progress, and
+   confirm the recipient can save it. Open **Received files** to review attachments. The
+   conversation wallpaper should stay anchored when the menu opens or you switch chats.
 10. **Verify contact.** Open **VerifyContact** for a DM peer; confirm the **safety number**
     matches on both instances, then mark the contact verified.
-11. **Settings.** Open **Settings**: toggle theme (light / dark / oled), switch language
-    (EN ↔ 中文) and confirm labels re-render, and review tray / autostart / notifications /
-    download-folder options.
-12. **Diagnostics.** Open **Diagnostics**: Overview shows environment + your identity; Peers
+11. **Settings.** Open **Settings**: select each of the six themes (dark, light, OLED,
+    Argentina, Barcelona, Messi), toggle the optional conversation wallpaper, and switch
+    among all six languages. Review privacy, retention, tray, autostart, notifications,
+    download folder, and experimental call settings. At a 760×520 window, controls should
+    remain reachable and focused sections should scroll into view.
+12. **Connection.** Open **Connection**: Overview shows environment and identity; Peers
     lists the discovered roster with addresses; Logs and Troubleshoot tabs render.
 13. **Pin.** Pin a contact; it moves into the **Pinned** section of the Sidebar.
 14. **Durability.** Restart one instance, sign in, reopen the conversation → prior messages
     are still there (persisted history).
 15. **Sign out.** Sign out → returns to the LoginScreen.
+16. **Presentation and input.** Open the sticker picker and avatar gallery; scroll through
+    presets and confirm offscreen thumbnails load when reached. Repeat key flows at the
+    minimum window size, with long Unicode names and with reduced motion enabled.
 
 ## Expected
 

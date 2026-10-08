@@ -26,6 +26,16 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
     "aria-label",
     /person online on the LAN/,
   );
+  await expect(page.getByTestId("sidebar-nav-connection")).toHaveText(
+    "Connection",
+  );
+  await expect(page.getByTestId("sidebar-nav-settings")).toHaveText("Settings");
+  await page.getByTestId("sidebar-nav-connection").click();
+  await expect(page.getByTestId("diagnostics-dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("sidebar-nav-settings").click();
+  await expect(page.getByTestId("settings-dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
   await expectMinTargetSize(
     page.getByTestId("sidebar-action-search"),
     32,
@@ -43,6 +53,13 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   );
 
   await page.getByTestId(`conversation-row-${BOB.account}`).hover();
+  await expectVisibleFocus(page, page.getByTestId("sidebar-overflow"));
+  await expectMinTargetSize(
+    page.getByTestId(`conversation-actions-${BOB.account}`),
+    32,
+    "conversation actions",
+  );
+  await page.getByTestId(`conversation-actions-${BOB.account}`).click();
   for (const id of [
     "open-profile",
     "sidebar-overflow",
@@ -52,7 +69,6 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
     await expectMinTargetSize(page.getByTestId(id), 32, id);
   }
 
-  await expectVisibleFocus(page, page.getByTestId("sidebar-overflow"));
   await expect(
     page.getByTestId(`conversation-rename-${BOB.account}`),
   ).toHaveAttribute("aria-label", /bob/i);
@@ -63,10 +79,12 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
     page,
     page.getByTestId(`conversation-rename-${BOB.account}`),
   );
+  await page.getByTestId(`conversation-actions-${BOB.account}`).click();
   await expectVisibleFocus(
     page,
     page.getByTestId(`conversation-pin-${BOB.account}`),
   );
+  await page.keyboard.press("Escape");
   await expectVisibleFocus(
     page,
     page.getByTestId(`conversation-row-${BOB.account}`),
