@@ -9,6 +9,34 @@ import {
 
 test.use({ viewport: { width: 1100, height: 760 } });
 
+test("app shell stays fixed while inner panes retain their scroll areas", async ({
+  page,
+}) => {
+  await enterChat(page);
+
+  const layout = await page.evaluate(() => {
+    const html = getComputedStyle(document.documentElement);
+    const body = getComputedStyle(document.body);
+    const nav = document.querySelector('[data-testid="sidebar"] nav');
+    if (!nav) throw new Error("Sidebar navigation missing");
+    return {
+      htmlOverflow: html.overflowY,
+      bodyOverflow: body.overflowY,
+      htmlOverscroll: html.overscrollBehaviorY,
+      bodyOverscroll: body.overscrollBehaviorY,
+      navOverflow: getComputedStyle(nav).overflowY,
+    };
+  });
+
+  expect(layout).toEqual({
+    htmlOverflow: "hidden",
+    bodyOverflow: "hidden",
+    htmlOverscroll: "none",
+    bodyOverscroll: "none",
+    navOverflow: "auto",
+  });
+});
+
 test("shell and sidebar meet baseline layout and interaction invariants", async ({
   page,
 }) => {
