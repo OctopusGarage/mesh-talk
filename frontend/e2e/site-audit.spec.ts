@@ -12,7 +12,7 @@ for (const width of [390, 1280]) {
     await page.setViewportSize({ width, height: 800 });
     await page.goto(site);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-    await expect(page.locator(".shot img")).toHaveCount(3);
+    await expect(page.locator(".shot img")).toHaveCount(5);
     for (const image of await page.locator(".shot img").all()) {
       await image.scrollIntoViewIfNeeded();
       await expect
