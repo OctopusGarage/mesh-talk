@@ -88,7 +88,7 @@ jobs:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: '1.25'
           cache: false
       - name: Install pinned secret and workflow scanners
         shell: bash
