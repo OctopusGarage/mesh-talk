@@ -63,6 +63,27 @@ test("message log actions, menus, and reaction chips stay usable", async ({
   expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(viewport!.height);
 });
 
+test("adjacent messages from one sender share a visible timestamp", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  const input = page.getByTestId("composer-input");
+  for (const text of ["first grouped message", "second grouped message"]) {
+    await input.fill(text);
+    await page.getByTestId("composer-send").click();
+  }
+
+  const first = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "first grouped message" });
+  const second = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "second grouped message" });
+  await expect(first.getByTestId("message-time")).toHaveCount(0);
+  await expect(second.getByTestId("message-time")).toBeVisible();
+});
+
 async function expectActionRowVisible(action: Locator) {
   await expect(action).toBeFocused();
   await expect

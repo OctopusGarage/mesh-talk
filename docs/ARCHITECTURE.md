@@ -312,15 +312,21 @@ proof protocol or event format is introduced.
 
 ## 5. Frontend (`frontend/`)
 
-**React 18 + TypeScript + Tailwind + shadcn/ui**, state in **zustand**, built with Vite.
+**React 19 + TypeScript + Tailwind + shadcn/ui**, state in **zustand**, built with Vite.
 `lib/api.ts` keeps the stable typed exports; `lib/api/` owns the feature-specific
 `invoke()` wrappers and command payloads. `lib/events.ts` subscribes to
 `dm-received`/`channel-message`/`file-received`.
 `store/auth.ts` holds the session; `store/chat.ts` holds per-conversation message/
 reaction/unread state and routes incoming DMs to the sender's *account* (one conversation
-per multi-device contact). `features/chat/` is the 3-pane app (sidebar · messages ·
-members) with replies, reactions, @mentions, file send + a received-files tray, search,
-and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
+per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
+message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,
+search, and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
+The sidebar keeps Chats, Files, Connection, and Settings visible; its footer shows
+the local identity and device/network status. The composer reveals secondary send
+tools on demand and combines emoji and stickers in one picker. Settings uses
+category navigation inside its dialog and reports persistence failures. The
+empty conversation pane distinguishes no peers, hidden contacts, and a failed
+contact-visibility read; Connection diagnostics distinguish loading from failure.
 The chat roster and presence snapshot poll every 2 s. Unchanged roster snapshots
 retain their existing references so a poll does not redraw conversation rows.
 
@@ -374,13 +380,14 @@ in [the hidden-contact evaluation runbook](evals/hidden-contacts.md).
   both builds — **mirrors CI** so failures surface locally, not on CI. The `hooks/pre-commit`
   hook runs a fast slice (`check-health.sh --fast`: fmt/clippy/lint/unit only); GPG-signed
   commits are enforced by `hooks/pre-push`.
-- **CI** (`.github/workflows/`): `ci.yml` (ubuntu+macOS matrix → the `verify` aggregate
+- **CI** (`.github/workflows/`): `ci.yml` (Linux, macOS, and Windows matrix → the `verify` aggregate
   check, required by branch protection; coverage → Codecov on Linux), `check-health.yml`,
   `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (Dependabot PRs to `dev`, gated by required checks),
   `glib-0.20-watch.yml` (monthly dep watcher).
 - **Automated bug-finding** (defence in depth — surfaces issues without anyone looking):
-  - *Coverage-guided fuzzing* (`fuzz/`, `fuzz.yml`, weekly + dispatch) of every untrusted
-    wire decoder; the `decoder_smoke` test is the always-on stable complement.
+  - *Coverage-guided fuzzing* (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
+    untrusted wire and opened-payload decoders; the `decoder_smoke` test is the always-on
+    stable complement. See [`fuzz/README.md`](../fuzz/README.md) for the current targets.
   - *Mutation testing* (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
   - *Coverage* (Codecov), *clippy `-D warnings`*, *cargo-deny*, *cargo-machete*, *CodeQL*, *gitleaks*.
   - *Delivery / AI regression smoke* (`make eval-smoke`) keeps core smoke examples,

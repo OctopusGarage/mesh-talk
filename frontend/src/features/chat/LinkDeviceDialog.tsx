@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Smartphone, KeyRound, Loader2, Copy, Check } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useTranslation } from "react-i18next";
@@ -17,56 +17,109 @@ import { errorMessage } from "@/lib/error";
 import { shortId } from "@/lib/format";
 import { useChat } from "@/store/chat";
 
-export function LinkDeviceDialog() {
+export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   const { t } = useTranslation();
   const myAccountId = useChat((s) => s.myAccountId);
   const peers = useChat((s) => s.peers);
+  const setError = useChat((s) => s.setError);
 
   const [open, setOpen] = useState(false);
   const [code, setCode] = useState<string | null>(null);
   const [joinPeer, setJoinPeer] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
+  const [msgIsError, setMsgIsError] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [creatingCode, setCreatingCode] = useState(false);
+  const creatingCodeRef = useRef(false);
+  const openRef = useRef(false);
+  const stopRef = useRef<Promise<void> | null>(null);
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
+    null,
+  );
+
+  const stopLinking = () => {
+    const pending = chat.stopLinking().catch((e) => {
+      setError(errorMessage(e));
+    });
+    stopRef.current = pending;
+    void pending.finally(() => {
+      if (stopRef.current === pending) stopRef.current = null;
+    });
+    return pending;
+  };
 
   const onOpenChange = (v: boolean) => {
+    openRef.current = v;
     setOpen(v);
     if (!v) {
-      if (code) void chat.stopLinking();
+      if (code) void stopLinking();
       setCode(null);
       setMsg(null);
+      setMsgIsError(false);
+      setCopyStatus(null);
       setJoinCode("");
     }
   };
 
+  useEffect(
+    () => () => {
+      openRef.current = false;
+    },
+    [],
+  );
+
   const showCode = async () => {
+    if (creatingCodeRef.current) return;
+    creatingCodeRef.current = true;
+    setCreatingCode(true);
     setMsg(null);
+    setMsgIsError(false);
     try {
-      setCode(await chat.startLinking());
+      if (stopRef.current) await stopRef.current;
+      if (!openRef.current) return;
+      const nextCode = await chat.startLinking();
+      if (openRef.current) setCode(nextCode);
+      else await stopLinking();
     } catch (e) {
-      setMsg(errorMessage(e));
+      if (openRef.current) {
+        setMsgIsError(true);
+        setMsg(errorMessage(e));
+      }
+    } finally {
+      creatingCodeRef.current = false;
+      setCreatingCode(false);
     }
   };
 
-  const copyCode = () => {
+  const copyCode = async () => {
     if (!code) return;
-    void navigator.clipboard?.writeText(code).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    });
+    setCopyStatus(null);
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopyStatus("copied");
+      setTimeout(
+        () =>
+          setCopyStatus((current) => (current === "copied" ? null : current)),
+        1200,
+      );
+    } catch {
+      setCopyStatus("failed");
+    }
   };
 
   const doLink = async () => {
     if (!joinPeer || !joinCode.trim()) return;
     setBusy(true);
     setMsg(null);
+    setMsgIsError(false);
     try {
       await chat.linkDevice(joinPeer, joinCode.trim());
       await auth.adoptLinkedAccount();
       setMsg(t("linkDevice.linked"));
       setJoinCode("");
     } catch (e) {
+      setMsgIsError(true);
       setMsg(t("linkDevice.linkFailed", { error: errorMessage(e) }));
     } finally {
       setBusy(false);
@@ -76,10 +129,12 @@ export function LinkDeviceDialog() {
   const rekey = async () => {
     setBusy(true);
     setMsg(null);
+    setMsgIsError(false);
     try {
       const id = await chat.rekeyAccount();
       setMsg(t("linkDevice.rekeyed", { id: shortId(id, 12) }));
     } catch (e) {
+      setMsgIsError(true);
       setMsg(t("linkDevice.rekeyFailed", { error: errorMessage(e) }));
     } finally {
       setBusy(false);
@@ -91,11 +146,13 @@ export function LinkDeviceDialog() {
       <DialogTrigger asChild>
         <Button
           variant="ghost"
-          size="icon"
+          size={menuItem ? "sm" : "icon"}
+          className={menuItem ? "w-full justify-start gap-2.5 px-2" : undefined}
           data-testid="sidebar-action-link"
           title={t("linkDevice.trigger")}
         >
           <Smartphone className="h-4 w-4" />
+          {menuItem && <span>{t("linkDevice.trigger")}</span>}
         </Button>
       </DialogTrigger>
       <DialogContent data-testid="link-device-dialog">
@@ -123,8 +180,16 @@ export function LinkDeviceDialog() {
                 variant="secondary"
                 size="sm"
                 data-testid="link-show-code"
-                onClick={showCode}
+                disabled={creatingCode || busy}
+                aria-busy={creatingCode}
+                onClick={() => void showCode()}
               >
+                {creatingCode && (
+                  <Loader2
+                    aria-hidden="true"
+                    className="h-4 w-4 animate-spin motion-reduce:animate-none"
+                  />
+                )}
                 {t("linkDevice.showCode")}
               </Button>
             </>
@@ -139,7 +204,7 @@ export function LinkDeviceDialog() {
               <div className="min-w-0 flex-1 space-y-2">
                 <button
                   type="button"
-                  onClick={copyCode}
+                  onClick={() => void copyCode()}
                   title={t("common.copy")}
                   className="group flex w-full items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-left transition-colors hover:bg-muted"
                 >
@@ -152,12 +217,28 @@ export function LinkDeviceDialog() {
                   >
                     {code.replace(/(.{4})(?=.)/g, "$1 ")}
                   </span>
-                  {copied ? (
+                  {copyStatus === "copied" ? (
                     <Check className="mt-0.5 h-4 w-4 shrink-0 text-verified" />
                   ) : (
                     <Copy className="mt-0.5 h-4 w-4 shrink-0 opacity-40 group-hover:opacity-100" />
                   )}
                 </button>
+                {copyStatus && (
+                  <p
+                    role={copyStatus === "failed" ? "alert" : "status"}
+                    className={
+                      copyStatus === "failed"
+                        ? "text-xs text-destructive"
+                        : "text-xs text-verified"
+                    }
+                  >
+                    {t(
+                      copyStatus === "failed"
+                        ? "common.copyFailed"
+                        : "common.copied",
+                    )}
+                  </p>
+                )}
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   {t("linkDevice.qrHint")}
                 </p>
@@ -171,10 +252,17 @@ export function LinkDeviceDialog() {
           <p className="font-display text-sm font-semibold tracking-tight">
             {t("linkDevice.haveCode")}
           </p>
+          <label
+            htmlFor="link-device-peer"
+            className="block text-xs font-medium text-muted-foreground"
+          >
+            {t("linkDevice.device")}
+          </label>
           <select
+            id="link-device-peer"
             value={joinPeer}
             onChange={(e) => setJoinPeer(e.target.value)}
-            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background [@media(hover:none)]:min-h-11"
           >
             <option value="">{t("linkDevice.pickDevice")}</option>
             {peers.map((p) => (
@@ -183,8 +271,15 @@ export function LinkDeviceDialog() {
               </option>
             ))}
           </select>
+          <label
+            htmlFor="link-device-code"
+            className="block text-xs font-medium text-muted-foreground"
+          >
+            {t("linkDevice.pairingCode")}
+          </label>
           <div className="flex gap-2">
             <Input
+              id="link-device-code"
               autoFocus
               placeholder={t("linkDevice.pairingCode")}
               value={joinCode}
@@ -221,7 +316,18 @@ export function LinkDeviceDialog() {
           </Button>
         </section>
 
-        {msg && <p className="text-sm font-medium text-signal">{msg}</p>}
+        {msg && (
+          <p
+            role={msgIsError ? "alert" : "status"}
+            className={
+              msgIsError
+                ? "text-sm font-medium text-destructive"
+                : "text-sm font-medium text-signal"
+            }
+          >
+            {msg}
+          </p>
+        )}
       </DialogContent>
     </Dialog>
   );

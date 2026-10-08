@@ -39,6 +39,11 @@ test("recall a freshly-sent message → it becomes a placeholder", async ({
   await expect(page.getByRole("log").getByText("oops typo")).toHaveCount(0);
   await expect(page.getByTestId("message-recalled")).toBeVisible();
   await expect(page.getByText("You recalled a message")).toBeVisible();
+  await page.getByTestId("message-recalled").click({ button: "right" });
+  await expect(page.getByTestId("msg-delete")).toHaveText(
+    "Delete on this device",
+  );
+  await page.keyboard.press("Escape");
 
   // "Re-edit" drops the original text back into the composer (WeChat behaviour).
   await page.getByTestId("msg-reedit").click();
@@ -54,6 +59,17 @@ test("delete a message removes it locally", async ({ page }) => {
 
   await bubble.click({ button: "right" });
   await page.getByTestId("msg-delete").click();
+  await expect(page.getByTestId("delete-message-dialog")).toBeVisible();
+  await expect(
+    page.getByText("This removes the message from this device only.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(bubble).toBeVisible();
+  await bubble.click({ button: "right" });
+  await page.getByTestId("msg-delete").click();
+  await page.getByTestId("delete-message-confirm").click();
   await expect(page.getByRole("log").getByText("delete me")).toHaveCount(0);
 });
 
@@ -90,8 +106,7 @@ test("clear chat history (from the history dialog) empties the conversation", as
 
 test("retention setting persists", async ({ page }) => {
   await enterBobDm(page);
-  await page.getByTestId("sidebar-overflow").click();
-  await page.getByTestId("sidebar-action-settings").click();
+  await page.getByTestId("sidebar-nav-settings").click();
   const sel = page.getByTestId("settings-retention-select");
   await expect(sel).toBeVisible();
   await sel.selectOption("30");

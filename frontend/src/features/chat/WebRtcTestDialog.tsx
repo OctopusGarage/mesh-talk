@@ -48,7 +48,7 @@ function StatusIcon({ status }: { status: StepStatus }) {
  * not a desktop browser. A same-page loopback proves getUserMedia + WebRTC work
  * here; cross-device reachability is a separate (network) concern noted in the UI.
  */
-export function WebRtcTestDialog() {
+export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [running, setRunning] = useState(false);
@@ -211,11 +211,13 @@ export function WebRtcTestDialog() {
       <DialogTrigger asChild>
         <Button
           variant="ghost"
-          size="icon"
+          size={menuItem ? "sm" : "icon"}
+          className={menuItem ? "w-full justify-start gap-2.5 px-2" : undefined}
           data-testid="sidebar-action-webrtc-test"
           title={t("webrtcTest.trigger")}
         >
           <Video className="h-4 w-4" />
+          {menuItem && <span>{t("webrtcTest.trigger")}</span>}
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-2xl" data-testid="webrtc-test-dialog">

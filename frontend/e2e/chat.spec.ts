@@ -1,5 +1,6 @@
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
+import { revealComposerTools } from "./helpers/session";
 
 // Stable scenario ids — mirror e2e/tauri-mock.ts.
 const BOB = { account: "acc_bob_bbbb2222" };
@@ -100,6 +101,69 @@ test.describe("Mesh-Talk UI flow", () => {
     await box.fill("hello e2e");
     await page.getByTestId("composer-send").click();
     await expect(page.getByRole("log").getByText("hello e2e")).toBeVisible();
+    await expect(box).toBeFocused();
+  });
+
+  test("drafts stay with their conversation when switching chats", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await openBobDm(page);
+    const input = page.getByTestId("composer-input");
+    await input.fill("draft for Bob");
+
+    await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+    await expect(input).toHaveValue("");
+    await input.fill("draft for team");
+
+    await page.getByTestId(`conversation-row-${BOB.account}`).click();
+    await expect(input).toHaveValue("draft for Bob");
+    await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+    await expect(input).toHaveValue("draft for team");
+  });
+
+  test("reply context does not carry into another conversation", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await openBobDm(page);
+    await page.getByTestId("message-bubble").first().hover();
+    await page.getByTestId("message-reply").first().click();
+    await expect(page.getByTestId("composer-reply-banner")).toBeVisible();
+
+    await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+    await expect(page.getByTestId("composer-reply-banner")).toHaveCount(0);
+  });
+
+  test("returning to a conversation restores its reading position", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await openBobDm(page);
+    const input = page.getByTestId("composer-input");
+    await input.fill(`long-start ${"mesh message ".repeat(500)} long-end`);
+    await page.getByTestId("composer-send").click();
+    await input.fill("latest-after-reading");
+    await page.getByTestId("composer-send").click();
+
+    const log = page.getByRole("log");
+    await expect(log.getByText("latest-after-reading")).toBeInViewport();
+    await log.evaluate((element) => {
+      element.scrollTop = 80;
+    });
+    const jump = page.getByRole("button", { name: "Jump to latest messages" });
+    await expect(jump).toBeVisible();
+    const before = await log.evaluate((element) => element.scrollTop);
+
+    await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+    await page.getByTestId(`conversation-row-${BOB.account}`).click();
+    await expect(jump).toBeVisible();
+    await expect
+      .poll(() => log.evaluate((element) => element.scrollTop))
+      .toBeGreaterThanOrEqual(before - 2);
+    await expect
+      .poll(() => log.evaluate((element) => element.scrollTop))
+      .toBeLessThanOrEqual(before + 2);
   });
 
   test("jump to latest reveals a message after an oversized bubble", async ({
@@ -170,6 +234,7 @@ test.describe("Mesh-Talk UI flow", () => {
   test("emoji picker inserts into the composer", async ({ page }) => {
     await enterChat(page);
     await openBobDm(page);
+    await revealComposerTools(page);
     await page.getByTestId("composer-emoji").click();
     await expect(page.getByTestId("emoji-picker")).toBeVisible();
     await page.getByTestId("emoji-option-🎉").click();
@@ -182,6 +247,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await enterChat(page);
     await openBobDm(page);
     // The screenshot button lives in the composer toolbar.
+    await revealComposerTools(page);
     await page.getByTestId("composer-screenshot").click();
     // The menu offers both capture modes.
     await expect(page.getByTestId("screenshot-menu")).toBeVisible();
@@ -194,6 +260,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
 
     // The "hide window & capture" mode also runs cleanly.
+    await revealComposerTools(page);
     await page.getByTestId("composer-screenshot").click();
     await expect(page.getByTestId("screenshot-hidden")).toBeVisible();
     await page.getByTestId("screenshot-hidden").click();
@@ -298,6 +365,113 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(
       page.getByTestId("message-bubble").getByText("hey, welcome to the mesh"),
     ).toBeVisible();
+    await expect(page.getByRole("log").locator(".bg-signal\\/10")).toHaveCount(
+      1,
+    );
+  });
+
+  test("search failure offers retry and never exposes stale results", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.getByTestId("sidebar-action-search").click();
+    await page.evaluate(() => {
+      (
+        window as unknown as { __mockFailNext: (command: string) => void }
+      ).__mockFailNext("search");
+    });
+    await page.getByTestId("search-input").fill("welcome");
+    await expect(page.getByRole("alert")).toContainText(
+      "Search could not finish",
+    );
+    await expect(page.getByTestId("search-result")).toHaveCount(0);
+    await page
+      .getByRole("alert")
+      .getByRole("button", { name: "Retry" })
+      .click();
+    await expect(page.getByTestId("search-result")).toHaveCount(1);
+  });
+
+  test("history failure keeps the conversation in a retryable state", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.evaluate(() => {
+      (
+        window as unknown as { __mockFailNext: (command: string) => void }
+      ).__mockFailNext("owner_account_history");
+    });
+    await page.getByTestId(`conversation-row-${BOB.account}`).click();
+    await expect(page.getByRole("alert")).toContainText(
+      "Conversation history could not load",
+    );
+    await expect(page.getByTestId("conversation-empty")).toHaveCount(0);
+    await page
+      .getByRole("alert")
+      .getByRole("button", { name: "Retry" })
+      .click();
+    await expect(
+      page.getByRole("log").getByText("hey, welcome to the mesh"),
+    ).toBeVisible();
+  });
+
+  test("sidebar row arrows do not steal keys from action buttons", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    const row = page.getByTestId(`conversation-row-${BOB.account}`);
+    const action = page.getByTestId(`conversation-actions-${BOB.account}`);
+    await row.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(
+      page.getByTestId(`conversation-row-${CAROL.account}`),
+    ).toBeFocused();
+    await action.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(action).toBeFocused();
+  });
+
+  test("sidebar resize persists only the completed drag", async ({ page }) => {
+    await enterChat(page);
+    const handle = page.getByTestId("sidebar-resize-handle");
+    await expect(handle).toHaveAttribute("aria-valuemin", "230");
+    await expect(handle).toHaveAttribute("aria-valuemax", "460");
+    await expect(handle).toHaveAttribute("aria-valuenow", "284");
+    const box = (await handle.boundingBox())!;
+    const initial = await page.evaluate(() =>
+      localStorage.getItem("mesh-talk-sidebar-width"),
+    );
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 80, box.y + box.height / 2);
+    const draggedWidth = await page
+      .getByTestId("sidebar")
+      .evaluate((el) => Number.parseFloat(getComputedStyle(el).width));
+    expect(draggedWidth).toBeGreaterThan(284);
+    expect(
+      await page.evaluate(() =>
+        localStorage.getItem("mesh-talk-sidebar-width"),
+      ),
+    ).toBe(initial);
+    await page.mouse.up();
+    expect(
+      Number(
+        await page.evaluate(() =>
+          localStorage.getItem("mesh-talk-sidebar-width"),
+        ),
+      ),
+    ).toBe(draggedWidth);
+    await expect(handle).toHaveAttribute("aria-valuenow", String(draggedWidth));
+    await handle.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(handle).toHaveAttribute(
+      "aria-valuenow",
+      String(draggedWidth - 16),
+    );
+    await expect(handle).toHaveAttribute(
+      "aria-valuetext",
+      `${draggedWidth - 16} px`,
+    );
   });
 
   test("Files tray opens", async ({ page }) => {
@@ -331,7 +505,7 @@ test.describe("Mesh-Talk UI flow", () => {
     );
     await expect(page.getByTestId("verify-trigger")).toHaveAttribute(
       "aria-label",
-      "Verified",
+      "Safety number verified",
     );
   });
 
@@ -342,8 +516,7 @@ test.describe("Mesh-Talk UI flow", () => {
     // App boots dark.
     await expect(page.locator("html")).toHaveClass(/dark/);
 
-    await page.getByTestId("sidebar-overflow").click();
-    await page.getByTestId("sidebar-action-settings").click();
+    await page.getByTestId("sidebar-nav-settings").click();
     await expect(page.getByTestId("theme-picker")).toBeVisible();
 
     await page.getByTestId("theme-light").click();
@@ -371,8 +544,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await enterChat(page);
     await expect(page.getByText("Direct messages")).toBeVisible();
 
-    await page.getByTestId("sidebar-overflow").click();
-    await page.getByTestId("sidebar-action-settings").click();
+    await page.getByTestId("sidebar-nav-settings").click();
     const lang = page.getByTestId("settings-language-select");
     await lang.selectOption("zh-Hans");
     // Sidebar section label re-renders in Simplified Chinese.
@@ -386,8 +558,7 @@ test.describe("Mesh-Talk UI flow", () => {
     page,
   }) => {
     await enterChat(page);
-    await page.getByTestId("sidebar-overflow").click();
-    await page.getByTestId("sidebar-action-diagnostics").click();
+    await page.getByTestId("sidebar-nav-connection").click();
     await expect(page.getByTestId("diagnostics-dialog")).toBeVisible();
     // Overview (default tab) shows the environment facts.
     await expect(page.getByText("This device")).toBeVisible();
@@ -435,6 +606,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await enterChat(page);
     const row = page.getByTestId(`conversation-row-${CAROL.account}`);
     await row.hover();
+    await page.getByTestId(`conversation-actions-${CAROL.account}`).click();
     await page.getByTestId(`conversation-pin-${CAROL.account}`).click();
     // The "Pinned" section appears.
     await expect(page.getByText("Pinned")).toBeVisible();

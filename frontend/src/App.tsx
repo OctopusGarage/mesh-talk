@@ -1,12 +1,17 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LoginScreen } from "@/features/auth/LoginScreen";
-import { ChatApp } from "@/features/chat/ChatApp";
 import { WindowControls } from "@/components/WindowControls";
 import { isMacOverlay } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
 import { useAvatars } from "@/store/avatars";
+
+const ChatApp = lazy(() =>
+  import("@/features/chat/ChatApp").then(({ ChatApp }) => ({
+    default: ChatApp,
+  })),
+);
 
 export default function App() {
   const { t } = useTranslation();
@@ -41,7 +46,11 @@ export default function App() {
       {/* Custom min/max/close for the frameless window (Windows/Linux); null on macOS/web. */}
       <WindowControls />
       {user ? (
-        <ChatApp />
+        <Suspense
+          fallback={<Unlocking label={t("redesign.loadingContacts")} />}
+        >
+          <ChatApp />
+        </Suspense>
       ) : booting ? (
         <Unlocking label={t("login.resuming")} />
       ) : (

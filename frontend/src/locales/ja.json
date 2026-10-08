@@ -57,9 +57,14 @@
     "starting": "起動中…",
     "copy": "コピー",
     "copied": "コピーしました",
+    "copyFailed": "コピーできませんでした。クリップボードへのアクセスを確認して、もう一度お試しください。",
     "clear": "クリア",
     "close": "閉じる",
     "dismiss": "非表示"
+  },
+  "windowControls": {
+    "minimize": "最小化",
+    "maximize": "最大化"
   },
   "avatar": {
     "set": "写真を設定…",
@@ -81,7 +86,7 @@
       "confirm": "写真を設定",
       "zoomLabel": "ズーム",
       "previewLabel": "プレビュー",
-      "viewportLabel": "ドラッグして写真の位置を調整"
+      "viewportLabel": "ドラッグまたは矢印キーで写真の位置を調整。Shift キーを押すと大きく移動します"
     }
   },
   "login": {
@@ -97,11 +102,13 @@
     "accountCreated": "アカウントを作成しました。サインインできます。",
     "staySignedIn": "サインインを維持",
     "resuming": "セッションを再開しています…",
-    "footer": "鍵がこの端末から出ることはありません。相手はLAN上で検出されます。"
+    "footer": "鍵がこの端末から出ることはありません。相手はLAN上で検出されます。",
+    "signingIn": "サインインしています…",
+    "creatingIdentity": "ID を作成しています…"
   },
   "sidebar": {
     "you": "あなた · {{id}}",
-    "nodeUnavailable": "ノードが利用できません — 再試行",
+    "nodeUnavailable": "ノードが利用できません",
     "directMessages": "ダイレクトメッセージ",
     "channels": "チャンネル",
     "noContacts": "まだ連絡先が見つかりません…",
@@ -137,6 +144,8 @@
     "noneSelectedDesc": "連絡先またはチャンネルを選んでチャットを始めましょう。",
     "unlockingTitle": "暗号化されたストアを解除しています…",
     "unlockingDesc": "鍵を復号し、相手の検出を開始しています。",
+    "startFailedTitle": "Mesh-Talkを起動できませんでした",
+    "startFailedDesc": "ローカルノードを起動できませんでした。ログで原因を確認し、問題を解決してからアプリを再起動してください。",
     "channel": "チャンネル",
     "members_one": "{{count}}人のメンバー",
     "members_other": "{{count}}人のメンバー",
@@ -181,7 +190,9 @@
       "crypto": "送信できませんでした — 暗号化エラー",
       "unknown": "送信に失敗しました"
     },
-    "delete": "削除",
+    "deleteLocalAction": "この端末から削除",
+    "deleteLocalTitle": "このメッセージを削除しますか？",
+    "deleteLocalDescription": "この端末からのみ削除されます。相手の端末には残り、元に戻せません。",
     "recall": "送信取消",
     "recalledByYou": "メッセージを取り消しました",
     "recalledBy": "{{name}} がメッセージを取り消しました",
@@ -198,6 +209,7 @@
     "replyingTo": "返信先",
     "message": "メッセージ",
     "send": "送信",
+    "notQueued": "メッセージを送信待ちにできませんでした。接続と保留中の送信を確認して、もう一度お試しください。",
     "attach": "ファイルを添付",
     "image": "画像を送信",
     "emoji": "絵文字",
@@ -217,7 +229,7 @@
   },
   "settings": {
     "title": "設定",
-    "description": "プライバシー、外観、バックグラウンド動作、ファイル、チャット履歴を設定します。",
+    "description": "プライバシー、外観、メッセージ、ファイル、アプリの動作を管理します。",
     "scrollMore": "スクロールして他の設定を見る",
     "sectionAppearance": "外観",
     "sectionBackground": "バックグラウンド",
@@ -241,7 +253,7 @@
     "theme_barcelona": "バルセロナ",
     "theme_messi": "メッシ",
     "downloadFolder": "ダウンロードフォルダ",
-    "downloadFolderDesc": "受信したファイルの保存先。未設定の場合は毎回確認します。",
+    "downloadFolderDesc": "別のフォルダーを選ぶまで、添付ファイルはシステムのダウンロードフォルダーに保存されます。",
     "downloadFolderSet": "受信したファイルはここに自動保存されます。",
     "chooseFolder": "フォルダを選択",
     "changeFolder": "変更",
@@ -255,13 +267,17 @@
     "callsDesc": "1:1 の音声・ビデオ通話を有効にします。実験的機能：LAN 限定で、不安定な場合があります。",
     "ringtone": "着信音",
     "ringtoneDesc": "着信時に鳴る音。選ぶと試聴できます。",
-    "ringtonePreview": "試聴"
+    "ringtonePreview": "試聴",
+    "loadFailed": "設定を読み込めませんでした: {{error}}",
+    "saveFailed": "変更を保存できませんでした: {{error}}"
   },
   "search": {
     "title": "メッセージを検索",
     "placeholder": "すべての会話を検索…",
     "searching": "検索中…",
     "noMatches": "一致するものがありません。",
+    "failed": "検索を完了できませんでした。もう一度お試しください。",
+    "outsideRecent": "この結果は最近のメッセージにありません。上のチャット履歴から探してください。",
     "empty": "入力して会話を検索します。"
   },
   "history": {
@@ -295,7 +311,12 @@
     "sentFile": "ファイルを送信しました：{{name}}",
     "videoUnsupported": "この動画はここではプレビューできません。「保存」してプレイヤーで開いてください。",
     "playVideo": "動画を再生",
-    "imageUnsupported": "この画像はここではプレビューできません。「保存」して開いてください。"
+    "imageUnsupported": "この画像はここではプレビューできません。「保存」して開いてください。",
+    "description": "会話で共有された添付ファイルです。",
+    "searchPlaceholder": "ファイル名や送信者を検索…",
+    "noMatches": "一致するファイルはありません。",
+    "folderUnknown": "フォルダーを確認できません",
+    "folderLoadFailed": "ダウンロードフォルダーを読み込めませんでした: {{error}}"
   },
   "linkDevice": {
     "trigger": "端末をリンク",
@@ -308,6 +329,7 @@
     "enterCodeHint": "下のコードを別の端末で入力してください。",
     "haveCode": "別の端末からのコードがありますか？",
     "pickDevice": "端末を選択…",
+    "device": "端末",
     "pairingCode": "ペアリングコード",
     "linked": "リンクしました！この端末は今そのアカウントを共有しています。",
     "linkFailed": "リンクに失敗しました：{{error}}",
@@ -415,14 +437,19 @@
     "macosFirewall": "システム設定 → ネットワーク → ファイアウォール：Mesh-Talk の受信接続を許可するか、信頼できるLANではファイアウォールをオフにしてください。",
     "rescan": "今すぐ通知",
     "rescanned": "通知しました",
-    "rescanHint": "この端末を再通知し、直ちにLANを再スキャンします。"
+    "rescanHint": "この端末を再通知し、直ちにLANを再スキャンします。",
+    "loading": "接続情報を読み込んでいます…",
+    "networkLoadFailed": "ネットワーク情報を読み込めませんでした: {{error}}",
+    "environmentLoadFailed": "環境情報を読み込めませんでした: {{error}}",
+    "peersLoadFailed": "ピアを更新できませんでした: {{error}}",
+    "actionFailed": "操作に失敗しました: {{error}}"
   },
   "verify": {
     "trigger": "安全番号を検証",
     "title": "連絡先を検証",
-    "verified": "検証済み",
+    "verified": "セーフティ番号を確認済み",
     "description": "信頼できる経路（対面や電話）で {{name}} とこの安全番号を照合してください。一致すれば、中間に第三者はいません。",
-    "verifiedBanner": "{{name}} を検証しました。この会話はエンドツーエンドで安全です。",
+    "verifiedBanner": "{{name}} の現在のセーフティ番号を確認しました。",
     "prompt": "信頼できる経路でこの連絡先と下の安全番号を照合し、検証済みとしてマークしてください。",
     "changedTitle": "この連絡先の安全番号が変更されました。",
     "changedDesc": "端末のフィンガープリントが最初に見たものと異なります。これは相手が端末を追加・交換したときに起こりますが、なりすましの可能性もあります。信頼する前に再検証してください。",
@@ -445,7 +472,8 @@
     "description": "グループ会話を作成し、検出された相手を招待します。",
     "namePlaceholder": "チャンネル名",
     "invite": "相手を招待",
-    "noPeers": "まだ招待できる相手がいません。"
+    "noPeers": "まだ招待できる相手がいません。",
+    "failed": "チャンネルを作成できませんでした：{{error}}。もう一度お試しください。"
   },
   "about": {
     "title": "情報",
@@ -485,5 +513,46 @@
     "description": "アプリを再読み込みして続けてください。メッセージはこの端末に保存されています。",
     "reload": "再読み込み",
     "details": "技術的な詳細"
+  },
+  "redesign": {
+    "ready": "このデバイスで準備完了",
+    "tools": "ツール",
+    "addTools": "その他の送信方法",
+    "connectionReady": "近くの人を探せます",
+    "connectionStarting": "接続を開始しています",
+    "noPeersTitle": "近くの人を探しています",
+    "noPeersBody": "Mesh-Talk は同じローカルネットワーク上の人を探します。両方のデバイスを起動し、同じネットワークに接続してください。",
+    "connectionHelp": "接続のヘルプ",
+    "connectToSomeone": "相手と接続する",
+    "connectIntro": "Mesh-Talk は同じローカルネットワーク上の人を見つけます。両方の端末でアプリを開き、ネットワークに接続してください。",
+    "sameNetworkTitle": "同じネットワークを使う",
+    "sameNetworkBody": "両方の端末を同じ Wi-Fi または有線ネットワークに接続し、この端末を通知して今すぐ探します。",
+    "announceFeedback": "この端末を通知しました。見つかるまで両方の端末で Mesh-Talk を開いておいてください。",
+    "noSharedNetwork": "共有ネットワークがありませんか？",
+    "emptyConversation": "メッセージを送って会話を始めましょう。",
+    "settingsNav": "設定のカテゴリー",
+    "firstRun": "初めてですか？このデバイスに ID を作成し、ローカルネットワーク上の人を探しましょう。",
+    "createIdentity": "ID を作成",
+    "discoveryHint": "このデバイスは固有の鍵を保持します。Mesh-Talk はローカルネットワーク上の相手を見つけます。",
+    "loadingHistory": "会話履歴を読み込んでいます…",
+    "historyFailed": "会話履歴を読み込めませんでした。",
+    "connection": "接続",
+    "noNetworkStatus": "ネットワークに未接続",
+    "actionFailed": "操作を確認してください",
+    "localIdentity": "あなたの ID",
+    "personalThemes": "パーソナルテーマ",
+    "wallpaper": "会話の壁紙",
+    "wallpaperDesc": "パーソナルテーマでメッセージの背景に画像を表示します。",
+    "loadingContacts": "会話を読み込んでいます…",
+    "returning": "サインインして、このデバイスのIDと会話を開きます。",
+    "searchingStatus": "このネットワークを検索中",
+    "slowStartup": "暗号化されたデータの読み込みに通常より時間がかかっています。起動中も接続情報を確認できます。",
+    "openConnection": "接続の詳細を開く",
+    "keyboardHint": "Enterで送信 · Shift+Enterで改行",
+    "appNotifications": "アプリと通知",
+    "messagesFiles": "メッセージとファイル",
+    "advanced": "詳細設定",
+    "identityStep": "このデバイスに保存されるIDを作成します。",
+    "discoveryStep": "サインインして、同じローカルネットワーク上の人を探します。"
   }
 }

@@ -9,8 +9,8 @@ export const CAROL = {
 };
 export const CHANNEL = { id: "chan_team_dddd4444" };
 
-export async function enterChat(page: Page, user = "tester") {
-  await page.goto("/");
+export async function enterChat(page: Page, user = "tester", path = "/") {
+  await page.goto(path);
   for (const tab of ["register", "signin"]) {
     await page.getByTestId(`login-tab-${tab}`).click();
     await page.getByTestId("login-username").fill(user);
@@ -34,6 +34,13 @@ export async function openBobDm(page: Page) {
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+}
+
+export async function revealComposerTools(page: Page) {
+  const trigger = page.getByTestId("composer-more-tools");
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+    await trigger.click();
+  }
 }
 
 export async function seedThemeBeforeLoad(page: Page, theme: string) {

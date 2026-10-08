@@ -1,6 +1,6 @@
 //! Append-only, hash-linked, per-conversation event log — the tamper-evident
 //! data structure every DM and channel is built from. See
-//! `docs/superpowers/specs/2026-06-15-mesh-talk--design.md` §5.
+//! `docs/ARCHITECTURE.md` for the maintained protocol description.
 //!
 //! Layers: [`event`] (the content-addressed `Event`), [`store`] (the in-memory
 //! validating index), [`persist`] (encrypted append-only file + the durable

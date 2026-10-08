@@ -1,5 +1,6 @@
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
+import { revealComposerTools } from "./helpers/session";
 
 const BOB = { account: "acc_bob_bbbb2222" };
 
@@ -23,6 +24,8 @@ test("open the sticker panel and send an animated sticker", async ({
 }) => {
   await enterBobDm(page);
 
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
   const panel = page.getByTestId("sticker-panel");
   await expect(panel).toBeVisible();
@@ -42,12 +45,15 @@ test("composer popovers dismiss on an outside click (no second button press)", a
   await enterBobDm(page);
 
   // Emoji picker: open, then click elsewhere (the message log) → it closes by itself.
+  await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await expect(page.getByTestId("emoji-picker")).toBeVisible();
   await page.getByTestId("conversation-header").click();
   await expect(page.getByTestId("emoji-picker")).toBeHidden();
 
   // Sticker panel: open, then dismiss with Escape.
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
   await expect(page.getByTestId("sticker-panel")).toBeVisible();
   await page.keyboard.press("Escape");

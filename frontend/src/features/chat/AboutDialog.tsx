@@ -20,7 +20,7 @@ const LICENSE_URL =
 
 /** A minimal About surface: app name + version, one-line description, source/license
  * links, and a shortcut into the Diagnostics dialog. Version comes from `env_info`. */
-export function AboutDialog() {
+export function AboutDialog({ menuItem = false }: { menuItem?: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
@@ -42,11 +42,13 @@ export function AboutDialog() {
       <DialogTrigger asChild>
         <Button
           variant="ghost"
-          size="icon"
+          size={menuItem ? "sm" : "icon"}
+          className={menuItem ? "w-full justify-start gap-2.5 px-2" : undefined}
           data-testid="sidebar-action-about"
           title={t("about.title")}
         >
           <Info className="h-4 w-4" />
+          {menuItem && <span>{t("about.title")}</span>}
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-md">

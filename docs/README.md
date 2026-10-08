@@ -34,6 +34,9 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/evals/quality-gates.md`](evals/quality-gates.md) | Scenario-based review, mutation evidence, four-platform artifact verification and controlled release publication. |
 | [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md) | Product workflow evaluation layers, three-platform real backend/native evidence, portable browser boundaries and fail-closed CI gating. |
 | [`docs/chat-ui-manual-test.md`](chat-ui-manual-test.md) | Supplementary manual smoke checklist for the desktop chat UI. |
+| [`fuzz/README.md`](../fuzz/README.md) | Current protocol fuzz targets, scope, and local commands. |
+| [`frontend/DESIGN.md`](../frontend/DESIGN.md) | Current native-direction visual system and interaction rules. |
+| [`docs/screenshots/README.md`](screenshots/README.md) | How current demo screenshots are captured and shared with the site. |
 
 ## Operations & Deployment
 
@@ -51,9 +54,10 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/ARCHITECTURE.md` § Security posture](ARCHITECTURE.md#8-security-posture-summary) | Crypto primitives, domain separation, forward secrecy, and known limitations by design. |
 | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Community conduct expectations. |
 
-## Design history
+## Current design
 
-The current design is documented in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
-The [host refactor design](superpowers/specs/2026-10-06-host-architecture-refactor-design.md)
-and [implementation plan](superpowers/plans/2026-10-06-host-architecture-refactor.md)
-record the desktop architecture decisions. Older task history is available in git history.
+The frontend visual and interaction system is documented in
+[`frontend/DESIGN.md`](../frontend/DESIGN.md). The protocol and host architecture are
+documented in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). Personal working plans under
+`docs/superpowers/` and the root `plans/` directory stay local and are not part of
+the committed documentation set.

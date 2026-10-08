@@ -77,11 +77,21 @@ cd frontend && npm run test
 ```
 
 The frontend also has a Playwright UI end-to-end suite (selectors keyed on
-`data-testid`), which drives the running app in a browser:
+`data-testid`), which drives the real React app in Chromium with mocked Tauri IPC:
 
 ```bash
 cd frontend && npm run e2e        # CI: .github/workflows/e2e-ui.yml
 ```
+
+The suite checks messages and recovery paths, six themes and screenshot baselines,
+large virtualized conversation/member lists, compact windows, touch targets, and
+representative WCAG A/AA rules with axe. Browser automation does not replace testing
+the native webview, real network, or a screen reader. Use
+[`docs/chat-ui-manual-test.md`](../docs/chat-ui-manual-test.md) for the human smoke pass.
+
+The detached [`fuzz/`](../fuzz/README.md) crate covers untrusted protocol decoders.
+Compile its targets with `cargo check --manifest-path fuzz/Cargo.toml --bins`; nightly
+`cargo-fuzz` is required for an instrumented run.
 
 Run `cd frontend && npm run test:coverage` for a report over all production
 TypeScript and TSX files. CI runs this on Linux, macOS and Windows and stores

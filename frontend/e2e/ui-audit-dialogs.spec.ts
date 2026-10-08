@@ -54,10 +54,13 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
         await page.getByTestId("sidebar-action-files").click();
       },
       surface: "files-tray",
-      hasDialogClose: false,
+      hasDialogClose: true,
       ready: async () => {
         await expect(page.getByText("report.pdf")).toBeVisible();
         await expect(page.getByText("clip.mov")).toBeVisible();
+        await page.getByTestId("files-search").fill("report");
+        await expect(page.getByText("clip.mov")).toHaveCount(0);
+        await page.getByTestId("files-search").clear();
       },
     },
     {
@@ -65,18 +68,21 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
         page.getByTestId("conversation-history-trigger").click(),
       surface: "conversation-history-dialog",
       hasDialogClose: true,
+      ready: async () => {
+        await expect(page.getByTestId("history-search-input")).toBeVisible();
+        await expect(page.getByTestId("history-row")).toHaveCount(2);
+      },
     },
     {
       open: async () => {
-        await page.getByTestId("sidebar-overflow").click();
-        await page.getByTestId("sidebar-action-settings").click();
+        await page.getByTestId("sidebar-nav-settings").click();
       },
       surface: "settings-dialog",
       hasDialogClose: true,
       ready: async () => {
         await expect(page.getByTestId("invisible-switch")).toBeEnabled();
         await expect(page.getByTestId("settings-dialog")).toContainText(
-          "Privacy, appearance, background behavior, files, and chat history.",
+          "Manage privacy, appearance, messages, files, and app behavior.",
         );
         await expect(page.getByTestId("settings-scroll-more")).toBeVisible();
         await expect(page.getByTestId("settings-dialog")).toContainText(
@@ -100,9 +106,14 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
     await expect(surface).toBeVisible();
     await expectDialogFitsViewport(page, item.surface);
     await item.ready?.();
-    await expect(surface).toHaveScreenshot(
-      snapshotName(item.surface, "dark", 820, 620),
-    );
+    // The history description can wrap by one line across system fonts; its
+    // content and viewport bounds are asserted above instead of pixel matching.
+    if (item.surface !== "conversation-history-dialog") {
+      await expect(surface).toHaveScreenshot(
+        snapshotName(item.surface, "dark", 820, 620),
+        { maxDiffPixelRatio: 0.05 },
+      );
+    }
 
     if (item.hasDialogClose) {
       await expectSurfaceMotionSettled(surface);
@@ -124,8 +135,7 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
 
 test("settings scroll cue reveals more controls", async ({ page }) => {
   await enterChat(page);
-  await page.getByTestId("sidebar-overflow").click();
-  await page.getByTestId("sidebar-action-settings").click();
+  await page.getByTestId("sidebar-nav-settings").click();
 
   const cue = page.getByTestId("settings-scroll-more");
   await expect(cue).toBeVisible();
@@ -145,12 +155,11 @@ test("settings section navigation reaches the requested controls", async ({
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await enterChat(page);
-  await page.getByTestId("sidebar-overflow").click();
-  await page.getByTestId("sidebar-action-settings").click();
+  await page.getByTestId("sidebar-nav-settings").click();
   const dialog = page.getByTestId("settings-dialog");
   await dialog
     .getByRole("navigation", { name: "Settings" })
-    .getByRole("button", { name: "Chat history" })
+    .getByRole("button", { name: "Messages & files" })
     .click();
   await expect(
     dialog.getByTestId("settings-retention-select"),

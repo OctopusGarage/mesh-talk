@@ -7,9 +7,11 @@ import type { ChatMessage } from "@/store/chat";
 export function DeliveryFooter({
   message,
   isChannel,
+  showTime = true,
 }: {
   message: ChatMessage;
   isChannel: boolean;
+  showTime?: boolean;
 }) {
   const { t } = useTranslation();
   const tooltip = useId();
@@ -21,9 +23,12 @@ export function DeliveryFooter({
   const detail = delivery
     ? t(`message.delivery.${message.file ? "fileHelp" : "help"}`)
     : "";
+  if (!showTime && !message.pending && !delivery) return null;
   return (
-    <span className="mt-0.5 flex items-center gap-1 px-1 font-mono text-[11px] tabular-nums text-muted-foreground">
-      {formatTime(message.wallClock)}
+    <span className="mt-1 flex items-center gap-1 px-1 text-xs tabular-nums text-muted-foreground">
+      {showTime && (
+        <span data-testid="message-time">{formatTime(message.wallClock)}</span>
+      )}
       {message.pending && <span>{` · ${t("message.sending")}`}</span>}
       {delivery && (
         <span

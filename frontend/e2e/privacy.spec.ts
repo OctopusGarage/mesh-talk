@@ -49,8 +49,7 @@ async function settings(page: import("@playwright/test").Page) {
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("a strong password");
   await page.getByTestId("login-submit").click();
-  await page.getByTestId("sidebar-overflow").click();
-  await page.getByTestId("sidebar-action-settings").click();
+  await page.getByTestId("sidebar-nav-settings").click();
 }
 test("invisible mode requires confirmation and survives reload", async ({
   page,

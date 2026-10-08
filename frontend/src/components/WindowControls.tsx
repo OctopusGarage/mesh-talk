@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { needsCustomWindowControls } from "@/lib/platform";
 
 /**
@@ -11,15 +12,19 @@ import { needsCustomWindowControls } from "@/lib/platform";
  * "minimize to tray" (hide vs quit), so this behaves exactly like the old native button.
  */
 export function WindowControls() {
+  const { t } = useTranslation();
   if (!needsCustomWindowControls()) return null;
   const win = getCurrentWindow();
   const btn =
     "flex h-8 w-12 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none";
   return (
-    <div className="fixed right-0 top-0 z-[60] flex select-none">
+    <div
+      data-testid="window-controls"
+      className="fixed right-0 top-0 z-[60] flex select-none"
+    >
       <button
         type="button"
-        aria-label="Minimize"
+        aria-label={t("windowControls.minimize")}
         className={btn}
         onClick={() => void win.minimize()}
       >
@@ -27,7 +32,7 @@ export function WindowControls() {
       </button>
       <button
         type="button"
-        aria-label="Maximize"
+        aria-label={t("windowControls.maximize")}
         className={btn}
         onClick={() => void win.toggleMaximize()}
       >
@@ -35,7 +40,7 @@ export function WindowControls() {
       </button>
       <button
         type="button"
-        aria-label="Close"
+        aria-label={t("common.close")}
         className={`${btn} hover:bg-red-600 hover:text-white`}
         onClick={() => void win.close()}
       >

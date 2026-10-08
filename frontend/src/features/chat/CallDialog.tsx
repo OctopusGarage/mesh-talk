@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   FlaskConical,
   Mic,
@@ -19,6 +20,7 @@ import { useSettings } from "@/store/settings";
 import { shortId } from "@/lib/format";
 import { playCallTone } from "@/lib/ringtones";
 import { cn } from "@/lib/utils";
+import { ease, useMotionOK } from "@/lib/motion";
 
 /** Header actions: start a voice or video call with a DM contact. Separate entry points
  * (like WeChat et al.). Rendered only when the experimental calls feature is enabled, and
@@ -135,6 +137,7 @@ const STATUS_KEY: Record<CallPhase, string> = {
  * Mounted once at the app root. */
 export function CallDialog() {
   const { t } = useTranslation();
+  const motionOK = useMotionOK();
   const phase = useCalls((s) => s.phase);
   const peerName = useCalls((s) => s.peerName);
   const peerId = useCalls((s) => s.peerId);
@@ -169,23 +172,13 @@ export function CallDialog() {
     }
   }, [phase, endedReason, error, clearEnded]);
 
-  if (phase === "idle") {
-    if (!endedReason && !error) return null;
-    const note = error
-      ? error
-      : endedReason === "decline"
-        ? t("call.declined")
-        : endedReason === "busy"
-          ? t("call.busy")
-          : t("call.failed");
-    return (
-      <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2">
-        <div className="rounded-full border bg-card px-4 py-2 text-sm shadow-lg">
-          {note}
-        </div>
-      </div>
-    );
-  }
+  const note = error
+    ? error
+    : endedReason === "decline"
+      ? t("call.declined")
+      : endedReason === "busy"
+        ? t("call.busy")
+        : t("call.failed");
 
   const who = rosterName || peerName || t("call.unknown");
   // The caller's name is only trustworthy when it comes from our roster (keyed by the
@@ -197,127 +190,192 @@ export function CallDialog() {
   const kindLabel = video ? t("call.video") : t("call.voice");
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-      <div className="flex w-[min(92vw,720px)] flex-col overflow-hidden rounded-2xl border bg-card shadow-2xl">
-        {/* Stage: remote video (or a glyph for ringing / audio-only), local PiP. */}
-        <div className="relative aspect-video w-full bg-black">
-          {phase === "connected" && remoteHasVideo ? (
-            <StreamVideo
-              stream={remoteStream}
-              className="h-full w-full object-cover"
-            />
-          ) : (
-            <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-white">
-              {peerId && <IdentityGlyph seed={peerId} size={84} title={who} />}
-              <p className="font-display text-lg font-semibold">{who}</p>
-              {unverifiedCaller && peerId && (
-                <p className="font-mono text-[11px] text-white/40">
-                  {shortId(peerId, 12)}
-                </p>
-              )}
-              <p className="text-sm text-white/70">
-                {t(STATUS_KEY[phase])} · {kindLabel}
-              </p>
-              {phase === "connected" && !hasVideo && (
-                <p className="text-xs text-white/50">{t("call.audioOnly")}</p>
-              )}
-            </div>
-          )}
-
-          {/* Local preview (muted to avoid echo). Hidden when audio-only or camera off. */}
-          {localStream && hasVideo && camOn && (
-            <StreamVideo
-              stream={localStream}
-              muted
-              className="absolute bottom-3 right-3 h-28 w-40 rounded-lg border border-white/20 object-cover shadow-lg"
-            />
-          )}
-
-          {phase === "connected" && remoteHasVideo && (
-            <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-sm text-white">
-              {who}
-            </div>
-          )}
-
-          {/* Always mark the call as experimental. */}
-          <div
-            className="absolute right-3 top-3 flex items-center gap-1 rounded-full bg-amber-500/20 px-2.5 py-1 text-xs text-amber-200"
-            title={t("call.experimentalHint")}
+    <>
+      <AnimatePresence>
+        {phase === "idle" && (endedReason || error) && (
+          <motion.div
+            key="call-note"
+            initial={{
+              opacity: 0,
+              transform: motionOK
+                ? "translateY(6px) translateX(-50%)"
+                : "translateX(-50%)",
+            }}
+            animate={{
+              opacity: 1,
+              transform: motionOK
+                ? "translateY(0px) translateX(-50%)"
+                : "translateX(-50%)",
+            }}
+            exit={{
+              opacity: 0,
+              transform: motionOK
+                ? "translateY(6px) translateX(-50%)"
+                : "translateX(-50%)",
+            }}
+            transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
+            className="fixed bottom-4 left-1/2 z-[51]"
           >
-            <FlaskConical className="h-3 w-3" />
-            {t("call.experimental")}
-          </div>
-        </div>
-
-        {/* Controls. */}
-        <div className="flex items-center justify-center gap-3 p-4">
-          {phase === "incoming" ? (
-            <>
-              <Button
-                onClick={() => void accept()}
-                data-testid="call-accept"
-                className="gap-2 bg-signal text-white hover:bg-signal/90"
-              >
-                <PhoneIncoming className="h-4 w-4" />
-                {t("call.accept")}
-              </Button>
-              <Button
-                onClick={() => decline()}
-                data-testid="call-decline"
-                variant="destructive"
-                className="gap-2"
-              >
-                <PhoneOff className="h-4 w-4" />
-                {t("call.decline")}
-              </Button>
-            </>
-          ) : (
-            <>
-              {!ringing && (
-                <>
-                  <Button
-                    variant="secondary"
-                    size="icon"
-                    onClick={() => toggleMic()}
-                    title={micOn ? t("call.mute") : t("call.unmute")}
-                    data-testid="call-toggle-mic"
-                  >
-                    {micOn ? (
-                      <Mic className="h-4 w-4" />
-                    ) : (
-                      <MicOff className="h-4 w-4" />
+            <div className="rounded-md border bg-card px-4 py-2 text-sm shadow-elevation">
+              {note}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {phase !== "idle" && (
+          <motion.div
+            key="call-surface"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, pointerEvents: "none" }}
+            transition={{ duration: motionOK ? 0.16 : 0.08, ease }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          >
+            <motion.div
+              initial={{
+                opacity: 0,
+                transform: motionOK ? "scale(.985)" : "none",
+              }}
+              animate={{
+                opacity: 1,
+                transform: motionOK ? "scale(1)" : "none",
+              }}
+              exit={{
+                opacity: 0,
+                transform: motionOK ? "scale(.985)" : "none",
+              }}
+              transition={{ duration: motionOK ? 0.18 : 0.08, ease }}
+              className="flex w-[min(92vw,720px)] flex-col overflow-hidden rounded-xl border bg-card shadow-elevation-lg"
+            >
+              {/* Stage: remote video (or a glyph for ringing / audio-only), local PiP. */}
+              <div className="relative aspect-video w-full bg-black">
+                {phase === "connected" && remoteHasVideo ? (
+                  <StreamVideo
+                    stream={remoteStream}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-white">
+                    {peerId && (
+                      <IdentityGlyph seed={peerId} size={84} title={who} />
                     )}
-                  </Button>
-                  {hasVideo && (
+                    <p className="font-display text-lg font-semibold">{who}</p>
+                    {unverifiedCaller && peerId && (
+                      <p className="font-mono text-xs text-white/70">
+                        {shortId(peerId, 12)}
+                      </p>
+                    )}
+                    <p className="text-sm text-white/70">
+                      {t(STATUS_KEY[phase])} · {kindLabel}
+                    </p>
+                    {phase === "connected" && !hasVideo && (
+                      <p className="text-xs text-white/50">
+                        {t("call.audioOnly")}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Local preview (muted to avoid echo). Hidden when audio-only or camera off. */}
+                {localStream && hasVideo && camOn && (
+                  <StreamVideo
+                    stream={localStream}
+                    muted
+                    className="absolute bottom-3 right-3 h-28 w-40 rounded-lg border border-white/20 object-cover shadow-lg"
+                  />
+                )}
+
+                {phase === "connected" && remoteHasVideo && (
+                  <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-sm text-white">
+                    {who}
+                  </div>
+                )}
+
+                {/* Always mark the call as experimental. */}
+                <div
+                  className="absolute right-3 top-3 flex items-center gap-1 rounded-full bg-amber-500/20 px-2.5 py-1 text-xs text-amber-200"
+                  title={t("call.experimentalHint")}
+                >
+                  <FlaskConical className="h-3 w-3" />
+                  {t("call.experimental")}
+                </div>
+              </div>
+
+              {/* Controls. */}
+              <div className="flex items-center justify-center gap-3 p-4">
+                {phase === "incoming" ? (
+                  <>
                     <Button
-                      variant="secondary"
-                      size="icon"
-                      onClick={() => toggleCam()}
-                      title={camOn ? t("call.cameraOff") : t("call.cameraOn")}
-                      data-testid="call-toggle-cam"
+                      onClick={() => void accept()}
+                      data-testid="call-accept"
+                      className="gap-2 bg-signal text-white hover:bg-signal/90"
                     >
-                      {camOn ? (
-                        <VideoIcon className="h-4 w-4" />
-                      ) : (
-                        <VideoOff className="h-4 w-4" />
-                      )}
+                      <PhoneIncoming className="h-4 w-4" />
+                      {t("call.accept")}
                     </Button>
-                  )}
-                </>
-              )}
-              <Button
-                onClick={() => hangup()}
-                variant="destructive"
-                className={cn("gap-2", ringing && "px-6")}
-                data-testid="call-hangup"
-              >
-                <PhoneOff className="h-4 w-4" />
-                {ringing ? t("call.cancel") : t("call.hangup")}
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+                    <Button
+                      onClick={() => decline()}
+                      data-testid="call-decline"
+                      variant="destructive"
+                      className="gap-2"
+                    >
+                      <PhoneOff className="h-4 w-4" />
+                      {t("call.decline")}
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    {!ringing && (
+                      <>
+                        <Button
+                          variant="secondary"
+                          size="icon"
+                          onClick={() => toggleMic()}
+                          title={micOn ? t("call.mute") : t("call.unmute")}
+                          data-testid="call-toggle-mic"
+                        >
+                          {micOn ? (
+                            <Mic className="h-4 w-4" />
+                          ) : (
+                            <MicOff className="h-4 w-4" />
+                          )}
+                        </Button>
+                        {hasVideo && (
+                          <Button
+                            variant="secondary"
+                            size="icon"
+                            onClick={() => toggleCam()}
+                            title={
+                              camOn ? t("call.cameraOff") : t("call.cameraOn")
+                            }
+                            data-testid="call-toggle-cam"
+                          >
+                            {camOn ? (
+                              <VideoIcon className="h-4 w-4" />
+                            ) : (
+                              <VideoOff className="h-4 w-4" />
+                            )}
+                          </Button>
+                        )}
+                      </>
+                    )}
+                    <Button
+                      onClick={() => hangup()}
+                      variant="destructive"
+                      className={cn("gap-2", ringing && "px-6")}
+                      data-testid="call-hangup"
+                    >
+                      <PhoneOff className="h-4 w-4" />
+                      {ringing ? t("call.cancel") : t("call.hangup")}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
   );
 }

@@ -14,7 +14,7 @@ hash-linked event log that syncs CRDT-style. An elected "post office" peer store
 forwards (still-encrypted) events for offline recipients.
 
 ### Technology Stack
-- **Language**: Rust 2021 · **Desktop**: Tauri 2.x · **Frontend**: React + TypeScript + Tailwind + shadcn/ui (Vite)
+- **Language**: Rust 2021 · **Desktop**: Tauri 2.x · **Frontend**: React 19 + TypeScript + Tailwind + Radix primitives (Vite)
 - **Async**: Tokio · **Serialization**: bincode (wire/at-rest), serde_json (IPC)
 - **Crypto**: Ed25519 + X25519 (dalek; keeps `rand` 0.8), Noise_XX (snow), Double Ratchet
   + sender-key group ratchet, AES-256-GCM + ChaChaPoly, SHA-256/HKDF, PBKDF2-600k at rest
@@ -34,7 +34,7 @@ CLI, Copilot, etc.). Conventions for agents live in [`AGENTS.md`](AGENTS.md).
 
 - Architecture (authoritative): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - Domain model: [`CONTEXT.md`](CONTEXT.md)
-- Design specs + implementation plans: `docs/superpowers/specs/`, `docs/superpowers/plans/`
+- Frontend visual system: [`frontend/DESIGN.md`](frontend/DESIGN.md)
 - Development conventions: [`specifications/development_conventions.md`](specifications/development_conventions.md)
 - Project structure + tech stack: see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (and the Tech Stack section above)
 - Git standards: [`specifications/git_standards.md`](specifications/git_standards.md)
@@ -48,10 +48,12 @@ CLI, Copilot, etc.). Conventions for agents live in [`AGENTS.md`](AGENTS.md).
 2. **The post office only sees ciphertext** — never route plaintext through a relay.
 3. **Offline delivery** depends on the post office or the recipient coming back online and
    syncing; there is no central store.
-4. **`rand` stays at 0.8** — the dalek crates require `rand_core` 0.6; bumping breaks the build.
+4. **Crypto RNG compatibility** — the core uses `rand_core` 0.6 directly for its identity APIs;
+   check dalek and `rand_core` compatibility before changing crypto dependencies.
 5. **Dependencies** — `cargo-deny` + `cargo-audit` run in the gate; keep advisories clean.
-6. **Known gaps** — device linking has no SAS/key-pinning (LAN MITM window); backfill
-   history travels as plaintext over the Noise channel.
+6. **Device linking** — a one-time code authorizes the link and binds both device keys;
+   backfill runs inside the authenticated Noise channel. The code is the intended
+   out-of-band authorization step, as documented in [`specifications/TODO.md`](specifications/TODO.md).
 
 ## Plan Adjustment Guidance
 
@@ -59,7 +61,8 @@ If an implementation plan proves unsuitable during development:
 
 1. **Assess** — document why the current plan is not working.
 2. **Adjust** — modify the approach based on what was learned.
-3. **Update docs** — revise `docs/superpowers/` and `docs/ARCHITECTURE.md` to match.
+3. **Update docs** — revise the applicable committed docs (`docs/ARCHITECTURE.md`,
+   `frontend/DESIGN.md`, or the relevant specification). Keep personal plans local.
 4. **Update status** — reflect scope changes in `specifications/TODO.md`.
 5. **Continue** — proceed with the updated plan.
 6. **Capture lessons** — record insights for future reference.

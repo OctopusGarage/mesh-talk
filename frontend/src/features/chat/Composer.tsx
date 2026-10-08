@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   SendHorizontal,
   X,
@@ -8,10 +9,12 @@ import {
   Sticker as StickerIcon,
   Camera,
   Image as ImageIcon,
+  Plus,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ease, useMotionOK } from "@/lib/motion";
 import { STICKERS } from "@/lib/stickerPacks";
 import type { ChatMessage } from "@/store/chat";
 
@@ -58,6 +61,24 @@ const EMOJIS = [
   "💀",
   "🤗",
 ];
+
+type PanelMotion = { pointer: boolean; reduced: boolean };
+const panelVariants = {
+  hidden: ({ pointer, reduced }: PanelMotion) => ({
+    opacity: pointer ? 0 : 1,
+    transform: reduced
+      ? "none"
+      : pointer
+        ? "translateY(4px) scale(1)"
+        : "translateY(0px) scale(1)",
+    transition: { duration: pointer ? (reduced ? 0.08 : 0.1) : 0, ease },
+  }),
+  visible: ({ pointer, reduced }: PanelMotion) => ({
+    opacity: 1,
+    transform: reduced ? "none" : "translateY(0px) scale(1)",
+    transition: { duration: pointer ? (reduced ? 0.08 : 0.14) : 0, ease },
+  }),
+};
 
 function useReducedMotion() {
   const [reduced, setReduced] = useState(false);
@@ -141,6 +162,8 @@ function StickerThumb({ src, alt }: { src: string; alt: string }) {
 
 export function Composer({
   onSend,
+  initialDraft = "",
+  onDraftChange,
   onAttach,
   onPasteImage,
   onScreenshot,
@@ -153,7 +176,9 @@ export function Composer({
   onSendSticker,
   onImage,
 }: {
-  onSend: (text: string) => void;
+  onSend: (text: string) => boolean;
+  initialDraft?: string;
+  onDraftChange?: (text: string) => void;
   onAttach?: () => void;
   /** Send an image pasted from the clipboard (bytes + file extension). */
   onPasteImage?: (bytes: Uint8Array, ext: string, name?: string) => void;
@@ -175,15 +200,23 @@ export function Composer({
   onImage?: () => void;
 }) {
   const { t } = useTranslation();
-  const [text, setText] = useState("");
+  const motionOK = useMotionOK();
+  const [text, setText] = useState(initialDraft);
+  const [sendRejected, setSendRejected] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const [showStickers, setShowStickers] = useState(false);
+  const [expressionTab, setExpressionTab] = useState<
+    "emoji" | "stickers" | null
+  >(null);
+  const [showTools, setShowTools] = useState(false);
+  const [panelPointerMotion, setPanelPointerMotion] = useState(false);
+  const panelMotion = { pointer: panelPointerMotion, reduced: !motionOK };
 
   // Apply an external prefill (re-edit): replace the draft and focus, caret at the end.
   // Keyed on the bump counter so re-editing the same text twice still re-applies.
   useEffect(() => {
     if (!prefill) return;
     setText(prefill.text);
+    onDraftChange?.(prefill.text);
     queueMicrotask(() => {
       const el = ref.current;
       if (el) {
@@ -194,26 +227,39 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.n]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  const [showEmoji, setShowEmoji] = useState(false);
   const [showShot, setShowShot] = useState(false);
 
-  // Dismiss the emoji / sticker / screenshot panels on an outside click or Escape — they're
+  // Dismiss the expression / screenshot panels on an outside click or Escape — they're
   // plain popovers, so without this they'd only close by clicking their button again. Panels
   // AND their toggle buttons carry `data-composer-popover`, so a click on a toggle is ignored
   // here and left to the button's own handler (no close-then-reopen fight).
   useEffect(() => {
-    if (!showEmoji && !showStickers && !showShot) return;
+    if (!expressionTab && !showShot) return;
     const close = () => {
-      setShowEmoji(false);
-      setShowStickers(false);
+      setExpressionTab(null);
       setShowShot(false);
     };
     const onPointerDown = (e: PointerEvent) => {
-      if (!(e.target as Element | null)?.closest("[data-composer-popover]"))
+      if (!(e.target as Element | null)?.closest("[data-composer-popover]")) {
+        setPanelPointerMotion(true);
         close();
+      }
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      if (e.key !== "Escape") return;
+      const focusedPanel = (document.activeElement as Element | null)?.closest(
+        "#composer-expression-panel, #composer-screenshot-panel",
+      );
+      const returnTo = focusedPanel
+        ? document.querySelector<HTMLButtonElement>(
+            showShot
+              ? '[data-testid="composer-screenshot"]'
+              : '[data-testid="composer-emoji"]',
+          )
+        : null;
+      setPanelPointerMotion(false);
+      close();
+      if (returnTo) queueMicrotask(() => returnTo.focus());
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKey);
@@ -221,13 +267,16 @@ export function Composer({
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [showEmoji, showStickers, showShot]);
+  }, [expressionTab, showShot]);
 
   const insertEmoji = (emoji: string) => {
     const el = ref.current;
     const caret = el?.selectionStart ?? text.length;
-    setText(text.slice(0, caret) + emoji + text.slice(caret));
-    setShowEmoji(false);
+    const next = text.slice(0, caret) + emoji + text.slice(caret);
+    setText(next);
+    onDraftChange?.(next);
+    setPanelPointerMotion(false);
+    setExpressionTab(null);
     setShowShot(false);
     queueMicrotask(() => {
       el?.focus();
@@ -259,6 +308,7 @@ export function Composer({
       .replace(/@([\p{L}\p{N}_-]*)$/u, `@${name} `);
     const next = before + text.slice(caret);
     setText(next);
+    onDraftChange?.(next);
     setMentionQuery(null);
     queueMicrotask(() => el.focus());
   };
@@ -266,13 +316,21 @@ export function Composer({
   const send = () => {
     const t = text.trim();
     if (!t) return;
-    onSend(t);
+    if (!onSend(t)) {
+      setSendRejected(true);
+      return;
+    }
+    setSendRejected(false);
     setText("");
+    onDraftChange?.("");
     setMentionQuery(null);
     if (ref.current) ref.current.style.height = "auto";
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Enter confirms an IME candidate in many writing systems. Let the input method
+    // finish composition before interpreting Enter as a send shortcut.
+    if (e.nativeEvent.isComposing) return;
     if (suggestions.length > 0 && e.key === "Enter") {
       e.preventDefault();
       applyMention(suggestions[0]);
@@ -304,18 +362,23 @@ export function Composer({
 
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
+    setSendRejected(false);
     setText(el.value);
+    onDraftChange?.(el.value);
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
     detectMention(el.value, el.selectionStart ?? el.value.length);
   };
 
   return (
-    <div data-testid="composer" className="border-t bg-card px-4 py-3">
+    <div
+      data-testid="composer"
+      className="border-t bg-[hsl(var(--composer-surface))] px-4 pb-3 pt-3"
+    >
       {replyTo && (
         <div
           data-testid="composer-reply-banner"
-          className="mx-auto mb-2 flex max-w-[880px] items-center gap-2 rounded-md border-l-2 border-signal bg-muted/50 px-3 py-1.5 text-sm"
+          className="mx-auto mb-2 flex max-w-[820px] items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-[13px]"
         >
           <CornerUpLeft className="h-3.5 w-3.5 shrink-0 text-signal" />
           <span className="min-w-0 flex-1 truncate text-muted-foreground">
@@ -328,18 +391,18 @@ export function Composer({
             onClick={onCancelReply}
             type="button"
             aria-label={t("composer.cancelReply")}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
           >
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
       )}
 
-      <div className="relative mx-auto max-w-[880px]">
+      <div className="group relative mx-auto max-w-[820px]">
         {suggestions.length > 0 && (
           <div
             data-testid="mention-popover"
-            className="absolute bottom-full left-0 mb-2 w-56 overflow-hidden rounded-xl border bg-popover shadow-elevation"
+            className="absolute bottom-full left-0 mb-2 w-56 overflow-hidden rounded-lg border bg-popover shadow-elevation"
           >
             {suggestions.map((n) => (
               <button
@@ -355,94 +418,183 @@ export function Composer({
           </div>
         )}
 
-        {showEmoji && (
-          <div
-            id="composer-emoji-panel"
-            data-testid="emoji-picker"
-            data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 max-h-72 w-64 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
-          >
-            <div className="grid grid-cols-10 gap-0.5">
-              {EMOJIS.map((e) => (
+        <AnimatePresence custom={panelMotion}>
+          {expressionTab && (
+            <motion.div
+              id="composer-expression-panel"
+              data-testid="expression-picker"
+              data-composer-popover=""
+              custom={panelMotion}
+              variants={panelVariants}
+              initial="hidden"
+              animate="visible"
+              exit="hidden"
+              style={{ transformOrigin: "left bottom" }}
+              className="absolute bottom-full left-0 mb-2 flex max-h-80 w-80 max-w-full flex-col overflow-hidden rounded-lg border bg-popover shadow-elevation"
+            >
+              <div
+                className="flex gap-1 border-b px-2 pt-2"
+                role="tablist"
+                aria-label={`${t("composer.emoji")} / ${t("composer.stickers")}`}
+              >
                 <button
-                  key={e}
                   type="button"
-                  data-testid={`emoji-option-${e}`}
-                  onClick={() => insertEmoji(e)}
-                  className="rounded-md p-1 text-lg leading-none hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  aria-label={t("composer.insertEmoji", { emoji: e })}
-                >
-                  {e}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {showStickers && onSendSticker && (
-          <div
-            id="composer-sticker-panel"
-            data-testid="sticker-panel"
-            data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 max-h-72 w-80 max-w-full overflow-y-auto rounded-xl border bg-popover p-2 shadow-elevation"
-          >
-            <div className="grid grid-cols-5 gap-1">
-              {STICKERS.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  data-testid={`sticker-option-${s.id}`}
-                  onClick={() => {
-                    onSendSticker(s.id, s.emoji);
-                    setShowStickers(false);
+                  role="tab"
+                  id="composer-emoji-tab"
+                  data-testid="composer-emoji-tab"
+                  aria-selected={expressionTab === "emoji"}
+                  tabIndex={expressionTab === "emoji" ? 0 : -1}
+                  aria-controls="composer-emoji-panel"
+                  onClick={() => setExpressionTab("emoji")}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowRight" && onSendSticker) {
+                      event.preventDefault();
+                      setExpressionTab("stickers");
+                      document.getElementById("composer-sticker-tab")?.focus();
+                    }
                   }}
-                  className="rounded-lg p-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  title={s.emoji}
-                  aria-label={t("composer.sendSticker", { emoji: s.emoji })}
+                  className={cn(
+                    "flex min-h-9 items-center gap-2 rounded-t-md border-b-2 px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    expressionTab === "emoji"
+                      ? "border-signal text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground",
+                  )}
                 >
-                  <StickerThumb src={s.url} alt={s.emoji} />
+                  <Smile className="h-4 w-4" />
+                  {t("composer.emoji")}
                 </button>
-              ))}
-            </div>
-          </div>
-        )}
+                {onSendSticker && (
+                  <button
+                    type="button"
+                    role="tab"
+                    id="composer-sticker-tab"
+                    data-testid="composer-stickers"
+                    aria-selected={expressionTab === "stickers"}
+                    tabIndex={expressionTab === "stickers" ? 0 : -1}
+                    aria-controls="composer-sticker-panel"
+                    onClick={() => setExpressionTab("stickers")}
+                    onKeyDown={(event) => {
+                      if (event.key === "ArrowLeft") {
+                        event.preventDefault();
+                        setExpressionTab("emoji");
+                        document.getElementById("composer-emoji-tab")?.focus();
+                      }
+                    }}
+                    className={cn(
+                      "flex min-h-9 items-center gap-2 rounded-t-md border-b-2 px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      expressionTab === "stickers"
+                        ? "border-signal text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    <StickerIcon className="h-4 w-4" />
+                    {t("composer.stickers")}
+                  </button>
+                )}
+              </div>
+              {expressionTab === "emoji" ? (
+                <div
+                  id="composer-emoji-panel"
+                  role="tabpanel"
+                  aria-labelledby="composer-emoji-tab"
+                  data-testid="emoji-picker"
+                  className="overflow-y-auto p-2"
+                >
+                  <div className="grid grid-cols-10 gap-0.5">
+                    {EMOJIS.map((e) => (
+                      <button
+                        key={e}
+                        type="button"
+                        data-testid={`emoji-option-${e}`}
+                        onClick={() => insertEmoji(e)}
+                        className="rounded-md p-1 text-lg leading-none hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={t("composer.insertEmoji", { emoji: e })}
+                      >
+                        {e}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : onSendSticker ? (
+                <div
+                  id="composer-sticker-panel"
+                  role="tabpanel"
+                  aria-labelledby="composer-sticker-tab"
+                  data-testid="sticker-panel"
+                  className="overflow-y-auto p-2"
+                >
+                  <div className="grid grid-cols-5 gap-1">
+                    {STICKERS.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        data-testid={`sticker-option-${s.id}`}
+                        onClick={() => {
+                          onSendSticker(s.id, s.emoji);
+                          setPanelPointerMotion(false);
+                          setExpressionTab(null);
+                        }}
+                        className="rounded-lg p-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        title={s.emoji}
+                        aria-label={t("composer.sendSticker", {
+                          emoji: s.emoji,
+                        })}
+                      >
+                        <StickerThumb src={s.url} alt={s.emoji} />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-        {showShot && onScreenshot && (
-          <div
-            id="composer-screenshot-panel"
-            data-testid="screenshot-menu"
-            data-composer-popover=""
-            className="absolute bottom-full left-0 mb-2 w-56 max-w-full overflow-hidden rounded-xl border bg-popover p-1 shadow-elevation"
-          >
-            <button
-              type="button"
-              data-testid="screenshot-now"
-              onClick={() => {
-                setShowShot(false);
-                onScreenshot(false);
-              }}
-              className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        <AnimatePresence custom={panelMotion}>
+          {showShot && onScreenshot && (
+            <motion.div
+              id="composer-screenshot-panel"
+              data-testid="screenshot-menu"
+              data-composer-popover=""
+              custom={panelMotion}
+              variants={panelVariants}
+              initial="hidden"
+              animate="visible"
+              exit="hidden"
+              style={{ transformOrigin: "left bottom" }}
+              className="absolute bottom-full left-0 mb-2 w-56 max-w-full overflow-hidden rounded-lg border bg-popover p-1 shadow-elevation"
             >
-              {t("screenshot.now")}
-            </button>
-            <button
-              type="button"
-              data-testid="screenshot-hidden"
-              onClick={() => {
-                setShowShot(false);
-                onScreenshot(true);
-              }}
-              className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {t("screenshot.hidden")}
-            </button>
-          </div>
-        )}
+              <button
+                type="button"
+                data-testid="screenshot-now"
+                onClick={() => {
+                  setPanelPointerMotion(false);
+                  setShowShot(false);
+                  onScreenshot(false);
+                }}
+                className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {t("screenshot.now")}
+              </button>
+              <button
+                type="button"
+                data-testid="screenshot-hidden"
+                onClick={() => {
+                  setPanelPointerMotion(false);
+                  setShowShot(false);
+                  onScreenshot(true);
+                }}
+                className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {t("screenshot.hidden")}
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-        {/* Action toolbar — kept ABOVE the input so the buttons aren't crammed onto the
-            typing line (screenshot · attach · image · emoji). */}
+        {/* Secondary tools open above the input when requested. */}
         <div
-          className="mb-2 flex items-center gap-1"
+          className={cn("mb-2 flex items-center gap-1", !showTools && "hidden")}
           role="toolbar"
           aria-label={t("composer.tools")}
         >
@@ -460,9 +612,9 @@ export function Composer({
               aria-label={t("screenshot.trigger")}
               aria-expanded={showShot}
               aria-controls="composer-screenshot-panel"
-              onClick={() => {
-                setShowEmoji(false);
-                setShowStickers(false);
+              onClick={(event) => {
+                setPanelPointerMotion(event.detail !== 0);
+                setExpressionTab(null);
                 setShowShot((v) => !v);
               }}
             >
@@ -502,46 +654,42 @@ export function Composer({
             data-composer-popover=""
             className={cn(
               "ml-1 h-9 w-9 shrink-0 rounded-md border-l text-muted-foreground",
-              showEmoji && "bg-accent text-foreground",
+              expressionTab && "bg-accent text-foreground",
             )}
-            title={t("composer.emoji")}
-            aria-label={t("composer.emoji")}
-            aria-expanded={showEmoji}
-            aria-controls="composer-emoji-panel"
-            onClick={() => {
+            title={`${t("composer.emoji")} / ${t("composer.stickers")}`}
+            aria-label={`${t("composer.emoji")} / ${t("composer.stickers")}`}
+            aria-expanded={expressionTab !== null}
+            aria-controls="composer-expression-panel"
+            onClick={(event) => {
+              setPanelPointerMotion(event.detail !== 0);
               setShowShot(false);
-              setShowStickers(false);
-              setShowEmoji((v) => !v);
+              setExpressionTab((tab) => (tab ? null : "emoji"));
             }}
           >
             <Smile className="h-4 w-4" />
           </Button>
-          {onSendSticker && (
-            <Button
-              variant="ghost"
-              size="icon"
-              data-testid="composer-stickers"
-              data-composer-popover=""
-              className={cn(
-                "h-9 w-9 shrink-0 rounded-md text-muted-foreground",
-                showStickers && "bg-accent text-foreground",
-              )}
-              title={t("composer.stickers")}
-              aria-label={t("composer.stickers")}
-              aria-expanded={showStickers}
-              aria-controls="composer-sticker-panel"
-              onClick={() => {
-                setShowEmoji(false);
-                setShowShot(false);
-                setShowStickers((v) => !v);
-              }}
-            >
-              <StickerIcon className="h-4 w-4" />
-            </Button>
-          )}
         </div>
 
-        <div className="flex items-end gap-2 rounded-xl border bg-background p-2 transition-colors focus-within:border-signal focus-within:ring-2 focus-within:ring-signal/30">
+        <div className="flex items-end gap-2 rounded-lg border border-input bg-background p-1.5 transition-[border-color,box-shadow] duration-150 focus-within:border-signal focus-within:ring-1 focus-within:ring-signal/20">
+          <Button
+            variant="ghost"
+            size="icon"
+            type="button"
+            data-testid="composer-more-tools"
+            aria-label={t("redesign.addTools")}
+            aria-expanded={showTools}
+            onClick={() => {
+              if (showTools) {
+                setPanelPointerMotion(false);
+                setExpressionTab(null);
+                setShowShot(false);
+              }
+              setShowTools((v) => !v);
+            }}
+            className="h-9 w-9 shrink-0 rounded-lg text-muted-foreground"
+          >
+            <Plus className={cn("h-4 w-4", showTools && "rotate-45")} />
+          </Button>
           <textarea
             ref={ref}
             rows={1}
@@ -551,22 +699,38 @@ export function Composer({
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             placeholder={placeholder}
-            className="max-h-40 flex-1 resize-none bg-transparent px-1 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
+            aria-label={placeholder}
+            title={t("redesign.keyboardHint")}
+            className="max-h-40 flex-1 resize-none bg-transparent px-1 py-1.5 text-[14px] leading-6 outline-none placeholder:text-muted-foreground"
           />
           <Button
             size="icon"
             data-testid="composer-send"
             aria-label={t("composer.send")}
             className={cn(
-              "h-9 w-9 shrink-0 rounded-xl bg-signal text-primary-foreground transition-opacity",
-              !text.trim() && "opacity-40",
+              "h-9 w-9 shrink-0 rounded-md bg-signal text-primary-foreground",
             )}
             disabled={!text.trim()}
-            onClick={send}
+            onClick={() => {
+              send();
+              ref.current?.focus();
+            }}
           >
             <SendHorizontal className="h-4 w-4" />
           </Button>
         </div>
+        {sendRejected ? (
+          <p
+            role="alert"
+            className="mt-1.5 min-h-4 text-right text-[11px] text-destructive"
+          >
+            {t("composer.notQueued")}
+          </p>
+        ) : (
+          <p className="mt-1.5 h-4 text-right text-[11px] text-muted-foreground opacity-0 transition-opacity group-focus-within:opacity-100">
+            {t("redesign.keyboardHint")}
+          </p>
+        )}
       </div>
     </div>
   );

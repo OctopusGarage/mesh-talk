@@ -57,9 +57,14 @@
     "starting": "啟動中…",
     "copy": "複製",
     "copied": "已複製",
+    "copyFailed": "無法複製。請檢查剪貼簿權限後再試。",
     "clear": "清除",
     "close": "關閉",
     "dismiss": "略過"
+  },
+  "windowControls": {
+    "minimize": "最小化",
+    "maximize": "最大化"
   },
   "avatar": {
     "set": "設定頭像…",
@@ -81,7 +86,7 @@
       "confirm": "設定頭像",
       "zoomLabel": "縮放",
       "previewLabel": "預覽",
-      "viewportLabel": "拖曳以調整頭像位置"
+      "viewportLabel": "拖曳或者用方向鍵調整相片位置。撳住 Shift 鍵可以移動得快啲"
     }
   },
   "login": {
@@ -97,11 +102,13 @@
     "accountCreated": "帳戶已建立——現在可以登入。",
     "staySignedIn": "保持登入狀態",
     "resuming": "正在恢復之前的設定…",
-    "footer": "你的金鑰永遠不會離開這部裝置。對方是在你的區域網絡中被找到的。"
+    "footer": "你的金鑰永遠不會離開這部裝置。對方是在你的區域網絡中被找到的。",
+    "signingIn": "登入中…",
+    "creatingIdentity": "建立身分中…"
   },
   "sidebar": {
     "you": "你 · {{id}}",
-    "nodeUnavailable": "節點無法使用——請重試",
+    "nodeUnavailable": "節點無法使用",
     "directMessages": "私訊",
     "channels": "頻道",
     "noContacts": "尚未找到任何聯絡人…",
@@ -137,12 +144,13 @@
     "noneSelectedDesc": "選擇一位聯絡人或頻道即可開始對話。",
     "unlockingTitle": "正在解鎖你的加密資料…",
     "unlockingDesc": "正在解鎖金鑰，並開始尋找對方。",
+    "startFailedTitle": "Mesh-Talk 開唔到",
+    "startFailedDesc": "本機節點未能啟動。請睇日誌了解原因，解決問題後重新開啟應用程式。",
     "channel": "頻道",
     "members_one": "{{count}} 位成員",
     "members_other": "{{count}} 位成員",
     "directMessage": "私訊 · {{id}}",
     "noMessages": "尚無訊息——向他打個招呼吧。",
-    "send": "發送訊息至 #{{name}}",
     "messageContact": "發送訊息至 {{name}}",
     "jumpToLatest": "跳至最新訊息",
     "dismissError": "已關閉錯誤提示",
@@ -151,7 +159,8 @@
     "dropToSend": "拖放至這裡即可發送給 {{name}}",
     "clearHistory": "清除聊天記錄",
     "clearHistoryConfirm": "此操作將永久刪除本地端此對話的訊息，無法恢復，亦不會影響對方的記錄。",
-    "noPeersHint": "Mesh-Talk 會搜尋本地網絡。請將兩部裝置連接到同一個區域網絡。"
+    "noPeersHint": "Mesh-Talk 會搜尋本地網絡。請將兩部裝置連接到同一個區域網絡。",
+    "messageChannel": "發送訊息至 #{{name}}"
   },
   "presence": {
     "online": "在線",
@@ -176,12 +185,14 @@
     "fail": {
       "invalid-input": "訊息無效",
       "authorization": "登入階段已變更",
-      "peer-unreachable": "無法發送——目前找不到對方",
       "relay-unreachable": "無法發送——網絡無法連接",
       "crypto": "無法發送——加密發生錯誤",
-      "unknown": "無法發送"
+      "unknown": "無法發送",
+      "peer-unknown": "無法發送——目前找不到對方"
     },
-    "delete": "刪除",
+    "deleteLocalAction": "喺呢部裝置刪除",
+    "deleteLocalTitle": "刪除呢則訊息？",
+    "deleteLocalDescription": "訊息只會喺呢部裝置刪除。其他人仍然保留副本，而且無法復原。",
     "recall": "收回",
     "recalledByYou": "你收回了一條訊息",
     "recalledBy": "{{name}} 收回了一條訊息",
@@ -198,6 +209,7 @@
     "replyingTo": "正在回覆",
     "message": "訊息",
     "send": "傳送",
+    "notQueued": "訊息未能加入傳送佇列。請檢查連線或待傳送訊息，再試一次。",
     "attach": "附加檔案",
     "image": "傳送圖片",
     "emoji": "表情符號",
@@ -217,7 +229,7 @@
   },
   "settings": {
     "title": "設定",
-    "description": "管理私隱、外觀、背景運作、檔案同聊天記錄。",
+    "description": "管理私隱、外觀、訊息、檔案同應用程式行為。",
     "scrollMore": "捲動睇更多設定",
     "sectionAppearance": "外觀",
     "sectionBackground": "背景",
@@ -241,7 +253,7 @@
     "theme_barcelona": "巴塞隆拿",
     "theme_messi": "美斯",
     "downloadFolder": "下載資料夾",
-    "downloadFolderDesc": "接收的檔案儲存位置。如不填寫則每次詢問。",
+    "downloadFolderDesc": "除非你揀其他資料夾，否則附件會儲存喺系統嘅下載資料夾。",
     "downloadFolderSet": "接收的檔案將自動儲存至此。",
     "chooseFolder": "選擇資料夾",
     "changeFolder": "更改",
@@ -255,13 +267,17 @@
     "callsDesc": "開啟 1:1 語音同視像通話。實驗功能：淨係喺區域網用，可能唔穩定。",
     "ringtone": "鈴聲",
     "ringtoneDesc": "有電話打入時嘅鈴聲。揀一個就會試播。",
-    "ringtonePreview": "試聽"
+    "ringtonePreview": "試聽",
+    "loadFailed": "載入設定失敗：{{error}}",
+    "saveFailed": "儲存變更失敗：{{error}}"
   },
   "search": {
     "title": "搜尋訊息",
     "placeholder": "在所有對話中搜尋…",
     "searching": "搜尋中…",
     "noMatches": "找不到符合的結果。",
+    "failed": "搜尋未能完成，請再試一次。",
+    "outsideRecent": "呢個結果唔喺最近嘅訊息入面。請打開上面嘅聊天記錄搵返。",
     "empty": "輸入關鍵字即可搜尋對話記錄。"
   },
   "history": {
@@ -295,7 +311,12 @@
     "sentFile": "已傳送檔案：{{name}}",
     "videoUnsupported": "無法在此檢視影片，請使用「儲存」以你的播放器開啟。",
     "playVideo": "播放影片",
-    "imageUnsupported": "無法在此檢視圖片，請使用「儲存」開啟。"
+    "imageUnsupported": "無法在此檢視圖片，請使用「儲存」開啟。",
+    "description": "喺對話中同你分享嘅附件。",
+    "searchPlaceholder": "搜尋檔案或傳送者…",
+    "noMatches": "搵唔到符合嘅檔案。",
+    "folderUnknown": "無法取得資料夾",
+    "folderLoadFailed": "載入下載資料夾失敗：{{error}}"
   },
   "linkDevice": {
     "trigger": "連結裝置",
@@ -308,6 +329,7 @@
     "enterCodeHint": "在你的另一部裝置上，輸入下方的密碼。",
     "haveCode": "有沒有來自另一部裝置的密碼？",
     "pickDevice": "選擇裝置…",
+    "device": "裝置",
     "pairingCode": "配對碼",
     "linked": "連結完成！此裝置現在正與該帳戶共用。",
     "linkFailed": "無法連結：{{error}}",
@@ -415,14 +437,19 @@
     "macosFirewall": "系統設定 → 網絡 → 防火牆：允許 Mesh-Talk 接收傳入連線，或在可信的區域網絡中關閉防火牆。",
     "rescan": "立即宣告",
     "rescanned": "已宣告",
-    "rescanHint": "立即重新宣告此裝置，並立即重新掃描區域網絡。"
+    "rescanHint": "立即重新宣告此裝置，並立即重新掃描區域網絡。",
+    "loading": "載入連線資料中…",
+    "networkLoadFailed": "載入網絡資料失敗：{{error}}",
+    "environmentLoadFailed": "載入環境資料失敗：{{error}}",
+    "peersLoadFailed": "更新節點失敗：{{error}}",
+    "actionFailed": "操作失敗：{{error}}"
   },
   "verify": {
     "trigger": "驗證安全碼",
     "title": "驗證聯絡人",
-    "verified": "已驗證",
+    "verified": "安全號碼已驗證",
     "description": "使用可信的方法（面對面、打電話）與 {{name}} 核對此安全碼。若相同，則中間無第三人。",
-    "verifiedBanner": "你已驗證 {{name}}。此對話已達端對端安全加密。",
+    "verifiedBanner": "你已驗證 {{name}} 目前嘅安全號碼。",
     "prompt": "使用可信的方法與此聯絡人核對安全碼，若相符則標記為已驗證。",
     "changedTitle": "此聯絡人的安全碼已變更。",
     "changedDesc": "對方的指紋與你首次見到時不同。對方新增或更換裝置時會如此，但也有可能是有人冒充。若要信任對方，建議再次驗證。",
@@ -445,7 +472,8 @@
     "description": "建立群組對話，並邀請找到的對方。",
     "namePlaceholder": "頻道名稱",
     "invite": "邀請對方",
-    "noPeers": "目前尚無可邀請的對方。"
+    "noPeers": "目前尚無可邀請的對方。",
+    "failed": "建立頻道失敗：{{error}}。請再試一次。"
   },
   "about": {
     "title": "關於",
@@ -485,5 +513,46 @@
     "description": "重新載入程式繼續使用。訊息儲存喺呢部裝置。",
     "reload": "重新載入",
     "details": "技術詳情"
+  },
+  "redesign": {
+    "ready": "呢部裝置已就緒",
+    "tools": "工具",
+    "addTools": "更多傳送方式",
+    "connectionReady": "可以搵附近嘅人",
+    "connectionStarting": "啟動緊連線",
+    "noPeersTitle": "搵緊附近嘅人",
+    "noPeersBody": "Mesh-Talk 會搵同一個區域網絡入面嘅人。請保持兩部裝置開住，並連接同一個網絡。",
+    "connectionHelp": "連線幫助",
+    "connectToSomeone": "同其他人連線",
+    "connectIntro": "Mesh-Talk 會搵同一個本地網絡嘅人。兩部裝置都要開住程式同連上網絡。",
+    "sameNetworkTitle": "連上同一個網絡",
+    "sameNetworkBody": "將兩部裝置連去同一個 Wi-Fi 或有線網絡，再即刻廣播呢部裝置去搵對方。",
+    "announceFeedback": "呢部裝置已經廣播。請喺兩部裝置保持 Mesh-Talk 開住，等佢哋搵到對方。",
+    "noSharedNetwork": "冇共用網絡？",
+    "emptyConversation": "傳送訊息，開始對話。",
+    "settingsNav": "設定分類",
+    "firstRun": "第一次用？喺呢部裝置建立身分，再搵同一個區域網絡入面嘅人。",
+    "createIdentity": "建立身分",
+    "discoveryHint": "呢部裝置會保留自己嘅密鑰。Mesh-Talk 會喺本地網絡搵人。",
+    "loadingHistory": "載入緊對話記錄…",
+    "historyFailed": "載入唔到對話記錄。",
+    "connection": "連線",
+    "noNetworkStatus": "未連接網絡",
+    "actionFailed": "請檢查呢個操作",
+    "localIdentity": "你嘅身分",
+    "personalThemes": "個人主題",
+    "wallpaper": "對話背景圖片",
+    "wallpaperDesc": "喺個人主題中顯示訊息背後嘅圖片。",
+    "loadingContacts": "載入對話中…",
+    "returning": "登入以解鎖呢部裝置嘅身分同對話。",
+    "searchingStatus": "搜尋緊呢個網絡",
+    "slowStartup": "開啟加密儲存空間比平時耐。Mesh-Talk 繼續啟動時，你可以睇連線詳情。",
+    "openConnection": "開啟連線詳情",
+    "keyboardHint": "撳 Enter 傳送 · 撳 Shift+Enter 換行",
+    "appNotifications": "應用程式同通知",
+    "messagesFiles": "訊息同檔案",
+    "advanced": "進階設定",
+    "identityStep": "建立一個儲存喺呢部裝置嘅身分。",
+    "discoveryStep": "登入之後，搵同一個本地網絡上嘅人。"
   }
 }

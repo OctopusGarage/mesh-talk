@@ -242,8 +242,7 @@ async function ensureOverflowOpen() {
   await settledDialog("sidebar-overflow-menu");
 }
 async function manage() {
-  await ensureOverflowOpen();
-  await openDialog("sidebar-action-settings");
+  await openDialog("sidebar-nav-settings");
   await settledDialog("settings-dialog");
   await openDialog("manage-hidden-contacts");
   await element("hidden-contacts-dialog");
@@ -259,8 +258,7 @@ const row = () => `conversation-row-${account}`;
 const history = () => observe("account_history", { account, limit: 500 });
 const privacyPolicy = () => observe("get_privacy", { owner: signedInUser });
 async function privacySettings() {
-  await ensureOverflowOpen();
-  await openDialog("sidebar-action-settings");
+  await openDialog("sidebar-nav-settings");
   await settledDialog("settings-dialog");
   await until("privacy controls loaded", () => execute("return document.querySelector('[data-testid=invisible-switch]')?.disabled === false;"));
 }

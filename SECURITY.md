@@ -21,8 +21,9 @@ there is no central server. Key security properties:
 - **Encryption at rest** — per-device/account keystores and the message stores are
   encrypted with a key derived from the user's password (PBKDF2-600k + AES-256-GCM);
   they are unlocked only after login.
-- **Local data only** — all user data lives under `~/.mesh-talk/` (Windows:
-  `%USERPROFILE%\.mesh-talk`); nothing is uploaded.
+- **No cloud account or telemetry** — local stores live under `~/.mesh-talk/`
+  (Windows: `%USERPROFILE%\.mesh-talk`). Messages and profile photos are sent to
+  intended peers; the optional post office stores only encrypted events.
 
 ## Known limitations
 
@@ -32,22 +33,23 @@ This is an experimental project. The following are tracked, not yet hardened:
   verified on receipt (a present-but-invalid signature is rejected). However,
   the binding between a `user_id` and its public key is trust-on-first-use —
   there is no key directory, so a first contact from an unknown key is accepted.
-- LAN transport is unauthenticated at the network layer; trust the network you
-  run on.
+- LAN discovery does not provide a central identity directory. Verify a contact's
+  safety number through a trusted channel before relying on that identity; the
+  authenticated Noise connection protects subsequent transport.
 
 Please mention any of these in a report only if you have a concrete exploit
 beyond the documented limitation.
 
 ## Security tooling (CI)
 
-Every push runs, and these are visible as README badges / the repo Security tab:
+The normal CI checks run on pushes; scheduled or manual jobs cover the slower checks:
 
 - **SAST**: CodeQL (code scanning) + `cargo clippy -D warnings`.
 - **Secrets**: gitleaks (history + diff).
 - **Dependencies**: `cargo-deny` (advisories/licenses/bans/sources), `cargo-audit`
   (RUSTSEC), `cargo-machete` (unused), Dependabot, and a PR **Dependency Review** gate.
-- **Fuzzing**: `cargo-fuzz` targets over every untrusted wire decoder (weekly + on demand),
-  with an always-on `decoder_smoke` test as the fast gate.
+- **Fuzzing**: `cargo-fuzz` targets over selected public wire and opened-payload decoders
+  (weekly + on demand), with an always-on `decoder_smoke` test as the fast gate.
 - **Mutation testing**: `cargo-mutants` (weekly + on PR diff) to catch weak tests.
 - **Coverage**: `cargo-llvm-cov` → Codecov.
 - **Posture score**: OpenSSF **Scorecard** (weekly), published to the badge above.

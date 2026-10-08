@@ -128,6 +128,8 @@ export function MessageBubble({
   m,
   parent,
   showAuthor,
+  grouped,
+  showTime,
   isChannel,
   authorAvatarId,
   authorName,
@@ -146,6 +148,10 @@ export function MessageBubble({
   m: ChatMessage;
   parent: ChatMessage | null;
   showAuthor: boolean;
+  /** Adjacent message from the same person within a short interval. */
+  grouped?: boolean;
+  /** The final message in a group carries the visible time. */
+  showTime?: boolean;
   /** Channel conversations show per-message author avatar + name; DMs don't. */
   isChannel: boolean;
   /** The author's ACCOUNT id (resolved from the roster) for avatar lookup; defaults to
@@ -251,7 +257,7 @@ export function MessageBubble({
               onSelect={() => onDelete(m)}
             >
               <Trash2 className="h-3.5 w-3.5 opacity-70" />
-              {t("message.delete")}
+              {t("message.deleteLocalAction")}
             </ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
@@ -280,7 +286,8 @@ export function MessageBubble({
       animate="visible"
       variants={fadeSlideUp}
       className={cn(
-        "group flex gap-2.5 px-4 py-0.5",
+        "group flex gap-2.5 px-4",
+        grouped ? "py-0.5" : "pt-2.5 pb-0.5",
         mine && "flex-row-reverse",
       )}
     >
@@ -349,25 +356,25 @@ export function MessageBubble({
                 // custom menu open here (see main.tsx).
                 data-context-menu=""
                 className={cn(
-                  "min-w-0 text-sm transition-shadow",
+                  "min-w-0 text-[14px] leading-[1.55]",
                   // Stickers float without a bubble; everything else gets the chat bubble.
                   isSticker
                     ? ""
                     : cn(
-                        "rounded-xl px-3.5 py-2",
+                        "rounded-lg px-3 py-2",
                         mine
                           ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
                           : "rounded-bl-sm border border-border bg-muted text-foreground",
                       ),
-                  mentioned && "border-l-2 border-signal",
-                  m.pending && "opacity-60",
+                  mentioned && "ring-1 ring-inset ring-signal/65",
+                  m.pending && "opacity-75",
                 )}
               >
                 {parent && (
                   <div
                     data-testid="message-parent-snippet"
                     className={cn(
-                      "mb-1 flex items-center gap-1 rounded-md border-l-2 px-2 py-1 text-xs",
+                      "mb-1 flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
                       mine
                         ? "border-primary-foreground/40 bg-primary-foreground/10"
                         : "border-signal/50 bg-muted/50",
@@ -454,7 +461,7 @@ export function MessageBubble({
                 onSelect={() => onDelete(m)}
               >
                 <Trash2 className="h-3.5 w-3.5 opacity-70" />
-                {t("message.delete")}
+                {t("message.deleteLocalAction")}
               </ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>
@@ -504,7 +511,7 @@ export function MessageBubble({
           </div>
         )}
 
-        <DeliveryFooter message={m} isChannel={isChannel} />
+        <DeliveryFooter message={m} isChannel={isChannel} showTime={showTime} />
 
         {m.failed && (
           <span
@@ -555,7 +562,7 @@ function Actions({
         }
       }}
       style={focused ? { opacity: 1 } : undefined}
-      className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+      className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100"
     >
       <button
         onClick={onReply}
@@ -563,7 +570,7 @@ function Actions({
         data-testid="message-reply"
         title={t("message.reply")}
         aria-label={t("message.reply")}
-        className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30"
+        className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
       >
         <CornerUpLeft className="h-3.5 w-3.5" />
       </button>
@@ -574,7 +581,7 @@ function Actions({
             data-testid="message-react"
             title={t("message.react")}
             aria-label={t("message.react")}
-            className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30"
+            className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30 [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
           >
             <SmilePlus className="h-3.5 w-3.5" />
           </button>

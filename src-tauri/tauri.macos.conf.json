@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "icon": ["icons/tray-template.png", "icons/icon.icns", "icons/icon.ico"]
+  }
+}

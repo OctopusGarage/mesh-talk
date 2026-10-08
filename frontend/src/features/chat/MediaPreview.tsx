@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Download, Play, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -6,6 +7,7 @@ import { chat } from "@/lib/api";
 import { defaultSavePath } from "@/lib/download";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
+import { ease, useMotionOK } from "@/lib/motion";
 import { useChat, captureChatOwnership } from "@/store/chat";
 import {
   blobMime,
@@ -37,11 +39,20 @@ export function MediaPreview({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
+  const motionOK = useMotionOK();
   const setError = useChat((s) => s.setError);
   const video = isVideo(name);
   const withinCap = withinInlineCap(name, size);
   const url = useFileObjectUrl(fileConv, withinCap, blobMime(name, mime));
   const [lightbox, setLightbox] = useState(false);
+  const playerRef = useRef<HTMLVideoElement>(null);
+  const closeLightbox = () => {
+    playerRef.current?.pause();
+    setLightbox(false);
+  };
+  const layoutId = motionOK ? `media-${fileConv}` : undefined;
+  const layoutTransition = { duration: 0.22, ease };
+  const backdropTransition = { duration: motionOK ? 0.16 : 0.08, ease };
   // An inline image whose codec the webview can't decode (e.g. HEIC outside Safari) fires
   // <img onError>; we then degrade to the same "can't preview — Save" card as video.
   const [imgFailed, setImgFailed] = useState(false);
@@ -180,38 +191,57 @@ export function MediaPreview({
           aria-label={t("files.playVideo")}
           className="relative mb-1.5 block w-full"
         >
-          {thumb}
-          {playBadge}
-        </button>
-        {lightbox && (
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label={name}
-            data-testid="file-video-lightbox"
-            onClick={() => setLightbox(false)}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
+          <motion.div
+            layoutId={layoutId}
+            transition={layoutTransition}
+            className="relative"
           >
-            <button
-              type="button"
-              aria-label={t("common.close")}
-              className="absolute right-4 top-4 rounded-full bg-background/80 p-2 text-foreground hover:bg-background"
+            {thumb}
+            {playBadge}
+          </motion.div>
+        </button>
+        <AnimatePresence>
+          {lightbox && (
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-label={name}
+              data-testid="file-video-lightbox"
+              onClick={closeLightbox}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, pointerEvents: "none" }}
+              transition={backdropTransition}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
             >
-              <X className="h-4 w-4" />
-            </button>
-            {/* Stop clicks on the player from closing the lightbox (so controls work). */}
-            <video
-              src={url}
-              controls
-              autoPlay
-              playsInline
-              data-testid="file-video-player"
-              onClick={(e) => e.stopPropagation()}
-              className="max-h-full max-w-full rounded-lg bg-black"
-            />
-            {detailBar}
-          </div>
-        )}
+              <button
+                type="button"
+                aria-label={t("common.close")}
+                className="absolute right-4 top-4 rounded-full bg-background/80 p-2 text-foreground hover:bg-background"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              {/* Stop clicks on the player from closing the lightbox (so controls work). */}
+              <motion.div
+                layoutId={layoutId}
+                transition={layoutTransition}
+                className="flex max-h-full max-w-full items-center justify-center"
+              >
+                <video
+                  ref={playerRef}
+                  src={url}
+                  controls
+                  autoPlay
+                  playsInline
+                  data-testid="file-video-player"
+                  onClick={(e) => e.stopPropagation()}
+                  className="max-h-full max-w-full rounded-lg bg-black"
+                />
+              </motion.div>
+              {detailBar}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </>
     );
   }
@@ -238,40 +268,50 @@ export function MediaPreview({
         aria-label={t("files.viewFullSize")}
         className="mb-1.5 block w-full"
       >
-        <img
+        <motion.img
           src={url}
           alt={name}
+          layoutId={layoutId}
+          transition={layoutTransition}
           data-testid="file-image"
           onError={() => setImgFailed(true)}
           className="max-h-80 w-full rounded-lg object-cover"
         />
       </button>
-      {lightbox && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={name}
-          data-testid="file-image-lightbox"
-          onClick={() => setLightbox(false)}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
-        >
-          <button
-            type="button"
-            aria-label={t("common.close")}
-            className="absolute right-4 top-4 rounded-full bg-background/80 p-2 text-foreground hover:bg-background"
+      <AnimatePresence>
+        {lightbox && (
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label={name}
+            data-testid="file-image-lightbox"
+            onClick={closeLightbox}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, pointerEvents: "none" }}
+            transition={backdropTransition}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6"
           >
-            <X className="h-4 w-4" />
-          </button>
-          {/* Stop clicks on the photo from closing the lightbox (matches the video player). */}
-          <img
-            src={url}
-            alt={name}
-            onClick={(e) => e.stopPropagation()}
-            className="max-h-full max-w-full rounded-lg object-contain"
-          />
-          {detailBar}
-        </div>
-      )}
+            <button
+              type="button"
+              aria-label={t("common.close")}
+              className="absolute right-4 top-4 rounded-full bg-background/80 p-2 text-foreground hover:bg-background"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            {/* Stop clicks on the photo from closing the lightbox (matches the video player). */}
+            <motion.img
+              src={url}
+              alt={name}
+              layoutId={layoutId}
+              transition={layoutTransition}
+              onClick={(e) => e.stopPropagation()}
+              className="max-h-full max-w-full rounded-lg object-contain"
+            />
+            {detailBar}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
   );
 }

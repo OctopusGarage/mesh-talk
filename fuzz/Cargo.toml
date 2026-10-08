@@ -94,3 +94,31 @@ path = "fuzz_targets/file_manifest_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "recall_envelope_decode"
+path = "fuzz_targets/recall_envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "profile_payload_decode"
+path = "fuzz_targets/profile_payload_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pairing_decode"
+path = "fuzz_targets/pairing_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "call_signal_decode"
+path = "fuzz_targets/call_signal_decode.rs"
+test = false
+doc = false
+bench = false

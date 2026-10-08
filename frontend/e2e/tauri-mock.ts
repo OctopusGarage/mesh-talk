@@ -1,4 +1,8 @@
 import { test as base, expect } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import v8ToIstanbul from "v8-to-istanbul";
 
 /**
  * Headless E2E runs the React frontend in plain Chromium — there is no Tauri runtime, so
@@ -21,6 +25,9 @@ import { test as base, expect } from "@playwright/test";
 export const test = base.extend({
   page: async ({ page }, provide) => {
     await page.addInitScript(() => {
+      // E2E-only fixture switch. The URL keeps each adversarial state reloadable without
+      // adding test controls to the product UI: ?data=worst|huge|peers-huge|members-huge|empty|offline.
+      const dataMode = new URLSearchParams(window.location.search).get("data");
       // --- Identity ---------------------------------------------------------
       const SELF = { device: "device_self_0001", account: "acc_self_aaaa1111" };
 
@@ -62,6 +69,11 @@ export const test = base.extend({
         },
       ];
 
+      (window as unknown as Record<string, unknown>).__mockRotateBobDevice =
+        () => {
+          peers[0].user_id = "device_bob_rotated_9999";
+        };
+
       const accounts = [
         {
           account_id: BOB.account_id,
@@ -97,6 +109,110 @@ export const test = base.extend({
         { user_id: BOB.device_id, name: BOB.name },
         { user_id: CAROL.device_id, name: CAROL.name },
       ];
+
+      if (dataMode === "worst" || dataMode === "huge") {
+        const longName = "Aleksandra Wiśniewska-Kowalczyk (Laboratory)";
+        BOB.name = longName;
+        accounts[0].names = [longName];
+        channelMembers[1].name = longName;
+        peers[0].name =
+          "Aleksandra's development workstation in the shared infrastructure laboratory — " +
+          "secondary device used for network diagnostics and release testing";
+        CHANNEL.name =
+          "Regional infrastructure and security coordination — 東京";
+        channels[0].name = CHANNEL.name;
+
+        const names = [
+          "Đặng Thị Ngọc Hân",
+          "王秀英",
+          "👩🏽‍💻 Priya",
+          "نور الهدى عبد الرحمن",
+          "Jo",
+          "Seán O'Brien-Ó Súilleabháin",
+          "Christopher Alexander Montgomery III",
+          "", // A known account whose announced name is unavailable.
+        ];
+        names.forEach((name, i) => {
+          const account_id = `acc_stress_${i}`;
+          const user_id = `device_stress_${i}`;
+          accounts.push({
+            account_id,
+            device_count: i === 0 ? 1284 : 1,
+            names: name ? [name] : [],
+          });
+          peers.push({
+            user_id,
+            name,
+            addr: `192.168.1.${40 + i}:47100`,
+            post_office: false,
+            account_id,
+          });
+        });
+      }
+
+      if (dataMode === "huge" || dataMode === "pinned-huge") {
+        for (let i = 0; i < 1000; i++) {
+          const account_id = `acc_bulk_${i}`;
+          accounts.push({
+            account_id,
+            device_count: 1,
+            names: [`Colleague ${String(i + 1).padStart(4, "0")}`],
+          });
+        }
+      }
+
+      if (dataMode === "peers-huge") {
+        for (let i = 0; i < 1000; i++) {
+          const account_id = `acc_peer_bulk_${i}`;
+          accounts.push({
+            account_id,
+            device_count: 1,
+            names: [`Colleague ${String(i + 1).padStart(4, "0")}`],
+          });
+          peers.push({
+            user_id: `device_peer_bulk_${i}`,
+            name: `Colleague ${String(i + 1).padStart(4, "0")}`,
+            addr: `10.0.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
+            post_office: false,
+            account_id,
+          });
+        }
+      }
+
+      if (dataMode === "members-huge") {
+        for (let i = 0; i < 1000; i++) {
+          const account_id = `acc_member_bulk_${i}`;
+          const user_id = `device_member_bulk_${i}`;
+          const name = `Colleague ${String(i + 1).padStart(4, "0")}`;
+          channelMembers.push({ user_id, name });
+          peers.push({
+            user_id,
+            name,
+            addr: `10.1.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
+            post_office: false,
+            account_id,
+          });
+        }
+      }
+
+      if (dataMode === "channels-huge") {
+        for (let i = 0; i < 1000; i++) {
+          channels.push({
+            channel_id: `chan_bulk_${i}`,
+            name: `Channel ${String(i + 1).padStart(4, "0")}`,
+            member_count: 2,
+          });
+        }
+      }
+
+      if (dataMode === "empty") {
+        peers.length = 0;
+        accounts.length = 0;
+        channels.length = 0;
+        channelMembers.length = 0;
+      } else if (dataMode === "offline") {
+        peers.length = 0;
+      }
 
       // --- Messages (in-memory, per conversation) ---------------------------
       const BASE = 1_700_000_000_000;
@@ -144,6 +260,27 @@ export const test = base.extend({
           msg({ who: BOB.device_id, text: "channel kickoff" }),
         ],
       };
+
+      if (dataMode === "worst" || dataMode === "huge") {
+        const samples = [
+          "Release notes: " +
+            "Network diagnostics and recovery details. ".repeat(55),
+          "https://example.com/workspaces/acme/projects/q3-launch/docs/9f8e7d6c5b4a?tab=comments&filter=unresolved",
+          "👩🏽‍💻 🦊 🫱🏽‍🫲🏻 🚀 家族とチームの予定を確認してください",
+          "Đặng Thị Ngọc Hân — Cập nhật trạng thái kết nối",
+          "Line one\nLine two\n────────────────────────────────────────────────────────────────────",
+          "<script>alert(1)</script> &amp; **bold**",
+        ];
+        for (let i = 0; i < 500; i++) {
+          msgs[`acc:${BOB.account_id}`].push(
+            msg({
+              from_me: i % 3 === 0,
+              who: i % 3 === 0 ? SELF.device : BOB.device_id,
+              text: samples[i % samples.length],
+            }),
+          );
+        }
+      }
 
       // Reactions, keyed the same way; each: { target, emoji, who[] }.
       const reacts: Record<
@@ -232,6 +369,12 @@ export const test = base.extend({
         string,
         { id: string; pinned: boolean; custom_alias: string | null }
       > = {};
+      if (dataMode === "pinned-huge") {
+        for (let i = 0; i < 1000; i++) {
+          const id = `acc_bulk_${i}`;
+          favorites[id] = { id, pinned: true, custom_alias: null };
+        }
+      }
 
       // --- Custom avatars (id -> data-URL) ----------------------------------
       const avatars: Record<string, string> = {};
@@ -251,6 +394,8 @@ export const test = base.extend({
         stay_signed_in: true,
         last_user: null as string | null,
         retention_days: 0,
+        calls_enabled: false,
+        ringtone: "classic",
       };
 
       // --- Presence (account DM + channel) ----------------------------------
@@ -291,6 +436,11 @@ export const test = base.extend({
         multicast_group: "239.255.42.99",
         interfaces: ["192.168.1.10"],
       };
+      (
+        window as unknown as Record<string, unknown>
+      ).__mockSetNetworkInterfaces = (interfaces: string[]) => {
+        networkInfo.interfaces = interfaces;
+      };
 
       const envInfo = {
         app_version: "0.1.0",
@@ -304,10 +454,13 @@ export const test = base.extend({
 
       const ok = () => null;
       let failNextCommand: string | null = null;
+      let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
         command: string,
+        message = "network unreachable",
       ) => {
         failNextCommand = command;
+        failNextMessage = message;
       };
 
       // --- Event listener registry (for __mockEmit) -------------------------
@@ -410,7 +563,7 @@ export const test = base.extend({
           account_id: () => SELF.account,
 
           // roster
-          list_peers: () => peers,
+          list_peers: () => peers.map((peer) => ({ ...peer })),
           list_accounts: () => accounts,
           list_channels: () => channels,
           // The test user (SELF) is the channel owner, so the member-management controls
@@ -497,7 +650,7 @@ export const test = base.extend({
             account_id: String(a.accountId),
             first_seen_fingerprint: String(a.currentFingerprint),
             verified: verifiedAccounts.has(String(a.accountId)),
-            fingerprint_changed: false,
+            fingerprint_changed: dataMode === "changed",
             known: true,
           }),
           mark_verified: (a) => {
@@ -739,7 +892,7 @@ export const test = base.extend({
           async invoke(cmd: string, args: Record<string, unknown>) {
             if (cmd === failNextCommand) {
               failNextCommand = null;
-              throw new Error("network unreachable");
+              throw new Error(failNextMessage);
             }
             // Tauri event plugin: register the JS callback against the event name so
             // __mockEmit can deliver a payload to it (mirrors `listen`).
@@ -779,7 +932,42 @@ export const test = base.extend({
         configurable: true,
       });
     });
-    await provide(page);
+    const collectCoverage = process.env.MESH_TALK_E2E_COVERAGE === "1";
+    if (collectCoverage)
+      await page.coverage.startJSCoverage({ resetOnNavigation: false });
+    try {
+      await provide(page);
+    } finally {
+      if (collectCoverage) {
+        const files: Record<string, number[]> = {};
+        for (const entry of await page.coverage.stopJSCoverage()) {
+          if (!entry.source || !/\/src\/[^?]+\.tsx?(?:\?|$)/.test(entry.url))
+            continue;
+          const converter = v8ToIstanbul(entry.url, 0, {
+            source: entry.source,
+          });
+          await converter.load();
+          converter.applyCoverage(entry.functions);
+          for (const [url, coverage] of Object.entries(
+            converter.toIstanbul(),
+          )) {
+            const lines = new Set(files[url] ?? []);
+            for (const [id, statement] of Object.entries(
+              coverage.statementMap,
+            )) {
+              if (coverage.s[id] > 0) lines.add(statement.start.line);
+            }
+            files[url] = [...lines];
+          }
+        }
+        const directory = resolve("coverage/e2e-parts");
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          resolve(directory, `${randomUUID()}.json`),
+          JSON.stringify(files),
+        );
+      }
+    }
   },
 });
 

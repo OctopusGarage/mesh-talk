@@ -57,9 +57,14 @@
     "starting": "啟動中…",
     "copy": "複製",
     "copied": "已複製",
+    "copyFailed": "無法複製。請檢查剪貼簿權限後再試。",
     "clear": "清除",
     "close": "關閉",
     "dismiss": "忽略"
+  },
+  "windowControls": {
+    "minimize": "最小化",
+    "maximize": "最大化"
   },
   "avatar": {
     "set": "設定頭像…",
@@ -81,7 +86,7 @@
       "confirm": "設定頭像",
       "zoomLabel": "縮放",
       "previewLabel": "預覽",
-      "viewportLabel": "拖曳以調整頭像位置"
+      "viewportLabel": "拖曳或使用方向鍵調整照片位置。按住 Shift 鍵可加快移動"
     }
   },
   "login": {
@@ -97,11 +102,13 @@
     "accountCreated": "帳號已建立——現在可以登入了。",
     "staySignedIn": "保持登入",
     "resuming": "正在恢復你的工作階段…",
-    "footer": "你的金鑰永遠不會離開本裝置。對方會透過區域網路探索。"
+    "footer": "你的金鑰永遠不會離開本裝置。對方會透過區域網路探索。",
+    "signingIn": "正在登入…",
+    "creatingIdentity": "正在建立身分…"
   },
   "sidebar": {
     "you": "你 · {{id}}",
-    "nodeUnavailable": "節點無法使用——重試",
+    "nodeUnavailable": "節點無法使用",
     "directMessages": "私訊",
     "channels": "頻道",
     "noContacts": "尚未探索到聯絡人…",
@@ -137,6 +144,8 @@
     "noneSelectedDesc": "選擇一位聯絡人或頻道開始聊天。",
     "unlockingTitle": "正在解鎖你的加密儲存空間…",
     "unlockingDesc": "正在解密金鑰並啟動對方探索。",
+    "startFailedTitle": "Mesh-Talk 無法啟動",
+    "startFailedDesc": "本機節點未能啟動。請查看日誌瞭解原因，解決問題後重新啟動應用程式。",
     "channel": "頻道",
     "members_one": "{{count}} 位成員",
     "members_other": "{{count}} 位成員",
@@ -181,7 +190,9 @@
       "crypto": "傳送失敗——加密錯誤",
       "unknown": "傳送失敗"
     },
-    "delete": "刪除",
+    "deleteLocalAction": "從此裝置刪除",
+    "deleteLocalTitle": "刪除這則訊息？",
+    "deleteLocalDescription": "訊息只會從此裝置刪除。其他參與者仍保留各自的副本，而且無法復原。",
     "recall": "收回",
     "recalledByYou": "你收回了一則訊息",
     "recalledBy": "{{name}} 收回了一則訊息",
@@ -198,6 +209,7 @@
     "replyingTo": "正在回覆",
     "message": "訊息",
     "send": "傳送",
+    "notQueued": "訊息未加入傳送佇列。請檢查連線或待傳送訊息後重試。",
     "attach": "附加檔案",
     "image": "傳送圖片",
     "emoji": "表情符號",
@@ -217,7 +229,7 @@
   },
   "settings": {
     "title": "設定",
-    "description": "管理隱私、外觀、背景行為、檔案及聊天記錄。",
+    "description": "管理隱私、外觀、訊息、檔案和應用程式行為。",
     "scrollMore": "捲動查看更多設定",
     "sectionAppearance": "外觀",
     "sectionBackground": "背景",
@@ -241,7 +253,7 @@
     "theme_barcelona": "巴塞隆納",
     "theme_messi": "梅西",
     "downloadFolder": "下載資料夾",
-    "downloadFolderDesc": "接收檔案的儲存位置。留空則每次詢問。",
+    "downloadFolderDesc": "除非你選擇其他資料夾，否則附件會儲存在系統的下載資料夾中。",
     "downloadFolderSet": "接收的檔案會自動儲存到此處。",
     "chooseFolder": "選擇資料夾",
     "changeFolder": "變更",
@@ -255,13 +267,17 @@
     "callsDesc": "啟用 1:1 語音和視訊通話。實驗性：僅限區域網路，可能不穩定。",
     "ringtone": "鈴聲",
     "ringtoneDesc": "來電時的提示音。選擇即可試聽。",
-    "ringtonePreview": "試聽"
+    "ringtonePreview": "試聽",
+    "loadFailed": "無法載入設定：{{error}}",
+    "saveFailed": "無法儲存變更：{{error}}"
   },
   "search": {
     "title": "搜尋訊息",
     "placeholder": "在所有對話中搜尋…",
     "searching": "搜尋中…",
     "noMatches": "沒有符合的項目。",
+    "failed": "搜尋未能完成，請重試。",
+    "outsideRecent": "這項結果不在最近的訊息中。請開啟上方的聊天記錄尋找。",
     "empty": "輸入關鍵字以搜尋你的對話。"
   },
   "history": {
@@ -295,7 +311,12 @@
     "sentFile": "傳送了檔案：{{name}}",
     "videoUnsupported": "此影片無法在此預覽,請用「儲存」在你的播放器中開啟。",
     "playVideo": "播放影片",
-    "imageUnsupported": "此圖片無法在此預覽,請用「儲存」開啟。"
+    "imageUnsupported": "此圖片無法在此預覽,請用「儲存」開啟。",
+    "description": "在對話中與你分享的附件。",
+    "searchPlaceholder": "搜尋檔案或寄件者…",
+    "noMatches": "沒有符合的檔案。",
+    "folderUnknown": "無法取得資料夾",
+    "folderLoadFailed": "無法載入下載資料夾：{{error}}"
   },
   "linkDevice": {
     "trigger": "連結裝置",
@@ -308,6 +329,7 @@
     "enterCodeHint": "在你的另一台裝置上輸入下方的配對碼。",
     "haveCode": "已有來自另一台裝置的配對碼？",
     "pickDevice": "選擇裝置…",
+    "device": "裝置",
     "pairingCode": "配對碼",
     "linked": "已連結！本裝置現在共用該帳號。",
     "linkFailed": "連結失敗：{{error}}",
@@ -415,14 +437,19 @@
     "macosFirewall": "系統設定 → 網路 → 防火牆：允許 Mesh-Talk 接收傳入連線，或在受信任的區域網路中關閉防火牆。",
     "rescan": "立即宣告",
     "rescanned": "已宣告",
-    "rescanHint": "立即重新宣告本裝置並重新掃描區域網路。"
+    "rescanHint": "立即重新宣告本裝置並重新掃描區域網路。",
+    "loading": "正在載入連線資訊…",
+    "networkLoadFailed": "無法載入網路資訊：{{error}}",
+    "environmentLoadFailed": "無法載入環境資訊：{{error}}",
+    "peersLoadFailed": "無法重新整理節點：{{error}}",
+    "actionFailed": "操作失敗：{{error}}"
   },
   "verify": {
     "trigger": "驗證安全碼",
     "title": "驗證聯絡人",
-    "verified": "已驗證",
+    "verified": "安全號碼已驗證",
     "description": "透過可信任的管道（當面、電話）與 {{name}} 核對此安全碼。若一致，則中間沒有第三方。",
-    "verifiedBanner": "你已驗證 {{name}}。本對話已端對端安全加密。",
+    "verifiedBanner": "你已驗證 {{name}} 目前的安全號碼。",
     "prompt": "透過可信任的管道與此聯絡人核對下方的安全碼，核對一致後將其標記為已驗證。",
     "changedTitle": "此聯絡人的安全碼已變更。",
     "changedDesc": "對方的裝置指紋與你首次看到的不同。這通常發生在他們新增或更換裝置時——但也可能是冒充者。請在信任之前重新驗證。",
@@ -445,7 +472,8 @@
     "description": "建立群組對話並邀請已探索的對方。",
     "namePlaceholder": "頻道名稱",
     "invite": "邀請對方",
-    "noPeers": "目前沒有可邀請的對方。"
+    "noPeers": "目前沒有可邀請的對方。",
+    "failed": "無法建立頻道：{{error}}。請再試一次。"
   },
   "about": {
     "title": "關於",
@@ -485,5 +513,46 @@
     "description": "重新載入應用程式以繼續。訊息儲存在本機。",
     "reload": "重新載入",
     "details": "技術詳情"
+  },
+  "redesign": {
+    "ready": "此裝置已就緒",
+    "tools": "工具",
+    "addTools": "更多傳送方式",
+    "connectionReady": "已準備好尋找聯絡人",
+    "connectionStarting": "正在啟動連線",
+    "noPeersTitle": "正在尋找附近的人",
+    "noPeersBody": "Mesh-Talk 會尋找同一區域網路中的人。請保持兩部裝置開啟並連接到同一網路。",
+    "connectionHelp": "連線說明",
+    "connectToSomeone": "與其他人連線",
+    "connectIntro": "Mesh-Talk 會尋找同一本地網路上的其他人。兩台裝置都需要保持開啟並連上網路。",
+    "sameNetworkTitle": "連上同一網路",
+    "sameNetworkBody": "將兩台裝置連上同一 Wi-Fi 或有線網路，然後立即廣播此裝置以互相尋找。",
+    "announceFeedback": "此裝置已廣播。請在兩台裝置上保持 Mesh-Talk 開啟，等待互相找到。",
+    "noSharedNetwork": "沒有共用網路？",
+    "emptyConversation": "傳送訊息以開始對話。",
+    "settingsNav": "設定分類",
+    "firstRun": "第一次使用？在此裝置建立身分，然後尋找區域網路中的人。",
+    "createIdentity": "建立身分",
+    "discoveryHint": "此裝置保留自己的金鑰。Mesh-Talk 會在本機網路中尋找其他人。",
+    "loadingHistory": "正在載入對話記錄…",
+    "historyFailed": "無法載入對話記錄。",
+    "connection": "連線",
+    "noNetworkStatus": "未連接網路",
+    "actionFailed": "請檢查此操作",
+    "localIdentity": "你的身分",
+    "personalThemes": "個人化主題",
+    "wallpaper": "聊天背景圖片",
+    "wallpaperDesc": "在個人化主題中顯示訊息背景圖片。",
+    "loadingContacts": "正在載入對話…",
+    "returning": "登入以解鎖此裝置上的身分和對話。",
+    "searchingStatus": "正在搜尋此網路",
+    "slowStartup": "開啟加密儲存空間所需的時間比平常長。Mesh-Talk 繼續啟動時，你可以查看連線詳情。",
+    "openConnection": "開啟連線詳情",
+    "keyboardHint": "按 Enter 傳送 · 按 Shift+Enter 換行",
+    "appNotifications": "應用程式與通知",
+    "messagesFiles": "訊息與檔案",
+    "advanced": "進階設定",
+    "identityStep": "建立保存在此裝置上的身分。",
+    "discoveryStep": "登入後，尋找同一本機網路上的其他人。"
   }
 }

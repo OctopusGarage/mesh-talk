@@ -127,6 +127,13 @@ test("received media recovers when bytes become available with stable fileConv",
         },
       )
       .toBe(true);
+    await page.getByRole("button", { name: "View full size" }).click();
+    const lightbox = page.getByTestId("file-image-lightbox");
+    await expect(lightbox).toBeVisible();
+    await expect(lightbox.locator("img")).toBeVisible();
+    await lightbox.getByRole("button", { name: "Close" }).click();
+    await expect(lightbox).toHaveCount(0);
+    await expect(page.getByTestId("file-image")).toBeVisible();
   } finally {
     console.log(
       "MEDIA_DIAGNOSTIC",

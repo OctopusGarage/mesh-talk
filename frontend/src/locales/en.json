@@ -57,9 +57,14 @@
     "starting": "starting…",
     "copy": "Copy",
     "copied": "copied",
+    "copyFailed": "Couldn't copy. Check clipboard access and try again.",
     "clear": "Clear",
     "close": "Close",
     "dismiss": "Dismiss"
+  },
+  "windowControls": {
+    "minimize": "Minimize",
+    "maximize": "Maximize"
   },
   "avatar": {
     "set": "Set photo…",
@@ -81,7 +86,7 @@
       "confirm": "Set photo",
       "zoomLabel": "Zoom",
       "previewLabel": "Preview",
-      "viewportLabel": "Drag to reposition the photo"
+      "viewportLabel": "Drag to reposition the photo, or use the arrow keys. Hold Shift for larger steps"
     }
   },
   "login": {
@@ -97,11 +102,13 @@
     "accountCreated": "Account created — you can sign in now.",
     "staySignedIn": "Stay signed in",
     "resuming": "Resuming your session…",
-    "footer": "Your keys never leave this device. Peers are discovered on your LAN."
+    "footer": "Your keys never leave this device. Peers are discovered on your LAN.",
+    "signingIn": "Signing in…",
+    "creatingIdentity": "Creating identity…"
   },
   "sidebar": {
     "you": "you · {{id}}",
-    "nodeUnavailable": "node unavailable — retry",
+    "nodeUnavailable": "Node unavailable",
     "directMessages": "Direct messages",
     "channels": "Channels",
     "noContacts": "No contacts discovered yet…",
@@ -137,6 +144,8 @@
     "noneSelectedDesc": "Pick a contact or channel to start chatting.",
     "unlockingTitle": "Unlocking your encrypted stores…",
     "unlockingDesc": "Decrypting keys and starting peer discovery.",
+    "startFailedTitle": "Couldn’t start Mesh-Talk",
+    "startFailedDesc": "The local node did not become ready. Open the logs for details, then restart the app after resolving the issue.",
     "channel": "channel",
     "members_one": "{{count}} member",
     "members_other": "{{count}} members",
@@ -181,7 +190,9 @@
       "crypto": "Couldn't send — encryption error",
       "unknown": "Failed to send"
     },
-    "delete": "Delete",
+    "deleteLocalAction": "Delete on this device",
+    "deleteLocalTitle": "Delete this message?",
+    "deleteLocalDescription": "This removes the message from this device only. Other participants keep their copies, and you can't undo this action.",
     "recall": "Recall",
     "recalledByYou": "You recalled a message",
     "recalledBy": "{{name}} recalled a message",
@@ -198,6 +209,7 @@
     "replyingTo": "Replying to",
     "message": "message",
     "send": "Send",
+    "notQueued": "Message not queued. Check the connection or pending sends, then try again.",
     "attach": "Attach a file",
     "image": "Send a picture",
     "emoji": "Emoji",
@@ -217,7 +229,7 @@
   },
   "settings": {
     "title": "Settings",
-    "description": "Privacy, appearance, background behavior, files, and chat history.",
+    "description": "Manage privacy, appearance, messages, files, and app behavior.",
     "scrollMore": "Scroll for more settings",
     "sectionAppearance": "Appearance",
     "sectionBackground": "Background",
@@ -241,7 +253,7 @@
     "theme_barcelona": "Barcelona",
     "theme_messi": "Messi",
     "downloadFolder": "Download folder",
-    "downloadFolderDesc": "Where received files are saved. Leave unset to be asked each time.",
+    "downloadFolderDesc": "Attachments save to your system Downloads folder unless you choose another folder.",
     "downloadFolderSet": "Received files are saved here automatically.",
     "chooseFolder": "Choose folder",
     "changeFolder": "Change",
@@ -255,13 +267,17 @@
     "callsDesc": "Enable 1:1 voice and video calls. Experimental: LAN-only and may be unreliable.",
     "ringtone": "Ringtone",
     "ringtoneDesc": "The sound for incoming calls. Pick one to preview it.",
-    "ringtonePreview": "Preview"
+    "ringtonePreview": "Preview",
+    "loadFailed": "Couldn’t load settings: {{error}}",
+    "saveFailed": "Couldn’t save the change: {{error}}"
   },
   "search": {
     "title": "Search messages",
     "placeholder": "Search across all conversations…",
     "searching": "Searching…",
     "noMatches": "No matches.",
+    "failed": "Search could not finish. Try again.",
+    "outsideRecent": "This match is outside recent messages. Open Chat history above to find it.",
     "empty": "Type to search your conversations."
   },
   "history": {
@@ -295,7 +311,12 @@
     "sentFile": "Sent a file: {{name}}",
     "videoUnsupported": "This video can't be previewed here — use Save to open it in your player.",
     "playVideo": "Play video",
-    "imageUnsupported": "This image can't be previewed here — use Save to open it."
+    "imageUnsupported": "This image can't be previewed here — use Save to open it.",
+    "description": "Attachments shared with you in conversations.",
+    "searchPlaceholder": "Search files or senders…",
+    "noMatches": "No matching files.",
+    "folderUnknown": "Folder unavailable",
+    "folderLoadFailed": "Couldn’t load the download folder: {{error}}"
   },
   "linkDevice": {
     "trigger": "Link a device",
@@ -308,6 +329,7 @@
     "enterCodeHint": "Enter this code on your other device, below.",
     "haveCode": "Have a code from your other device?",
     "pickDevice": "Pick the device…",
+    "device": "Device",
     "pairingCode": "pairing code",
     "linked": "Linked! This device now shares that account.",
     "linkFailed": "Link failed: {{error}}",
@@ -415,14 +437,19 @@
     "macosFirewall": "System Settings → Network → Firewall: allow incoming connections for Mesh-Talk, or turn the firewall off on a trusted LAN.",
     "rescan": "Announce now",
     "rescanned": "Announced",
-    "rescanHint": "Re-announce this device and rescan the LAN immediately."
+    "rescanHint": "Re-announce this device and rescan the LAN immediately.",
+    "loading": "Loading connection details…",
+    "networkLoadFailed": "Couldn’t load network details: {{error}}",
+    "environmentLoadFailed": "Couldn’t load environment details: {{error}}",
+    "peersLoadFailed": "Couldn’t refresh peers: {{error}}",
+    "actionFailed": "Action failed: {{error}}"
   },
   "verify": {
     "trigger": "Verify safety number",
     "title": "Verify contact",
-    "verified": "Verified",
+    "verified": "Safety number verified",
     "description": "Compare this safety number with {{name}} over a trusted channel (in person, a phone call). If it matches, there is no one in the middle.",
-    "verifiedBanner": "You verified {{name}}. This conversation is end-to-end secure.",
+    "verifiedBanner": "You verified the current safety number for {{name}}.",
     "prompt": "Compare the safety number below with this contact over a trusted channel, then mark them verified.",
     "changedTitle": "This contact's safety number changed.",
     "changedDesc": "Their device fingerprint differs from what you first saw. This happens when they add or replace a device — but it can also be an impostor. Re-verify before trusting it.",
@@ -445,7 +472,8 @@
     "description": "Create a group conversation and invite discovered peers.",
     "namePlaceholder": "Channel name",
     "invite": "Invite peers",
-    "noPeers": "No peers to invite yet."
+    "noPeers": "No peers to invite yet.",
+    "failed": "Couldn't create the channel: {{error}}. Try again."
   },
   "about": {
     "title": "About",
@@ -485,5 +513,46 @@
     "description": "Reload the app to continue. Your messages are stored locally.",
     "reload": "Reload",
     "details": "Technical details"
+  },
+  "redesign": {
+    "ready": "Ready on this device",
+    "tools": "Tools",
+    "addTools": "More ways to send",
+    "connectionReady": "Ready to find people",
+    "connectionStarting": "Starting connection",
+    "noPeersTitle": "Looking for people nearby",
+    "noPeersBody": "Mesh-Talk looks for people on the same local network. Keep both devices open and on that network.",
+    "connectionHelp": "Connection help",
+    "connectToSomeone": "Connect to someone",
+    "connectIntro": "Mesh-Talk discovers people on a shared local network. Both devices need to be open and connected.",
+    "sameNetworkTitle": "On the same network",
+    "sameNetworkBody": "Connect both devices to the same Wi-Fi or wired network, then announce this device to look for each other now.",
+    "announceFeedback": "This device announced itself. Keep Mesh-Talk open on both devices while they discover each other.",
+    "noSharedNetwork": "No shared network?",
+    "emptyConversation": "Start the conversation with a message.",
+    "settingsNav": "Settings categories",
+    "firstRun": "New here? Create an identity on this device, then find people on your local network.",
+    "createIdentity": "Create identity",
+    "discoveryHint": "This device keeps its own keys. Mesh-Talk finds people on your local network.",
+    "loadingHistory": "Loading conversation history…",
+    "historyFailed": "Conversation history could not load.",
+    "connection": "Connection",
+    "noNetworkStatus": "No network connection",
+    "actionFailed": "Action needs attention",
+    "localIdentity": "Your identity",
+    "personalThemes": "Personal themes",
+    "wallpaper": "Conversation wallpaper",
+    "wallpaperDesc": "Show the image behind messages in personal themes.",
+    "loadingContacts": "Loading conversations…",
+    "returning": "Sign in to unlock this device’s identity and conversations.",
+    "searchingStatus": "Searching this network",
+    "slowStartup": "Opening encrypted stores is taking longer than usual. You can check connection details while Mesh-Talk continues starting.",
+    "openConnection": "Open connection details",
+    "keyboardHint": "Enter to send · Shift+Enter for a new line",
+    "appNotifications": "App & notifications",
+    "messagesFiles": "Messages & files",
+    "advanced": "Advanced",
+    "identityStep": "Create an identity that stays on this device.",
+    "discoveryStep": "Sign in, then find people on the same local network."
   }
 }

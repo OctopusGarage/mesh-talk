@@ -12,10 +12,11 @@ const ContextMenuContent = React.forwardRef<
   <ContextMenuPrimitive.Portal>
     <ContextMenuPrimitive.Content
       ref={ref}
+      collisionPadding={8}
       // Tag the portalled menu so the global prod contextmenu-disable can skip it.
       data-context-menu=""
       className={cn(
-        "z-50 min-w-[9rem] overflow-hidden rounded-xl border bg-popover p-1 text-popover-foreground shadow-elevation outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+        "z-50 min-w-[9rem] overflow-hidden rounded-lg border bg-popover p-1 text-popover-foreground shadow-elevation outline-none",
         className,
       )}
       {...props}
@@ -31,7 +32,7 @@ const ContextMenuItem = React.forwardRef<
   <ContextMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-40",
+      "relative flex cursor-default select-none items-center gap-2 rounded-md px-2.5 py-2 text-[13px] outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-40",
       className,
     )}
     {...props}

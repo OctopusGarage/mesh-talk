@@ -24,6 +24,7 @@ export default {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
+        "destructive-fill": "hsl(var(--destructive-fill))",
         muted: {
           DEFAULT: "hsl(var(--muted))",
           foreground: "hsl(var(--muted-foreground))",
@@ -42,6 +43,7 @@ export default {
         },
         // Signature accents — `bg-signal`, `text-verified`, `text-mention`.
         signal: "hsl(var(--signal))",
+        attention: "hsl(var(--attention))",
         verified: "hsl(var(--verified))",
         mention: "hsl(var(--mention))",
         // Own chat bubble — a softer teal than the raw signal accent (kinder on the eyes
@@ -50,20 +52,27 @@ export default {
       },
       fontFamily: {
         display: [
-          "'Space Grotesk Variable'",
-          "ui-sans-serif",
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "'Segoe UI Variable'",
           "system-ui",
           "sans-serif",
         ],
-        sans: ["'Inter Variable'", "system-ui", "sans-serif"],
-        mono: ["'Geist Mono Variable'", "ui-monospace", "monospace"],
+        sans: [
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "'Segoe UI Variable'",
+          "system-ui",
+          "sans-serif",
+        ],
+        mono: ["'SFMono-Regular'", "Consolas", "ui-monospace", "monospace"],
       },
       boxShadow: {
-        // Soft elevation for cards / sheets / popovers under the ink palette.
+        // Desktop surfaces lift only when they float above the conversation.
         elevation:
-          "0 1px 2px hsl(220 40% 2% / 0.18), 0 8px 24px -8px hsl(220 40% 2% / 0.28)",
+          "0 4px 16px -6px hsl(190 32% 2% / 0.34), 0 1px 3px hsl(190 32% 2% / 0.16)",
         "elevation-lg":
-          "0 2px 4px hsl(220 40% 2% / 0.2), 0 16px 48px -12px hsl(220 40% 2% / 0.42)",
+          "0 16px 48px -16px hsl(190 32% 2% / 0.5), 0 2px 8px hsl(190 32% 2% / 0.18)",
       },
       borderRadius: {
         lg: "var(--radius)",

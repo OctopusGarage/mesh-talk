@@ -15,8 +15,7 @@ async function login(page: Page, username = "tester") {
   await expect(page.getByTestId("chat-shell")).toBeVisible();
 }
 async function manage(page: Page) {
-  await page.getByTestId("sidebar-overflow").click();
-  await page.getByTestId("sidebar-action-settings").click();
+  await page.getByTestId("sidebar-nav-settings").click();
   await page.getByTestId("manage-hidden-contacts").click();
   await expect(page.getByTestId("hidden-contacts-dialog")).toBeVisible();
 }

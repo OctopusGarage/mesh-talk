@@ -17,6 +17,22 @@ test("frameless window shows custom min/max/close controls", async ({
   }
 });
 
+test("window and dialog close labels follow the selected language", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("sidebar-nav-settings").click();
+  const dialog = page.getByTestId("settings-dialog");
+  await dialog.getByTestId("settings-language-select").selectOption("zh-Hans");
+  await expect(dialog.getByRole("button", { name: "关闭" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "最小化" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "最大化" })).toBeVisible();
+  await expect(
+    page.getByTestId("window-controls").getByRole("button", { name: "关闭" }),
+  ).toBeVisible();
+});
+
 test("empty chat has a usable window drag band", async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 520 });
   await enterChat(page);

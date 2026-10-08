@@ -1,7 +1,4 @@
-import {
-  expect,
-  test,
-} from "./tauri-mock";
+import { expect, test } from "./tauri-mock";
 import { prepareForScreenshot } from "./helpers/visual-snapshot";
 
 // Regression: the channel members list must show OUR OWN row with our display name and an
@@ -27,6 +24,7 @@ test("channel members shows self with name + online", async ({ page }) => {
 
   await prepareForScreenshot(page);
   await page.getByTestId("members-trigger").click();
+  await page.mouse.move(0, 0);
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveScreenshot("members-self.png");

@@ -60,4 +60,5 @@
 - `./scripts/check-health.sh` chains fmt, Clippy `--all-targets`, ESLint, tests, typos,
   cargo-deny, cargo-machete, gitleaks, shellcheck, audits, and both builds.
 - Triage vulnerabilities immediately or document mitigation in the PR.
-- If plans shift, update the design docs under `docs/superpowers/` and `docs/ARCHITECTURE.md`.
+- If plans shift, update the relevant committed design or architecture docs. Keep
+  `docs/superpowers/` and the root `plans/` directory local and untracked.

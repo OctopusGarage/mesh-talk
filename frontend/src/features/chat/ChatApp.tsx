@@ -1,4 +1,6 @@
 import { useEffect } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { CircleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
@@ -11,9 +13,11 @@ import { useSettings } from "@/store/settings";
 import { useAuth } from "@/store/auth";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { usePrivacy } from "@/store/privacy";
+import { ease, useMotionOK } from "@/lib/motion";
 
 export function ChatApp() {
   const { t } = useTranslation();
+  const motionOK = useMotionOK();
   const start = useChat((s) => s.start);
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
@@ -69,22 +73,48 @@ export function ChatApp() {
       <Sidebar />
       <ConversationView />
       <CallDialog />
-      {error && (
-        <div
-          role="alert"
-          className="absolute right-4 top-4 z-50 flex max-w-[min(26rem,calc(100vw-2rem))] items-start gap-3 rounded-md border border-destructive/35 bg-card px-3 py-2.5 text-sm text-foreground shadow-elevation-lg"
-        >
-          <span>{error}</span>
-          <button
-            type="button"
-            onClick={clearError}
-            aria-label={t("conversation.dismissError")}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <AnimatePresence>
+        {error && (
+          <motion.div
+            role="alert"
+            initial={{
+              opacity: 0,
+              transform: motionOK ? "translateY(-6px)" : "none",
+            }}
+            animate={{
+              opacity: 1,
+              transform: motionOK ? "translateY(0px)" : "none",
+            }}
+            exit={{
+              opacity: 0,
+              transform: motionOK ? "translateY(-6px)" : "none",
+            }}
+            transition={{ duration: motionOK ? 0.18 : 0.08, ease }}
+            className="absolute right-4 top-20 z-50 flex max-w-[min(26rem,calc(100vw-2rem))] items-start gap-3 rounded-lg border border-destructive/35 bg-popover px-3 py-3 text-[13px] text-foreground shadow-elevation"
           >
-            ×
-          </button>
-        </div>
-      )}
+            <CircleAlert
+              className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
+              aria-hidden="true"
+            />
+            <span className="min-w-0 flex-1">
+              <strong className="block font-semibold">
+                {t("redesign.actionFailed")}
+              </strong>
+              <span className="mt-0.5 block text-muted-foreground">
+                {error}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={clearError}
+              aria-label={t("conversation.dismissError")}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
+            >
+              ×
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

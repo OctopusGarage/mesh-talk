@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { releaseInputs } from "../release/preflight.mjs";
@@ -26,13 +26,14 @@ test("branch dry runs use safe unique artifact names, not slash-containing branc
 });
 
 test("tag preflight finds a published release even when GitHub's tag endpoint returns 404", { skip: process.platform === "win32" }, (t) => {
+  const currentVersion = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
   const root = mkdtempSync(join(tmpdir(), "mesh-talk-release-preflight-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "bin"));
-  writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst args = process.argv.slice(2); if (args.some(arg => arg.includes('/compare/'))) process.stdout.write(JSON.stringify({status:'identical'})); else if (args.some(arg => arg.includes('/releases/tags/'))) { console.error('gh: Not Found (HTTP 404)'); process.exit(1); } else process.stdout.write(JSON.stringify([[{id:42,tag_name:'v0.1.6',draft:false}]]));\n`, { mode: 0o755 });
+  writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst args = process.argv.slice(2); if (args.some(arg => arg.includes('/compare/'))) process.stdout.write(JSON.stringify({status:'identical'})); else if (args.some(arg => arg.includes('/releases/tags/'))) { console.error('gh: Not Found (HTTP 404)'); process.exit(1); } else process.stdout.write(JSON.stringify([[{id:42,tag_name:'v${currentVersion}',draft:false}]]));\n`, { mode: 0o755 });
   const output = join(root, "output.txt");
   const result = spawnSync(process.execPath, [resolve("scripts/release/preflight.mjs")], {
-    cwd: resolve("."), encoding: "utf8", env: { ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`, GITHUB_REF: "refs/tags/v0.1.6", GITHUB_RUN_ID: "123", GITHUB_REPOSITORY: "owner/repo", GITHUB_SHA: "a".repeat(40), GITHUB_OUTPUT: output },
+    cwd: resolve("."), encoding: "utf8", env: { ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`, GITHUB_REF: `refs/tags/v${currentVersion}`, GITHUB_RUN_ID: "123", GITHUB_REPOSITORY: "owner/repo", GITHUB_SHA: "a".repeat(40), GITHUB_OUTPUT: output },
   });
   assert.notEqual(result.status, 0, result.stdout);
   assert.match(result.stderr, /published/);

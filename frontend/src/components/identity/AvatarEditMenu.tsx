@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Camera, ImagePlus, LayoutGrid, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -10,10 +10,13 @@ import { pickImageFile } from "@/lib/avatarImage";
 import { useAvatar, useAvatars } from "@/store/avatars";
 import { cn } from "@/lib/utils";
 import { AvatarCropDialog } from "@/features/chat/AvatarCropDialog";
-import {
-  AvatarGallery,
-  type AvatarGalleryCategory,
-} from "@/components/AvatarGallery";
+import type { AvatarGalleryCategory } from "@/components/AvatarGallery";
+
+const AvatarGallery = lazy(() =>
+  import("@/components/AvatarGallery").then(({ AvatarGallery }) => ({
+    default: AvatarGallery,
+  })),
+);
 
 /**
  * AvatarEditMenu — wraps an identity glyph (its `children`) in a button that opens a small
@@ -116,16 +119,18 @@ export function AvatarEditMenu({
         }}
         onCancel={() => setCropFile(null)}
       />
-      {category && (
-        <AvatarGallery
-          category={category}
-          open={gallery}
-          onPick={(dataUrl) => {
-            setGallery(false);
-            void setAvatar(id, dataUrl);
-          }}
-          onClose={() => setGallery(false)}
-        />
+      {category && (open || gallery) && (
+        <Suspense fallback={null}>
+          <AvatarGallery
+            category={category}
+            open={gallery}
+            onPick={(dataUrl) => {
+              setGallery(false);
+              void setAvatar(id, dataUrl);
+            }}
+            onClose={() => setGallery(false)}
+          />
+        </Suspense>
       )}
     </>
   );

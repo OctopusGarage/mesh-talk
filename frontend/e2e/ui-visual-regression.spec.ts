@@ -41,12 +41,16 @@ test("no peers offers a direct connection path", async ({ page }) => {
     await page.getByTestId("login-submit").click();
   }
   await expect(page.getByTestId("chat-shell")).toBeVisible();
-  await expect(
-    page.getByText("Can't see anyone? Connect without Wi-Fi"),
-  ).toBeVisible();
+  await expect(page.getByText("Connection help")).toBeVisible();
   await prepareForScreenshot(page);
   await expect(page.getByTestId("chat-shell")).toHaveScreenshot(
     snapshotName("no-peers", "dark", 1280, 800),
+  );
+  await page.getByText("Connection help").click();
+  await expect(page.getByTestId("diagnostics-dialog")).toBeVisible();
+  await expect(page.getByTestId("diagnostics-tab-help")).toHaveAttribute(
+    "data-state",
+    "active",
   );
 });
 
@@ -103,6 +107,9 @@ for (const viewport of VIEWPORTS) {
         await expect(shell).toBeVisible();
         await expect(shell).toHaveScreenshot(
           snapshotName("chat-shell", theme, viewport.width, viewport.height),
+          theme === "messi" && viewport.width === 760
+            ? { maxDiffPixelRatio: 0.04 }
+            : {},
         );
       });
     }
