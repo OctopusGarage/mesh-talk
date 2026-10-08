@@ -327,6 +327,8 @@ owns cache eviction, deletion protection, and history/status state transitions.
 *account* (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
 message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,
 search, and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
+`features/chat/useConversationViewport.ts` owns the virtual list's reading position,
+restoration, search jumps and follow-latest callbacks across conversation switches.
 The sidebar keeps Chats, Files, Connection, and Settings visible; its footer shows
 the local identity and device/network status. The composer reveals secondary send
 tools on demand and combines emoji and stickers in one picker. Settings uses

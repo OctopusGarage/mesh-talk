@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { Virtuoso } from "react-virtuoso";
 import { AnimatePresence, motion } from "framer-motion";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -20,7 +20,10 @@ import {
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { Composer } from "./Composer";
-import { jumpToLatest } from "./jumpToLatest";
+import {
+  messageRowKey,
+  useConversationViewport,
+} from "./useConversationViewport";
 import {
   IMAGE_EXTENSIONS,
   VIDEO_EXTENSIONS,
@@ -421,11 +424,6 @@ export function ConversationView() {
     setPendingDelete(null);
   }, [key]);
   const drafts = useRef(new Map<string, string>());
-  const scrollPositions = useRef(new Map<string, number>());
-  const exactScrollPositions = useRef(new Map<string, number>());
-  const restoringScroll = useRef<string | null>(null);
-  const lastVisibleRows = useRef(new Map<string, number>());
-  const atBottom = useRef(new Map<string, boolean>());
   const messages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
   );
@@ -439,39 +437,13 @@ export function ConversationView() {
   const bootFailed = useChat((s) => s.bootFailed);
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
 
-  const virtuosoRef = useRef<VirtuosoHandle>(null);
-  const scrollerRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!key || !exactScrollPositions.current.has(key)) return;
-    restoringScroll.current = key;
-    return () => {
-      if (restoringScroll.current === key) restoringScroll.current = null;
-    };
-  }, [key]);
-
-  useEffect(() => {
-    if (restoringScroll.current !== key || loading || messages.length === 0)
-      return;
-    const top = exactScrollPositions.current.get(key);
-    if (top === undefined) return;
-    let frame = 0;
-    let attempts = 0;
-    const restore = () => {
-      const scroller = scrollerRef.current;
-      const maxTop = scroller
-        ? scroller.scrollHeight - scroller.clientHeight
-        : 0;
-      if ((!scroller || maxTop < top) && attempts++ < 30) {
-        frame = requestAnimationFrame(restore);
-        return;
-      }
-      if (scroller) scroller.scrollTop = Math.min(top, Math.max(0, maxTop));
-      restoringScroll.current = null;
-    };
-    frame = requestAnimationFrame(restore);
-    return () => cancelAnimationFrame(frame);
-  }, [key, loading, messages.length]);
+  const viewport = useConversationViewport(
+    key,
+    messages,
+    loading,
+    historyError,
+    searchTarget,
+  );
 
   // Native (Tauri) drag-and-drop: dropping file(s) onto the conversation sends them there.
   // The webview drag-drop event is global, so we subscribe once and read the latest
@@ -537,17 +509,9 @@ export function ConversationView() {
   // `showJump` reveals the jump-to-bottom button whenever the user has scrolled up.
   // Virtuoso's `followOutput` only sticks to the newest message while already at the
   // bottom, so reading history is never interrupted by an inbound message.
-  const [showJump, setShowJump] = useState(false);
-  const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
-  const [searchMiss, setSearchMiss] = useState(false);
-  const handledSearch = useRef<number | null>(null);
-
   useEffect(() => {
     setReply(null);
     setPrefill(null);
-    setShowJump(false);
-    setSearchMiss(false);
-    setHighlightedKey(null);
   }, [key]);
 
   // Message-enter motion: animate ONLY messages that arrive after a conversation's
@@ -555,8 +519,6 @@ export function ConversationView() {
   // (virtuoso unmounts/remounts rows as they scroll out of the window). `seenKeys` is the
   // baseline of keys already shown; it's READ in render (pure, StrictMode-safe) and only
   // MUTATED in a post-commit effect. `primed` excludes the very first backlog load.
-  const rowKey = (m: ChatMessage, i: number) =>
-    m.clientId ?? m.id ?? `pending-${i}`;
   const seenKeys = useRef<Set<string>>(new Set());
   const primed = useRef(false);
   useEffect(() => {
@@ -566,46 +528,11 @@ export function ConversationView() {
   useEffect(() => {
     // Record every currently-present key as "seen" after commit, and prime after the
     // first non-empty load so subsequent genuinely-new messages animate exactly once.
-    messages.forEach((m, i) => seenKeys.current.add(rowKey(m, i)));
+    messages.forEach((m, i) => seenKeys.current.add(messageRowKey(m, i)));
     if (!primed.current && messages.length > 0) primed.current = true;
   }, [messages, key]);
   const isFresh = (m: ChatMessage, i: number) =>
-    primed.current && !seenKeys.current.has(rowKey(m, i));
-
-  useEffect(() => {
-    if (!searchTarget || searchTarget.key !== key || loading || historyError)
-      return;
-    if (handledSearch.current === searchTarget.request) return;
-    const index = messages.findIndex(
-      (m) =>
-        m.wallClock === searchTarget.wallClock &&
-        m.text === searchTarget.text &&
-        m.fromMe === searchTarget.fromMe,
-    );
-    if (index < 0) {
-      handledSearch.current = searchTarget.request;
-      setSearchMiss(true);
-      return;
-    }
-    setSearchMiss(false);
-    const messageKey = rowKey(messages[index], index);
-    setHighlightedKey(messageKey);
-    const frame = requestAnimationFrame(() => {
-      virtuosoRef.current?.scrollToIndex({
-        index,
-        align: "center",
-        behavior: "auto",
-      });
-      handledSearch.current = searchTarget.request;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [searchTarget, key, loading, historyError, messages]);
-
-  useEffect(() => {
-    if (!highlightedKey) return;
-    const timer = window.setTimeout(() => setHighlightedKey(null), 2800);
-    return () => clearTimeout(timer);
-  }, [highlightedKey]);
+    primed.current && !seenKeys.current.has(messageRowKey(m, i));
 
   const byId = useMemo(() => {
     const m = new Map<string, ChatMessage>();
@@ -782,7 +709,7 @@ export function ConversationView() {
             </button>
           </div>
         )}
-        {!loading && !historyError && searchMiss && (
+        {!loading && !historyError && viewport.searchMiss && (
           <div
             role="status"
             className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
@@ -817,11 +744,8 @@ export function ConversationView() {
         )}
         {messages.length > 0 && (
           <Virtuoso
-            ref={virtuosoRef}
-            scrollerRef={(element) => {
-              scrollerRef.current =
-                element instanceof HTMLElement ? element : null;
-            }}
+            ref={viewport.virtuosoRef}
+            scrollerRef={viewport.scrollerRef}
             // `key` resets all virtualization state (scroll pos, measured heights) when
             // switching conversations — equivalent to the old `[messages.length, key]` reset.
             key={key}
@@ -836,50 +760,13 @@ export function ConversationView() {
             // instead of floating at the top with a large empty gap below it.
             alignToBottom
             // Start pinned to the newest message (chat opens at the bottom).
-            initialTopMostItemIndex={Math.min(
-              messages.length - 1,
-              scrollPositions.current.get(key) ?? messages.length - 1,
-            )}
+            initialTopMostItemIndex={viewport.initialIndex}
             // Stick to the bottom on new messages only while the user is already there
             // (preserves scroll position when reading history / prepending older items).
             followOutput={(isAtBottom) => (isAtBottom ? "auto" : false)}
-            atBottomStateChange={(b) => {
-              atBottom.current.set(key, b);
-              if (restoringScroll.current === key) return;
-              if (b) {
-                scrollPositions.current.delete(key);
-                exactScrollPositions.current.delete(key);
-              } else
-                scrollPositions.current.set(
-                  key,
-                  lastVisibleRows.current.get(key) ?? 0,
-                );
-              setShowJump(!b);
-            }}
-            rangeChanged={({ startIndex }) => {
-              lastVisibleRows.current.set(key, startIndex);
-              if (atBottom.current.get(key) === false)
-                scrollPositions.current.set(key, startIndex);
-            }}
-            onScroll={(event) => {
-              if (restoringScroll.current === key) return;
-              const scroller = event.currentTarget;
-              if (
-                scroller.scrollHeight -
-                  scroller.clientHeight -
-                  scroller.scrollTop <=
-                48
-              ) {
-                exactScrollPositions.current.delete(key);
-                return;
-              }
-              exactScrollPositions.current.delete(key);
-              exactScrollPositions.current.set(key, scroller.scrollTop);
-              if (exactScrollPositions.current.size > 24)
-                exactScrollPositions.current.delete(
-                  exactScrollPositions.current.keys().next().value!,
-                );
-            }}
+            atBottomStateChange={viewport.atBottomStateChange}
+            rangeChanged={({ startIndex }) => viewport.rangeChanged(startIndex)}
+            onScroll={viewport.onScroll}
             // A little tolerance so "at bottom" isn't lost to sub-pixel rounding.
             atBottomThreshold={48}
             increaseViewportBy={400}
@@ -909,7 +796,7 @@ export function ConversationView() {
                 <div
                   className={cn(
                     "mx-auto max-w-[820px] px-0 pb-1 transition-colors duration-500 motion-reduce:transition-none",
-                    highlightedKey === rowKey(m, i) &&
+                    viewport.highlightedKey === messageRowKey(m, i) &&
                       "rounded-md bg-signal/10",
                   )}
                 >
@@ -947,11 +834,11 @@ export function ConversationView() {
               );
             }}
             // Stable per-row identity so reactions/edits don't remount unrelated rows.
-            computeItemKey={(i, m) => rowKey(m, i)}
+            computeItemKey={(i, m) => messageRowKey(m, i)}
           />
         )}
         <AnimatePresence>
-          {showJump && (
+          {viewport.showJump && (
             <motion.button
               type="button"
               initial={{
@@ -968,7 +855,7 @@ export function ConversationView() {
               }}
               transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
               aria-label={t("conversation.jumpToLatest")}
-              onClick={() => jumpToLatest(() => virtuosoRef.current)}
+              onClick={viewport.jumpToLatest}
               className="absolute bottom-3 right-4 z-10 rounded-md border bg-card p-2 shadow-elevation hover:bg-accent"
             >
               <ChevronDown className="h-4 w-4" />
