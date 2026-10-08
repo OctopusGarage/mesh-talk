@@ -127,6 +127,136 @@ pub(in crate::node) struct FileTransfer {
     last_used: std::time::Instant,
 }
 
+impl FileTransfer {
+    fn new(
+        file: super::delivery_store::FileCard,
+        destination: super::delivery_store::FileDestination,
+    ) -> Self {
+        Self {
+            file,
+            destination,
+            channel: None,
+            phase: FilePhase::Dial,
+            sync: super::session::SyncProgress::default(),
+            legacy: false,
+            last_used: std::time::Instant::now(),
+        }
+    }
+}
+
+type FileKey = (EventId, EventId);
+type FileWork = (
+    super::delivery_store::FileCard,
+    super::delivery_store::FileDestination,
+);
+
+/// The worker owns file scheduling state across wakeups. A scan takes only a
+/// cursor and a capacity snapshot, so no socket or mutable cache crosses the
+/// blocking journal read.
+#[derive(Default)]
+struct FileDeliveryScheduler {
+    pending_cursor: Option<FileKey>,
+    active_cursor: Option<FileKey>,
+    transfers: std::collections::HashMap<FileKey, FileTransfer>,
+}
+
+#[derive(Clone, Copy)]
+struct FileScan {
+    cursor: Option<FileKey>,
+    slots: usize,
+}
+
+impl FileScan {
+    fn read(self, store: &DeliveryStore) -> (Vec<FileWork>, Option<FileKey>) {
+        let mut files = Vec::with_capacity(self.slots);
+        let mut cursor = self.cursor;
+        for _ in 0..self.slots {
+            let Some((file, destination)) = store.next_file_destination(cursor) else {
+                break;
+            };
+            let key = (file.id, destination.binding.event_id);
+            if files.iter().any(|(previous, reference): &FileWork| {
+                (previous.id, reference.binding.event_id) == key
+            }) {
+                break;
+            }
+            cursor = Some(key);
+            files.push((file, destination));
+        }
+        (files, cursor)
+    }
+}
+
+impl FileDeliveryScheduler {
+    fn scan(&mut self, node: &Node) -> FileScan {
+        node.prune_file_transfers(&mut self.transfers);
+        FileScan {
+            cursor: self.pending_cursor,
+            slots: MAX_FILE_TRANSFERS - self.transfers.len(),
+        }
+    }
+
+    fn admit(&mut self, node: &Node, files: Vec<FileWork>, cursor: Option<FileKey>) {
+        self.pending_cursor = cursor;
+        node.prune_file_transfers(&mut self.transfers);
+        for (file, destination) in files {
+            let key = (file.id, destination.binding.event_id);
+            if self.transfers.len() < MAX_FILE_TRANSFERS
+                && node.file_destination_current(&file, &destination)
+            {
+                self.transfers
+                    .entry(key)
+                    .or_insert_with(|| FileTransfer::new(file, destination));
+            }
+        }
+    }
+
+    async fn advance(&mut self, node: &Node, diagnostic: &mut DeliveryDiagnosticThrottle) {
+        // Bound each pass to eight complete exchanges, round-robin across
+        // active slots. A failed attempt drops retained state and never self-wakes.
+        let mut progress = std::collections::HashSet::new();
+        for _ in 0..MAX_FILE_TRANSFERS {
+            let mut keys = self.transfers.keys().copied().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let Some(key) = keys
+                .iter()
+                .copied()
+                .find(|key| self.active_cursor.is_none_or(|cursor| *key > cursor))
+                .or_else(|| keys.first().copied())
+            else {
+                break;
+            };
+            self.active_cursor = Some(key);
+            let transfer = self.transfers.get(&key).unwrap();
+            let file = transfer.file.clone();
+            let destination = transfer.destination.clone();
+            if node
+                .retry_file_step(&file, &destination, &mut self.transfers)
+                .await
+                && node
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .retire_file_destination(file.id, destination.binding.event_id)
+                    .is_err()
+            {
+                diagnostic.warn_if_due();
+            }
+            if self.transfers.contains_key(&key) {
+                progress.insert(key);
+            }
+        }
+        if progress.iter().any(|key| self.transfers.contains_key(key)) {
+            #[cfg(test)]
+            if self.transfers.is_empty() {
+                node.empty_file_cache_self_wakes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            node.delivery_notify.notify_one();
+        }
+    }
+}
+
 #[derive(Default)]
 struct DeliveryDiagnosticThrottle {
     last_emitted: Option<std::time::Instant>,
@@ -1008,17 +1138,14 @@ impl Node {
         let mut destination_cursor = None;
         let mut receipt_cursor = None;
         let mut peer_cursor = None;
-        let mut file_cursor = None;
-        let mut active_file_cursor = None;
-        let mut file_transfers = std::collections::HashMap::new();
+        let mut file_scheduler = FileDeliveryScheduler::default();
         let mut diagnostic = DeliveryDiagnosticThrottle::default();
         loop {
             tokio::select! {
                 _ = interval.tick() => {},
                 _ = self.delivery_notify.notified() => {},
             }
-            self.prune_file_transfers(&mut file_transfers);
-            let file_slots = MAX_FILE_TRANSFERS - file_transfers.len();
+            let file_scan = file_scheduler.scan(&self);
             let node = self.clone();
             let Some(work) = self.runtime_work.admit() else {
                 return;
@@ -1056,26 +1183,7 @@ impl Node {
                     .into_iter()
                     .next()
                     .or_else(|| store.retry_receipts_after(None, 1).into_iter().next());
-                let mut files = Vec::with_capacity(file_slots);
-                let mut cursor = file_cursor;
-                for _ in 0..file_slots {
-                    let Some((file, destination)) = store.next_file_destination(cursor) else {
-                        break;
-                    };
-                    let key = (file.id, destination.binding.event_id);
-                    if files.iter().any(
-                        |(previous, reference): &(
-                            super::delivery_store::FileCard,
-                            super::delivery_store::FileDestination,
-                        )| {
-                            (previous.id, reference.binding.event_id) == key
-                        },
-                    ) {
-                        break;
-                    }
-                    cursor = Some(key);
-                    files.push((file, destination));
-                }
+                let (files, cursor) = file_scan.read(&store);
                 Some((destination, receipt, files, cursor))
             })
             .await;
@@ -1083,7 +1191,6 @@ impl Node {
                 diagnostic.warn_if_due();
                 continue;
             };
-            file_cursor = cursor;
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
                 let live = self
@@ -1113,71 +1220,8 @@ impl Node {
                     diagnostic.warn_if_due();
                 }
             }
-            self.prune_file_transfers(&mut file_transfers);
-            for (file, destination) in files {
-                let key = (file.id, destination.binding.event_id);
-                if file_transfers.len() < MAX_FILE_TRANSFERS
-                    && self.file_destination_current(&file, &destination)
-                {
-                    file_transfers.entry(key).or_insert_with(|| FileTransfer {
-                        file,
-                        destination,
-                        channel: None,
-                        phase: FilePhase::Dial,
-                        sync: super::session::SyncProgress::default(),
-                        legacy: false,
-                        last_used: std::time::Instant::now(),
-                    });
-                }
-            }
-            // Bound each pass to eight complete exchanges, round-robin across
-            // the active slots, rather than revisiting them via the unbounded
-            // pending-work cursor. Small active sets can use spare exchanges.
-            let mut file_progress = std::collections::HashSet::new();
-            for _ in 0..MAX_FILE_TRANSFERS {
-                let mut keys = file_transfers.keys().copied().collect::<Vec<_>>();
-                keys.sort_unstable();
-                let Some(key) = keys
-                    .iter()
-                    .copied()
-                    .find(|key| active_file_cursor.is_none_or(|cursor| *key > cursor))
-                    .or_else(|| keys.first().copied())
-                else {
-                    break;
-                };
-                active_file_cursor = Some(key);
-                let transfer = file_transfers.get(&key).unwrap();
-                let file = transfer.file.clone();
-                let destination = transfer.destination.clone();
-                if self
-                    .retry_file_step(&file, &destination, &mut file_transfers)
-                    .await
-                    && self
-                        .delivery
-                        .lock()
-                        .expect("delivery lock not poisoned")
-                        .retire_file_destination(file.id, destination.binding.event_id)
-                        .is_err()
-                {
-                    diagnostic.warn_if_due();
-                }
-                // Retained state means this operation reached a clean exchange
-                // boundary. Failed attempts remove state and never self-wake.
-                if file_transfers.contains_key(&key) {
-                    file_progress.insert(key);
-                }
-            }
-            if file_progress
-                .iter()
-                .any(|key| file_transfers.contains_key(key))
-            {
-                #[cfg(test)]
-                if file_transfers.is_empty() {
-                    self.empty_file_cache_self_wakes
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
-                self.delivery_notify.notify_one();
-            }
+            file_scheduler.admit(&self, files, cursor);
+            file_scheduler.advance(&self, &mut diagnostic).await;
             // Historical identity authorizes a control pull even with its sender
             // offline. The cursor advances before any bounded network await.
             let peer = {
@@ -1422,18 +1466,7 @@ impl Node {
                 // still get the original bounded best-effort attempt this turn.
                 return self.retry_file_destination(file, destination).await;
             }
-            transfers.insert(
-                key,
-                FileTransfer {
-                    file: file.clone(),
-                    destination: destination.clone(),
-                    channel: None,
-                    phase: FilePhase::Dial,
-                    sync: super::session::SyncProgress::default(),
-                    legacy: false,
-                    last_used: std::time::Instant::now(),
-                },
-            );
+            transfers.insert(key, FileTransfer::new(file.clone(), destination.clone()));
         }
         #[cfg(test)]
         self.file_transfer_peak

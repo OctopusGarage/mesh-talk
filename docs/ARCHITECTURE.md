@@ -174,7 +174,10 @@ Card delivery is not file download or read confirmation. Independent immutable
 chunk work survives an early card receipt and sender restart. The worker also
 rotates one file destination, sends its manifest before chunks, and retires chunk
 work only after the exact target confirms the final event in the validated
-dense signed chunk chain. A receiver may instead confirm historical verified
+dense signed chunk chain. The worker's file scheduler owns its pending and
+active cursors, bounded transfer cache, liveness checks and retirement; journal
+scans use an immutable cursor/capacity snapshot before network work resumes.
+A receiver may instead confirm historical verified
 completion after saving all content and reclaiming chunks: it verifies the entire
 original-author chain, chunk AEAD/hashes and whole-file checksum, synchronizes the
 saved file, rename and Unix parent directory, then durably journals a bounded
