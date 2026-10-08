@@ -1,7 +1,12 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { test, expect } from "./tauri-mock";
-import { enterChat, openBobDm, CHANNEL } from "./helpers/session";
+import {
+  enterChat,
+  BOB,
+  CHANNEL,
+  seedThemeBeforeLoad,
+} from "./helpers/session";
 
 test.use({
   viewport: { width: 1280, height: 800 },
@@ -19,20 +24,43 @@ test("capture current desktop surfaces for the site and README", async ({
   page,
 }) => {
   await mkdir(output, { recursive: true });
-  await enterChat(page);
+  await seedThemeBeforeLoad(page, "messi");
+  await enterChat(page, "Cesc Fàbregas", "/?data=site");
 
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
-  await page
-    .getByTestId("composer-input")
-    .fill("Field notes are ready for the team.");
-  await page.getByTestId("composer-input").press("Enter");
   await expect(
-    page.getByRole("log").getByText("Field notes are ready for the team."),
+    page
+      .getByRole("log")
+      .getByText("I'll bring the match balls. See you there! ⚽"),
   ).toBeVisible();
-  await page.screenshot({ path: resolve(output, "hero-channel.png") });
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await Promise.all(
+      [...document.images].map((img) => img.decode().catch(() => {})),
+    );
+  });
+  await page.screenshot({ path: resolve(output, "hero-messi.png") });
 
-  await openBobDm(page);
+  for (const theme of ["barcelona", "argentina"] as const) {
+    await page.getByTestId("sidebar-nav-settings").click();
+    await page.getByTestId(`theme-${theme}`).click();
+    await expect(page.locator("html")).toHaveAttribute("data-palette", theme);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    await page
+      .getByTestId("sidebar-nav-settings")
+      .evaluate((button) => (button as HTMLElement).blur());
+    await page.mouse.move(1000, 110);
+    await page.screenshot({ path: resolve(output, `hero-${theme}.png`) });
+  }
+
+  await page.getByTestId("sidebar-nav-settings").click();
+  await page.getByTestId("theme-messi").click();
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await expect(page.getByTestId("conversation-header")).toBeVisible();
   await page.getByTestId("verify-trigger").click();
   await expect(page.getByTestId("verify-dialog")).toBeVisible();
   await page.screenshot({ path: resolve(output, "verify.png") });
@@ -44,7 +72,7 @@ test("capture current desktop surfaces for the site and README", async ({
   await expect(page.getByTestId("theme-picker")).toBeVisible();
   await page.getByTestId("theme-barcelona").click();
   await page.screenshot({ path: resolve(output, "themes.png") });
-  await page.getByTestId("theme-dark").click();
+  await page.getByTestId("theme-messi").click();
   await page.keyboard.press("Escape");
 
   await page.getByTestId("composer-more-tools").click();
