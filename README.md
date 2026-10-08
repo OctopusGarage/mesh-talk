@@ -36,11 +36,11 @@ encrypted events for offline peers.
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/hero-channel.webp" width="860"
-       alt="Mesh-Talk v0.2.0 channel conversation with compact navigation, message history, and composer">
+  <img src="docs/screenshots/hero-barcelona.webp" width="860"
+       alt="Mesh-Talk Barcelona theme showing a football team chat with Lionel Messi, Neymar Jr., player avatars, and a message composer">
 </p>
 
-<p align="center"><sub>Current v0.2.0 interface shown with deterministic demo identities and messages.</sub></p>
+<p align="center"><sub>Barcelona × Argentina demo, captured from the current v0.2.0 interface with deterministic sample messages.</sub></p>
 
 ---
 
@@ -86,6 +86,16 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 ## Screenshots
 
 <table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/hero-argentina.webp" alt="Argentina theme with the same football team conversation and player avatars">
+      <br><sub><b>Argentina theme</b></sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="docs/screenshots/hero-messi.webp" alt="Messi theme with the same football team conversation and player avatars">
+      <br><sub><b>Messi theme</b></sub>
+    </td>
+  </tr>
   <tr>
     <td width="50%" align="center">
       <img src="docs/screenshots/stickers.webp" alt="The sticker panel open in a direct message">

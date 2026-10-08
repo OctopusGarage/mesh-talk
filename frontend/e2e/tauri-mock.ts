@@ -52,6 +52,14 @@ export const test = base.extend({
         member_count: 2,
       };
 
+      // The site capture uses the same IPC fixture with a focused, football-themed
+      // conversation. Other E2E scenarios keep their ordinary names and messages.
+      if (dataMode === "site") {
+        BOB.name = "Lionel Messi";
+        CAROL.name = "Neymar Jr.";
+        CHANNEL.name = "Barcelona × Argentina";
+      }
+
       const peers = [
         {
           user_id: BOB.device_id,
@@ -109,6 +117,8 @@ export const test = base.extend({
         { user_id: BOB.device_id, name: BOB.name },
         { user_id: CAROL.device_id, name: CAROL.name },
       ];
+
+      if (dataMode === "site") channelMembers[0].name = "Cesc Fàbregas";
 
       if (dataMode === "worst" || dataMode === "huge") {
         const longName = "Aleksandra Wiśniewska-Kowalczyk (Laboratory)";
@@ -261,6 +271,28 @@ export const test = base.extend({
         ],
       };
 
+      if (dataMode === "site") {
+        msgs[`ch:${CHANNEL.channel_id}`] = [
+          msg({
+            who: BOB.device_id,
+            text: "Training starts at 10:30. Can everyone see the plan from the annex?",
+          }),
+          msg({
+            who: CAROL.device_id,
+            text: "Yes. The local network is up, and the plan came through clearly.",
+          }),
+          msg({
+            from_me: true,
+            who: SELF.device,
+            text: "Perfect. Meet by the south pitch. Bring the blue bibs.",
+          }),
+          msg({
+            who: BOB.device_id,
+            text: "I'll bring the match balls. See you there! ⚽",
+          }),
+        ];
+      }
+
       if (dataMode === "worst" || dataMode === "huge") {
         const samples = [
           "Release notes: " +
@@ -385,6 +417,16 @@ export const test = base.extend({
       const receivedAvatars: Record<string, string> = {
         [BOB.account_id]: TINY_PNG,
       };
+
+      if (dataMode === "site") {
+        const player = (name: string) =>
+          `/src/assets/avatars/players/${encodeURIComponent(name)}.webp`;
+        avatars[SELF.account] = player("Cesc Fàbregas");
+        avatars[CHANNEL.channel_id] =
+          "/src/assets/avatars/clubs/02-barcelona.svg";
+        receivedAvatars[BOB.account_id] = player("Lionel Messi");
+        receivedAvatars[CAROL.account_id] = player("Neymar");
+      }
 
       // --- Settings ---------------------------------------------------------
       const appSettings = {
