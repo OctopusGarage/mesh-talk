@@ -262,7 +262,7 @@ impl Node {
         log.sync().map_err(NodeError::Log)?;
         drop(log);
         drop(ratchet);
-        let mut transaction = Some(DeliveryTransaction::Outgoing {
+        let transaction = DeliveryTransaction::Outgoing {
             message: OutgoingDelivery {
                 logical_id: id,
                 sender_account: account,
@@ -278,18 +278,11 @@ impl Node {
                 plaintext,
             },
             ratchets: prepared,
-        });
-        authorize(&mut || {
-            store
-                .begin(transaction.take().expect("accept is single-use"))
-                .map(|_| ())
-                .map_err(NodeError::Log)
-        })?;
+        };
         // WAL acceptance cannot turn into a failed send inviting duplicates.
-        if self.recover_delivery(&mut store).is_err() {
+        if !self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
             log::warn!("accepted delivery awaits local recovery");
         }
-        self.delivery_notify.notify_one();
         Ok(id)
     }
 }

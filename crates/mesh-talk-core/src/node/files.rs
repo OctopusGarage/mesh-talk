@@ -488,7 +488,7 @@ impl Node {
                 &author,
             )
             .map_err(NodeError::Log)?;
-        let mut transaction = Some(DeliveryTransaction::OutgoingManifest {
+        let transaction = DeliveryTransaction::OutgoingManifest {
             message: OutgoingDelivery {
                 logical_id: id,
                 sender_account: self.account_id(),
@@ -505,19 +505,12 @@ impl Node {
                 plaintext,
             }),
             file,
-        });
-        authorize(&mut || {
-            store
-                .begin(transaction.take().expect("accept is single-use"))
-                .map(|_| ())
-                .map_err(NodeError::Log)
-        })?;
-        if self.recover_delivery(&mut store).is_ok() {
+        };
+        if self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
             book.record_event(id, AnyManifest::V3(manifest.clone()));
         }
-        self.delivery_notify.notify_one();
         Ok(id)
     }
 

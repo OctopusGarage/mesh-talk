@@ -15,7 +15,7 @@ vi.mock("@/lib/events", () => ({
 }));
 
 import { useChat, convKey } from "./chat";
-import { SEND_INTENT_CAP } from "./sendModel";
+import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
 
 it("old roster identity failure cannot undo newer readiness", async () => {

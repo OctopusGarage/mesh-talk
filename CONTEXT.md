@@ -29,6 +29,7 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 | **Peer** | Another device found via signed UDP announce; tracked in the roster, grouped by account. |
 | **Event** | Content-addressed, signed log entry (Message / React / FileManifest / MembershipChange / KeyRotation / …) in a per-conversation hash-linked DAG. |
 | **Conversation** | A 1:1 DM (device-pair or account-pair) or a channel; history is the event log. |
+| **Outgoing intent** | A user's attempt to send text, a sticker, or a file to a Conversation. It can be pending or failed before acceptance assigns a stable Event ID. |
 | **Post office** | A deterministically-elected always-on peer that stores-and-forwards (still-encrypted) events for offline recipients. |
 
 ## Key invariants
