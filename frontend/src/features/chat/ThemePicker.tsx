@@ -94,8 +94,8 @@ export function ThemePicker() {
                 name: pack.name,
                 swatch: [
                   `hsl(${pack.colors.background ?? "185 20% 8%"})`,
-                  `hsl(${pack.colors.primary ?? "163 42% 61%"})`,
-                  `hsl(${pack.colors.secondary ?? "178 17% 13%"})`,
+                  `hsl(${pack.colors.signal ?? pack.colors.primary ?? "163 42% 61%"})`,
+                  `hsl(${pack.colors["shell-rail"] ?? pack.colors.secondary ?? "178 17% 13%"})`,
                 ] as [string, string, string],
                 image:
                   pack.wallpaper ??

@@ -21,6 +21,9 @@ test("personal avatar gallery offers the player pack", async ({ page }) => {
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
+  await page
+    .getByRole("button", { name: "Football stars", exact: true })
+    .click();
   const tiles = page.getByTestId("avatar-gallery").locator("button");
   await expect.poll(async () => tiles.count()).toBe(18); // 18 players
 });
@@ -47,6 +50,9 @@ test("group avatar gallery offers the club pack", async ({ page }) => {
   await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
+  await page
+    .getByRole("button", { name: "Football clubs", exact: true })
+    .click();
   await expect
     .poll(async () =>
       page.getByTestId("avatar-gallery").locator("button").count(),

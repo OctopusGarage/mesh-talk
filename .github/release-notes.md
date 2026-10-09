@@ -19,6 +19,8 @@ Pick the zip for your platform. Each zip contains the installer(s) **plus** a `S
 file, and ships alongside a cosign signature (`.zip.bundle`) and a SLSA build-provenance
 attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
 
+Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
+
 | Platform | Asset |
 |----------|-------|
 | macOS (Apple Silicon) | `mesh-talk___TAG___macos_arm64.zip` |
@@ -32,6 +34,7 @@ attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
 
 These builds are **not signed by a commercial CA** (free distribution), but every artifact is
 independently verifiable. Replace `<os>_<arch>` with your platform (e.g. `macos_arm64`).
+For lite, append `_lite` after `<os>_<arch>` in the examples.
 
 **1. Checksum** — unzip, then in the extracted folder:
 - macOS / Linux: `shasum -a 256 -c SHA256SUMS`
