@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Download avatar and theme libraries for Mesh-Talk."
+    />
+    <title>Customization Market — Mesh-Talk</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        background: #08141a;
+        color: #e9f2f0;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+      a {
+        color: inherit;
+      }
+      a:focus-visible,
+      button:focus-visible,
+      input:focus-visible {
+        outline: 2px solid #2fe6ce;
+        outline-offset: 3px;
+      }
+      header {
+        border-bottom: 1px solid #21505b;
+      }
+      .wrap {
+        width: min(1100px, calc(100% - 40px));
+        margin: auto;
+      }
+      nav {
+        min-height: 72px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+      nav a {
+        text-decoration: none;
+      }
+      .brand {
+        font-size: 17px;
+        font-weight: 750;
+        letter-spacing: -0.04em;
+      }
+      .brand span {
+        color: #2fe6ce;
+      }
+      .back {
+        color: #9bb3ad;
+        font-size: 14px;
+      }
+      main {
+        padding-block: 68px 96px;
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: #2fe6ce;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      h1 {
+        margin: 12px 0 16px;
+        max-width: 700px;
+        font-size: clamp(38px, 7vw, 72px);
+        line-height: 1.04;
+        letter-spacing: -0.065em;
+      }
+      .intro {
+        max-width: 660px;
+        color: #a8c1bc;
+        font-size: 17px;
+        line-height: 1.6;
+      }
+      .hint {
+        margin: 34px 0;
+        border: 1px solid #21505b;
+        border-radius: 14px;
+        background: #102832;
+        padding: 20px;
+        color: #c4d7d2;
+      }
+      .hint strong {
+        color: #e9f2f0;
+      }
+      .tools {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin: 38px 0 24px;
+      }
+      .filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      button {
+        cursor: pointer;
+        border: 1px solid #21505b;
+        border-radius: 999px;
+        background: #102832;
+        color: #a8c1bc;
+        font: inherit;
+        font-size: 13px;
+        padding: 8px 15px;
+      }
+      button[aria-pressed="true"] {
+        background: #2fe6ce;
+        color: #08141a;
+        border-color: #2fe6ce;
+        font-weight: 700;
+      }
+      input {
+        margin-left: auto;
+        min-width: min(100%, 220px);
+        border: 1px solid #21505b;
+        border-radius: 9px;
+        background: #0c1d24;
+        color: #e9f2f0;
+        font: inherit;
+        padding: 9px 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 14px;
+      }
+      article {
+        display: flex;
+        flex-direction: column;
+        min-height: 196px;
+        padding: 20px;
+        border: 1px solid #21505b;
+        border-radius: 15px;
+        background: #0c1d24;
+      }
+      .kind {
+        color: #2fe6ce;
+        font-size: 11px;
+        font-weight: 750;
+        text-transform: uppercase;
+        letter-spacing: 0.11em;
+      }
+      h2 {
+        margin: 11px 0 5px;
+        font-size: 22px;
+        letter-spacing: -0.035em;
+      }
+      article p {
+        margin: 0 0 23px;
+        color: #a8c1bc;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .download {
+        align-self: flex-start;
+        margin-top: auto;
+        border: 1px solid #2fe6ce;
+        border-radius: 8px;
+        padding: 7px 12px;
+        color: #2fe6ce;
+        font-size: 13px;
+        font-weight: 650;
+        text-decoration: none;
+      }
+      .download:hover {
+        background: #2fe6ce;
+        color: #08141a;
+      }
+      .credits {
+        margin-top: 10px;
+        color: #a8c1bc;
+        font-size: 12px;
+      }
+      #message {
+        color: #a8c1bc;
+      }
+      footer {
+        border-top: 1px solid #21505b;
+        padding: 25px 0;
+        color: #84a39e;
+        font-size: 13px;
+      }
+      @media (max-width: 600px) {
+        main {
+          padding-top: 48px;
+        }
+        input {
+          margin-left: 0;
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <nav class="wrap">
+        <a class="brand" href="../">Mesh<span>·</span>Talk</a
+        ><a class="back" href="../">← Back to Mesh-Talk</a>
+      </nav>
+    </header>
+    <main class="wrap">
+      <div class="eyebrow">Customize your space</div>
+      <h1>Make Mesh-Talk yours.</h1>
+      <p class="intro">
+        Discover optional avatar libraries and themes. Each download is a
+        data-only ZIP pack: images and a manifest, with no executable code.
+      </p>
+      <div class="hint">
+        <strong>Install in the app:</strong> Open Settings → Appearance for
+        themes, or choose a profile or channel avatar to open the gallery. You
+        can install a pack directly from the in-app marketplace, or download a
+        ZIP here and choose <strong>Install ZIP</strong>.
+      </div>
+      <div class="tools">
+        <div class="filters" aria-label="Filter packs">
+          <button type="button" data-filter="all" aria-pressed="true">
+            All
+          </button>
+          <button type="button" data-filter="theme" aria-pressed="false">
+            Themes
+          </button>
+          <button type="button" data-filter="personal" aria-pressed="false">
+            People
+          </button>
+          <button type="button" data-filter="group" aria-pressed="false">
+            Channels
+          </button>
+        </div>
+        <input
+          type="search"
+          id="search"
+          placeholder="Search libraries"
+          aria-label="Search libraries"
+        />
+      </div>
+      <p id="message" role="status">Loading libraries…</p>
+      <div class="grid" id="packs"></div>
+    </main>
+    <footer>
+      <div class="wrap">
+        Mesh-Talk customization packs ·
+        <a href="https://github.com/OctopusGarage/mesh-talk"
+          >Source on GitHub</a
+        >
+      </div>
+    </footer>
+    <script type="module">
+      const grid = document.getElementById("packs");
+      const message = document.getElementById("message");
+      const search = document.getElementById("search");
+      const filters = [...document.querySelectorAll("[data-filter]")];
+      let items = [];
+      let active = "all";
+      function render() {
+        grid.replaceChildren();
+        const query = search.value.trim().toLowerCase();
+        const shown = items.filter(
+          (item) =>
+            (active === "all" ||
+              item.kind === active ||
+              item.category === active) &&
+            (item.name.toLowerCase().includes(query) ||
+              item.description.toLowerCase().includes(query)),
+        );
+        message.textContent = shown.length
+          ? `${shown.length} libraries`
+          : "No libraries match this search.";
+        for (const item of shown) {
+          const card = document.createElement("article");
+          const kind = document.createElement("span");
+          kind.className = "kind";
+          kind.textContent =
+            item.kind === "theme"
+              ? "Theme"
+              : item.category === "group"
+                ? "Channel avatars"
+                : "Personal avatars";
+          const title = document.createElement("h2");
+          title.textContent = item.name;
+          const description = document.createElement("p");
+          description.textContent = item.description;
+          const download = document.createElement("a");
+          download.className = "download";
+          download.href = item.file;
+          download.download = "";
+          download.textContent = "Download ZIP ↓";
+          download.setAttribute("aria-label", `Download ${item.name} ZIP`);
+          card.append(kind, title, description, download);
+          if (item.id === "cities") {
+            const credits = document.createElement("a");
+            credits.href =
+              "https://github.com/OctopusGarage/mesh-talk/blob/main/marketplace/assets/avatars/cities/credits.json";
+            credits.textContent = "Image credits";
+            credits.className = "credits";
+            card.append(credits);
+          }
+          grid.append(card);
+        }
+      }
+      filters.forEach((button) =>
+        button.addEventListener("click", () => {
+          active = button.dataset.filter;
+          filters.forEach((item) =>
+            item.setAttribute("aria-pressed", String(item === button)),
+          );
+          render();
+        }),
+      );
+      search.addEventListener("input", render);
+      try {
+        const response = await fetch("catalog.json");
+        if (!response.ok) throw new Error("Catalog unavailable");
+        items = await response.json();
+        render();
+      } catch {
+        message.textContent =
+          "Could not load the marketplace. Please try again later.";
+      }
+    </script>
+  </body>
+</html>
