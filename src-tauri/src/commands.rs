@@ -2,6 +2,7 @@
 //! (login / logout / register) plus the bridge that starts the node on login.
 //! All messaging/contact/file/channel commands live in [`crate::chat_commands`].
 
+use crate::chat_commands::RuntimeAuthority;
 use crate::services::auth_service::AuthError;
 use crate::services::user::User;
 use crate::state::AppState;
@@ -462,10 +463,7 @@ pub async fn logout<R: tauri::Runtime>(
             .matching(&lease, |_| ())
             .map_err(CommandError::Authentication)?;
         let result = logout_impl(app_state.inner())?;
-        let ticket = node_state
-            .2
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
+        let ticket = node_state.next_lifecycle_ticket();
         // Forget exactly the successfully signed-out credential before releasing
         // auth serialization. A replacement login can now remember its own secret.
         forget_logged_out(&app_handle, settings_state.inner(), &username);
@@ -481,12 +479,7 @@ pub async fn logout<R: tauri::Runtime>(
     #[cfg(test)]
     let retirement_gate = app_state.logout_retirement_gate.clone();
     let retirement = tokio::spawn(async move {
-        let _startup = node.1.clone().lock_owned().await;
-        if node.2.load(std::sync::atomic::Ordering::Acquire) != retirement_ticket {
-            return;
-        }
-        let old = node.0.lock().await.take();
-        if let Some(old) = old {
+        node.retire_if_current(retirement_ticket, async move {
             #[cfg(test)]
             {
                 let gate = retirement_gate.lock().unwrap().take();
@@ -495,8 +488,8 @@ pub async fn logout<R: tauri::Runtime>(
                     let _ = release.await;
                 }
             }
-            old.stop().await;
-        }
+        })
+        .await;
     });
     retirement
         .await
@@ -825,89 +818,6 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
     });
 }
 
-#[derive(Clone)]
-struct RuntimeAuthority {
-    session: crate::state::SessionState,
-    lease: crate::state::SessionLease,
-    node: crate::chat_commands::NodeState,
-    ticket: u64,
-}
-
-impl RuntimeAuthority {
-    fn request(
-        session: crate::state::SessionState,
-        lease: crate::state::SessionLease,
-        node: crate::chat_commands::NodeState,
-    ) -> Result<Self, String> {
-        let ticket = session.matching(&lease, |_| {
-            node.2.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
-        })?;
-        Ok(Self {
-            session,
-            lease,
-            node,
-            ticket,
-        })
-    }
-
-    async fn begin(&self) -> Result<StartupPermit, String> {
-        let serialization = self.node.1.clone().lock_owned().await;
-        self.current(|_| ())?;
-        let old = self.node.0.lock().await.take();
-        if let Some(old) = old {
-            old.stop().await;
-        }
-        let display_name = self.current(|info| info.user.display_name.clone())?;
-        Ok(StartupPermit {
-            authority: self.clone(),
-            _serialization: serialization,
-            display_name,
-        })
-    }
-
-    fn current<T>(
-        &self,
-        operation: impl FnOnce(&mut crate::state::SessionInfo) -> T,
-    ) -> Result<T, String> {
-        self.session.matching(&self.lease, |info| {
-            if self.node.2.load(std::sync::atomic::Ordering::Acquire) != self.ticket {
-                return Err("startup superseded".into());
-            }
-            Ok(operation(info))
-        })?
-    }
-}
-
-struct StartupPermit {
-    authority: RuntimeAuthority,
-    _serialization: tokio::sync::OwnedMutexGuard<()>,
-    display_name: String,
-}
-
-impl StartupPermit {
-    async fn install(self, runtime: mesh_talk_core::node::NodeRuntime) -> bool {
-        let mut guard = self.authority.node.0.lock().await;
-        let mut runtime = Some(runtime);
-        let installed = self
-            .authority
-            .current(|info| {
-                let rt = runtime.as_mut().unwrap();
-                if rt.display_name() != info.user.display_name {
-                    rt.set_display_name(&info.user.display_name);
-                }
-                *guard = runtime.take();
-                *self.authority.node.3.lock().unwrap() =
-                    Some((self.authority.lease.clone(), self.authority.ticket));
-            })
-            .is_ok();
-        drop(guard);
-        if !installed {
-            runtime.unwrap().stop().await;
-        }
-        installed
-    }
-}
-
 /// Adopt an account secret just persisted by a successful device link: drop the running
 /// node runtime and re-spawn it so it reloads the account keystore (now holding the
 /// linked account) and re-advertises under it. Reuses the held session credentials — no
@@ -1062,7 +972,7 @@ mod tests {
 
     impl Drop for AuthFixture {
         fn drop(&mut self) {
-            let _startup = self.node.1.blocking_lock();
+            let _startup = self.node.test_startup_gate().blocking_lock();
             let old = self.node.0.blocking_lock().take();
             if let Some(old) = old {
                 tauri::async_runtime::block_on(old.stop());
@@ -1192,13 +1102,7 @@ mod tests {
                 let lease = fixture.app_state.session().capture().unwrap();
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     loop {
-                        let installed = fixture
-                            .node
-                            .3
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .is_some_and(|(current, _)| current == &lease);
+                        let installed = fixture.node.test_installed_for(&lease);
                         if installed {
                             break;
                         }
@@ -1271,7 +1175,7 @@ mod tests {
             std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
         tauri::async_runtime::block_on(entered_rx).unwrap();
         invoke_auth(&fixture.webview, "logout", serde_json::json!({})).unwrap();
-        let ticket = fixture.node.2.load(std::sync::atomic::Ordering::Acquire);
+        let ticket = fixture.node.test_lifecycle_ticket();
         release_tx.send(()).unwrap();
         let result = automatic.join().unwrap().unwrap();
         assert_eq!(result, serde_json::Value::Null);
@@ -1279,10 +1183,7 @@ mod tests {
         assert!(crate::session_store::load(&fixture.alice).is_none());
         assert!(fixture.settings.get().last_user.is_none());
         assert!(fixture.node.0.blocking_lock().is_none());
-        assert_eq!(
-            fixture.node.2.load(std::sync::atomic::Ordering::Acquire),
-            ticket
-        );
+        assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
     }
 
     #[test]
@@ -1376,7 +1277,7 @@ mod tests {
             fixture.node.clone(),
         )
         .unwrap();
-        let serialization_retained = fixture.node.1.try_lock().is_err();
+        let serialization_retained = fixture.node.test_startup_gate().try_lock().is_err();
         let replacement = tauri::async_runtime::spawn(async move { authority.begin().await });
         let _ = release_tx.send(());
         let permit = tauri::async_runtime::block_on(replacement)
@@ -1572,7 +1473,7 @@ mod tests {
         let fixture = AuthFixture::new("logout");
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-        let startup = fixture.node.1.blocking_lock();
+        let startup = fixture.node.test_startup_gate().blocking_lock();
         let webview = fixture.webview.clone();
         let logout =
             std::thread::spawn(move || invoke_auth(&webview, "logout", serde_json::json!({})));
@@ -1631,7 +1532,7 @@ mod tests {
         let valid = RuntimeAuthority::request(session.clone(), current, node.clone()).unwrap();
         let ticket = valid.ticket;
         assert!(RuntimeAuthority::request(session.clone(), old, node.clone()).is_err());
-        assert_eq!(node.2.load(std::sync::atomic::Ordering::Acquire), ticket);
+        assert_eq!(node.test_lifecycle_ticket(), ticket);
         let latest = RuntimeAuthority::request(session, valid.lease.clone(), node).unwrap();
         let mut callbacks = 0;
         for _ in 0..5 {
@@ -1706,7 +1607,7 @@ mod tests {
             assert!(prepare.await.unwrap().is_err());
             assert!(node.0.lock().await.is_none());
             drop(permit);
-            assert!(node.1.try_lock().is_ok());
+            assert!(node.test_startup_gate().try_lock().is_ok());
         }
     }
 
@@ -1749,12 +1650,12 @@ mod tests {
             permit.install(runtime).await
         });
         queued_rx.await.unwrap();
-        assert!(node.1.try_lock().is_err());
+        assert!(node.test_startup_gate().try_lock().is_err());
         session.clear();
         session.publish("new-a".into(), fixture_user("alice"), "pw".into());
         drop(guard);
         assert!(!install.await.unwrap());
-        assert!(node.1.try_lock().is_ok());
+        assert!(node.test_startup_gate().try_lock().is_ok());
         assert!(node.0.lock().await.is_none());
         assert!(
             tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))

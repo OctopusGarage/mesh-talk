@@ -111,8 +111,10 @@ command names for Tauri registration. Commands clone a node handle from
   The desktop host serializes authentication operations separately from runtime
   replacement. Every published session has a private owner/generation lease; a
   valid startup request receives a monotonically increasing ticket under that
-  session guard. Replacement awaits the old runtime's consuming stop before
-  opening any new profile. Guarded startup joins all already-started initializer
+  session guard. The host runtime state module owns the ticket, startup permit,
+  installation check, and retirement sequence; IPC callers cannot access those
+  synchronization fields directly. Replacement awaits the old runtime's consuming
+  stop before opening any new profile. Guarded startup joins all already-started initializer
   writers on errors and authorizes the synchronous producer launch, installation,
   and each inbound callback against the current lease/ticket. A late rename cannot
   change a replacement session or runtime; startup uses the current matching name.
