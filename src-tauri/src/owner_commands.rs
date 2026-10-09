@@ -10,58 +10,96 @@ use mesh_talk_core::{
     node::{NodeError, NodeRuntime},
 };
 use serde::Serialize;
+use std::{future::Future, pin::Pin};
 
-fn capture(app: &AppState, owner: &str) -> Result<SessionLease, CommandError> {
-    let lease = app
-        .session()
-        .capture()
-        .map_err(CommandError::Authorization)?;
-    if lease.owner() != owner {
-        return Err(CommandError::Authorization("session owner mismatch".into()));
-    }
-    #[cfg(test)]
-    if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
-        let _ = entered.send("owner-entry");
-    }
-    Ok(lease)
+type OwnerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CommandError>> + Send + 'a>>;
+
+/// The owner captured at IPC entry, together with the only authority allowed to
+/// run synchronous producers against the installed runtime. Detached enqueues
+/// retain the lifecycle guard even if the caller cancels its IPC future.
+struct OwnerAdmission {
+    app: AppState,
+    node: NodeState,
+    lease: SessionLease,
 }
 
-fn authorized<T>(
-    app: &AppState,
-    state: &NodeState,
-    lease: &SessionLease,
-    runtime: &NodeRuntime,
-    operation: impl FnOnce() -> Result<T, CommandError>,
-) -> Result<T, CommandError> {
-    app.session()
-        .matching(lease, |_| {
-            if runtime.host_account_id() != Some(lease.owner()) {
-                return Err(CommandError::Authorization("runtime owner mismatch".into()));
-            }
-            state.check_installation(lease)?;
-            operation()
-        })
-        .map_err(CommandError::Authorization)?
-}
-
-fn authorize_accept(
-    app: &AppState,
-    state: &NodeState,
-    lease: &SessionLease,
-    runtime: &NodeRuntime,
-    accept: &mut dyn FnMut() -> Result<(), NodeError>,
-) -> Result<(), NodeError> {
-    // The session guard encloses each synchronous producer (local grant and WAL),
-    // not just a preceding check. No session guard crosses the async policy wait.
-    let result = authorized(app, state, lease, runtime, || Ok(accept()))
-        .map_err(|error| NodeError::Authorization(error.to_string()))?;
-    #[cfg(test)]
-    if result.is_ok() {
-        if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
-            let _ = entered.send("owner-authorized");
+impl OwnerAdmission {
+    fn capture(app: &AppState, node: &NodeState, owner: &str) -> Result<Self, CommandError> {
+        let lease = app
+            .session()
+            .capture()
+            .map_err(CommandError::Authorization)?;
+        if lease.owner() != owner {
+            return Err(CommandError::Authorization("session owner mismatch".into()));
         }
+        #[cfg(test)]
+        if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
+            let _ = entered.send("owner-entry");
+        }
+        Ok(Self {
+            app: app.clone(),
+            node: node.clone(),
+            lease,
+        })
     }
-    result
+
+    fn authorized<T>(
+        &self,
+        runtime: &NodeRuntime,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.app
+            .session()
+            .matching(&self.lease, |_| {
+                if runtime.host_account_id() != Some(self.lease.owner()) {
+                    return Err(CommandError::Authorization("runtime owner mismatch".into()));
+                }
+                self.node.check_installation(&self.lease)?;
+                operation()
+            })
+            .map_err(CommandError::Authorization)?
+    }
+
+    async fn read<T>(
+        &self,
+        operation: impl FnOnce(&NodeRuntime) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        let guard = self.node.0.lock().await;
+        let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        self.authorized(runtime, || operation(runtime))
+    }
+
+    fn authorize_accept(
+        &self,
+        runtime: &NodeRuntime,
+        accept: &mut dyn FnMut() -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        // The session guard encloses each synchronous producer (local grant and WAL),
+        // not just a preceding check. No session guard crosses an async policy wait.
+        let result = self
+            .authorized(runtime, || Ok(accept()))
+            .map_err(|error| NodeError::Authorization(error.to_string()))?;
+        #[cfg(test)]
+        if result.is_ok() {
+            if let Some(entered) = self.app.owner_command_captured.lock().unwrap().as_ref() {
+                let _ = entered.send("owner-authorized");
+            }
+        }
+        result
+    }
+
+    async fn detached<T: Send + 'static>(
+        self,
+        operation: impl for<'a> FnOnce(&'a NodeRuntime, &'a Self) -> OwnerFuture<'a, T> + Send + 'static,
+    ) -> Result<T, CommandError> {
+        let guard = self.node.0.clone().lock_owned().await;
+        tokio::spawn(async move {
+            let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
+            operation(runtime, &self).await
+        })
+        .await
+        .map_err(|_| CommandError::Internal("enqueue operation terminated".into()))?
+    }
 }
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
@@ -93,16 +131,16 @@ pub async fn owner_node_identity(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<NodeIdentity, CommandError> {
-    let lease = capture(&app, &owner)?;
-    let guard = node.0.lock().await;
-    let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    authorized(&app, &node, &lease, runtime, || {
-        Ok(NodeIdentity {
-            owner,
-            device_id: runtime.user_id().into(),
-            account_id: runtime.account_id().into(),
+    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    admission
+        .read(|runtime| {
+            Ok(NodeIdentity {
+                owner,
+                device_id: runtime.user_id().into(),
+                account_id: runtime.account_id().into(),
+            })
         })
-    })
+        .await
 }
 
 #[tauri::command]
@@ -114,25 +152,23 @@ pub async fn owner_enqueue_text(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
-    let lease = capture(&app, &owner)?;
+    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     let reply = reply_to.as_deref().map(parse_id).transpose()?;
-    let app = app.inner().clone();
-    let node = node.inner().clone();
-    let guard = node.0.clone().lock_owned().await;
-    tokio::spawn(async move {
-        let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        let id = runtime
-            .handle()
-            .enqueue_to_account_if(&account, text.as_bytes(), reply, |accept| {
-                authorize_accept(&app, &node, &lease, runtime, accept)
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = runtime
+                    .handle()
+                    .enqueue_to_account_if(&account, text.as_bytes(), reply, |accept| {
+                        admission.authorize_accept(runtime, accept)
+                    })
+                    .await
+                    .map_err(CommandError::from)?;
+                Ok(hex::encode(id.as_bytes()))
             })
-            .await
-            .map_err(CommandError::from)?;
-        Ok(hex::encode(id.as_bytes()))
-    })
-    .await
-    .map_err(|_| CommandError::Internal("enqueue operation terminated".into()))?
+        })
+        .await
 }
 
 #[tauri::command]
@@ -144,24 +180,25 @@ pub async fn owner_enqueue_sticker(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
-    let lease = capture(&app, &owner)?;
+    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
-    let app = app.inner().clone();
-    let node = node.inner().clone();
-    let guard = node.0.clone().lock_owned().await;
-    tokio::spawn(async move {
-        let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        let id = runtime
-            .handle()
-            .enqueue_sticker_to_account_if(&account, &sticker_id, fallback.as_bytes(), |accept| {
-                authorize_accept(&app, &node, &lease, runtime, accept)
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = runtime
+                    .handle()
+                    .enqueue_sticker_to_account_if(
+                        &account,
+                        &sticker_id,
+                        fallback.as_bytes(),
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .await
+                    .map_err(CommandError::from)?;
+                Ok(hex::encode(id.as_bytes()))
             })
-            .await
-            .map_err(CommandError::from)?;
-        Ok(hex::encode(id.as_bytes()))
-    })
-    .await
-    .map_err(|_| CommandError::Internal("enqueue operation terminated".into()))?
+        })
+        .await
 }
 
 #[derive(Serialize)]
@@ -180,48 +217,44 @@ pub async fn owner_enqueue_file(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<AcceptedFile, CommandError> {
-    let lease = capture(&app, &owner)?;
+    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
-    let app = app.inner().clone();
-    let node = node.inner().clone();
-    // The admitted task owns this lifecycle guard through blocking staging,
-    // even if the frontend drops its IPC future while the file writer runs.
-    let guard = node.0.clone().lock_owned().await;
-    tokio::spawn(async move {
-        let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        let kind = if media {
-            mesh_talk_core::file::FileKind::Media
-        } else {
-            mesh_talk_core::file::FileKind::File
-        };
-        #[cfg(test)]
-        let progress_hook = app.owner_file_progress_hook.clone();
-        let (id, conv) = runtime
-            .handle()
-            .enqueue_file_to_account_progress_if(
-                &account,
-                std::path::Path::new(&path),
-                kind,
-                move |_| {
-                    #[cfg(test)]
-                    {
-                        let hook = progress_hook.lock().unwrap().take();
-                        if let Some(hook) = hook {
-                            hook();
-                        }
-                    }
-                },
-                |accept| authorize_accept(&app, &node, &lease, runtime, accept),
-            )
-            .await
-            .map_err(CommandError::from)?;
-        Ok(AcceptedFile {
-            id: hex::encode(id.as_bytes()),
-            file_conv: hex::encode(conv.as_bytes()),
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let kind = if media {
+                    mesh_talk_core::file::FileKind::Media
+                } else {
+                    mesh_talk_core::file::FileKind::File
+                };
+                #[cfg(test)]
+                let progress_hook = admission.app.owner_file_progress_hook.clone();
+                let (id, conv) = runtime
+                    .handle()
+                    .enqueue_file_to_account_progress_if(
+                        &account,
+                        std::path::Path::new(&path),
+                        kind,
+                        move |_| {
+                            #[cfg(test)]
+                            {
+                                let hook = progress_hook.lock().unwrap().take();
+                                if let Some(hook) = hook {
+                                    hook();
+                                }
+                            }
+                        },
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .await
+                    .map_err(CommandError::from)?;
+                Ok(AcceptedFile {
+                    id: hex::encode(id.as_bytes()),
+                    file_conv: hex::encode(conv.as_bytes()),
+                })
+            })
         })
-    })
-    .await
-    .map_err(|_| CommandError::Internal("enqueue operation terminated".into()))?
+        .await
 }
 
 #[tauri::command]
@@ -232,17 +265,17 @@ pub async fn owner_account_history(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<Vec<HistoryItem>, CommandError> {
-    let lease = capture(&app, &owner)?;
+    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
-    let guard = node.0.lock().await;
-    let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    authorized(&app, &node, &lease, runtime, || {
-        Ok(runtime
-            .account_history(&account, limit.min(500))
-            .into_iter()
-            .map(HistoryItem::from)
-            .collect())
-    })
+    admission
+        .read(|runtime| {
+            Ok(runtime
+                .account_history(&account, limit.min(500))
+                .into_iter()
+                .map(HistoryItem::from)
+                .collect())
+        })
+        .await
 }
 
 #[derive(Serialize)]
@@ -259,7 +292,7 @@ pub async fn owner_delivery_statuses(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<Vec<MessageStatus>, CommandError> {
-    let lease = capture(&app, &owner)?;
+    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     if ids.len() > 256 {
         return Err(CommandError::InvalidInput(
@@ -270,19 +303,19 @@ pub async fn owner_delivery_statuses(
         .iter()
         .map(|id| parse_id(id))
         .collect::<Result<Vec<_>, _>>()?;
-    let guard = node.0.lock().await;
-    let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    authorized(&app, &node, &lease, runtime, || {
-        Ok(runtime
-            .handle()
-            .account_delivery_statuses(&account, &ids)
-            .into_iter()
-            .map(|(id, status)| MessageStatus {
-                id: hex::encode(id.as_bytes()),
-                status,
-            })
-            .collect())
-    })
+    admission
+        .read(|runtime| {
+            Ok(runtime
+                .handle()
+                .account_delivery_statuses(&account, &ids)
+                .into_iter()
+                .map(|(id, status)| MessageStatus {
+                    id: hex::encode(id.as_bytes()),
+                    status,
+                })
+                .collect())
+        })
+        .await
 }
 
 #[cfg(test)]

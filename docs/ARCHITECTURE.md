@@ -119,8 +119,10 @@ command names for Tauri registration. Commands clone a node handle from
   Successful logout forgets the original login credential before awaiting teardown.
 
   New `owner_*` delivery IPC captures the lease before waiting for the runtime
-  lock. Local text/sticker/file enqueue keeps that lifecycle admission through
-  privacy updates and staging. Waiting for the privacy gate holds no session guard;
+  lock. `OwnerAdmission` owns capture, checked reads, guarded local acceptance,
+  and detached enqueue lifetime for these commands. Local text/sticker/file
+  enqueue keeps that lifecycle admission through privacy updates and staging.
+  Waiting for the privacy gate holds no session guard;
   once admitted, the matching session guard encloses the entire synchronous local
   grant (including verified bindings and routes), and separately the final WAL
   append. The grant and later staging/WAL are not one rollback transaction: a
