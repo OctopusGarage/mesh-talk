@@ -88,7 +88,7 @@ export function LoginScreen() {
   };
 
   return (
-    <div className="relative flex h-full items-center justify-center overflow-auto bg-background p-6">
+    <div className="login-stage relative flex h-full items-center justify-center overflow-auto bg-background p-6">
       {/* Frameless window (Windows/Linux) has no native bar to grab — a thin top strip drags
           it. (macOS is covered by the app-level top drag strip in App.tsx.) Skipped in a
           plain browser (e2e/dev tab) where there's no window to move. */}
@@ -98,7 +98,7 @@ export function LoginScreen() {
           className="absolute inset-x-0 top-0 z-10 h-8"
         />
       )}
-      <div className="relative w-full max-w-sm py-4">
+      <div className="login-panel relative w-full max-w-sm py-4">
         <motion.div
           initial={false}
           animate="visible"
@@ -146,7 +146,7 @@ export function LoginScreen() {
           animate="visible"
           variants={fadeSlideUp}
           transition={{ delay: ok ? 0.06 : 0 }}
-          className="rounded-lg border bg-card p-5"
+          className="login-form-shell rounded-lg border bg-card p-5"
         >
           <Tabs value={tab} onValueChange={onTab}>
             <TabsList className="grid w-full grid-cols-2">

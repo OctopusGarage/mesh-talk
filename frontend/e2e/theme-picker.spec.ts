@@ -91,6 +91,55 @@ test("theme changes stay scoped and reduced motion keeps control feedback", asyn
   expect(reduced.duration).toBe("0.08s");
 });
 
+test("theme previews match the canvas, signal, and rail colors they apply", async ({
+  page,
+}) => {
+  await login(page);
+  await page.getByTestId("sidebar-nav-settings").click();
+  for (const id of [
+    "dark",
+    "light",
+    "oled",
+    "argentina",
+    "barcelona",
+    "messi",
+    "nature",
+  ]) {
+    const preview = page.getByTestId(`theme-preview-${id}`);
+    const previewCanvas = await preview.evaluate(
+      (element) => getComputedStyle(element).backgroundColor,
+    );
+    await page.getByTestId(`theme-${id}`).click();
+    const applied = await page.evaluate(() => {
+      const root = getComputedStyle(document.documentElement);
+      const sample = document.createElement("div");
+      document.body.append(sample);
+      const colors = ["--background", "--signal", "--shell-rail"].map(
+        (token) => {
+          sample.style.backgroundColor = `hsl(${root.getPropertyValue(token)})`;
+          return getComputedStyle(sample).backgroundColor;
+        },
+      );
+      sample.remove();
+      return colors;
+    });
+    const previewColors = await preview.evaluate((element) => {
+      const sample = document.createElement("div");
+      document.body.append(sample);
+      const colors = [
+        element.dataset.previewSignal,
+        element.dataset.previewRail,
+      ].map((value) => {
+        sample.style.backgroundColor = value ?? "";
+        return getComputedStyle(sample).backgroundColor;
+      });
+      sample.remove();
+      return colors;
+    });
+    expect([previewCanvas, ...previewColors], `${id} preview`).toEqual(applied);
+  }
+});
+
 test("wallpaper can be hidden without changing the personal theme", async ({
   page,
 }) => {

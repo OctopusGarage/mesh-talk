@@ -64,6 +64,8 @@ test("empty conversation keeps the composer in view", async ({ page }) => {
   await page.getByTestId("clear-history-confirm").click();
   await expect(page.getByTestId("conversation-empty")).toBeVisible();
   await expect(page.getByTestId("composer-input")).toBeVisible();
+  await expect(page.getByTestId("clear-history-dialog")).toBeHidden();
+  await expect(page.getByTestId("conversation-history-dialog")).toBeHidden();
   await prepareForScreenshot(page);
   await expect(page.getByTestId("chat-shell")).toHaveScreenshot(
     snapshotName("conversation-empty", "dark", 1280, 800),

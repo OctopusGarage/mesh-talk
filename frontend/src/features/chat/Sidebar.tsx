@@ -116,7 +116,7 @@ function Row({
       role="group"
       aria-label={`${listPosition} / ${listSize}`}
       className={cn(
-        "group relative flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left",
+        "conversation-row group relative flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left",
         isActive ? "bg-signal/10" : "hover:bg-accent/45",
       )}
     >
@@ -245,7 +245,7 @@ function SectionLabel({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between px-2.5 pb-1.5 pt-4 text-[11px] font-semibold text-muted-foreground">
+    <div className="flex items-center justify-between px-2.5 pb-1.5 pt-4 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
       <span>{children}</span>
       {action}
     </div>
@@ -259,8 +259,8 @@ const DEFAULT_WIDTH = 284;
 const MIN_WIDTH = 230;
 const MAX_WIDTH = 460;
 const VIRTUALIZE_AT = 80;
-// The 36px avatar and 8px vertical padding make a conversation row 52px tall.
-const CONVERSATION_ROW_HEIGHT = 52;
+// Match the row's minimum height so virtualized lists preserve focus and scroll math.
+const CONVERSATION_ROW_HEIGHT = 56;
 
 const clampWidth = (w: number) =>
   Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(w)));
@@ -729,12 +729,12 @@ export function Sidebar() {
       {/* Conversation title and search live above the list. The drag region and
           titlebar inset leave room for native window controls. */}
       <div
-        className="border-b px-3.5 pb-3 pt-4"
+        className="sidebar-heading border-b px-3.5 pb-3 pt-4"
         data-testid="self-identity"
         data-tauri-drag-region
         data-titlebar-inset="left"
       >
-        <div className="mb-3 flex items-center gap-2.5 text-[15px] font-semibold tracking-tight">
+        <div className="mb-3 flex items-center gap-2.5 font-display text-[16px] font-semibold tracking-tight">
           <Logo size={27} />
           <span>Mesh-Talk</span>
         </div>

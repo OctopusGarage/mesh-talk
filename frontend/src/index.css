@@ -14,30 +14,30 @@
 @layer base {
   :root {
     /* LIGHT — calm cool-paper */
-    --background: 156 12% 97%;
-    --foreground: 169 20% 14%;
-    --card: 0 0% 100%;
-    --card-foreground: 169 20% 14%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 169 20% 14%;
-    --primary: 163 49% 33%;
+    --background: 44 19% 96%;
+    --foreground: 172 20% 15%;
+    --card: 44 28% 99%;
+    --card-foreground: 172 20% 15%;
+    --popover: 44 28% 99%;
+    --popover-foreground: 172 20% 15%;
+    --primary: 163 43% 30%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 156 13% 93%;
-    --secondary-foreground: 169 20% 14%;
-    --muted: 156 12% 94%;
-    --muted-foreground: 160 8% 38%;
-    --accent: 154 18% 90%;
-    --accent-foreground: 169 20% 14%;
+    --secondary: 45 16% 91%;
+    --secondary-foreground: 172 20% 15%;
+    --muted: 44 14% 92%;
+    --muted-foreground: 168 10% 37%;
+    --accent: 157 14% 87%;
+    --accent-foreground: 172 20% 15%;
     --destructive: 0 72% 46%;
     --destructive-fill: 0 72% 46%;
     --destructive-foreground: 0 0% 100%;
-    --border: 155 14% 85%;
-    --input: 155 14% 81%;
-    --ring: 163 49% 33%;
+    --border: 44 12% 83%;
+    --input: 44 13% 78%;
+    --ring: 163 43% 30%;
 
     /* Signature accents — the only place we spend boldness. */
-    --signal: 163 49% 33%; /* = primary teal */
-    --presence-online: 163 49% 33%;
+    --signal: 163 43% 30%; /* = primary teal */
+    --presence-online: 163 43% 30%;
     --presence-recent: 38 70% 37%;
     --attention: 38 70% 32%;
     --verified: 154 64% 34%;
@@ -50,34 +50,34 @@
     --bubble-own-link: 163 59% 26%;
     --message-link: 163 59% 26%;
 
-    --radius: 0.5rem;
-    --shell-rail: 155 12% 95%;
-    --conversation-surface: 156 12% 97%;
-    --composer-surface: 0 0% 100%;
+    --radius: 0.625rem;
+    --shell-rail: 43 17% 92%;
+    --conversation-surface: 44 19% 96%;
+    --composer-surface: 44 28% 99%;
   }
 
   .dark {
     /* DARK (hero) — sustained ink surfaces */
-    --background: 185 20% 8%;
-    --foreground: 160 14% 91%;
-    --card: 184 18% 11%;
-    --card-foreground: 160 14% 91%;
-    --popover: 184 18% 12%;
-    --popover-foreground: 160 14% 91%;
+    --background: 176 13% 9%;
+    --foreground: 42 16% 91%;
+    --card: 175 12% 12%;
+    --card-foreground: 42 16% 91%;
+    --popover: 174 12% 14%;
+    --popover-foreground: 42 16% 91%;
     --primary: 163 42% 61%;
     --primary-foreground: 175 28% 10%;
-    --secondary: 176 15% 15%;
-    --secondary-foreground: 160 14% 91%;
-    --muted: 174 15% 17%;
-    --muted-foreground: 160 9% 68%;
-    --accent: 166 13% 24%;
-    --accent-foreground: 160 14% 91%;
+    --secondary: 174 11% 16%;
+    --secondary-foreground: 42 16% 91%;
+    --muted: 174 10% 18%;
+    --muted-foreground: 43 9% 70%;
+    --accent: 166 11% 25%;
+    --accent-foreground: 42 16% 91%;
     /* Warning text and solid buttons need different reds on ink surfaces. */
-    --destructive: 0 72% 68%;
+    --destructive: 0 72% 71%;
     --destructive-fill: 0 72% 50%;
     --destructive-foreground: 0 0% 98%;
-    --border: 169 13% 23%;
-    --input: 169 14% 31%;
+    --border: 173 9% 25%;
+    --input: 172 9% 33%;
     --ring: 163 42% 61%;
 
     --signal: 163 42% 61%; /* = primary teal */
@@ -93,9 +93,9 @@
     --bubble-own-foreground: 160 14% 93%;
     --bubble-own-link: 163 52% 75%;
     --message-link: 163 42% 67%;
-    --shell-rail: 178 17% 13%;
-    --conversation-surface: 185 20% 8%;
-    --composer-surface: 184 18% 11%;
+    --shell-rail: 176 11% 14%;
+    --conversation-surface: 176 13% 9%;
+    --composer-surface: 175 12% 12%;
   }
 
   /* Pure-black (OLED) variant: layered on top of `.dark`, it pushes the near-black
@@ -325,9 +325,9 @@
       radial-gradient(
         125% 92% at 50% 34%,
         transparent 26%,
-        hsl(205 55% 96% / 0.55) 100%
+        hsl(205 55% 96% / 0.72) 100%
       ),
-      linear-gradient(165deg, hsl(205 55% 95% / 0.64), hsl(202 55% 97% / 0.82)),
+      linear-gradient(165deg, hsl(205 55% 95% / 0.84), hsl(202 55% 97% / 0.91)),
       url("./assets/themes/argentina-bg.webp");
   }
 
@@ -349,9 +349,9 @@
       radial-gradient(
         125% 92% at 50% 34%,
         transparent 26%,
-        hsl(208 50% 96% / 0.55) 100%
+        hsl(208 50% 96% / 0.72) 100%
       ),
-      linear-gradient(165deg, hsl(208 46% 95% / 0.66), hsl(206 50% 97% / 0.82)),
+      linear-gradient(165deg, hsl(208 46% 95% / 0.85), hsl(206 50% 97% / 0.92)),
       url("./assets/themes/messi-bg.jpg");
   }
 
@@ -364,6 +364,7 @@
 
   html[data-palette]:not([data-wallpaper="off"]) .conversation-log-surface {
     background-color: transparent;
+    background-image: none;
   }
 }
 
@@ -459,26 +460,18 @@
     background: transparent;
   }
 
-  /* Stop spatial motion and continuous loops for reduced motion. Controls retain a
-     brief color/opacity response; Framer overlays handle their own reduced motion. */
+  /* Reduced motion keeps brief color and opacity feedback while removing movement.
+     Busy surfaces provide a stable visible label when their spinner is hidden. */
   @media (prefers-reduced-motion: reduce) {
     *,
     ::before,
     ::after {
-      animation-duration: 0.001ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.001ms !important;
-      scroll-behavior: auto !important;
-    }
-
-    button,
-    input,
-    textarea,
-    [role="switch"] {
+      animation: none !important;
       transition-property:
         color, background-color, border-color, opacity !important;
       transition-duration: 80ms !important;
       transition-timing-function: ease-out !important;
+      scroll-behavior: auto !important;
     }
   }
 }
@@ -503,6 +496,193 @@ html[data-os="frameless"] [data-titlebar-inset] {
    Only Tauri on macOS sets this marker; other platforms retain their spacing. */
 html[data-os="macos"] [data-titlebar-inset] {
   padding-top: 1.75rem;
+}
+
+/* A quiet architectural frame: conversation remains the reading surface, while
+   navigation and composition have their own material weight. The same geometry
+   carries through every optional palette without overriding its colors. */
+.sidebar-container {
+  background-image: linear-gradient(
+    155deg,
+    hsl(var(--card) / 0.42),
+    transparent 44%
+  );
+}
+
+.sidebar-heading {
+  border-color: hsl(var(--border) / 0.7);
+}
+
+.sidebar-heading .font-semibold {
+  letter-spacing: -0.035em;
+}
+
+.conversation-row {
+  min-height: 3.5rem;
+  transition:
+    background-color 160ms ease-out,
+    box-shadow 160ms ease-out;
+}
+
+.conversation-row:has([aria-current="true"]) {
+  background-color: hsl(var(--accent) / 0.66);
+  box-shadow: inset 2px 0 hsl(var(--signal));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .conversation-row:hover:not(:has([aria-current="true"])) {
+    background-color: hsl(var(--accent) / 0.38);
+  }
+}
+
+[data-testid="conversation-header"] {
+  background-image: linear-gradient(
+    90deg,
+    hsl(var(--card)),
+    hsl(var(--card) / 0.94)
+  );
+  border-color: hsl(var(--border) / 0.72);
+}
+
+.composer-dock {
+  border-color: hsl(var(--border) / 0.72);
+  box-shadow: 0 -10px 28px -24px hsl(var(--foreground) / 0.28);
+}
+
+.conversation-log-surface {
+  background-image: radial-gradient(
+    ellipse 74% 55% at 50% 15%,
+    hsl(var(--card) / 0.2),
+    transparent 100%
+  );
+}
+
+.conversation-welcome {
+  position: relative;
+  isolation: isolate;
+}
+
+.conversation-welcome::before {
+  position: absolute;
+  z-index: -1;
+  width: min(28rem, 80vw);
+  aspect-ratio: 1;
+  border: 1px solid hsl(var(--border) / 0.42);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 3rem hsl(var(--border) / 0.08),
+    0 0 0 6rem hsl(var(--border) / 0.05);
+  content: "";
+  pointer-events: none;
+}
+
+.login-stage {
+  isolation: isolate;
+  background-image:
+    radial-gradient(
+      circle at 17% 22%,
+      hsl(var(--signal) / 0.1),
+      transparent 36%
+    ),
+    radial-gradient(
+      circle at 86% 82%,
+      hsl(var(--accent) / 0.5),
+      transparent 42%
+    );
+}
+
+.login-stage::before,
+.login-stage::after {
+  position: fixed;
+  z-index: -1;
+  width: min(46vw, 38rem);
+  aspect-ratio: 1;
+  border: 1px solid hsl(var(--signal) / 0.14);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+}
+
+.login-stage::before {
+  left: -15vw;
+  top: -26vw;
+  box-shadow: 0 0 0 5rem hsl(var(--signal) / 0.025);
+}
+
+.login-stage::after {
+  bottom: -29vw;
+  right: -13vw;
+  box-shadow: 0 0 0 5rem hsl(var(--signal) / 0.025);
+}
+
+.login-panel {
+  max-width: 23rem;
+}
+
+.login-form-shell {
+  border-color: hsl(var(--border) / 0.78);
+  box-shadow:
+    0 24px 72px -40px hsl(var(--foreground) / 0.3),
+    0 2px 8px -4px hsl(var(--foreground) / 0.1);
+}
+
+.popover-surface {
+  transform-origin: var(--radix-popover-content-transform-origin);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .popover-surface[data-state="open"] {
+    animation: surface-appear 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .dialog-surface[data-state="open"] {
+    animation: dialog-appear 190ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+}
+
+@keyframes surface-appear {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes dialog-appear {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (max-height: 600px) {
+  .login-stage {
+    align-items: flex-start;
+    padding-block: 0.5rem;
+  }
+  .login-panel {
+    padding-block: 0;
+  }
+  .login-panel > div:first-child {
+    margin-bottom: 0.5rem;
+  }
+  .login-panel > div:first-child .relative.mb-4 {
+    margin-bottom: 0.25rem;
+  }
+  .login-panel > div:first-child .relative.mb-4 svg {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+  .login-form-shell {
+    padding: 0.75rem;
+  }
+  .conversation-welcome::before {
+    width: min(18rem, 60vw);
+  }
 }
 
 /* Tailwind v4 leaves `ring-2` transparent unless a ring color is also present.

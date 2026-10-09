@@ -361,7 +361,7 @@ export function MessageBubble({
                   isSticker
                     ? ""
                     : cn(
-                        "rounded-lg px-3 py-2",
+                        "rounded-xl px-3.5 py-2.5",
                         mine
                           ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
                           : "rounded-bl-sm border border-border bg-muted text-foreground",

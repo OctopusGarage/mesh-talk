@@ -219,7 +219,8 @@ test("a thousand pinned conversations stay bounded and keyboard reachable", asyn
     await nav.locator('[data-testid^="conversation-row-"]').count(),
   ).toBeLessThan(80);
   await nav.evaluate((el) => {
-    el.scrollTop = 1000 * 52;
+    // Stop inside the last pinned row's viewport, before the following sections.
+    el.scrollTop = 1000 * 56 - el.clientHeight / 2;
   });
   const lastPinned = page.getByTestId("conversation-row-acc_bulk_999");
   await lastPinned.focus();

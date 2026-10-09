@@ -1,46 +1,38 @@
-# Mesh-Talk visual system — Native direction
+# Mesh-Talk visual system — Quiet signal
 
-Mesh-Talk is a desktop messenger for sustained use. The interface should feel calm, direct, and technically trustworthy. Direction A in frontend/prototypes/mesh-talk is the visual reference: compact navigation, one clear conversation plane, restrained controls, and explicit status. Product language and behavior remain governed by the production app.
+Mesh-Talk is a desktop messenger for sustained use. The interface keeps the conversation as the primary reading plane. Navigation and composition form a stable frame around it. The visual language is calm and precise: warm mineral paper in light mode, charcoal green ink in dark mode, and one verdigris signal accent. The product never uses decoration to imply encryption or delivery state.
 
 ## Foundations
 
-Tokens are in src/index.css; Tailwind mappings are in tailwind.config.js. Use semantic utilities and CSS variables. Dark, light, and OLED are base themes. The optional Argentina, Barcelona, and Messi palettes retain their identity; shared component geometry and hierarchy are the same in every theme.
+Tokens live in `src/index.css`; Tailwind maps them in `tailwind.config.js`. The standard light and dark palettes share the same geometry. OLED preserves a true-black canvas. Argentina, Barcelona, Messi, and Nature remain optional personal palettes with their own accents and wallpapers. In light branded themes, the wallpaper scrim is strong enough to keep messages and timestamps legible. Wallpaper can be disabled.
 
-| Layer            | Token / treatment                                               | Purpose                                                    |
-| ---------------- | --------------------------------------------------------------- | ---------------------------------------------------------- |
-| Rail             | --shell-rail                                                    | Conversation navigation, slightly distinct from the canvas |
-| Canvas           | --conversation-surface                                          | Message reading area                                       |
-| Composer         | --composer-surface                                              | Stable writing surface                                     |
-| Floating surface | --popover, --card                                               | Menus and dialogs                                          |
-| Structure        | --border, --input                                               | Hairline separation                                        |
-| Action           | --signal, --primary                                             | Focus, selected actions, links                             |
-| Status           | --presence-online, --presence-recent, --verified, --destructive | Distinct meanings that also have text or icons             |
-| Own message      | --bubble-own                                                    | Quiet fill separate from the action accent                 |
+| Layer | Treatment | Role |
+| --- | --- | --- |
+| Navigation rail | `--shell-rail`, quiet directional light, hairline divider | Conversations, search, tools, account and connection |
+| Conversation plane | `--conversation-surface`, restrained ambient light | Reading messages |
+| Composer dock | `--composer-surface`, top divider and subtle upward separation | Stable writing area |
+| Floating surface | `--popover`, `--card`, tinted elevation | Menus and dialogs only |
+| Structure | `--border`, `--input` | Separators and input boundaries |
+| Signal | `--signal`, `--primary` | Focus, selection, primary action |
+| Status | `--presence-online`, `--presence-recent`, `--verified`, `--destructive` | Meaning always paired with text or an icon |
+| Own message | `--bubble-own` | A distinct but comfortable message fill |
 
-Avoid decorative gradients and blur on ordinary UI surfaces. Existing optional themed conversation wallpapers are a user preference and can be turned off. Use shadows only on floating menus and dialogs. The normal layout is defined by flat surfaces and borders.
+## Type, density and shape
 
-## Type and spacing
+The operating system UI font is the body font. Locally bundled Space Grotesk gives brand names, conversation titles and dialog headings a distinct voice without changing message readability. Monospace is reserved for fingerprints, safety numbers, IDs, ports and numeric progress. Message text is 14px with approximately 1.55 line height. Navigation labels are 13px; secondary text and timestamps are 11–12px with adequate contrast. Section labels are small, tracked capitals. Dialog titles and important empty-state headings are 16–18px. The sign-in product name is 24px.
 
-Use the operating system UI font for body and headings, and the system monospaced font for fingerprints, safety numbers, IDs, ports, and progress values. Do not use monospaced type merely to look technical. Name and section hierarchy comes from weight and spacing.
+Spacing follows a 4px unit. A conversation row has a 56px minimum height and a full-width click target. Outer surfaces use a 10px radius, with smaller controls nested inside. The selected row has a quiet fill and a 2px signal edge; color alone is not the sole locator because its position and selected state are also exposed semantically.
 
-- Main body and messages: 13–14px; messages use 14px with approximately 1.55 line height.
-- Navigation names and control labels: 13px. Secondary text and timestamps: 11–12px with sufficient contrast.
-- Dialog titles and important empty-state headings: 16–18px. The sign-in product name may be 24px.
-- Use a 4px spacing unit. Common gaps are 8, 12, 16, and 24px. A conversation row is compact but has a full-width click target.
-- Radius is 8px at the large token, smaller for row controls. Message bubbles and dialogs use a restrained 8–12px radius.
+## Application frame
 
-## Component hierarchy
+The sidebar defaults to 284px and remains user resizable. Search is directly below the app mark. Conversations are grouped into pinned, direct messages and channels. Row actions appear on hover and keyboard focus and remain available on touch. Arrow keys move through conversation options. Files, connection and settings are consistently placed above the account and connection summary.
 
-The sidebar is 284px by default and user resizable. It groups conversations, search, utilities, network status, and account access. Selected conversations use a quiet surface change. Unread count, presence, and time remain legible at rest; row actions appear on hover or keyboard focus and stay available on touch devices. Arrow keys move through conversation options.
+The conversation header identifies the contact or channel, with history, membership, call and verification beside that identity. The message log and composer share an 820px maximum content width. Messages have distinct sent and received fills; delivery denotes account receipt, never a read receipt. Replies, mentions, pending or failed sends and file transfer retain distinct visible states.
 
-The conversation header identifies the contact or channel and keeps history, membership, call, and verification actions adjacent to that identity. The message log and composer share an 820px maximum content width. Bubbles use different fills for sent and received messages; delivery means account receipt, never read receipt. Message metadata is quiet but readable. Replies, mentions, failed sends, pending sends, and file transfer have distinct visible states.
+The composer is a stable bottom dock. Attachment, media, expression and send controls remain near the input, and the tool row can collapse for a quieter writing area. Menus and dialogs use the same solid surfaces, hairline structure, typography and elevation. Settings retain their navigable section list; sign-in and identity creation use the same input and button system as the signed-in app.
 
-The composer is a stable bottom surface with a clear writing field and compact attachment, media, sticker, and send controls. Composer menus use the same menu radius, elevation, and typography as sidebar menus. Dialogs use solid surfaces, one border, a short title, and a direct primary action. Settings are organized as a navigable list of sections with compact rows and consistent controls. Onboarding uses the same controls and type scale as the signed-in app.
+## States and accessibility
 
-Empty, loading, error, connection, and offline states state what is happening and offer the existing next action where one exists. Do not rely on color alone for encryption, verification, or connection meaning. Keep fingerprints and safety numbers selectable and easy to compare. Technical diagnostics may use monospaced values, while explanatory text stays in the UI font.
+Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
-## Interaction
-
-All interactive controls need a visible keyboard focus state and an accessible name. Hover adds affordance without being required to discover core actions. Enter and Space activate native buttons; Escape closes Radix dialogs and menus. Respect reduced-motion preferences. Use brief transitions only for state changes, and avoid entrance animation in the ordinary message reading path.
-
-At narrow widths, keep the existing responsive conversation behavior and make long names, identifiers, messages, and filenames wrap or truncate inside their panes. At short heights, tools remain accessible and dialog content scrolls. Native window drag regions and title-bar insets must remain clear on macOS, Windows, and Linux.
+Controls need accessible names, keyboard focus indicators and at least the existing touch target sizes. Native buttons handle Enter and Space; Escape closes Radix dialogs and menus. Brief 150–190ms motion is reserved for press feedback and floating surfaces. Ordinary message reading does not animate on entry. Reduced-motion settings remove spatial movement while preserving 80ms color and opacity feedback; progress that would otherwise be shown by a spinner has readable text. Theme previews use the actual canvas, signal and rail tokens. At narrow widths, the existing responsive conversation behavior remains intact; at short heights, dialogs scroll and tools remain reachable. Title-bar drag regions and native control insets remain clear on macOS, Windows and Linux.
