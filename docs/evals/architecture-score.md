@@ -1,22 +1,42 @@
 # Architecture score — 2026-10-09
 
-This is a qualitative review of the current `refactor/architecture-deepening` branch using the same rubric applied before the refactors. It measures module design in the four reviewed hot paths; it is not a repository-wide static-analysis metric.
+**95/100**, up from **86/100** in the broad-scope review of commit `6640d30`.
+This is a qualitative score for the codebase's active core, host, and frontend
+seams using a fixed four-part rubric. It is reviewer judgment with medium
+confidence, not a repository-wide static-analysis metric. The earlier 90/100
+in this document covered only four selected refactors; the 86/100 baseline
+reassessed the wider hot paths before the three rounds below.
 
-| Dimension | Before | After | Evidence |
+| Dimension | Broad baseline | Current | Evidence |
 |---|---:|---:|---|
-| Module depth | 18/25 | 23/25 | Conversation transitions, file delivery scheduling, viewport movement, and owner admission now sit behind focused interfaces. |
-| Seam integrity | 17/25 | 22/25 | The state transition, delivery cursor, viewport, and host authorization rules each have one owner. |
-| Test surface | 21/25 | 23/25 | Store, file delivery, rendered viewport, and registered IPC tests cover the changed seams, including restart and cancellation. |
-| Locality | 14/25 | 22/25 | Each reviewed behavior can be changed at its owner rather than by editing multiple coordinating callers. |
-| **Total** | **70/100** | **90/100** | Fixed equal-weight rubric; reviewer judgment, medium confidence. |
+| Module depth | 22/25 | 24/25 | `NodeState` owns host lifecycle tickets and retirement; `DeliveryStore` prepares the outgoing manifest transaction and derives File cards; conversation state settles sends behind one transition interface. |
+| Seam integrity | 21/25 | 24/25 | Host commands delegate lifecycle changes to `NodeState`; send/receive file paths share store-owned card construction; frontend send orchestration delegates cache, deletion, and intent completion rules to `conversationState.ts`. |
+| Test surface | 23/25 | 24/25 | Existing registered-command and Node runtime tests exercise the host and file interfaces; new public store-action tests cover late accepted sends after cache eviction and authoritative file metadata arriving before acceptance. |
+| Locality | 20/25 | 23/25 | Lifecycle ordering, card identity, and exact-ID completion each have one owner, leaving callers to coordinate IPC or network work. |
+| **Total** | **86/100** | **95/100** | Equal weights; same rubric in each round. |
 
-The four rounds were:
+## Rounds
 
-1. `store/conversationState.ts` took cache eviction, deletion protection, and conversation state transitions from `chat.ts` and `outgoingIntent.ts`.
-2. `FileDeliveryScheduler` took the file worker's pending and active cursors, bounded transfer cache, admission, and exact retirement path.
-3. `useConversationViewport.ts` took scroll restoration, search jumps, and follow-latest behavior from `ConversationView.tsx`.
-4. `OwnerAdmission` took owner capture, checked reads, guarded local acceptance, and cancellation-safe detached enqueue lifetime for owner-sensitive IPC.
+1. `aebed81` — Host runtime lifecycle moved from `commands.rs` into `NodeState`, next to the installed node it governs. **90/100** after this round.
+2. `592234f` — The delivery store took outgoing manifest transaction preparation and both File card constructors. Signed destination events and validated staged chunks remain the inputs. **93/100** after this round.
+3. `682281d` — Conversation state took exact-ID send completion, including deletion protection, metadata/status preservation, and cache eviction behavior. Send orchestration still performs IPC. Two public store-action regressions cover the newly concentrated interface. **95/100** after this round.
 
-Verification: `make test` passed; `./scripts/check-health.sh` passed its complete gate. The health run included 264 Vitest tests, 210 passing Playwright tests with one skipped, 713 core library tests, 90 Tauri library tests, strict workspace Clippy, audits, and builds. The targeted rendered viewport tests for restoration, jump to latest, and search navigation also passed separately.
+The deletion test favors each module: removing it would spread lifecycle,
+File card, or completion rules back across its callers. No new adapter was
+introduced for a hypothetical variant.
 
-The score has limits. File-card assembly and durable validation still span `files.rs` and `delivery_store.rs`. Host startup ticketing remains separate from IPC admission because startup and a running operation have different lifetimes. These are the clearest candidates for a later review; this score does not claim those paths are fully localized.
+## Verification and limits
+
+`make test` and the complete `./scripts/check-health.sh` gate passed on
+`refactor/architecture-deepening`. The gate included 266 Vitest tests, 210
+passing Playwright tests with one skip, 713 core library tests, 90 Tauri
+library tests, strict workspace Clippy, scans, and builds. The 64 focused
+delivery runtime tests and 60 pre-addition frontend store tests also passed
+during the rounds. The two new store tests passed with the full 266-test suite.
+
+User-visible behavior, Tauri command shapes, versioned wire layouts, and stored
+data formats were kept stable. This is supported by the changed interface
+surfaces and regression checks, not an exhaustive format compatibility proof.
+The host runtime lock remains exposed to legacy command callers, and incoming
+manifest validation still coordinates network proof with the store. Those
+remaining seams account for the score staying below 100.
