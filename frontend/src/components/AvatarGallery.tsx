@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -21,10 +21,6 @@ import {
 } from "@/lib/avatarPacks";
 
 export type AvatarGalleryCategory = "personal" | "group";
-
-const EAGER_THUMBNAILS = 24;
-const EMPTY_THUMBNAIL =
-  "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACAUwAOw==";
 
 interface Tab {
   id: AvatarPackName;
@@ -106,8 +102,6 @@ export function AvatarGallery({
     category === "personal" ? "players" : "cities",
   );
   const [busy, setBusy] = useState<string | null>(null);
-  const [visibleUrls, setVisibleUrls] = useState<Set<string>>(() => new Set());
-  const gridRef = useRef<HTMLDivElement>(null);
 
   const tabs = category === "personal" ? PERSONAL_TABS(t) : GROUP_TABS(t);
 
@@ -119,47 +113,6 @@ export function AvatarGallery({
 
   const currentTab = tabs.find((t) => t.id === activeTab) ?? tabs[0];
   const presets = currentTab.presets;
-
-  useEffect(() => {
-    if (!open || !gridRef.current) return;
-    const grid = gridRef.current;
-    const deferred = grid.querySelectorAll<HTMLElement>(
-      "[data-avatar-deferred]",
-    );
-    if (deferred.length === 0) return;
-
-    if (!("IntersectionObserver" in window)) {
-      setVisibleUrls((previous) => {
-        const next = new Set(previous);
-        for (const item of deferred) {
-          if (item.dataset.avatarUrl) next.add(item.dataset.avatarUrl);
-        }
-        return next;
-      });
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const newlyVisible = entries
-          .filter((entry) => entry.isIntersecting)
-          .map((entry) => (entry.target as HTMLElement).dataset.avatarUrl)
-          .filter((url): url is string => !!url);
-        if (newlyVisible.length === 0) return;
-        setVisibleUrls((previous) => {
-          const next = new Set(previous);
-          for (const url of newlyVisible) next.add(url);
-          return next;
-        });
-        for (const entry of entries) {
-          if (entry.isIntersecting) observer.unobserve(entry.target);
-        }
-      },
-      { root: grid, rootMargin: "120px 0px" },
-    );
-    deferred.forEach((item) => observer.observe(item));
-    return () => observer.disconnect();
-  }, [activeTab, open, visibleUrls]);
 
   const choose = async (url: string) => {
     setBusy(url);
@@ -209,19 +162,12 @@ export function AvatarGallery({
 
           <div className="min-w-0">
             <div
-              ref={gridRef}
               data-testid="avatar-gallery"
               className="grid max-h-[min(54vh,480px)] grid-cols-3 content-start gap-2 overflow-y-auto p-3 sm:max-h-[min(60vh,520px)] sm:grid-cols-4 sm:gap-3 sm:p-5"
             >
-              {presets.map((p, index) => (
+              {presets.map((p) => (
                 <button
                   key={p.url}
-                  data-avatar-url={p.url}
-                  data-avatar-deferred={
-                    index >= EAGER_THUMBNAILS && !visibleUrls.has(p.url)
-                      ? "true"
-                      : undefined
-                  }
                   type="button"
                   aria-busy={busy === p.url}
                   onClick={() => void choose(p.url)}
@@ -231,11 +177,7 @@ export function AvatarGallery({
                 >
                   <div className="relative h-16 w-16 shrink-0 rounded-[28%] ring-1 ring-border/70 sm:h-[76px] sm:w-[76px]">
                     <img
-                      src={
-                        index < EAGER_THUMBNAILS || visibleUrls.has(p.url)
-                          ? p.url
-                          : EMPTY_THUMBNAIL
-                      }
+                      src={p.url}
                       alt=""
                       loading="lazy"
                       decoding="async"

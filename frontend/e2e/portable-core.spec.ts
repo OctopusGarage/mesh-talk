@@ -7,47 +7,36 @@ import {
   expectNoHorizontalOverflow,
 } from "./helpers/ui-audit";
 
-test("deferred avatar thumbnails show a decodable placeholder", async ({
+test("city avatar thumbnails load after scrolling the gallery", async ({
   page,
 }) => {
   await enterChat(page);
-  await page.getByTestId("open-profile").click();
-  await page.getByRole("button", { name: "Change your photo" }).click();
+  await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+  await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
-  await page.getByRole("button", { name: "NBA", exact: true }).click();
+  const gallery = page.getByTestId("avatar-gallery");
+  await expect(gallery.locator("img")).toHaveCount(36);
 
-  const deferred = page
-    .getByTestId("avatar-gallery")
-    .locator('[data-avatar-deferred="true"] img')
-    .first();
-  await expect(deferred).toBeAttached();
-  const src = await deferred.getAttribute("src");
-  expect(src).toBeTruthy();
-  const decoded = await page.evaluate(async (url) => {
-    const image = new Image();
-    image.src = url!;
-    try {
-      await image.decode();
-      return image.naturalWidth;
-    } catch {
-      return 0;
-    }
-  }, src);
-  expect(decoded).toBe(1);
-
-  const index = await deferred.evaluate((image) =>
-    Array.from(
-      image.closest('[data-testid="avatar-gallery"]')!.querySelectorAll("img"),
-    ).indexOf(image as HTMLImageElement),
-  );
-  const target = page.getByTestId("avatar-gallery").locator("img").nth(index);
-  await target.scrollIntoViewIfNeeded();
-  await expect(target).toHaveAttribute("src", /nba-players/);
+  await gallery.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const abuDhabi = gallery
+    .getByRole("button", { name: "Abu Dhabi" })
+    .locator("img");
+  await expect(abuDhabi).toHaveAttribute("src", /25-Abu%20Dhabi/);
   await expect
     .poll(() =>
-      target.evaluate((image) => (image as HTMLImageElement).naturalWidth),
+      abuDhabi.evaluate((image) => (image as HTMLImageElement).naturalWidth),
     )
     .toBeGreaterThan(1);
+  for (const index of [28, 29, 30, 31, 32, 33, 34, 35]) {
+    const thumbnail = gallery.locator("img").nth(index);
+    await expect
+      .poll(() =>
+        thumbnail.evaluate((image) => (image as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(1);
+  }
 });
 
 test("portable authentication rejects the wrong password", async ({ page }) => {
