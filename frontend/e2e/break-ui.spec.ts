@@ -330,7 +330,24 @@ test("rapid incoming messages and conversation switches stay usable", async ({
   await page.setViewportSize({ width: 760, height: 520 });
   await enter(page, "worst");
   await page.getByTestId(`conversation-row-${BOB}`).click();
+  const log = page.getByRole("log");
   await expect(page.getByTestId("message-bubble").first()).toBeVisible();
+  // The 500-message backlog must finish measuring before this test exercises
+  // followOutput. A mounted bubble alone does not mean Virtuoso reached the end.
+  await expect
+    .poll(() =>
+      log.evaluate((element) => element.scrollHeight - element.clientHeight),
+    )
+    .toBeGreaterThan(200);
+  await log.press("End");
+  await expect
+    .poll(() =>
+      log.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    )
+    .toBeLessThan(48);
   await page.evaluate(() => {
     const w = window as unknown as {
       __mockInject: (conv: string, text: string, who: string) => void;
