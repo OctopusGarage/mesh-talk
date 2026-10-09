@@ -373,7 +373,7 @@ export function Composer({
   return (
     <div
       data-testid="composer"
-      className="border-t bg-[hsl(var(--composer-surface))] px-4 pb-3 pt-3"
+      className="composer-dock border-t bg-[hsl(var(--composer-surface))] px-4 pb-3 pt-3"
     >
       {replyTo && (
         <div
@@ -454,7 +454,7 @@ export function Composer({
                     }
                   }}
                   className={cn(
-                    "flex min-h-9 items-center gap-2 rounded-t-md border-b-2 px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "flex min-h-9 items-center gap-2 border-b-2 px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     expressionTab === "emoji"
                       ? "border-signal text-foreground"
                       : "border-transparent text-muted-foreground hover:text-foreground",
@@ -481,7 +481,7 @@ export function Composer({
                       }
                     }}
                     className={cn(
-                      "flex min-h-9 items-center gap-2 rounded-t-md border-b-2 px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      "flex min-h-9 items-center gap-2 border-b-2 px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       expressionTab === "stickers"
                         ? "border-signal text-foreground"
                         : "border-transparent text-muted-foreground hover:text-foreground",

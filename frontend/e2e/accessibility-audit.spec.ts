@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
@@ -46,7 +47,7 @@ test("settings dialog has no detectable WCAG A/AA violations", async ({
   page,
 }) => {
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByRole("dialog")).toBeVisible();
   await expectNoWcagViolations(page);
 });
@@ -72,7 +73,7 @@ test("settings controls stay legible when privacy cannot load", async ({
         : original(command, args);
   });
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   const managePrivacy = page.getByTestId("manage-privacy");
   await expect(managePrivacy).toBeDisabled();
   expect(
@@ -133,7 +134,7 @@ test("connection dialog has no detectable WCAG A/AA violations", async ({
   page,
 }) => {
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-connection").click();
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
   await expect(page.getByTestId("diagnostics-dialog")).toBeVisible();
   await expectNoWcagViolations(page);
 });

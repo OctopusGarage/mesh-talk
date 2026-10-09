@@ -10,6 +10,8 @@ import {
   Pencil,
   Pin,
   PinOff,
+  Radar,
+  Settings,
   Sun,
   X,
 } from "lucide-react";
@@ -116,7 +118,7 @@ function Row({
       role="group"
       aria-label={`${listPosition} / ${listSize}`}
       className={cn(
-        "group relative flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left",
+        "conversation-row group relative flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left",
         isActive ? "bg-signal/10" : "hover:bg-accent/45",
       )}
     >
@@ -245,7 +247,7 @@ function SectionLabel({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between px-2.5 pb-1.5 pt-4 text-[11px] font-semibold text-muted-foreground">
+    <div className="flex items-center justify-between px-2.5 pb-1.5 pt-4 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
       <span>{children}</span>
       {action}
     </div>
@@ -259,8 +261,8 @@ const DEFAULT_WIDTH = 284;
 const MIN_WIDTH = 230;
 const MAX_WIDTH = 460;
 const VIRTUALIZE_AT = 80;
-// The 36px avatar and 8px vertical padding make a conversation row 52px tall.
-const CONVERSATION_ROW_HEIGHT = 52;
+// Match the row's minimum height so virtualized lists preserve focus and scroll math.
+const CONVERSATION_ROW_HEIGHT = 56;
 
 const clampWidth = (w: number) =>
   Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(w)));
@@ -350,11 +352,12 @@ function useSidebarWidth() {
   return { width, onPointerDown, reset, onKeyDown };
 }
 
-/** Secondary actions stay labeled in the utility menu; files, diagnostics, and
- * settings already have persistent places in the tool rail. */
+/** Secondary actions share one labeled utility menu beside connection status. */
 function UtilityMenu() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const theme = useTheme((s) => s.theme);
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useAuth((s) => s.logout);
@@ -362,58 +365,91 @@ function UtilityMenu() {
   const callsEnabled = useSettings((s) => s.callsEnabled);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          data-testid="sidebar-overflow"
-          title={t("sidebar.moreActions")}
-          aria-label={t("sidebar.moreActions")}
+    <>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="sidebar-overflow"
+            title={t("sidebar.moreActions")}
+            aria-label={t("sidebar.moreActions")}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="start"
+          side="top"
+          className="w-56 p-1.5"
+          data-testid="sidebar-overflow-menu"
         >
-          <MoreHorizontal className="h-4 w-4" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        side="top"
-        className="w-56 p-1.5"
-        data-testid="sidebar-overflow-menu"
-      >
-        <div className="grid gap-0.5">
-          <LinkDeviceDialog menuItem />
-          {callsEnabled && <WebRtcTestDialog menuItem />}
-          <AboutDialog menuItem />
-          <div className="my-1 h-px bg-border" />
-          <button
-            type="button"
-            data-testid="sidebar-theme-toggle"
-            onClick={() => toggleTheme()}
-            className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
-          >
-            {theme === "light" ? (
-              <Moon className="h-4 w-4 text-muted-foreground" />
-            ) : (
-              <Sun className="h-4 w-4 text-muted-foreground" />
-            )}
-            <span>
-              {theme === "light"
-                ? t("sidebar.darkMode")
-                : t("sidebar.lightMode")}
-            </span>
-          </button>
-          <button
-            type="button"
-            data-testid="sidebar-sign-out"
-            onClick={() => logout()}
-            className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
-          >
-            <LogOut className="h-4 w-4" />
-            <span>{t("sidebar.signOut")}</span>
-          </button>
-        </div>
-      </PopoverContent>
-    </Popover>
+          <div className="grid gap-0.5">
+            <LinkDeviceDialog menuItem />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 px-2"
+              data-testid="sidebar-nav-connection"
+              onClick={() => {
+                setOpen(false);
+                setConnectionOpen(true);
+              }}
+            >
+              <Radar className="h-4 w-4" />
+              {t("redesign.connection")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 px-2"
+              data-testid="sidebar-nav-settings"
+              onClick={() => {
+                setOpen(false);
+                setSettingsOpen(true);
+              }}
+            >
+              <Settings className="h-4 w-4" />
+              {t("settings.title")}
+            </Button>
+            {callsEnabled && <WebRtcTestDialog menuItem />}
+            <AboutDialog menuItem />
+            <div className="my-1 h-px bg-border" />
+            <button
+              type="button"
+              data-testid="sidebar-theme-toggle"
+              onClick={() => toggleTheme()}
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+            >
+              {theme === "light" ? (
+                <Moon className="h-4 w-4 text-muted-foreground" />
+              ) : (
+                <Sun className="h-4 w-4 text-muted-foreground" />
+              )}
+              <span>
+                {theme === "light"
+                  ? t("sidebar.darkMode")
+                  : t("sidebar.lightMode")}
+              </span>
+            </button>
+            <button
+              type="button"
+              data-testid="sidebar-sign-out"
+              onClick={() => logout()}
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>{t("sidebar.signOut")}</span>
+            </button>
+          </div>
+        </PopoverContent>
+      </Popover>
+      <DiagnosticsDialog
+        open={connectionOpen}
+        onOpenChange={setConnectionOpen}
+      />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+    </>
   );
 }
 
@@ -729,12 +765,12 @@ export function Sidebar() {
       {/* Conversation title and search live above the list. The drag region and
           titlebar inset leave room for native window controls. */}
       <div
-        className="border-b px-3.5 pb-3 pt-4"
+        className="sidebar-heading border-b px-3.5 pb-3 pt-4"
         data-testid="self-identity"
         data-tauri-drag-region
         data-titlebar-inset="left"
       >
-        <div className="mb-3 flex items-center gap-2.5 text-[15px] font-semibold tracking-tight">
+        <div className="mb-3 flex items-center gap-2.5 font-display text-[16px] font-semibold tracking-tight">
           <Logo size={27} />
           <span>Mesh-Talk</span>
         </div>
@@ -922,12 +958,10 @@ export function Sidebar() {
       </nav>
 
       <div
-        className="sidebar-tools grid gap-0.5 border-t px-2 py-1.5"
+        className="sidebar-tools border-t px-2 py-1.5"
         aria-label={t("redesign.tools")}
       >
         <FilesTray navigation />
-        <DiagnosticsDialog />
-        <SettingsDialog />
       </div>
 
       {/* Stranded prompt: nobody's online and the grace window has passed — offer the

@@ -149,10 +149,10 @@ export function AvatarGallery({
                 type="button"
                 aria-pressed={activeTab === tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`shrink-0 rounded-lg border-l-2 px-3 py-2.5 text-left text-sm font-medium whitespace-nowrap outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-popover sm:w-full ${
+                className={`shrink-0 rounded-lg px-3 py-2.5 text-left text-sm font-medium whitespace-nowrap outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-popover sm:w-full ${
                   activeTab === tab.id
-                    ? "border-primary bg-popover text-foreground shadow-sm"
-                    : "border-transparent text-muted-foreground hover:bg-popover/70 hover:text-foreground"
+                    ? "bg-popover font-semibold text-foreground shadow-sm"
+                    : "text-muted-foreground hover:bg-popover/70 hover:text-foreground"
                 }`}
               >
                 {tab.label}
@@ -190,7 +190,10 @@ export function AvatarGallery({
                     />
                     {busy === p.url && (
                       <span className="absolute inset-0 flex items-center justify-center rounded-[28%] bg-black/40">
-                        <Loader2 className="h-5 w-5 animate-spin text-white" />
+                        <Loader2 className="h-5 w-5 animate-spin text-white motion-reduce:hidden" />
+                        <span className="hidden max-w-full rounded bg-popover px-1 py-0.5 text-center text-[10px] leading-tight font-semibold text-popover-foreground motion-reduce:block">
+                          {t("common.loading")}
+                        </span>
                       </span>
                     )}
                   </div>

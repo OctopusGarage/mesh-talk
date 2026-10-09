@@ -1,6 +1,42 @@
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm, seedThemeBeforeLoad } from "./helpers/session";
 
+// GPU gradient compositing can round an individual color channel by one level
+// between captures. Compare rendered pixels so this test still catches movement.
+async function maxPixelDrift(
+  page: import("@playwright/test").Page,
+  a: Buffer,
+  b: Buffer,
+) {
+  return page.evaluate(
+    async ([first, second]) => {
+      const pixels = async (base64: string) => {
+        const image = await createImageBitmap(
+          await (await fetch(`data:image/png;base64,${base64}`)).blob(),
+        );
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Canvas unavailable");
+        context.drawImage(image, 0, 0);
+        const data = context.getImageData(0, 0, image.width, image.height).data;
+        image.close();
+        return data;
+      };
+      const left = await pixels(first);
+      const right = await pixels(second);
+      if (left.length !== right.length)
+        throw new Error("Capture dimensions changed");
+      let max = 0;
+      for (let i = 0; i < left.length; i++)
+        max = Math.max(max, Math.abs(left[i] - right[i]));
+      return max;
+    },
+    [a.toString("base64"), b.toString("base64")],
+  );
+}
+
 for (const theme of ["argentina", "barcelona", "messi"] as const) {
   test(`${theme} theme shows one image across the chat shell`, async ({
     page,
@@ -69,10 +105,14 @@ test("wallpaper stays in place across conversation and composer changes", async 
   await expect(page.getByTestId("conversation-header")).toContainText("team");
   await expect(page.getByRole("log")).toBeVisible();
   const channelWallpaper = await page.screenshot({ clip });
-  expect(channelWallpaper.equals(privateWallpaper)).toBe(true);
+  expect(
+    await maxPixelDrift(page, channelWallpaper, privateWallpaper),
+  ).toBeLessThanOrEqual(1);
 
   await page.getByTestId("composer-more-tools").click();
   await expect(page.getByRole("toolbar", { name: "Tools" })).toBeVisible();
   const expandedWallpaper = await page.screenshot({ clip });
-  expect(expandedWallpaper.equals(channelWallpaper)).toBe(true);
+  expect(
+    await maxPixelDrift(page, expandedWallpaper, channelWallpaper),
+  ).toBeLessThanOrEqual(1);
 });

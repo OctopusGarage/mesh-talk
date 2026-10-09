@@ -332,9 +332,7 @@ export function DiagnosticsDialog({
             className="h-10 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-foreground"
           >
             <Radar className="h-4 w-4" />
-            <span className="sidebar-tool-label">
-              {t("redesign.connection")}
-            </span>
+            <span>{t("redesign.connection")}</span>
           </Button>
         </DialogTrigger>
       )}

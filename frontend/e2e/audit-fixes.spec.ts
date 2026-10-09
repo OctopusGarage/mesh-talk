@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import { enterChat, CHANNEL } from "./helpers/session";
 
@@ -58,7 +59,7 @@ test("device-linking fields are named and failed clipboard writes are announced"
 
 test("diagnostics copy controls report clipboard failure", async ({ page }) => {
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-connection").click();
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
   const dialog = page.getByTestId("diagnostics-dialog");
   await page.evaluate(() => {
     Object.defineProperty(navigator, "clipboard", {

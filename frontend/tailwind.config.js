@@ -52,6 +52,7 @@ export default {
       },
       fontFamily: {
         display: [
+          "'Space Grotesk Variable'",
           "-apple-system",
           "BlinkMacSystemFont",
           "'Segoe UI Variable'",

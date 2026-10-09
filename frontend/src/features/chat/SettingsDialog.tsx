@@ -119,11 +119,19 @@ const LANGUAGE_LABELS: Record<Language, string> = {
   yue: "粵語",
 };
 
-export function SettingsDialog() {
+export function SettingsDialog({
+  open: controlledOpen,
+  onOpenChange,
+}: {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+} = {}) {
   const { t, i18n } = useTranslation();
   const wallpaperEnabled = useTheme((s) => s.wallpaperEnabled);
   const setWallpaperEnabled = useTheme((s) => s.setWallpaperEnabled);
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = onOpenChange ?? setInternalOpen;
   // Selectors return primitives only (stable refs) — a fresh object once black-screened the app.
   // Primitive state only (memory: zustand selectors returning fresh objects each
   // render once black-screened the app — kept as local primitives here regardless).
@@ -306,18 +314,20 @@ export function SettingsDialog() {
         if (next) setMoreBelow(true);
       }}
     >
-      <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          data-testid="sidebar-nav-settings"
-          title={t("settings.title")}
-          aria-label={t("settings.title")}
-          className="h-10 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-foreground"
-        >
-          <Settings className="h-4 w-4" />
-          <span className="sidebar-tool-label">{t("settings.title")}</span>
-        </Button>
-      </DialogTrigger>
+      {controlledOpen === undefined && (
+        <DialogTrigger asChild>
+          <Button
+            variant="ghost"
+            data-testid="sidebar-nav-settings"
+            title={t("settings.title")}
+            aria-label={t("settings.title")}
+            className="h-10 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-foreground"
+          >
+            <Settings className="h-4 w-4" />
+            <span>{t("settings.title")}</span>
+          </Button>
+        </DialogTrigger>
+      )}
       <DialogContent
         className="max-w-[min(52rem,calc(100vw-2rem))] overflow-hidden"
         data-testid="settings-dialog"

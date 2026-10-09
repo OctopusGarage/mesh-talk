@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
@@ -67,7 +68,7 @@ test("settings switches keep a compact track inside a usable touch target", asyn
   page,
 }) => {
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   const wallpaper = page.getByTestId("settings-wallpaper");
   const bounds = await wallpaper.boundingBox();
   expect(bounds?.width).toBeGreaterThanOrEqual(44);
@@ -86,7 +87,7 @@ test("settings switches keep a compact track inside a usable touch target", asyn
 test("form inputs and selects keep 44px touch targets", async ({ page }) => {
   await enterChat(page);
 
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   const settings = page.getByRole("dialog");
   const language = page.getByTestId("settings-language-select");
   expect(

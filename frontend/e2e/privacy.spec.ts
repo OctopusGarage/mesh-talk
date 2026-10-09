@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 const bob = "b".repeat(32);
 test.beforeEach(async ({ page }) => {
@@ -49,7 +50,7 @@ async function settings(page: import("@playwright/test").Page) {
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("a strong password");
   await page.getByTestId("login-submit").click();
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
 }
 test("invisible mode requires confirmation and survives reload", async ({
   page,

@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, BOB, CHANNEL } from "./helpers/session";
@@ -127,7 +128,7 @@ test("portable registration sign in and sign out", async ({ page }) => {
 });
 
 async function settings(page: Page) {
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByTestId("settings-dialog")).toBeVisible();
 }
 

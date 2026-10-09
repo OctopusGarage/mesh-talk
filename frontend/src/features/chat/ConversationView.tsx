@@ -99,7 +99,7 @@ function EmptyState() {
   const [guideOpen, setGuideOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+    <div className="conversation-welcome flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
       <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-muted text-signal">
         <MessagesSquare className="h-5 w-5" />
       </div>
@@ -733,7 +733,7 @@ export function ConversationView() {
         {!loading && !historyError && messages.length === 0 && (
           <div
             data-testid="conversation-empty"
-            className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground"
+            className="conversation-welcome flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground"
           >
             <MessagesSquare
               aria-hidden="true"

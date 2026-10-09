@@ -4,16 +4,16 @@ import { ALL_THEMES, useTheme, type Theme } from "@/lib/theme";
 import { THEME_CREST } from "@/lib/themeCrest";
 import { getNatureWallpaper, NATURE_WALLPAPERS } from "@/lib/natureWallpapers";
 
-// Representative preview swatches per theme: [surface, crest accent, secondary accent].
-// These mirror the palette tokens in index.css so a card previews the real look.
+// Preview [canvas, signal, rail] values mirror index.css. The browser test compares
+// all three values with their applied CSS tokens so a palette edit cannot leave stale previews.
 const SWATCH: Record<Theme, [string, string, string]> = {
-  dark: ["hsl(185 20% 8%)", "hsl(163 42% 61%)", "hsl(178 17% 13%)"],
-  light: ["hsl(156 12% 97%)", "hsl(163 49% 33%)", "hsl(155 12% 95%)"],
+  dark: ["hsl(176 13% 9%)", "hsl(163 42% 61%)", "hsl(176 11% 14%)"],
+  light: ["hsl(44 19% 96%)", "hsl(163 43% 30%)", "hsl(43 17% 92%)"],
   oled: ["hsl(0 0% 0%)", "hsl(163 42% 61%)", "hsl(220 12% 5%)"],
-  argentina: ["hsl(205 55% 95%)", "hsl(202 84% 46%)", "hsl(38 90% 42%)"],
-  barcelona: ["hsl(224 46% 9%)", "hsl(344 72% 52%)", "hsl(45 88% 58%)"],
-  messi: ["hsl(208 46% 95%)", "hsl(214 82% 46%)", "hsl(38 88% 42%)"],
-  nature: ["hsl(44 34% 96%)", "hsl(154 42% 31%)", "hsl(148 20% 87%)"],
+  argentina: ["hsl(205 55% 95%)", "hsl(202 84% 46%)", "hsl(204 43% 93%)"],
+  barcelona: ["hsl(224 46% 9%)", "hsl(344 72% 52%)", "hsl(226 40% 12%)"],
+  messi: ["hsl(208 46% 95%)", "hsl(214 84% 48%)", "hsl(208 40% 92%)"],
+  nature: ["hsl(44 34% 96%)", "hsl(154 42% 31%)", "hsl(43 28% 93%)"],
 };
 
 /** A gallery of theme cards, each previewing its palette; click to apply (with a crossfade). */
@@ -45,6 +45,9 @@ export function ThemePicker() {
           )}
         >
           <span
+            data-testid={`theme-preview-${id}`}
+            data-preview-signal={a1}
+            data-preview-rail={a2}
             className="flex h-12 items-center justify-center overflow-hidden rounded-lg ring-1 ring-inset ring-white/5"
             style={{ background: bg }}
           >

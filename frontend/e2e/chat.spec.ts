@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
@@ -516,7 +517,7 @@ test.describe("Mesh-Talk UI flow", () => {
     // App boots dark.
     await expect(page.locator("html")).toHaveClass(/dark/);
 
-    await page.getByTestId("sidebar-nav-settings").click();
+    await openSidebarMenuAction(page, "sidebar-nav-settings");
     await expect(page.getByTestId("theme-picker")).toBeVisible();
 
     await page.getByTestId("theme-light").click();
@@ -544,7 +545,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await enterChat(page);
     await expect(page.getByText("Direct messages")).toBeVisible();
 
-    await page.getByTestId("sidebar-nav-settings").click();
+    await openSidebarMenuAction(page, "sidebar-nav-settings");
     const lang = page.getByTestId("settings-language-select");
     await lang.selectOption("zh-Hans");
     // Sidebar section label re-renders in Simplified Chinese.
@@ -558,7 +559,7 @@ test.describe("Mesh-Talk UI flow", () => {
     page,
   }) => {
     await enterChat(page);
-    await page.getByTestId("sidebar-nav-connection").click();
+    await openSidebarMenuAction(page, "sidebar-nav-connection");
     await expect(page.getByTestId("diagnostics-dialog")).toBeVisible();
     // Overview (default tab) shows the environment facts.
     await expect(page.getByText("This device")).toBeVisible();

@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import "@fontsource-variable/space-grotesk";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 // Bundle fonts LOCALLY (offline desktop app, CSP-safe — no CDN). Variable packages.

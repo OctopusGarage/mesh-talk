@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import type { Locator } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm } from "./helpers/session";
@@ -75,7 +76,7 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
     },
     {
       open: async () => {
-        await page.getByTestId("sidebar-nav-settings").click();
+        await openSidebarMenuAction(page, "sidebar-nav-settings");
       },
       surface: "settings-dialog",
       hasDialogClose: true,
@@ -135,7 +136,7 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
 
 test("settings scroll cue reveals more controls", async ({ page }) => {
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
 
   const cue = page.getByTestId("settings-scroll-more");
   await expect(cue).toBeVisible();
@@ -155,7 +156,7 @@ test("settings section navigation reaches the requested controls", async ({
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   const dialog = page.getByTestId("settings-dialog");
   await dialog
     .getByRole("navigation", { name: "Settings" })

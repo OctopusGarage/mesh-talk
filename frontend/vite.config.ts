@@ -16,7 +16,10 @@ export default defineConfig({
     // Tauri, so a modestly higher limit than Vite's web default is appropriate here.
     chunkSizeWarningLimit: 700,
   },
-  server: { port: 5173, strictPort: true },
+  server: {
+    port: Number(process.env.MESH_TALK_E2E_PORT ?? 5173),
+    strictPort: true,
+  },
   test: {
     environment: "node",
     globals: false,
