@@ -127,15 +127,25 @@ test("native historical rendering uses the focusable message log and real PageUp
   const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
   const commands = [], keys = [];
   let polls = 0;
-  await revealHistoricalNativeMessage({ execute: async (_script, args) => args ? ++polls === 3 : true, command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async value => keys.push(value), until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("history not visible"); } }, "old message");
+  await revealHistoricalNativeMessage({ execute: async (script, args) => script.includes("const b=document.querySelector") ? false : args ? ++polls === 3 : true, command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": "log" }; }, key: async value => keys.push(value), until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("history not visible"); } }, "old message");
   assert.equal(commands[0].body.value, '[role="log"]');
   assert.equal(commands[1].path, "/element/log/click");
   assert.deepEqual(keys, ["\uE00E", "\uE00E"]);
 });
 
+test("native historical rendering uses Jump to latest when restored history starts above recent messages", async () => {
+  const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
+  const commands = [], keys = [];
+  let polls = 0;
+  await revealHistoricalNativeMessage({ execute: async (script, args) => script.includes("const b=document.querySelector") ? polls < 2 : args ? ++polls === 3 : true, command: async (method, path, body) => { commands.push({ method, path, body }); return { "element-6066-11e4-a52e-4f735466cecf": body?.value?.includes("Jump") ? "jump" : "log" }; }, key: async value => keys.push(value), until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("history not visible"); } }, "recent message");
+  assert.equal(commands[2].body.value, 'button[aria-label="Jump to latest messages"]');
+  assert.equal(commands[3].path, "/element/jump/click");
+  assert.deepEqual(keys, ["\uE00E"]);
+});
+
 test("native historical rendering does not turn missing history into success", async () => {
   const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
-  await assert.rejects(revealHistoricalNativeMessage({ execute: async (_script, args) => !args, command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }), key: async () => {}, until: async (_label, poll) => { if (await poll()) return true; throw new Error("history not visible"); } }, "missing message"), /history not visible/);
+  await assert.rejects(revealHistoricalNativeMessage({ execute: async (script, args) => script.includes("const b=document.querySelector") ? false : args ? false : true, command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }), key: async () => {}, until: async (_label, poll) => { if (await poll()) return true; throw new Error("history not visible"); } }, "missing message"), /history not visible/);
 });
 
 test("native historical rendering waits for asynchronous history hydration before locating the scroller", async () => {
