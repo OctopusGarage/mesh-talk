@@ -137,8 +137,8 @@ async function receiptPhase(c, state, name, expected, historical = false, cold =
     const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
     return values.every(value => value === expected) && values;
   });
-  for (const label of [...state.labels].reverse()) {
-    if (historical) await revealHistoricalNativeMessage(c, label);
+  for (const [index, label] of [...state.labels].reverse().entries()) {
+    if (historical && index > 0) await revealHistoricalNativeMessage(c, label);
     else await revealLatestNativeMessage(c, label);
     await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
   }
@@ -221,39 +221,21 @@ export async function revealLatestNativeMessage({ execute, until, command, now =
   }
 }
 
-export async function revealHistoricalNativeMessage({ execute, until, command, key, now = Date.now }, text) {
+export async function revealHistoricalNativeMessage({ execute, until, command, key }, text) {
   // Virtuoso's real scroller is keyboard-focusable. Native PageUp exercises
   // normal browser scrolling, rather than mutating its virtual-list state.
   await until("restarted message log hydrated", () => execute("return !!document.querySelector('[role=log]');"));
   const log = await command("POST", "/element", { using: "css selector", value: '[role="log"]' });
   await command("POST", `/element/${log["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
-  let jumpRequested = false;
-  let jumpAt = 0;
-  let domClickFallback = false;
   try { await until("historical message visibly rendered after native PageUp", async () => {
     const visible = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right;", [text]);
     if (visible) return true;
-    // A restored virtual list can start above the newest messages. PageUp
-    // would then move away from these recent receipt fixtures indefinitely.
-    const jump = await execute("const b=document.querySelector('button[aria-label=\"Jump to latest messages\"]'),r=b?.getBoundingClientRect();return !!r&&r.width>0&&r.height>0;");
-    if (jump) {
-      if (!jumpRequested) {
-        const button = await command("POST", "/element", { using: "css selector", value: 'button[aria-label="Jump to latest messages"]' });
-        await command("POST", `/element/${button["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
-        jumpRequested = true;
-        jumpAt = now();
-      } else if (!domClickFallback && now() - jumpAt >= 2000) {
-        domClickFallback = await execute("const b=document.querySelector('button[aria-label=\"Jump to latest messages\"]');if(!b)return false;b.click();return true;");
-      }
-      return false;
-    }
-    if (jumpRequested) await execute("document.querySelector('[role=log]')?.focus();");
     assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native PageUp targets the focused message log");
     await key("\uE00E");
     return false;
   }); } catch (error) {
     const state = await execute("const log=document.querySelector('[role=log]'),bubbles=Array.from(document.querySelectorAll('[data-testid=message-bubble]'));return {count:bubbles.length,tails:bubbles.slice(-3).map(e=>e.textContent.slice(-120)),scrollTop:log?.scrollTop,scrollHeight:log?.scrollHeight,clientHeight:log?.clientHeight,targetInDom:bubbles.some(e=>e.textContent.includes(arguments[0]))};", [text]);
-    throw new Error(`${error.message}; native history state ${JSON.stringify({ ...state, jumpRequested, domClickFallback })}`);
+    throw new Error(`${error.message}; native history state ${JSON.stringify({ ...state, target: text })}`);
   }
 }
 
@@ -405,8 +387,9 @@ async function profileLayout(c) {
 
 export async function restartedCoreScenarios(c, state) {
   await c.click(c.row());
-  for (const text of [state.outbound, state.inbound, ...state.contents].reverse()) {
-    await revealHistoricalNativeMessage(c, text);
+  for (const [index, text] of [state.outbound, state.inbound, ...state.contents].reverse().entries()) {
+    if (index === 0) await revealLatestNativeMessage(c, text);
+    else await revealHistoricalNativeMessage(c, text);
     assert.ok((await c.history()).some(h => h.text === text));
   }
   await c.passed("history-process-restart", { actualProcessRestart: true, rendered: true, persisted: true });
