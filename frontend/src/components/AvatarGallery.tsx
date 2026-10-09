@@ -14,6 +14,8 @@ import {
   PLAYER_AVATARS,
   NBA_TEAM_AVATARS,
   NBA_PLAYER_AVATARS,
+  SPORTS_AVATARS,
+  FAMOUS_AVATARS,
   type AvatarPackName,
 } from "@/lib/avatarPacks";
 
@@ -44,6 +46,18 @@ const PERSONAL_TABS = (t: (k: string) => string): Tab[] => [
     presets: NBA_PLAYER_AVATARS,
     fit: "cover",
   },
+  {
+    id: "sports",
+    label: t("avatar.tabSportsStars"),
+    presets: SPORTS_AVATARS,
+    fit: "cover",
+  },
+  {
+    id: "famous",
+    label: t("avatar.tabFamousPeople"),
+    presets: FAMOUS_AVATARS,
+    fit: "cover",
+  },
 ];
 
 const GROUP_TABS = (t: (k: string) => string): Tab[] => [
@@ -63,7 +77,7 @@ const GROUP_TABS = (t: (k: string) => string): Tab[] => [
 
 /**
  * A grid of built-in preset avatars with tab navigation. Two categories:
- * - "personal": Football Stars | NBA Stars  (cover fit — photos fill the square)
+ * - "personal": Football | NBA | Sports Stars | Famous People (cover fit)
  * - "group":    Football Clubs | NBA Teams  (contain fit — logos keep their shape)
  *
  * Clicking a preset normalizes it to the same 256×256 JPEG an upload produces and
@@ -156,79 +170,86 @@ export function AvatarGallery({
         if (!o) onClose();
       }}
     >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{t("avatar.galleryTitle")}</DialogTitle>
+      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-[740px]">
+        <DialogHeader className="border-b px-5 pb-5 pt-6 pr-14 sm:px-7 sm:pr-16">
+          <DialogTitle className="text-xl leading-7">
+            {t("avatar.galleryTitle")}
+          </DialogTitle>
           <DialogDescription>{t("avatar.galleryHint")}</DialogDescription>
         </DialogHeader>
 
-        {/* Tab bar */}
-        <div className="flex gap-1 rounded-lg border bg-secondary/50 p-1">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-150 ease-out ${
-                activeTab === tab.id
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+        <div className="min-h-0 sm:grid sm:grid-cols-[176px_minmax(0,1fr)]">
+          <nav
+            aria-label={t("avatar.galleryTitle")}
+            className="flex gap-1 overflow-x-auto border-b bg-muted/40 p-2.5 sm:flex-col sm:gap-1.5 sm:overflow-x-visible sm:border-b-0 sm:border-r sm:p-4"
+          >
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                aria-pressed={activeTab === tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`shrink-0 rounded-lg border-l-2 px-3 py-2.5 text-left text-sm font-medium whitespace-nowrap outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-popover sm:w-full ${
+                  activeTab === tab.id
+                    ? "border-primary bg-popover text-foreground shadow-sm"
+                    : "border-transparent text-muted-foreground hover:bg-popover/70 hover:text-foreground"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
 
-        {/* Preset grid */}
-        <div
-          ref={gridRef}
-          data-testid="avatar-gallery"
-          className="grid max-h-[48vh] grid-cols-4 gap-3 overflow-y-auto p-1 sm:grid-cols-5"
-        >
-          {presets.map((p, index) => (
-            <button
-              key={p.url}
-              data-avatar-url={p.url}
-              data-avatar-deferred={
-                index >= EAGER_THUMBNAILS && !visibleUrls.has(p.url)
-                  ? "true"
-                  : undefined
-              }
-              type="button"
-              onClick={() => void choose(p.url)}
-              disabled={busy !== null}
-              title={p.label}
-              className="flex flex-col items-center gap-1 rounded-lg p-1.5 hover:bg-accent disabled:opacity-50"
-            >
-              <div className="relative h-14 w-14">
-                <img
-                  src={
-                    index < EAGER_THUMBNAILS || visibleUrls.has(p.url)
-                      ? p.url
-                      : EMPTY_THUMBNAIL
-                  }
-                  alt={p.label}
-                  loading="lazy"
-                  decoding="async"
-                  className="h-14 w-14 rounded-[28%] bg-secondary object-cover"
-                  style={
-                    currentTab.fit === "contain"
-                      ? { objectFit: "contain" }
-                      : undefined
-                  }
-                />
-                {busy === p.url && (
-                  <span className="absolute inset-0 flex items-center justify-center rounded-[28%] bg-black/40">
-                    <Loader2 className="h-5 w-5 animate-spin text-white" />
-                  </span>
-                )}
-              </div>
-              <span className="w-full truncate text-center text-[10px] text-muted-foreground">
-                {p.label}
-              </span>
-            </button>
-          ))}
+          <div
+            ref={gridRef}
+            data-testid="avatar-gallery"
+            className="grid max-h-[min(54vh,480px)] grid-cols-3 content-start gap-2 overflow-y-auto p-3 sm:max-h-[min(60vh,520px)] sm:grid-cols-4 sm:gap-3 sm:p-5"
+          >
+            {presets.map((p, index) => (
+              <button
+                key={p.url}
+                data-avatar-url={p.url}
+                data-avatar-deferred={
+                  index >= EAGER_THUMBNAILS && !visibleUrls.has(p.url)
+                    ? "true"
+                    : undefined
+                }
+                type="button"
+                aria-busy={busy === p.url}
+                onClick={() => void choose(p.url)}
+                disabled={busy !== null}
+                title={p.label}
+                className="flex min-w-0 flex-col items-center gap-2 rounded-xl border border-transparent bg-muted/45 p-2.5 text-center outline-none transition-colors hover:border-border hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-popover disabled:opacity-50"
+              >
+                <div className="relative h-16 w-16 shrink-0 rounded-[28%] ring-1 ring-border/70 sm:h-[76px] sm:w-[76px]">
+                  <img
+                    src={
+                      index < EAGER_THUMBNAILS || visibleUrls.has(p.url)
+                        ? p.url
+                        : EMPTY_THUMBNAIL
+                    }
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    className="h-full w-full rounded-[28%] bg-secondary object-cover"
+                    style={
+                      currentTab.fit === "contain"
+                        ? { objectFit: "contain" }
+                        : undefined
+                    }
+                  />
+                  {busy === p.url && (
+                    <span className="absolute inset-0 flex items-center justify-center rounded-[28%] bg-black/40">
+                      <Loader2 className="h-5 w-5 animate-spin text-white" />
+                    </span>
+                  )}
+                </div>
+                <span className="line-clamp-2 min-h-8 w-full text-xs leading-4 text-foreground/85">
+                  {p.label}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       </DialogContent>
     </Dialog>

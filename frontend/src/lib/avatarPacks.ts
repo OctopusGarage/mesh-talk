@@ -1,6 +1,6 @@
-// Built-in avatar packs the user can pick from, instead of uploading a photo. Four sets:
-// football clubs + NBA teams for GROUP (channel) avatars, and football stars + NBA stars
-// for PERSONAL avatars. The manifests are built automatically from the bundled assets via
+// Built-in avatar packs the user can pick from, instead of uploading a photo. Clubs and
+// NBA teams are for GROUP avatars; football, NBA, sports, and famous people are for
+// PERSONAL avatars. The manifests are built automatically from the bundled assets via
 // `import.meta.glob` (eager URL imports) — drop a file in the folder and it shows up.
 
 export interface AvatarPreset {
@@ -48,7 +48,8 @@ export const PLAYER_AVATARS: AvatarPreset[] = pack(
   }),
 );
 
-export type AvatarPackName = "clubs" | "players" | "nba-players" | "nba-teams";
+export type AvatarPackName =
+  "clubs" | "players" | "nba-players" | "nba-teams" | "sports" | "famous";
 
 export function avatarPack(name: AvatarPackName): AvatarPreset[] {
   switch (name) {
@@ -60,6 +61,10 @@ export function avatarPack(name: AvatarPackName): AvatarPreset[] {
       return NBA_TEAM_AVATARS;
     case "nba-players":
       return NBA_PLAYER_AVATARS;
+    case "sports":
+      return SPORTS_AVATARS;
+    case "famous":
+      return FAMOUS_AVATARS;
   }
 }
 
@@ -75,6 +80,24 @@ export const NBA_TEAM_AVATARS: AvatarPreset[] = pack(
 /** NBA star photos — preset PERSONAL avatars. */
 export const NBA_PLAYER_AVATARS: AvatarPreset[] = pack(
   import.meta.glob("../assets/avatars/nba-players/*.webp", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);
+
+/** Sports-star portraits — preset PERSONAL avatars. */
+export const SPORTS_AVATARS: AvatarPreset[] = pack(
+  import.meta.glob("../assets/avatars/sports/*.jpg", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);
+
+/** Famous-person portraits — preset PERSONAL avatars. */
+export const FAMOUS_AVATARS: AvatarPreset[] = pack(
+  import.meta.glob("../assets/avatars/famous/*.jpg", {
     eager: true,
     query: "?url",
     import: "default",
