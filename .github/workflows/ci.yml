@@ -211,10 +211,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/*
 
-      - uses: actions/setup-go@v7
+      - name: Install Go for workflow validation
         if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.26.1'
+          go-version: '1.25'
           cache: false
 
       - name: Validate GitHub Actions workflows
