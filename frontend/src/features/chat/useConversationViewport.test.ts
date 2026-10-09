@@ -112,9 +112,10 @@ it("restores the reading position after switching away and back", async () => {
   await render("account:bob");
   scroller.scrollTop = 0;
   await render("account:alice");
-  expect(viewport.initialIndex).toBe(1);
+  expect(viewport.initialIndex).toBe(0);
   await nextAnimationFrame();
   expect(scroller.scrollTop).toBe(120);
+  expect(viewport.showJump).toBe(true);
 });
 
 it("navigates to an exact search result and reports a later miss", async () => {
