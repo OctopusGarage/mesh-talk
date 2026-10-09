@@ -1,4 +1,5 @@
 import { test, expect } from "./tauri-mock";
+import { seedMarketPacks } from "./helpers/packs";
 test.use({ viewport: { width: 900, height: 700 } });
 
 // A preset player photo is a transparent cutout; JPEG has no alpha, so without a light fill
@@ -6,6 +7,7 @@ test.use({ viewport: { width: 900, height: 700 } });
 test("a chosen preset avatar has a light background (not black)", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["players"]);
   await page.goto("/");
   for (const tab of ["register", "signin"]) {
     await page.getByTestId(`login-tab-${tab}`).click();
