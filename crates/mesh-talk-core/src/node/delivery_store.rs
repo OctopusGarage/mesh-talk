@@ -114,6 +114,26 @@ pub(crate) struct FileCard {
     pub(crate) completion_binding: Option<FileCompletionBinding>,
 }
 
+impl FileCard {
+    pub(crate) fn incoming(
+        original: &Event,
+        received: &ReceivedEntry,
+        manifest: &crate::file::AnyManifest,
+        binding: FileCompletionBinding,
+    ) -> Self {
+        Self {
+            id: original.id,
+            conversation: received.conversation,
+            wall_clock: received.wall_clock,
+            file_conversation: manifest.file_conv(),
+            chunk_count: manifest.chunk_count(),
+            final_chunk: None,
+            destinations: vec![],
+            completion_binding: Some(binding),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileCompletionBinding {
     pub(crate) source: PublicIdentity,
@@ -1159,6 +1179,61 @@ impl DeliveryStore {
             }
         }
         Ok(())
+    }
+
+    /// Build the immutable local File card, history row and fanout as one
+    /// transaction. The store owns their shared identity and chunk binding;
+    /// callers only prepare the signed destination events.
+    pub(crate) fn prepare_outgoing_manifest(
+        &self,
+        message: OutgoingDelivery,
+        plaintext: Vec<u8>,
+        log: &PersistentEventLog,
+    ) -> Result<DeliveryTransaction, LogError> {
+        let manifest = super::files::validated_manifest(&plaintext)
+            .ok_or_else(|| invalid("invalid file manifest"))?;
+        let first = message
+            .destinations
+            .first()
+            .ok_or_else(|| invalid("no file destinations"))?;
+        let file = FileCard {
+            id: message.logical_id,
+            conversation: message.conversation,
+            wall_clock: message.wall_clock,
+            file_conversation: manifest.file_conv(),
+            final_chunk: log
+                .events(&manifest.file_conv())
+                .last()
+                .map(|event| event.id),
+            chunk_count: manifest.chunk_count(),
+            destinations: message
+                .destinations
+                .iter()
+                .map(|destination| FileDestination {
+                    binding: DeliveryReference {
+                        device: destination.device.clone(),
+                        account: destination.account.clone(),
+                        event_id: destination.event.id,
+                        receipt_eligible: destination.receipt_eligible,
+                    },
+                    active: true,
+                })
+                .collect(),
+            completion_binding: None,
+        };
+        self.validate_staged_file(&file, log, &first.event.author)?;
+        let received = Box::new(ReceivedEntry {
+            event_id: message.logical_id,
+            conversation: message.conversation,
+            from: first.event.author.user_id(),
+            wall_clock: message.wall_clock,
+            plaintext,
+        });
+        Ok(DeliveryTransaction::OutgoingManifest {
+            message,
+            received,
+            file,
+        })
     }
 
     /// A single owned destination, selected by a stable two-dimensional cursor.

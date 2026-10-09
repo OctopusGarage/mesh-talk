@@ -15,7 +15,7 @@ vi.mock("@/lib/events", () => ({
 }));
 
 import { useChat, convKey } from "./chat";
-import { SEND_INTENT_CAP } from "./sendModel";
+import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
 
 it("old roster identity failure cannot undo newer readiness", async () => {
@@ -614,6 +614,20 @@ describe("conversation cache LRU", () => {
     expect(useChat.getState().messages["account:a0"]).toHaveLength(1);
     expect(useChat.getState().messages["account:a0"][0].text).toBe("back");
   });
+
+  it("keeps unread counts while evicting cached conversation state", async () => {
+    invoke.mockResolvedValue([]);
+    await useChat.getState().open({ kind: "account", id: "a0", name: "x" });
+    useChat.setState({ unread: { "account:a0": 4 } });
+    for (let i = 1; i < 60; i++) {
+      await useChat
+        .getState()
+        .open({ kind: "account", id: `a${i}`, name: "x" });
+    }
+    const state = useChat.getState();
+    expect(state.messages["account:a0"]).toBeUndefined();
+    expect(state.unread["account:a0"]).toBe(4);
+  });
 });
 
 describe("send", () => {
@@ -945,6 +959,55 @@ describe("send", () => {
     });
   });
 
+  it("keeps exact-ID file metadata when history arrives before enqueue completion", async () => {
+    let accept!: (result: { id: string; fileConv: string }) => void;
+    let historyAvailable = true;
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "owner_enqueue_file")
+        return new Promise((resolve) => {
+          accept = resolve;
+        });
+      if (cmd === "owner_account_history")
+        return historyAvailable
+          ? Promise.resolve([
+              {
+                id: "file-id",
+                from_me: true,
+                who: "me",
+                text: "",
+                wall_clock: 1,
+                file: {
+                  name: "authoritative.png",
+                  size: 1234,
+                  mime: "image/png",
+                  file_conv: "fc",
+                  media: true,
+                },
+              },
+            ])
+          : Promise.reject(new Error("history unavailable"));
+      return Promise.resolve([]);
+    });
+    useChat.setState({
+      active: { kind: "account", id: "target", name: "Target" },
+    });
+    const sending = useChat.getState().sendFile("/tmp/photo.png", true);
+    await useChat.getState().reload();
+    historyAvailable = false;
+    accept({ id: "file-id", fileConv: "fc" });
+    await sending;
+    expect(useChat.getState().messages["account:target"]).toEqual([
+      expect.objectContaining({
+        id: "file-id",
+        metadataPending: false,
+        file: expect.objectContaining({
+          name: "authoritative.png",
+          size: 1234,
+        }),
+      }),
+    ]);
+  });
+
   it("preserves failed intents through LRU eviction without late completion growing the cache", async () => {
     let rejectSend!: (error: unknown) => void;
     invoke.mockImplementation((cmd: string) =>
@@ -972,6 +1035,43 @@ describe("send", () => {
     await useChat.getState().open(original);
     expect(useChat.getState().messages["account:original"][0]).toMatchObject({
       failed: true,
+      text: "pending",
+    });
+  });
+
+  it("keeps a late accepted send in its intent after cache eviction and restores it on reopen", async () => {
+    let accept!: (id: string) => void;
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "owner_enqueue_text"
+        ? new Promise((resolve) => {
+            accept = resolve;
+          })
+        : Promise.resolve([]),
+    );
+    const original = {
+      kind: "account" as const,
+      id: "original",
+      name: "Original",
+    };
+    await useChat.getState().open(original);
+    const sending = useChat.getState().send("pending", null);
+    const clientId = Object.keys(useChat.getState().intents)[0];
+    for (let i = 0; i < 60; i++)
+      await useChat
+        .getState()
+        .open({ kind: "account", id: `other-${i}`, name: "Other" });
+    accept("accepted-id");
+    await sending;
+    expect(useChat.getState().messages["account:original"]).toBeUndefined();
+    expect(Object.keys(useChat.getState().messages)).toHaveLength(50);
+    expect(useChat.getState().intents[clientId].message).toMatchObject({
+      id: "accepted-id",
+      pending: false,
+    });
+    await useChat.getState().open(original);
+    expect(useChat.getState().messages["account:original"][0]).toMatchObject({
+      id: "accepted-id",
+      clientId,
       text: "pending",
     });
   });

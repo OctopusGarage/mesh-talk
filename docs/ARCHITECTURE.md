@@ -111,16 +111,20 @@ command names for Tauri registration. Commands clone a node handle from
   The desktop host serializes authentication operations separately from runtime
   replacement. Every published session has a private owner/generation lease; a
   valid startup request receives a monotonically increasing ticket under that
-  session guard. Replacement awaits the old runtime's consuming stop before
-  opening any new profile. Guarded startup joins all already-started initializer
+  session guard. The host runtime state module owns the ticket, startup permit,
+  installation check, and retirement sequence; IPC callers cannot access those
+  synchronization fields directly. Replacement awaits the old runtime's consuming
+  stop before opening any new profile. Guarded startup joins all already-started initializer
   writers on errors and authorizes the synchronous producer launch, installation,
   and each inbound callback against the current lease/ticket. A late rename cannot
   change a replacement session or runtime; startup uses the current matching name.
   Successful logout forgets the original login credential before awaiting teardown.
 
   New `owner_*` delivery IPC captures the lease before waiting for the runtime
-  lock. Local text/sticker/file enqueue keeps that lifecycle admission through
-  privacy updates and staging. Waiting for the privacy gate holds no session guard;
+  lock. `OwnerAdmission` owns capture, checked reads, guarded local acceptance,
+  and detached enqueue lifetime for these commands. Local text/sticker/file
+  enqueue keeps that lifecycle admission through privacy updates and staging.
+  Waiting for the privacy gate holds no session guard;
   once admitted, the matching session guard encloses the entire synchronous local
   grant (including verified bindings and routes), and separately the final WAL
   append. The grant and later staging/WAL are not one rollback transaction: a
@@ -163,7 +167,10 @@ DM file cards use the same authenticated delivery controls, without a ratchet
 transition. FileManifest wire layouts remain unchanged: the receiver confirms its
 exact per-device manifest event, and the sender's bounded original-event index
 resolves that confirmation to the first manifest event's stable canonical card ID.
-An outgoing transaction journals the immutable fanout manifests, canonical local
+The delivery store derives outgoing and incoming File cards from the accepted
+manifest identity. It prepares an outgoing card, local row, and fanout as one
+transaction from the signed destination events and validated staged chunks.
+That transaction journals the immutable fanout manifests, canonical local
 file row and bounded destination/scope metadata before publication. Incoming
 transactions install the file row before appending their immutable receipt.
 Live recovery publishes callbacks once after durable installation; startup replay
@@ -174,7 +181,10 @@ Card delivery is not file download or read confirmation. Independent immutable
 chunk work survives an early card receipt and sender restart. The worker also
 rotates one file destination, sends its manifest before chunks, and retires chunk
 work only after the exact target confirms the final event in the validated
-dense signed chunk chain. A receiver may instead confirm historical verified
+dense signed chunk chain. The worker's file scheduler owns its pending and
+active cursors, bounded transfer cache, liveness checks and retirement; journal
+scans use an immutable cursor/capacity snapshot before network work resumes.
+A receiver may instead confirm historical verified
 completion after saving all content and reclaiming chunks: it verifies the entire
 original-author chain, chunk AEAD/hashes and whole-file checksum, synchronizes the
 saved file, rename and Unix parent directory, then durably journals a bounded
@@ -316,11 +326,18 @@ proof protocol or event format is introduced.
 `lib/api.ts` keeps the stable typed exports; `lib/api/` owns the feature-specific
 `invoke()` wrappers and command payloads. `lib/events.ts` subscribes to
 `dm-received`/`channel-message`/`file-received`.
-`store/auth.ts` holds the session; `store/chat.ts` holds per-conversation message/
-reaction/unread state and routes incoming DMs to the sender's *account* (one conversation
-per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
+`store/auth.ts` holds the session; `store/ownership.ts` validates owner and runtime epochs
+for asynchronous frontend work. `store/outgoingIntent.ts` owns optimistic send admission,
+backend acceptance, history loading, and delivery-status queries. `store/conversationState.ts`
+owns cache eviction, deletion protection, exact-ID send completion, and history/status
+state transitions. A late accepted ID after intent removal becomes a deletion tombstone;
+completion never recreates an evicted conversation cache.
+`store/chat.ts` exposes the UI-facing state and routes incoming DMs to the sender's
+*account* (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
 message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,
 search, and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
+`features/chat/useConversationViewport.ts` owns the virtual list's reading position,
+restoration, search jumps and follow-latest callbacks across conversation switches.
 The sidebar keeps Chats, Files, Connection, and Settings visible; its footer shows
 the local identity and device/network status. The composer reveals secondary send
 tools on demand and combines emoji and stickers in one picker. Settings uses

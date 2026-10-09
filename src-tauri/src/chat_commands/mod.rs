@@ -28,6 +28,7 @@ pub use messaging::*;
 pub use models::*;
 pub use platform::*;
 pub use state::NodeState;
+pub(crate) use state::RuntimeAuthority;
 
 fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {
     let bytes =
