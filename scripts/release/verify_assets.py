@@ -25,7 +25,9 @@ PLATFORMS = {
     "macos_arm64": ("dmg",),
     "macos_x86_64": ("dmg",),
     "windows_x86_64": ("exe", "msi"),
+    "windows_arm64": ("exe", "msi"),
     "linux_x86_64": ("deb", "rpm", "AppImage"),
+    "linux_aarch64": ("deb", "rpm", "AppImage"),
 }
 MAX_UNCOMPRESSED = 2 * 1024**3
 
@@ -71,9 +73,10 @@ def appimage_executable(path):
     return subprocess.check_output(["unsquashfs", "-cat", "-no-wildcards", "-o", str(payload_offset), str(path), "usr/bin/mesh-talk"], timeout=60)
 
 
-def elf_fingerprint(binary):
+def elf_fingerprint(binary, platform=None):
     """Match executable code/constants across linuxdeploy's RPATH rewriting."""
-    require(len(binary) >= 64 and binary[:6] == b"\x7fELF\x02\x01" and binary[18:20] == b"\x3e\x00", "embedded Linux application architecture")
+    machine = b"\xb7\x00" if platform == "linux_aarch64" else b"\x3e\x00"
+    require(len(binary) >= 64 and binary[:6] == b"\x7fELF\x02\x01" and binary[18:20] == machine, "embedded Linux application architecture")
     section_offset = struct.unpack_from("<Q", binary, 40)[0]
     size, count, names_index = struct.unpack_from("<HHH", binary, 58)
     require(size >= 64 and count > 0 and names_index < count and section_offset + size * count <= len(binary), "ELF section bounds")
@@ -119,25 +122,29 @@ def native_metadata(path, extension, version, platform=None):
         properties = dict(row.split("\t", 1) for row in rows if "\t" in row)
         require(properties.get("ProductVersion") == version, "Windows MSI version")
         summary = command("msiinfo", "suminfo", str(path))
-        require(re.search(r"^Template:\s*x64;", summary, re.MULTILINE), "Windows MSI architecture")
+        architecture = "Arm64" if platform == "windows_arm64" else "x64"
+        require(re.search(rf"^Template:\s*{architecture};", summary, re.MULTILINE), "Windows MSI architecture")
     elif extension == "deb":
         require(command("dpkg-deb", "-f", str(path), "Version") == version, "Debian version")
-        require(command("dpkg-deb", "-f", str(path), "Architecture") == "amd64", "Debian architecture")
+        architecture = "arm64" if platform == "linux_aarch64" else "amd64"
+        require(command("dpkg-deb", "-f", str(path), "Architecture") == architecture, "Debian architecture")
         payload = subprocess.check_output(["dpkg-deb", "--fsys-tarfile", str(path)], timeout=60)
         with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
             matches = [member for member in archive.getmembers() if member.name.removeprefix("./") == "usr/bin/mesh-talk" and member.isfile()]
             require(len(matches) == 1, "missing Debian executable")
-            return {"elf": elf_fingerprint(archive.extractfile(matches[0]).read())}
+            return {"elf": elf_fingerprint(archive.extractfile(matches[0]).read(), platform)}
     elif extension == "rpm":
-        require(command("rpm", "-qp", "--qf", "%{VERSION}\n%{ARCH}", str(path)).splitlines() == [version, "x86_64"], "RPM version/architecture")
+        architecture = "aarch64" if platform == "linux_aarch64" else "x86_64"
+        require(command("rpm", "-qp", "--qf", "%{VERSION}\n%{ARCH}", str(path)).splitlines() == [version, architecture], "RPM version/architecture")
     elif extension == "AppImage":
         with path.open("rb") as binary:
             header = binary.read(20)
-        require(header[:6] == b"\x7fELF\x02\x01" and header[18:20] == b"\x3e\x00", "AppImage architecture")
+        machine = b"\xb7\x00" if platform == "linux_aarch64" else b"\x3e\x00"
+        require(header[:6] == b"\x7fELF\x02\x01" and header[18:20] == machine, "AppImage architecture")
         require(header[8:11] == b"AI\x02", "AppImage Type 2 format")
         # AppImage has no application-version field. Bind its actual executable
         # code/constants to the independently versioned Debian package below.
-        return {"elf": elf_fingerprint(appimage_executable(path))}
+        return {"elf": elf_fingerprint(appimage_executable(path), platform)}
     elif extension == "dmg":
         require(path.stat().st_size >= 512, "invalid DMG size")
         with path.open("rb") as image:
@@ -219,7 +226,7 @@ def verify_archive(path, platform, version, check_installers):
             require(all(name.startswith("release/mesh-talk.app/") or name.count("/") == 1 for name in files), "unexpected app archive content")
         else:
             require(all(name.count("/") == 1 for name in files), "unexpected installer archive content")
-            if check_installers and platform == "linux_x86_64":
+            if check_installers and platform.startswith("linux_"):
                 require(installer_metadata["AppImage"]["elf"] == installer_metadata["deb"]["elf"], "AppImage/versioned Debian executable mismatch")
 
 

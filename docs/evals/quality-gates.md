@@ -68,7 +68,7 @@ or skipped/inconclusive native scenarios as passed.
 
 The normal sequence is:
 
-`preflight → four native builds → aggregate verification → draft upload → downloaded-draft verification → optional publication`
+`preflight → six native builds → aggregate verification → draft upload → downloaded-draft verification → optional publication`
 
 Preflight rejects version/tag mismatches, tags not already merged into main and
 published releases. Workflow runs for the same ref are serialized. A branch dry run
@@ -76,7 +76,7 @@ uses `v<version>-ci.<run-id>` archive names and never writes a GitHub release.
 
 Each platform signs its ZIP and records build provenance. Builds only upload workflow
 artifacts; they cannot independently publish or update a release. The aggregate job
-downloads all four outputs and requires exactly four ZIPs, four signature bundles
+downloads all six outputs and requires exactly six ZIPs, six signature bundles
 and one nonempty CycloneDX SBOM.
 Native builds reuse the Tauri CLI installed by `npm ci` from the committed lockfile,
 instead of compiling an unpinned latest CLI independently on every runner.
@@ -92,7 +92,7 @@ Metadata inspection never executes or installs application binaries:
 - macOS: inspect actual DMG UDIF structure and embedded app with 7-Zip; check version,
   architecture and equality of its executable to the separately packaged `.app`.
 - Windows: inspect PE version and bootstrapper architecture, MSI ProductVersion and
-  x64 Template. An x86 NSIS bootstrapper installing an x64 app is valid.
+  target-specific x64/Arm64 Template. An x86 NSIS bootstrapper installing a native app is valid.
 - Linux: inspect Debian/RPM version and architecture, AppImage format and embedded ELF.
   Use `unsquashfs -cat` at the runtime's validated ELF-derived filesystem offset,
   without executing AppImage; 7-Zip codec support differs across operating systems.
@@ -134,7 +134,7 @@ The `verified-release-evidence` workflow artifact and job summary retain source 
 asset hashes. A failed build, verifier or metadata tool leaves the release unpublished.
 
 To run the gate locally (requires cosign, gh, Python 3.11+, exiftool, msiinfo, dpkg-deb,
-rpm, 7zz/7z and unsquashfs from `squashfs-tools`; the directory must contain only the nine release assets):
+rpm, 7zz/7z and unsquashfs from `squashfs-tools`; the directory must contain only the thirteen release assets):
 
 ```sh
 bash scripts/release/verify-release.sh /path/to/assets vX.Y.Z X.Y.Z \

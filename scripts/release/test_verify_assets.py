@@ -21,7 +21,9 @@ class ReleaseAssetsTests(unittest.TestCase):
         for platform, extensions in {
             "macos_arm64": ["dmg"], "macos_x86_64": ["dmg"],
             "windows_x86_64": ["exe", "msi"],
+            "windows_arm64": ["exe", "msi"],
             "linux_x86_64": ["deb", "rpm", "AppImage"],
+            "linux_aarch64": ["deb", "rpm", "AppImage"],
         }.items():
             entries = {f"release/installer 0.1.5.{ext}": b"installer bytes" for ext in extensions}
             if platform.startswith("macos"):
@@ -53,10 +55,15 @@ class ReleaseAssetsTests(unittest.TestCase):
         return verify_directory(self.root, "v0.1.5", "0.1.5", check_installers=False)
 
     def test_complete_release(self):
-        self.assertEqual(len(self.verify()), 4)
+        self.assertEqual(len(self.verify()), 6)
 
     def test_missing_platform(self):
         (self.root / self.name("windows_x86_64")).unlink()
+        with self.assertRaisesRegex(ValueError, "asset set"):
+            self.verify()
+
+    def test_missing_arm_platform(self):
+        (self.root / self.name("linux_aarch64")).unlink()
         with self.assertRaisesRegex(ValueError, "asset set"):
             self.verify()
 
@@ -182,6 +189,25 @@ class ReleaseAssetsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "architecture"):
                     native_metadata(path, extension, "0.1.5")
 
+    def test_arm_native_package_architecture_is_checked(self):
+        from unittest.mock import patch
+        path = self.root / "fixture"
+        path.write_bytes(b"installer")
+        for extension, platform, outputs in [
+            ("deb", "linux_aarch64", ["0.1.5", "amd64"]),
+            ("rpm", "linux_aarch64", ["0.1.5\nx86_64"]),
+            ("msi", "windows_arm64", ["ProductVersion\t0.1.5", "Template: x64;1033"]),
+        ]:
+            with self.subTest(extension=extension), patch("verify_assets.subprocess.check_output", side_effect=outputs):
+                with self.assertRaisesRegex(ValueError, "architecture"):
+                    native_metadata(path, extension, "0.1.5", platform)
+        for extension, platform, outputs in [
+            ("rpm", "linux_aarch64", ["0.1.5\naarch64"]),
+            ("msi", "windows_arm64", ["ProductVersion\t0.1.5", "Template: Arm64;1033"]),
+        ]:
+            with self.subTest(extension=extension), patch("verify_assets.subprocess.check_output", side_effect=outputs):
+                native_metadata(path, extension, "0.1.5", platform)
+
     def test_dmg_embedded_version_and_architecture_are_checked(self):
         from unittest.mock import patch
         path = self.root / "image.dmg"
@@ -253,6 +279,15 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertNotEqual(original, elf_fingerprint(self.elf_fixture(constants=b"version=0.1.4;__TAURI_BUNDLE_TYPE_VAR_APP")))
         with self.assertRaisesRegex(ValueError, "bounds"):
             elf_fingerprint(self.elf_fixture()[:100])
+
+    def test_elf_fingerprint_checks_linux_arm_architecture(self):
+        arm = bytearray(self.elf_fixture())
+        arm[18:20] = b"\xb7\0"
+        elf_fingerprint(bytes(arm), "linux_aarch64")
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            elf_fingerprint(bytes(arm), "linux_x86_64")
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            elf_fingerprint(self.elf_fixture(), "linux_aarch64")
 
     def test_native_packages_must_match_companion_applications(self):
         from unittest.mock import patch

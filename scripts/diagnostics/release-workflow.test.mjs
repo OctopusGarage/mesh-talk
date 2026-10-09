@@ -8,6 +8,19 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("release matrix builds native Windows and Linux ARM64 packages", () => {
+  assert.match(workflow, /runner: windows-11-(?:vs2026-)?arm[\s\S]*?target: aarch64-pc-windows-msvc/);
+  assert.match(workflow, /runner: ubuntu-22\.04-arm[\s\S]*?target: aarch64-unknown-linux-gnu/);
+  assert.match(workflow, /aarch64-pc-windows-msvc\)[\s\S]*?ARCH="arm64"/);
+});
+
+test("Windows ARM64 installs a pinned x64 Cosign binary for emulated signing", () => {
+  assert.match(workflow, /name: Install cosign\n\s+if: matrix\.target != 'aarch64-pc-windows-msvc'/);
+  assert.match(workflow, /name: Install Cosign for Windows ARM64\n\s+if: matrix\.target == 'aarch64-pc-windows-msvc'/);
+  assert.match(workflow, /cosign-windows-amd64\.exe/);
+  assert.match(workflow, /9b85a88ebff2d9dd30ff4984a6f61f2cedc232dd87d81fa7f2ff3c0ed96c241c/);
+});
+
 for (const runner of ["Windows", "Linux", "macOS"]) {
   test(`${runner} checksum step hashes real files and preserves filenames with spaces`, () => {
     const step = workflow.split(/^      - /m).find((value) => value.startsWith("name: Generate SHA256 checksums"));

@@ -26,7 +26,9 @@ attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
 | macOS (Apple Silicon) | `mesh-talk___TAG___macos_arm64.zip` |
 | macOS (Intel) | `mesh-talk___TAG___macos_x86_64.zip` |
 | Windows (x64) | `mesh-talk___TAG___windows_x86_64.zip` |
+| Windows (ARM64) | `mesh-talk___TAG___windows_arm64.zip` |
 | Linux (x64) | `mesh-talk___TAG___linux_x86_64.zip` |
+| Linux (ARM64) | `mesh-talk___TAG___linux_aarch64.zip` |
 
 ### Verifying your download
 

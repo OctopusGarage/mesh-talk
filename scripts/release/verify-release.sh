@@ -15,7 +15,7 @@ source_sha="${6:?source commit required}"
 [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]]
 [[ "$source_ref" == refs/tags/* || "$source_ref" == refs/heads/* ]]
 
-for platform in macos_arm64 macos_x86_64 windows_x86_64 linux_x86_64; do
+for platform in macos_arm64 macos_x86_64 windows_arm64 windows_x86_64 linux_aarch64 linux_x86_64; do
     archive="$asset_dir/mesh-talk_${tag}_${platform}.zip"
     test -f "$archive" && test ! -L "$archive" && test -s "$archive"
     test -f "$archive.bundle" && test ! -L "$archive.bundle" && test -s "$archive.bundle"
