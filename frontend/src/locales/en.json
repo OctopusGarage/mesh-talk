@@ -259,6 +259,8 @@
     "theme_argentina": "Argentina",
     "theme_barcelona": "Barcelona",
     "theme_messi": "Messi",
+    "theme_nature": "Nature",
+    "natureWallpapers": "Choose a landscape",
     "downloadFolder": "Download folder",
     "downloadFolderDesc": "Attachments save to your system Downloads folder unless you choose another folder.",
     "downloadFolderSet": "Received files are saved here automatically.",

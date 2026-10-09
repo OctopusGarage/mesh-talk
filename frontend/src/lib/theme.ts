@@ -1,19 +1,19 @@
 import { create } from "zustand";
+import {
+  DEFAULT_NATURE_WALLPAPER,
+  getNatureWallpaper,
+} from "@/lib/natureWallpapers";
 
-// Themes come in two kinds:
-//  • base modes of the default "Ink & Signal" look — light / dark / oled (a true-black dark)
-//  • football-brand PALETTES — argentina / barcelona / messi — each a complete, cohesive
-//    look applied via a `data-palette` attribute on top of a dark base (so any token a
-//    palette doesn't override falls back to the dark scale, never the light one).
+// Base modes use the default Ink & Signal look. Football and nature themes apply
+// their own palette via `data-palette`; nature also selects a separate wallpaper.
 export type Theme =
-  "light" | "dark" | "oled" | "argentina" | "barcelona" | "messi";
+  "light" | "dark" | "oled" | "argentina" | "barcelona" | "messi" | "nature";
 
-/** Brand palettes (driven by `html[data-palette=…]`); the rest are base modes. */
-const PALETTES = new Set<Theme>(["argentina", "barcelona", "messi"]);
+/** Personal palettes (driven by `html[data-palette=…]`); the rest are base modes. */
+const PALETTES = new Set<Theme>(["argentina", "barcelona", "messi", "nature"]);
 
-/** Brand palettes that build on the LIGHT base (airy white/blue) — Argentina (Albiceleste)
- *  and Messi. Barcelona (blaugrana) stays dark. */
-const LIGHT_PALETTES = new Set<Theme>(["argentina", "messi"]);
+/** Light palettes build on light defaults; Barcelona remains dark. */
+const LIGHT_PALETTES = new Set<Theme>(["argentina", "messi", "nature"]);
 
 /** Every selectable theme, in display order. */
 export const ALL_THEMES: Theme[] = [
@@ -23,10 +23,12 @@ export const ALL_THEMES: Theme[] = [
   "argentina",
   "barcelona",
   "messi",
+  "nature",
 ];
 
 const KEY = "mesh-talk-theme";
 const WALLPAPER_KEY = "mesh-talk-wallpaper";
+const NATURE_WALLPAPER_KEY = "mesh-talk-nature-wallpaper";
 let themeTransitionTimer: number | undefined;
 
 function readWallpaper(): boolean {
@@ -46,6 +48,22 @@ function read(): Theme {
   return v && ALL_THEMES.includes(v) ? v : "dark";
 }
 
+function readNatureWallpaper(): string {
+  if (typeof localStorage === "undefined") return DEFAULT_NATURE_WALLPAPER.id;
+  return getNatureWallpaper(
+    localStorage.getItem(NATURE_WALLPAPER_KEY) ?? DEFAULT_NATURE_WALLPAPER.id,
+  ).id;
+}
+
+function applyNatureWallpaper(id: string) {
+  if (typeof document === "undefined") return;
+  const url = getNatureWallpaper(id).url;
+  document.documentElement.style.setProperty(
+    "--nature-wallpaper-url",
+    `url("${url}")`,
+  );
+}
+
 function apply(t: Theme, animate: boolean) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
@@ -63,8 +81,7 @@ function apply(t: Theme, animate: boolean) {
   if (animate && !reduceMotion) root.classList.add("theme-transitioning");
 
   const isPalette = PALETTES.has(t);
-  // Light brand themes (Argentina, Messi) build on the light base; oled + every dark brand
-  // builds on the dark base.
+  // Light palettes build on light defaults; OLED and Barcelona build on dark defaults.
   const darkBase =
     t === "dark" || t === "oled" || (isPalette && !LIGHT_PALETTES.has(t));
   root.classList.toggle("dark", darkBase);
@@ -82,17 +99,21 @@ function apply(t: Theme, animate: boolean) {
 
 const initial = read();
 const initialWallpaper = readWallpaper();
+const initialNatureWallpaper = readNatureWallpaper();
 apply(initial, false); // before first paint — no animation
 applyWallpaper(initialWallpaper);
+applyNatureWallpaper(initialNatureWallpaper);
 
 interface ThemeState {
   theme: Theme;
   wallpaperEnabled: boolean;
+  natureWallpaperId: string;
   /** Quick light↔dark toggle (the sidebar icon button); from any brand/oled it lands on dark. */
   toggle: () => void;
   /** Set an explicit theme (the Settings picker). */
   set: (t: Theme) => void;
   setWallpaperEnabled: (enabled: boolean) => void;
+  setNatureWallpaper: (id: string) => void;
 }
 
 function persist(t: Theme, animate: boolean) {
@@ -103,6 +124,7 @@ function persist(t: Theme, animate: boolean) {
 export const useTheme = create<ThemeState>((set, get) => ({
   theme: initial,
   wallpaperEnabled: initialWallpaper,
+  natureWallpaperId: initialNatureWallpaper,
   toggle: () => {
     const next: Theme = get().theme === "light" ? "dark" : "light";
     persist(next, true);
@@ -118,5 +140,14 @@ export const useTheme = create<ThemeState>((set, get) => ({
     }
     applyWallpaper(enabled);
     set({ wallpaperEnabled: enabled });
+  },
+  setNatureWallpaper: (id: string) => {
+    const wallpaper = getNatureWallpaper(id);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(NATURE_WALLPAPER_KEY, wallpaper.id);
+    }
+    applyNatureWallpaper(wallpaper.id);
+    persist("nature", true);
+    set({ theme: "nature", natureWallpaperId: wallpaper.id });
   },
 }));

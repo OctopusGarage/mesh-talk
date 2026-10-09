@@ -259,6 +259,8 @@
     "theme_argentina": "阿根廷",
     "theme_barcelona": "巴塞隆拿",
     "theme_messi": "美斯",
+    "theme_nature": "自然風景",
+    "natureWallpapers": "揀風景背景",
     "downloadFolder": "下載資料夾",
     "downloadFolderDesc": "除非你揀其他資料夾，否則附件會儲存喺系統嘅下載資料夾。",
     "downloadFolderSet": "接收的檔案將自動儲存至此。",

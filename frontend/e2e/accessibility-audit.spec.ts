@@ -93,7 +93,14 @@ test("members dialog has no detectable WCAG A/AA violations", async ({
   await expectNoWcagViolations(page);
 });
 
-for (const theme of ["light", "oled", "argentina", "barcelona", "messi"]) {
+for (const theme of [
+  "light",
+  "oled",
+  "argentina",
+  "barcelona",
+  "messi",
+  "nature",
+]) {
   test(`conversation in ${theme} has no detectable WCAG A/AA violations`, async ({
     page,
   }) => {

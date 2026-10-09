@@ -259,6 +259,8 @@
     "theme_argentina": "アルゼンチン",
     "theme_barcelona": "バルセロナ",
     "theme_messi": "メッシ",
+    "theme_nature": "自然の風景",
+    "natureWallpapers": "風景の壁紙を選択",
     "downloadFolder": "ダウンロードフォルダ",
     "downloadFolderDesc": "別のフォルダーを選ぶまで、添付ファイルはシステムのダウンロードフォルダーに保存されます。",
     "downloadFolderSet": "受信したファイルはここに自動保存されます。",

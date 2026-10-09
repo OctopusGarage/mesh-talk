@@ -2,22 +2,25 @@ import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm, seedThemeBeforeLoad } from "./helpers/session";
 
 for (const theme of ["argentina", "barcelona", "messi"] as const) {
-  test(`${theme} theme shows its image in the conversation canvas`, async ({
+  test(`${theme} theme shows one image across the chat shell`, async ({
     page,
   }) => {
     await seedThemeBeforeLoad(page, theme);
     await enterChat(page);
     const homeBackground = await page
       .getByTestId("chat-shell")
-      .locator("main")
       .evaluate((element) => getComputedStyle(element).backgroundImage);
     expect(homeBackground).toContain(`${theme}-bg`);
     await openBobDm(page);
 
     const frame = page.locator("main.conversation-canvas");
-    const background = await frame.evaluate(
+    const frameBackground = await frame.evaluate(
       (element) => getComputedStyle(element).backgroundImage,
     );
+    expect(frameBackground).toBe("none");
+    const background = await page
+      .getByTestId("chat-shell")
+      .evaluate((element) => getComputedStyle(element).backgroundImage);
     expect(background).toContain(`${theme}-bg`);
     expect(background).toContain("radial-gradient");
     await expect(page.locator(".conversation-log-surface")).toHaveCSS(
@@ -27,8 +30,8 @@ for (const theme of ["argentina", "barcelona", "messi"] as const) {
 
     const sidebarBackground = await page
       .getByTestId("sidebar")
-      .evaluate((element) => getComputedStyle(element).backgroundImage);
-    expect(sidebarBackground).toBe("none");
+      .evaluate((element) => getComputedStyle(element).backgroundColor);
+    expect(sidebarBackground).toMatch(/, 0\.74\)$/);
   });
 }
 
@@ -36,7 +39,6 @@ test("base theme keeps a plain conversation canvas", async ({ page }) => {
   await enterChat(page);
   const homeBackground = await page
     .getByTestId("chat-shell")
-    .locator("main")
     .evaluate((element) => getComputedStyle(element).backgroundImage);
   expect(homeBackground).toBe("none");
   await openBobDm(page);

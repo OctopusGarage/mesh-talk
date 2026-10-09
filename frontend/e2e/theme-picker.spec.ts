@@ -96,17 +96,17 @@ test("wallpaper can be hidden without changing the personal theme", async ({
 }) => {
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
-  const canvas = page.locator(".conversation-canvas");
+  const shell = page.getByTestId("chat-shell");
   await page.getByTestId("sidebar-nav-settings").click();
   await page.getByTestId("theme-barcelona").click();
   await expect
-    .poll(() => canvas.evaluate((el) => getComputedStyle(el).backgroundImage))
+    .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
     .toContain("barcelona-bg");
 
   const wallpaper = page.getByTestId("settings-wallpaper");
   await wallpaper.click();
   await expect
-    .poll(() => canvas.evaluate((el) => getComputedStyle(el).backgroundImage))
+    .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
     .toBe("none");
   await expect.poll(() => palette(page)).toBe("barcelona");
   await page.reload();
@@ -119,6 +119,59 @@ test("wallpaper can be hidden without changing the personal theme", async ({
   await page.getByTestId("sidebar-nav-settings").click();
   await wallpaper.click();
   await expect
-    .poll(() => canvas.evaluate((el) => getComputedStyle(el).backgroundImage))
+    .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
     .toContain("barcelona-bg");
+});
+
+test("nature theme offers all 50 wallpapers and restores the selected scene", async ({
+  page,
+}) => {
+  await login(page);
+  await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
+  await page.getByTestId("sidebar-nav-settings").click();
+  await page.getByTestId("theme-nature").click();
+
+  const gallery = page.getByTestId("nature-wallpaper-picker");
+  await expect(gallery).toBeVisible();
+  await expect(gallery.getByRole("button")).toHaveCount(50);
+
+  const selected = page.getByTestId("nature-wallpaper-050-maldives-wallpaper");
+  await selected.click();
+  await expect(selected).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page
+        .getByTestId("chat-shell")
+        .evaluate((el) => getComputedStyle(el).backgroundImage),
+    )
+    .toContain("050-maldives-wallpaper");
+  await expect
+    .poll(() =>
+      page
+        .locator(".conversation-canvas")
+        .evaluate((el) => getComputedStyle(el).backgroundImage),
+    )
+    .toBe("none");
+  const sidebarColor = await page
+    .getByTestId("sidebar")
+    .evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(sidebarColor).toMatch(/, 0\.74\)$/);
+  await expect.poll(() => palette(page)).toBe("nature");
+
+  await page.reload();
+  await login(page);
+  await page.getByTestId("sidebar-nav-settings").click();
+  await expect(page.getByTestId("theme-nature")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(selected).toHaveAttribute("aria-pressed", "true");
+  await page.getByTestId("settings-wallpaper").click();
+  await expect
+    .poll(() =>
+      page
+        .getByTestId("chat-shell")
+        .evaluate((el) => getComputedStyle(el).backgroundImage),
+    )
+    .toBe("none");
 });

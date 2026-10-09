@@ -9,6 +9,7 @@ const THEMES = [
   "argentina",
   "barcelona",
   "messi",
+  "nature",
 ] as const;
 
 const VIEWPORTS = [

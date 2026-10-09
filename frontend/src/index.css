@@ -230,6 +230,38 @@
     --conversation-surface: 208 46% 95%;
     --composer-surface: 206 50% 99%;
   }
+
+  /* Nature — warm paper and restrained forest-green controls around the selected study. */
+  html[data-palette="nature"] {
+    --background: 44 34% 96%;
+    --foreground: 160 22% 16%;
+    --card: 42 35% 99%;
+    --card-foreground: 160 22% 16%;
+    --popover: 42 35% 99%;
+    --popover-foreground: 160 22% 16%;
+    --primary: 154 42% 31%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 46 24% 90%;
+    --secondary-foreground: 160 22% 16%;
+    --muted: 43 25% 92%;
+    --muted-foreground: 156 12% 37%;
+    --accent: 148 20% 87%;
+    --accent-foreground: 160 22% 16%;
+    --border: 44 18% 82%;
+    --input: 44 18% 78%;
+    --ring: 154 42% 31%;
+    --signal: 154 42% 31%;
+    --attention: 38 70% 32%;
+    --verified: 154 56% 34%;
+    --mention: 154 54% 34%;
+    --bubble-own: 150 28% 86%;
+    --bubble-own-foreground: 160 22% 16%;
+    --bubble-own-link: 154 54% 25%;
+    --message-link: 154 54% 25%;
+    --shell-rail: 43 28% 93%;
+    --conversation-surface: 44 34% 96%;
+    --composer-surface: 42 35% 99%;
+  }
 }
 
 /* Brand artwork belongs to the stable conversation frame; navigation and controls stay quiet.
@@ -269,18 +301,26 @@
     }
   }
 
-  html[data-palette] .conversation-canvas {
-    background-color: hsl(var(--background));
+  html[data-palette]:not([data-wallpaper="off"]) [data-testid="chat-shell"] {
     background-position: center;
     background-repeat: no-repeat;
     background-size: cover;
+  }
+
+  html[data-palette] .conversation-canvas {
+    background-color: hsl(var(--conversation-surface));
+  }
+
+  html[data-palette]:not([data-wallpaper="off"]) .conversation-canvas {
+    background-color: transparent;
   }
 
   .conversation-log-surface {
     background-color: hsl(var(--conversation-surface));
   }
 
-  html[data-palette="argentina"] .conversation-canvas {
+  html[data-palette="argentina"]:not([data-wallpaper="off"])
+    [data-testid="chat-shell"] {
     background-image:
       radial-gradient(
         125% 92% at 50% 34%,
@@ -291,7 +331,8 @@
       url("./assets/themes/argentina-bg.webp");
   }
 
-  html[data-palette="barcelona"] .conversation-canvas {
+  html[data-palette="barcelona"]:not([data-wallpaper="off"])
+    [data-testid="chat-shell"] {
     background-image:
       radial-gradient(
         125% 90% at 50% 32%,
@@ -302,7 +343,8 @@
       url("./assets/themes/barcelona-bg.jpg");
   }
 
-  html[data-palette="messi"] .conversation-canvas {
+  html[data-palette="messi"]:not([data-wallpaper="off"])
+    [data-testid="chat-shell"] {
     background-image:
       radial-gradient(
         125% 92% at 50% 34%,
@@ -313,12 +355,31 @@
       url("./assets/themes/messi-bg.jpg");
   }
 
-  html[data-palette][data-wallpaper="off"] .conversation-canvas {
-    background-image: none;
+  html[data-palette="nature"]:not([data-wallpaper="off"])
+    [data-testid="chat-shell"] {
+    background-image:
+      linear-gradient(hsl(44 34% 97% / 0.4), hsl(44 34% 97% / 0.52)),
+      var(--nature-wallpaper-url);
   }
 
   html[data-palette]:not([data-wallpaper="off"]) .conversation-log-surface {
     background-color: transparent;
+  }
+}
+
+/* These panels carry utility background classes; overrides belong in the utilities layer. */
+@layer utilities {
+  html[data-palette]:not([data-wallpaper="off"]) .sidebar-container {
+    background-color: hsl(var(--shell-rail) / 0.74);
+  }
+
+  html[data-palette]:not([data-wallpaper="off"])
+    [data-testid="conversation-header"] {
+    background-color: hsl(var(--card) / 0.76);
+  }
+
+  html[data-palette]:not([data-wallpaper="off"]) [data-testid="composer"] {
+    background-color: hsl(var(--composer-surface) / 0.76);
   }
 }
 

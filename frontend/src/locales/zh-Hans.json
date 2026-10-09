@@ -259,6 +259,8 @@
     "theme_argentina": "阿根廷",
     "theme_barcelona": "巴塞罗那",
     "theme_messi": "梅西",
+    "theme_nature": "自然风景",
+    "natureWallpapers": "选择风景壁纸",
     "downloadFolder": "下载文件夹",
     "downloadFolderDesc": "除非你选择其他文件夹，否则附件会保存在系统的下载文件夹中。",
     "downloadFolderSet": "接收的文件将自动保存到此处。",
