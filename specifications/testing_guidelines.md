@@ -83,7 +83,7 @@ The frontend also has a Playwright UI end-to-end suite (selectors keyed on
 cd frontend && npm run e2e        # CI: .github/workflows/e2e-ui.yml
 ```
 
-The suite checks messages and recovery paths, six themes and screenshot baselines,
+The suite checks messages and recovery paths, seven themes and screenshot baselines,
 large virtualized conversation/member lists, compact windows, touch targets, and
 representative WCAG A/AA rules with axe. Browser automation does not replace testing
 the native webview, real network, or a screen reader. Use

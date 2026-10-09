@@ -22,6 +22,7 @@ export default defineConfig({
   },
   use: {
     baseURL: "http://localhost:5173",
+    timezoneId: "Asia/Tokyo",
     trace: "retain-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],

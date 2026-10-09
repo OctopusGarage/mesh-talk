@@ -65,11 +65,14 @@ HOME=/tmp/mesh-po cargo run -p mesh-talk-core --bin mesh-talk-node -- \
    it navigates into the right conversation.
 9. **Files.** Expand the composer's **+** menu, attach a file, watch transfer progress, and
    confirm the recipient can save it. Open **Received files** to review attachments. The
-   conversation wallpaper should stay anchored when the menu opens or you switch chats.
+   wallpaper should stay anchored across the sidebar, header, conversation, and composer
+   when the menu opens or you switch chats.
 10. **Verify contact.** Open **VerifyContact** for a DM peer; confirm the **safety number**
     matches on both instances, then mark the contact verified.
-11. **Settings.** Open **Settings**: select each of the six themes (dark, light, OLED,
-    Argentina, Barcelona, Messi), toggle the optional conversation wallpaper, and switch
+11. **Settings.** Open **Settings**: select each of the seven themes (dark, light, OLED,
+    Argentina, Barcelona, Messi, Nature), confirm each personal theme's wallpaper spans
+    the whole chat window, try several of Nature's 50 landscape wallpapers,
+    toggle the optional conversation wallpaper, and switch
     among all six languages. Review privacy, retention, tray, autostart, notifications,
     download folder, and experimental call settings. At a 760×520 window, controls should
     remain reachable and focused sections should scroll into view.

@@ -84,10 +84,13 @@
       "previewLabel": "Vista previa",
       "viewportLabel": "Arrastra para ajustar la foto o usa las flechas. Mantén Mayús para moverla más rápido"
     },
-    "tabFootballStars": "⚽ Futbolistas",
-    "tabNbaStars": "🏀 Estrellas NBA",
-    "tabFootballClubs": "⚽ Clubes",
-    "tabNbaTeams": "🏀 Equipos NBA"
+    "tabFootballStars": "Futbolistas",
+    "tabNbaStars": "Estrellas NBA",
+    "tabSportsStars": "Deportistas",
+    "tabFamousPeople": "Personas famosas",
+    "tabFootballClubs": "Clubes",
+    "tabNbaTeams": "Equipos NBA",
+    "tabCities": "Ciudades pintadas"
   },
   "login": {
     "tagline": "Sin servidor · cifrado de extremo a extremo",
@@ -252,6 +255,8 @@
     "theme_argentina": "Argentina",
     "theme_barcelona": "Barcelona",
     "theme_messi": "Messi",
+    "theme_nature": "Naturaleza",
+    "natureWallpapers": "Elegir un paisaje",
     "downloadFolder": "Carpeta de descargas",
     "downloadFolderDesc": "Los archivos adjuntos se guardan en Descargas, salvo que elijas otra carpeta.",
     "downloadFolderSet": "Los archivos recibidos se guardan aquí automáticamente.",

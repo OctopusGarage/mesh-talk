@@ -54,6 +54,13 @@
 ## Commit & Pull Request Guidelines
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
   `specifications/git_standards.md`. Squash WIP; link issues.
+- Before opening a PR, commit the branch and run `./scripts/pr-preflight.sh` with only the
+  Playwright specs relevant to changed frontend behavior (for example,
+  `./scripts/pr-preflight.sh e2e/avatar-gallery.spec.ts e2e/theme-picker.spec.ts`).
+  Include `e2e/ui-visual-regression.spec.ts` when a change affects theme layout or snapshots.
+  It checks the changed-line coverage estimate and portable scenario evidence; add focused
+  tests or specs named by its uncovered-line report before broadening the run. Fetch
+  `origin/main` first if the base ref is stale. Keep the full suite for the final gate.
 - Request review only after `./scripts/check-health.sh` passes (it mirrors CI exactly).
 
 ## Security & Adjustments

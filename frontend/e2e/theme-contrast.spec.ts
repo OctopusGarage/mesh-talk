@@ -5,7 +5,15 @@ import { contrastRatio } from "./helpers/ui-audit";
 const BOB = "acc_bob_bbbb2222";
 const SENT_URL = "https://sent.example.test";
 const RECEIVED_URL = "https://received.example.test";
-const THEMES = ["light", "dark", "oled", "argentina", "barcelona", "messi"];
+const THEMES = [
+  "light",
+  "dark",
+  "oled",
+  "argentina",
+  "barcelona",
+  "messi",
+  "nature",
+];
 const MIN_TEXT_CONTRAST = 4.5;
 
 test("attention text is readable on dialog surfaces in every theme", async ({
@@ -24,7 +32,7 @@ test("attention text is readable on dialog surfaces in every theme", async ({
         ["dark", "oled", "barcelona"].includes(theme),
       );
       root.classList.toggle("oled", theme === "oled");
-      if (["argentina", "barcelona", "messi"].includes(theme))
+      if (["argentina", "barcelona", "messi", "nature"].includes(theme))
         root.dataset.palette = theme;
       else delete root.dataset.palette;
       const style = getComputedStyle(probe);
@@ -90,7 +98,12 @@ test("message text and links stay readable across every theme", async ({
     ({ themes, sentUrl, receivedUrl }) => {
       const applyTheme = (theme: string) => {
         const root = document.documentElement;
-        const isPalette = ["argentina", "barcelona", "messi"].includes(theme);
+        const isPalette = [
+          "argentina",
+          "barcelona",
+          "messi",
+          "nature",
+        ].includes(theme);
         const darkBase =
           theme === "dark" || theme === "oled" || theme === "barcelona";
 
@@ -207,7 +220,9 @@ test("destructive confirmation stays readable across every theme", async ({
     );
     if (!button) throw new Error("Missing delete confirmation");
     return themes.map((theme) => {
-      const palette = ["argentina", "barcelona", "messi"].includes(theme);
+      const palette = ["argentina", "barcelona", "messi", "nature"].includes(
+        theme,
+      );
       root.classList.toggle(
         "dark",
         theme === "dark" || theme === "oled" || theme === "barcelona",
@@ -268,7 +283,9 @@ test("changed identity warning stays readable across every theme", async ({
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Missing canvas context");
     return themes.map((theme) => {
-      const palette = ["argentina", "barcelona", "messi"].includes(theme);
+      const palette = ["argentina", "barcelona", "messi", "nature"].includes(
+        theme,
+      );
       root.classList.toggle(
         "dark",
         theme === "dark" || theme === "oled" || theme === "barcelona",

@@ -7,6 +7,38 @@ import {
   expectNoHorizontalOverflow,
 } from "./helpers/ui-audit";
 
+test("city avatar thumbnails load after scrolling the gallery", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  const gallery = page.getByTestId("avatar-gallery");
+  await expect(gallery.locator("img")).toHaveCount(36);
+
+  await gallery.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const abuDhabi = gallery
+    .getByRole("button", { name: "Abu Dhabi" })
+    .locator("img");
+  await expect(abuDhabi).toHaveAttribute("src", /25-Abu%20Dhabi/);
+  await expect
+    .poll(() =>
+      abuDhabi.evaluate((image) => (image as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(1);
+  for (const index of [28, 29, 30, 31, 32, 33, 34, 35]) {
+    const thumbnail = gallery.locator("img").nth(index);
+    await expect
+      .poll(() =>
+        thumbnail.evaluate((image) => (image as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(1);
+  }
+});
+
 test("portable authentication rejects the wrong password", async ({ page }) => {
   await page.goto("/");
   // A rejected backend response, delivered through the same IPC boundary as Tauri.
