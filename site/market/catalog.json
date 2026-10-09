@@ -1,0 +1,97 @@
+[
+  {
+    "id": "players",
+    "name": "Football stars",
+    "kind": "avatar",
+    "category": "personal",
+    "description": "Football player portraits",
+    "file": "packs/players.zip",
+    "sha256": "72755fb5ed856964d33435400311b84f00f69760caadd4da0dc5d6fa4026f0eb"
+  },
+  {
+    "id": "nba-players",
+    "name": "NBA stars",
+    "kind": "avatar",
+    "category": "personal",
+    "description": "Basketball player portraits",
+    "file": "packs/nba-players.zip",
+    "sha256": "ae762965b2f0cdf9dba53023e278bff641a5983f8825c1dac24647a282f0e795"
+  },
+  {
+    "id": "sports",
+    "name": "Sports stars",
+    "kind": "avatar",
+    "category": "personal",
+    "description": "Athletes from different sports",
+    "file": "packs/sports.zip",
+    "sha256": "972cb82fe589fea545e6c6259308c1ee163b78fbead94018df647c5beaa65623"
+  },
+  {
+    "id": "famous",
+    "name": "Famous people",
+    "kind": "avatar",
+    "category": "personal",
+    "description": "Portraits of notable people",
+    "file": "packs/famous.zip",
+    "sha256": "0f3dabab98290f7a2a94a715bbe05c444f73920e684677d7099848db6afa0455"
+  },
+  {
+    "id": "cities",
+    "name": "City paintings",
+    "kind": "avatar",
+    "category": "group",
+    "description": "Painted city landmarks",
+    "file": "packs/cities.zip",
+    "sha256": "375b144cb7ad3392390bac52429c5e54c4e2dc93bc5883ec0a0bfbdedccfd0c1"
+  },
+  {
+    "id": "clubs",
+    "name": "Football clubs",
+    "kind": "avatar",
+    "category": "group",
+    "description": "Football club emblems",
+    "file": "packs/clubs.zip",
+    "sha256": "d95a2bc6634070719225af045976d7b21689a62051f80c491bc0af44afd16f63"
+  },
+  {
+    "id": "nba-teams",
+    "name": "NBA teams",
+    "kind": "avatar",
+    "category": "group",
+    "description": "Basketball team emblems",
+    "file": "packs/nba-teams.zip",
+    "sha256": "9780e16912ba219058171bc1c9b233116dc3cab86f599bc4338ffadf31dc4f36"
+  },
+  {
+    "id": "argentina",
+    "name": "Argentina",
+    "kind": "theme",
+    "description": "Sky blue and white with a stadium wallpaper",
+    "file": "packs/argentina.zip",
+    "sha256": "1333a1e861bbef692e7e15fabfe69f6c2e0e455b2ab021474c4d23a08e93f16e"
+  },
+  {
+    "id": "barcelona",
+    "name": "Barcelona",
+    "kind": "theme",
+    "description": "Deep blue and garnet with a stadium wallpaper",
+    "file": "packs/barcelona.zip",
+    "sha256": "811a171e2562a6a2175dde185153eef288e77da087a1bd938e307cc4cd63b25b"
+  },
+  {
+    "id": "messi",
+    "name": "Messi",
+    "kind": "theme",
+    "description": "Bright blue palette with a football wallpaper",
+    "file": "packs/messi.zip",
+    "sha256": "ae18ad1d5960e436337b6efb7a9265e03312d313228021256fc8cfc13491750f"
+  },
+  {
+    "id": "nature",
+    "name": "Nature",
+    "kind": "theme",
+    "description": "Forest green palette and fifty landscape wallpapers",
+    "file": "packs/nature.zip",
+    "sha256": "aac84e963785b892e411ea1c7603ba04d3770a114caa1b80017f87779256a5d8"
+  }
+]
