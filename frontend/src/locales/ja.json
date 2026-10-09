@@ -81,6 +81,11 @@
     "tabFamousPeople": "著名人",
     "tabFootballClubs": "クラブ",
     "tabNbaTeams": "チーム",
+    "tabCities": "都市の絵画",
+    "cityCredits": "写真のクレジット",
+    "cityCreditsIntro": "リンク先のウィキメディア写真をAIで絵画化し、サイズを調整しました。",
+    "sourcePhoto": "元の写真",
+    "license": "ライセンス",
     "editGroup": "グループ写真を変更",
     "crop": {
       "title": "写真を切り抜き",

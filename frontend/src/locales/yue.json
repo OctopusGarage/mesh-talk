@@ -81,6 +81,11 @@
     "tabFamousPeople": "知名人物",
     "tabFootballClubs": "足球會",
     "tabNbaTeams": "NBA球隊",
+    "tabCities": "城市油畫",
+    "cityCredits": "相片來源",
+    "cityCreditsIntro": "根據連結嘅維基媒體相片用 AI 繪製並調整尺寸。",
+    "sourcePhoto": "原相片",
+    "license": "授權條款",
     "editGroup": "更換群組頭像",
     "crop": {
       "title": "裁剪頭像",

@@ -1,6 +1,6 @@
-// Built-in avatar packs the user can pick from, instead of uploading a photo. Clubs and
-// NBA teams are for GROUP avatars; football, NBA, sports, and famous people are for
-// PERSONAL avatars. The manifests are built automatically from the bundled assets via
+// Built-in avatar packs the user can pick from, instead of uploading a photo.
+// Clubs, NBA teams, and city paintings are for GROUP avatars; people are for
+// PERSONAL avatars. The manifests are built automatically from bundled assets via
 // `import.meta.glob` (eager URL imports) — drop a file in the folder and it shows up.
 
 export interface AvatarPreset {
@@ -49,7 +49,13 @@ export const PLAYER_AVATARS: AvatarPreset[] = pack(
 );
 
 export type AvatarPackName =
-  "clubs" | "players" | "nba-players" | "nba-teams" | "sports" | "famous";
+  | "clubs"
+  | "players"
+  | "nba-players"
+  | "nba-teams"
+  | "cities"
+  | "sports"
+  | "famous";
 
 export function avatarPack(name: AvatarPackName): AvatarPreset[] {
   switch (name) {
@@ -59,6 +65,8 @@ export function avatarPack(name: AvatarPackName): AvatarPreset[] {
       return PLAYER_AVATARS;
     case "nba-teams":
       return NBA_TEAM_AVATARS;
+    case "cities":
+      return CITY_AVATARS;
     case "nba-players":
       return NBA_PLAYER_AVATARS;
     case "sports":
@@ -71,6 +79,15 @@ export function avatarPack(name: AvatarPackName): AvatarPreset[] {
 /** NBA team logos — preset GROUP (channel) avatars. */
 export const NBA_TEAM_AVATARS: AvatarPreset[] = pack(
   import.meta.glob("../assets/avatars/nba-teams/*.webp", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+);
+
+/** Impressionist city landmarks — preset GROUP (channel) avatars. */
+export const CITY_AVATARS: AvatarPreset[] = pack(
+  import.meta.glob("../assets/avatars/cities/*.jpg", {
     eager: true,
     query: "?url",
     import: "default",
