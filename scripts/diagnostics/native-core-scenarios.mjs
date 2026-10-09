@@ -348,7 +348,11 @@ export async function coreScenarios(c) {
     const returned = await c.command("POST", "/window/rect", request);
     await until(`settings ${name} client resize`, () => execute("return Math.abs(innerWidth-arguments[0])<=1 && Math.abs(innerHeight-arguments[1])<=1;", [viewport.width, viewport.height]));
     await c.settledDialog("settings-dialog");
-    const layout = await execute("const e=document.querySelector('[data-testid=settings-dialog]'),r=e.getBoundingClientRect(),p=document.querySelector('[data-testid=theme-picker]'),q=p.getBoundingClientRect();return {viewport:{width:innerWidth,height:innerHeight},dialog:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},themePickerVisible:q.width>0 && q.height>0};");
+    let lastLayout;
+    const layout = await until(`settings ${name} dialog contained after resize`, async () => {
+      lastLayout = await execute("const e=document.querySelector('[data-testid=settings-dialog]'),r=e.getBoundingClientRect(),p=document.querySelector('[data-testid=theme-picker]'),q=p.getBoundingClientRect();return {viewport:{width:innerWidth,height:innerHeight},dialog:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},themePickerVisible:q.width>0 && q.height>0};");
+      return lastLayout.dialog.x >= 0 && lastLayout.dialog.y >= 0 && lastLayout.dialog.right <= lastLayout.viewport.width + 1 && lastLayout.dialog.bottom <= lastLayout.viewport.height + 1 && lastLayout.themePickerVisible && lastLayout;
+    }).catch(error => { throw new Error(`${error.message}; settings layout ${JSON.stringify(lastLayout)}`); });
     assert.ok(layout.dialog.x >= 0 && layout.dialog.y >= 0 && layout.dialog.right <= layout.viewport.width + 1 && layout.dialog.bottom <= layout.viewport.height + 1);
     assert.equal(layout.themePickerVisible, true);
     settingsLayouts[name] = { ...layout, requestedWindow: request, returnedWindow: returned, dialogContained: true };
