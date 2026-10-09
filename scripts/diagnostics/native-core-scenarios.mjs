@@ -387,9 +387,8 @@ async function profileLayout(c) {
 
 export async function restartedCoreScenarios(c, state) {
   await c.click(c.row());
-  for (const [index, text] of [state.outbound, state.inbound, ...state.contents].reverse().entries()) {
-    if (index === 0) await revealLatestNativeMessage(c, text);
-    else await revealHistoricalNativeMessage(c, text);
+  for (const text of [state.outbound, state.inbound, ...state.contents].reverse()) {
+    await revealHistoricalNativeMessage(c, text);
     assert.ok((await c.history()).some(h => h.text === text));
   }
   await c.passed("history-process-restart", { actualProcessRestart: true, rendered: true, persisted: true });
