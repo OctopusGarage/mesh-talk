@@ -1,7 +1,6 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, BOB, CHANNEL } from "./helpers/session";
-import { seedMarketPacks } from "./helpers/packs";
 import {
   expectDialogFitsViewport,
   expectMinTargetSize,
@@ -11,7 +10,6 @@ import {
 test("city avatar thumbnails load after scrolling the gallery", async ({
   page,
 }) => {
-  await seedMarketPacks(page, ["cities"]);
   await enterChat(page);
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await page.getByRole("button", { name: "Change group photo" }).click();
@@ -25,7 +23,7 @@ test("city avatar thumbnails load after scrolling the gallery", async ({
   const abuDhabi = gallery
     .getByRole("button", { name: "Abu Dhabi" })
     .locator("img");
-  await expect(abuDhabi).toHaveAttribute("src", /^data:image\/jpeg;base64,/);
+  await expect(abuDhabi).toHaveAttribute("src", /25-Abu%20Dhabi/);
   await expect
     .poll(() =>
       abuDhabi.evaluate((image) => (image as HTMLImageElement).naturalWidth),
@@ -397,7 +395,6 @@ if (process.env.EVAL_TIER === "extended")
   test("@extended palette locale resize and repeated dialog DOM retention smoke", async ({
     page,
   }) => {
-    await seedMarketPacks(page, ["barcelona", "argentina", "messi"]);
     await enterChat(page);
     await openBobDm(page);
     const before = await page.locator("*").count();

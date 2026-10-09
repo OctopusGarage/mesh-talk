@@ -559,21 +559,5 @@
     "advanced": "Avanzado",
     "identityStep": "Crea una identidad que permanece en este dispositivo.",
     "discoveryStep": "Inicia sesión y encuentra personas en la misma red local."
-  },
-  "packs": {
-    "libraries": "Bibliotecas",
-    "importZip": "Instalar ZIP…",
-    "installed": "Bibliotecas instaladas",
-    "marketplace": "Tienda",
-    "install": "Instalar",
-    "update": "Actualizar",
-    "remove": "Eliminar",
-    "browseMarket": "Explorar la tienda",
-    "noAvatars": "No hay bibliotecas de avatares instaladas. Instala una para elegir un avatar.",
-    "noThemes": "No hay temas personales instalados. Instala uno para personalizar la aplicación.",
-    "marketUnavailable": "La tienda no está disponible ahora.",
-    "downloadFailed": "No se pudo descargar el paquete.",
-    "checksumFailed": "El paquete descargado no pasó la verificación.",
-    "wrongType": "Este ZIP es de otro tipo de biblioteca."
   }
 }

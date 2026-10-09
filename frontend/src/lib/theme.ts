@@ -1,17 +1,34 @@
 import { create } from "zustand";
-import { installedTheme } from "@/store/packs";
+import {
+  DEFAULT_NATURE_WALLPAPER,
+  getNatureWallpaper,
+} from "@/lib/natureWallpapers";
 
 // Base modes use the default Ink & Signal look. Football and nature themes apply
 // their own palette via `data-palette`; nature also selects a separate wallpaper.
-export type Theme = string;
+export type Theme =
+  "light" | "dark" | "oled" | "argentina" | "barcelona" | "messi" | "nature";
 
 /** Personal palettes (driven by `html[data-palette=…]`); the rest are base modes. */
+const PALETTES = new Set<Theme>(["argentina", "barcelona", "messi", "nature"]);
+
+/** Light palettes build on light defaults; Barcelona remains dark. */
+const LIGHT_PALETTES = new Set<Theme>(["argentina", "messi", "nature"]);
+
 /** Every selectable theme, in display order. */
-export const ALL_THEMES: Theme[] = ["dark", "light", "oled"];
+export const ALL_THEMES: Theme[] = [
+  "dark",
+  "light",
+  "oled",
+  "argentina",
+  "barcelona",
+  "messi",
+  "nature",
+];
 
 const KEY = "mesh-talk-theme";
 const WALLPAPER_KEY = "mesh-talk-wallpaper";
-const PACK_WALLPAPER_KEY = "mesh-talk-pack-wallpaper";
+const NATURE_WALLPAPER_KEY = "mesh-talk-nature-wallpaper";
 let themeTransitionTimer: number | undefined;
 
 function readWallpaper(): boolean {
@@ -28,16 +45,24 @@ function applyWallpaper(enabled: boolean) {
 function read(): Theme {
   if (typeof localStorage === "undefined") return "dark";
   const v = localStorage.getItem(KEY) as Theme | null;
-  return v && /^[a-z0-9][a-z0-9._-]{2,79}$/.test(v) ? v : "dark";
+  return v && ALL_THEMES.includes(v) ? v : "dark";
 }
 
-function readPackWallpaper(): string {
-  return typeof localStorage === "undefined"
-    ? ""
-    : (localStorage.getItem(PACK_WALLPAPER_KEY) ?? "");
+function readNatureWallpaper(): string {
+  if (typeof localStorage === "undefined") return DEFAULT_NATURE_WALLPAPER.id;
+  return getNatureWallpaper(
+    localStorage.getItem(NATURE_WALLPAPER_KEY) ?? DEFAULT_NATURE_WALLPAPER.id,
+  ).id;
 }
 
-let activeTokens: string[] = [];
+function applyNatureWallpaper(id: string) {
+  if (typeof document === "undefined") return;
+  const url = getNatureWallpaper(id).url;
+  document.documentElement.style.setProperty(
+    "--nature-wallpaper-url",
+    `url("${url}")`,
+  );
+}
 
 function apply(t: Theme, animate: boolean) {
   if (typeof document === "undefined") return;
@@ -55,32 +80,13 @@ function apply(t: Theme, animate: boolean) {
     window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
   if (animate && !reduceMotion) root.classList.add("theme-transitioning");
 
-  for (const token of activeTokens) root.style.removeProperty(`--${token}`);
-  activeTokens = [];
-  root.style.removeProperty("--pack-wallpaper-url");
-  const pack = installedTheme(t);
+  const isPalette = PALETTES.has(t);
+  // Light palettes build on light defaults; OLED and Barcelona build on dark defaults.
   const darkBase =
-    t === "dark" ||
-    t === "oled" ||
-    pack?.base === "dark" ||
-    (!pack && !ALL_THEMES.includes(t));
+    t === "dark" || t === "oled" || (isPalette && !LIGHT_PALETTES.has(t));
   root.classList.toggle("dark", darkBase);
   root.classList.toggle("oled", t === "oled");
-  if (pack) {
-    for (const [token, value] of Object.entries(pack.colors)) {
-      root.style.setProperty(`--${token}`, value);
-      activeTokens.push(token);
-    }
-    const selected = pack.wallpapers?.find(
-      (item) => item.id === readPackWallpaper(),
-    );
-    const wallpaper =
-      selected?.url ?? pack.wallpapers?.[0]?.url ?? pack.wallpaper;
-    if (wallpaper)
-      root.style.setProperty("--pack-wallpaper-url", `url("${wallpaper}")`);
-    root.setAttribute("data-pack-theme", "");
-  } else root.removeAttribute("data-pack-theme");
-  if (pack) root.setAttribute("data-palette", t);
+  if (isPalette) root.setAttribute("data-palette", t);
   else root.removeAttribute("data-palette");
 
   if (animate && !reduceMotion) {
@@ -93,20 +99,21 @@ function apply(t: Theme, animate: boolean) {
 
 const initial = read();
 const initialWallpaper = readWallpaper();
+const initialNatureWallpaper = readNatureWallpaper();
 apply(initial, false); // before first paint — no animation
 applyWallpaper(initialWallpaper);
+applyNatureWallpaper(initialNatureWallpaper);
 
 interface ThemeState {
   theme: Theme;
   wallpaperEnabled: boolean;
-  packWallpaperId: string;
+  natureWallpaperId: string;
   /** Quick light↔dark toggle (the sidebar icon button); from any brand/oled it lands on dark. */
   toggle: () => void;
   /** Set an explicit theme (the Settings picker). */
   set: (t: Theme) => void;
   setWallpaperEnabled: (enabled: boolean) => void;
-  setPackWallpaper: (id: string) => void;
-  refresh: () => void;
+  setNatureWallpaper: (id: string) => void;
 }
 
 function persist(t: Theme, animate: boolean) {
@@ -117,7 +124,7 @@ function persist(t: Theme, animate: boolean) {
 export const useTheme = create<ThemeState>((set, get) => ({
   theme: initial,
   wallpaperEnabled: initialWallpaper,
-  packWallpaperId: readPackWallpaper(),
+  natureWallpaperId: initialNatureWallpaper,
   toggle: () => {
     const next: Theme = get().theme === "light" ? "dark" : "light";
     persist(next, true);
@@ -134,21 +141,13 @@ export const useTheme = create<ThemeState>((set, get) => ({
     applyWallpaper(enabled);
     set({ wallpaperEnabled: enabled });
   },
-  setPackWallpaper: (id: string) => {
-    const pack = installedTheme(get().theme);
-    const wallpaper = pack?.wallpapers?.find((item) => item.id === id);
-    if (!wallpaper) return;
+  setNatureWallpaper: (id: string) => {
+    const wallpaper = getNatureWallpaper(id);
     if (typeof localStorage !== "undefined") {
-      localStorage.setItem(PACK_WALLPAPER_KEY, wallpaper.id);
+      localStorage.setItem(NATURE_WALLPAPER_KEY, wallpaper.id);
     }
-    apply(get().theme, true);
-    set({ packWallpaperId: wallpaper.id });
-  },
-  refresh: () => {
-    const current = get().theme;
-    if (!ALL_THEMES.includes(current) && !installedTheme(current)) {
-      persist("dark", false);
-      set({ theme: "dark" });
-    } else apply(current, false);
+    applyNatureWallpaper(wallpaper.id);
+    persist("nature", true);
+    set({ theme: "nature", natureWallpaperId: wallpaper.id });
   },
 }));

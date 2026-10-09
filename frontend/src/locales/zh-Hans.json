@@ -559,21 +559,5 @@
     "advanced": "高级设置",
     "identityStep": "创建保存在此设备上的身份。",
     "discoveryStep": "登录后，查找同一本地网络上的其他人。"
-  },
-  "packs": {
-    "libraries": "资源库",
-    "importZip": "安装 ZIP…",
-    "installed": "已安装的资源库",
-    "marketplace": "资源市场",
-    "install": "安装",
-    "update": "更新",
-    "remove": "移除",
-    "browseMarket": "浏览资源市场",
-    "noAvatars": "尚未安装头像资源库。请在下方安装后选择头像。",
-    "noThemes": "尚未安装个性主题。请在下方安装。",
-    "marketUnavailable": "资源市场暂时无法访问。",
-    "downloadFailed": "无法下载资源包。",
-    "checksumFailed": "下载的资源包未通过校验。",
-    "wrongType": "此 ZIP 属于其他资源库类型。"
   }
 }

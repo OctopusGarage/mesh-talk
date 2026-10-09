@@ -34,7 +34,7 @@ import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
 import { formatTime, shortId } from "@/lib/format";
 import { useTheme } from "@/lib/theme";
-import { usePacks } from "@/store/packs";
+import { THEME_CREST } from "@/lib/themeCrest";
 import { CreateChannelDialog } from "./CreateChannelDialog";
 import { SearchDialog } from "./SearchDialog";
 import { FilesTray } from "./FilesTray";
@@ -434,11 +434,7 @@ export function Sidebar() {
   const channels = useChat((s) => s.channels);
   const peers = useChat((s) => s.peers);
   const favorites = useChat((s) => s.favorites);
-  const selectedTheme = useTheme((s) => s.theme);
-  const themePacks = usePacks((s) => s.packs);
-  const activeThemePack = themePacks.find((pack) => pack.id === selectedTheme);
-  const themeCrest =
-    activeThemePack?.kind === "theme" ? activeThemePack.crest : undefined;
+  const themeCrest = THEME_CREST[useTheme((s) => s.theme)];
   // The active theme's crest (a brand theme) replaces the app mark in the footer, so the
   // chosen club/national/Messi identity is always present without shouting.
   const togglePinned = useChat((s) => s.togglePinned);

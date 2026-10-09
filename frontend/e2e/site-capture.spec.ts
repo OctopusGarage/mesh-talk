@@ -1,11 +1,11 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { test, expect } from "./tauri-mock";
-import { seedMarketPacks } from "./helpers/packs";
 import {
   enterChat,
   BOB,
   CHANNEL,
+  seedThemeBeforeLoad,
 } from "./helpers/session";
 
 test.use({
@@ -24,8 +24,7 @@ test("capture current desktop surfaces for the site and README", async ({
   page,
 }) => {
   await mkdir(output, { recursive: true });
-  await seedMarketPacks(page, ["messi", "barcelona", "argentina", "players", "clubs"]);
-  await page.addInitScript(() => localStorage.setItem("mesh-talk-theme", "messi"));
+  await seedThemeBeforeLoad(page, "messi");
   await enterChat(page, "Cesc Fàbregas", "/?data=site");
 
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();

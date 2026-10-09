@@ -1,7 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect } from "../tauri-mock";
 import type { Theme } from "@/lib/theme";
-import { seedMarketPacks } from "./packs";
 
 export const BOB = { account: "acc_bob_bbbb2222", device: "device_bob_2222" };
 export const CAROL = {
@@ -45,7 +44,6 @@ export async function revealComposerTools(page: Page) {
 }
 
 export async function seedThemeBeforeLoad(page: Page, theme: string) {
-  if (!["light", "dark", "oled"].includes(theme)) await seedMarketPacks(page, [theme]);
   await page.addInitScript((nextTheme) => {
     localStorage.setItem("mesh-talk-theme", nextTheme);
   }, theme);

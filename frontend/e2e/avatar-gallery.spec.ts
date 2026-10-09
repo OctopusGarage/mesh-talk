@@ -1,5 +1,4 @@
 import { test, expect } from "./tauri-mock";
-import { seedMarketPacks } from "./helpers/packs";
 const CHANNEL = "chan_team_dddd4444";
 test.use({ viewport: { width: 1100, height: 800 } });
 
@@ -15,7 +14,6 @@ async function login(page: import("@playwright/test").Page) {
 }
 
 test("personal avatar gallery offers the player pack", async ({ page }) => {
-  await seedMarketPacks(page, ["players"]);
   await login(page);
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
@@ -26,12 +24,12 @@ test("personal avatar gallery offers the player pack", async ({ page }) => {
 });
 
 test("group avatar gallery offers the club pack", async ({ page }) => {
-  await seedMarketPacks(page, ["clubs"]);
   await login(page);
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
+  await page.getByRole("button", { name: "Clubs", exact: true }).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
   await expect
     .poll(async () =>

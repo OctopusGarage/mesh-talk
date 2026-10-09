@@ -1,5 +1,4 @@
 import { test, expect } from "./tauri-mock";
-import { seedMarketPacks } from "./helpers/packs";
 test.use({ viewport: { width: 1100, height: 800 } });
 
 async function login(page: import("@playwright/test").Page) {
@@ -18,7 +17,6 @@ const palette = (page: import("@playwright/test").Page) =>
 test("theme picker applies + persists a brand palette, and clears it for base modes", async ({
   page,
 }) => {
-  await seedMarketPacks(page, ["barcelona"]);
   await login(page);
   const onlineColor = () =>
     page
@@ -96,7 +94,6 @@ test("theme changes stay scoped and reduced motion keeps control feedback", asyn
 test("wallpaper can be hidden without changing the personal theme", async ({
   page,
 }) => {
-  await seedMarketPacks(page, ["barcelona"]);
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   const shell = page.getByTestId("chat-shell");
@@ -104,7 +101,7 @@ test("wallpaper can be hidden without changing the personal theme", async ({
   await page.getByTestId("theme-barcelona").click();
   await expect
     .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
-    .toContain("data:image/");
+    .toContain("barcelona-bg");
 
   const wallpaper = page.getByTestId("settings-wallpaper");
   await wallpaper.click();
@@ -123,13 +120,12 @@ test("wallpaper can be hidden without changing the personal theme", async ({
   await wallpaper.click();
   await expect
     .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
-    .toContain("data:image/");
+    .toContain("barcelona-bg");
 });
 
 test("nature theme offers all 50 wallpapers and restores the selected scene", async ({
   page,
 }) => {
-  await seedMarketPacks(page, ["nature"]);
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await page.getByTestId("sidebar-nav-settings").click();
@@ -148,7 +144,7 @@ test("nature theme offers all 50 wallpapers and restores the selected scene", as
         .getByTestId("chat-shell")
         .evaluate((el) => getComputedStyle(el).backgroundImage),
     )
-    .toContain("data:image/");
+    .toContain("050-maldives-wallpaper");
   await expect
     .poll(() =>
       page

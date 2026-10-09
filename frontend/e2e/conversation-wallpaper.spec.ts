@@ -10,7 +10,7 @@ for (const theme of ["argentina", "barcelona", "messi"] as const) {
     const homeBackground = await page
       .getByTestId("chat-shell")
       .evaluate((element) => getComputedStyle(element).backgroundImage);
-    expect(homeBackground.includes("data:image/")).toBe(true);
+    expect(homeBackground).toContain(`${theme}-bg`);
     await openBobDm(page);
 
     const frame = page.locator("main.conversation-canvas");
@@ -21,8 +21,8 @@ for (const theme of ["argentina", "barcelona", "messi"] as const) {
     const background = await page
       .getByTestId("chat-shell")
       .evaluate((element) => getComputedStyle(element).backgroundImage);
-    expect(background.includes("data:image/")).toBe(true);
-    expect(background).toContain("linear-gradient");
+    expect(background).toContain(`${theme}-bg`);
+    expect(background).toContain("radial-gradient");
     await expect(page.locator(".conversation-log-surface")).toHaveCSS(
       "background-color",
       "rgba(0, 0, 0, 0)",

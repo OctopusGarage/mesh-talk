@@ -559,21 +559,5 @@
     "advanced": "詳細設定",
     "identityStep": "このデバイスに保存されるIDを作成します。",
     "discoveryStep": "サインインして、同じローカルネットワーク上の人を探します。"
-  },
-  "packs": {
-    "libraries": "ライブラリ",
-    "importZip": "ZIPをインストール…",
-    "installed": "インストール済み",
-    "marketplace": "マーケット",
-    "install": "インストール",
-    "update": "更新",
-    "remove": "削除",
-    "browseMarket": "マーケットを見る",
-    "noAvatars": "アバターライブラリがありません。下からインストールしてください。",
-    "noThemes": "個人用テーマがありません。下からインストールしてください。",
-    "marketUnavailable": "現在マーケットを利用できません。",
-    "downloadFailed": "パックをダウンロードできませんでした。",
-    "checksumFailed": "ダウンロードしたパックの検証に失敗しました。",
-    "wrongType": "このZIPは別の種類のライブラリです。"
   }
 }
