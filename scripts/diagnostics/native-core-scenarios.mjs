@@ -137,8 +137,8 @@ async function receiptPhase(c, state, name, expected, historical = false, cold =
     const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
     return values.every(value => value === expected) && values;
   });
-  for (const label of [...state.labels].reverse()) {
-    if (historical) await revealHistoricalNativeMessage(c, label);
+  for (const [index, label] of [...state.labels].reverse().entries()) {
+    if (historical && index > 0) await revealHistoricalNativeMessage(c, label);
     else await revealLatestNativeMessage(c, label);
     await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
   }
@@ -227,13 +227,16 @@ export async function revealHistoricalNativeMessage({ execute, until, command, k
   await until("restarted message log hydrated", () => execute("return !!document.querySelector('[role=log]');"));
   const log = await command("POST", "/element", { using: "css selector", value: '[role="log"]' });
   await command("POST", `/element/${log["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
-  await until("historical message visibly rendered after native PageUp", async () => {
+  try { await until("historical message visibly rendered after native PageUp", async () => {
     const visible = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right;", [text]);
     if (visible) return true;
     assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native PageUp targets the focused message log");
     await key("\uE00E");
     return false;
-  });
+  }); } catch (error) {
+    const state = await execute("const log=document.querySelector('[role=log]'),bubbles=Array.from(document.querySelectorAll('[data-testid=message-bubble]'));return {count:bubbles.length,tails:bubbles.slice(-3).map(e=>e.textContent.slice(-120)),scrollTop:log?.scrollTop,scrollHeight:log?.scrollHeight,clientHeight:log?.clientHeight,targetInDom:bubbles.some(e=>e.textContent.includes(arguments[0]))};", [text]);
+    throw new Error(`${error.message}; native history state ${JSON.stringify({ ...state, target: text })}`);
+  }
 }
 
 export function nativeMinimumWindowRequest(defaultRect, defaultViewport) {
@@ -345,7 +348,11 @@ export async function coreScenarios(c) {
     const returned = await c.command("POST", "/window/rect", request);
     await until(`settings ${name} client resize`, () => execute("return Math.abs(innerWidth-arguments[0])<=1 && Math.abs(innerHeight-arguments[1])<=1;", [viewport.width, viewport.height]));
     await c.settledDialog("settings-dialog");
-    const layout = await execute("const e=document.querySelector('[data-testid=settings-dialog]'),r=e.getBoundingClientRect(),p=document.querySelector('[data-testid=theme-picker]'),q=p.getBoundingClientRect();return {viewport:{width:innerWidth,height:innerHeight},dialog:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},themePickerVisible:q.width>0 && q.height>0};");
+    let lastLayout;
+    const layout = await until(`settings ${name} dialog contained after resize`, async () => {
+      lastLayout = await execute("const e=document.querySelector('[data-testid=settings-dialog]'),r=e.getBoundingClientRect(),p=document.querySelector('[data-testid=theme-picker]'),q=p.getBoundingClientRect();return {viewport:{width:innerWidth,height:innerHeight},dialog:{x:r.x,y:r.y,right:r.right,bottom:r.bottom},themePickerVisible:q.width>0 && q.height>0};");
+      return lastLayout.dialog.x >= 0 && lastLayout.dialog.y >= 0 && lastLayout.dialog.right <= lastLayout.viewport.width + 1 && lastLayout.dialog.bottom <= lastLayout.viewport.height + 1 && lastLayout.themePickerVisible && lastLayout;
+    }).catch(error => { throw new Error(`${error.message}; settings layout ${JSON.stringify(lastLayout)}`); });
     assert.ok(layout.dialog.x >= 0 && layout.dialog.y >= 0 && layout.dialog.right <= layout.viewport.width + 1 && layout.dialog.bottom <= layout.viewport.height + 1);
     assert.equal(layout.themePickerVisible, true);
     settingsLayouts[name] = { ...layout, requestedWindow: request, returnedWindow: returned, dialogContained: true };
