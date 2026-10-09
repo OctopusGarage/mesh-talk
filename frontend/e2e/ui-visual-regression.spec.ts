@@ -108,7 +108,9 @@ for (const viewport of VIEWPORTS) {
         await expect(shell).toBeVisible();
         await expect(shell).toHaveScreenshot(
           snapshotName("chat-shell", theme, viewport.width, viewport.height),
-          theme === "messi" && viewport.width === 760
+          // Detailed artwork rasterizes differently on Linux and macOS at compact size.
+          ["argentina", "barcelona", "messi", "nature"].includes(theme) &&
+            viewport.width === 760
             ? { maxDiffPixelRatio: 0.04 }
             : {},
         );
