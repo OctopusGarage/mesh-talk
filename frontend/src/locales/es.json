@@ -90,11 +90,7 @@
     "tabFamousPeople": "Personas famosas",
     "tabFootballClubs": "Clubes",
     "tabNbaTeams": "Equipos NBA",
-    "tabCities": "Ciudades pintadas",
-    "cityCredits": "Créditos fotográficos",
-    "cityCreditsIntro": "Pintadas con IA y redimensionadas a partir de las fotos enlazadas de Wikimedia.",
-    "sourcePhoto": "Foto original",
-    "license": "Licencia"
+    "tabCities": "Ciudades pintadas"
   },
   "login": {
     "tagline": "Sin servidor · cifrado de extremo a extremo",

@@ -82,10 +82,6 @@
     "tabFootballClubs": "Clubs",
     "tabNbaTeams": "Teams",
     "tabCities": "City paintings",
-    "cityCredits": "Photo credits",
-    "cityCreditsIntro": "AI painted and resized from the linked Wikimedia photos.",
-    "sourcePhoto": "Source photo",
-    "license": "License",
     "editGroup": "Change group photo",
     "crop": {
       "title": "Crop photo",

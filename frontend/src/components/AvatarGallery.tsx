@@ -19,7 +19,6 @@ import {
   FAMOUS_AVATARS,
   type AvatarPackName,
 } from "@/lib/avatarPacks";
-import cityCredits from "@/assets/avatars/cities/credits.json";
 
 export type AvatarGalleryCategory = "personal" | "group";
 
@@ -259,42 +258,6 @@ export function AvatarGallery({
                 </button>
               ))}
             </div>
-            {activeTab === "cities" && (
-              <details className="border-t px-4 py-3 text-xs text-muted-foreground sm:px-5">
-                <summary className="cursor-pointer font-medium text-foreground">
-                  {t("avatar.cityCredits")}
-                </summary>
-                <p className="mt-2">{t("avatar.cityCreditsIntro")}</p>
-                <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto">
-                  {cityCredits.map((credit) => (
-                    <li key={credit.file}>
-                      {credit.city}: {credit.artist} · {credit.license} ·{" "}
-                      <a
-                        href={credit.source}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="underline underline-offset-2"
-                      >
-                        {t("avatar.sourcePhoto")}
-                      </a>
-                      {credit.licenseUrl && (
-                        <>
-                          {" · "}
-                          <a
-                            href={credit.licenseUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="underline underline-offset-2"
-                          >
-                            {t("avatar.license")}
-                          </a>
-                        </>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
           </div>
         </div>
       </DialogContent>
