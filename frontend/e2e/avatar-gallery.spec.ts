@@ -29,6 +29,7 @@ test("group avatar gallery offers the club pack", async ({ page }) => {
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
+  await page.getByRole("button", { name: "Clubs", exact: true }).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
   await expect
     .poll(async () =>
