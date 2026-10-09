@@ -5,12 +5,19 @@ import { parsePack } from "../../src/lib/pack";
 
 /** Populate IndexedDB before entering the chat so optional visual scenarios stay offline. */
 export async function seedMarketPacks(page: Page, ids: string[]) {
-  const packs = ids.map((id) => parsePack(readFileSync(resolve(`../site/market/packs/${id}.zip`))));
+  const packs = ids.map((id) =>
+    parsePack(readFileSync(resolve(`../site/market/packs/${id}.zip`))),
+  );
   await page.goto("/");
   await page.evaluate(async (entries) => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("mesh-talk-customization", 1);
-      request.onupgradeneeded = () => request.result.createObjectStore("packs", { keyPath: "id" });
+      const request = indexedDB.open("mesh-talk-customization", 2);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("packs"))
+          request.result.createObjectStore("packs", { keyPath: "id" });
+        if (!request.result.objectStoreNames.contains("meta"))
+          request.result.createObjectStore("meta");
+      };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

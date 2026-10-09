@@ -1,6 +1,10 @@
 # Customization packs
 
-Mesh-Talk keeps its basic light, dark, and OLED themes in the desktop app. Avatar libraries and personal themes are optional ZIP packs. A pack can be installed from the app's marketplace or from a local ZIP file. Installed packs are stored per device in IndexedDB; they are available offline after installation. Removing an avatar library does not change avatars already selected for a profile or channel, because selected avatars are copied into the existing avatar store. Removing the active theme switches the app to dark.
+Mesh-Talk keeps its basic light, dark, and OLED themes in both desktop editions. Avatar libraries and personal themes are ZIP packs. The default edition bundles and installs the eleven current collections on first launch. Each is removable; removing one does not cause it to return on restart. The lite edition bundles no avatar or personal theme packs and starts with an empty library. Both editions can install a pack from the marketplace or a local ZIP file. Installed packs are stored per device in IndexedDB and remain available offline. Switching editions preserves packs already installed on that device. Removing an avatar library does not change avatars already selected for a profile or channel, because selected avatars are copied into the existing avatar store. Removing the active theme switches the app to dark.
+
+## Build editions
+
+`cd frontend && npm run build` makes the default frontend and includes eleven ZIPs under `dist/builtin-packs/`. `npm run build:lite` makes the lite frontend, with no `builtin-packs/` directory. To build a lite desktop installer, set `MESH_TALK_VARIANT=lite` in the environment before running the Tauri build; the release workflow builds both editions for each platform. Default release ZIP names are unchanged, while lite release ZIPs end in `_lite.zip`. The editions use the same app identity, so they replace one another rather than install side by side.
 
 ## Create a pack
 
