@@ -58,7 +58,10 @@ export function useConversationViewport(
         frame = requestAnimationFrame(restore);
         return;
       }
-      if (scroller) scroller.scrollTop = Math.min(top, Math.max(0, maxTop));
+      if (scroller) {
+        scroller.scrollTop = Math.min(top, Math.max(0, maxTop));
+        setShowJump(maxTop - scroller.scrollTop > 48);
+      }
       restoringScroll.current = null;
     };
     frame = requestAnimationFrame(restore);
@@ -107,10 +110,14 @@ export function useConversationViewport(
     scrollerRef(element: HTMLElement | Window | null) {
       scrollerRef.current = element instanceof HTMLElement ? element : null;
     },
-    initialIndex: Math.min(
-      messages.length - 1,
-      scrollPositions.current.get(key) ?? messages.length - 1,
-    ),
+    // Exact pixel restoration runs after the list has measured its rows. Starting
+    // Virtuoso at the saved row as well can issue a later scroll that overwrites it.
+    initialIndex: exactScrollPositions.current.has(key)
+      ? 0
+      : Math.min(
+          messages.length - 1,
+          scrollPositions.current.get(key) ?? messages.length - 1,
+        ),
     atBottomStateChange(bottom: boolean) {
       atBottom.current.set(key, bottom);
       if (restoringScroll.current === key) return;

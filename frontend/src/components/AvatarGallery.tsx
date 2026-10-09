@@ -9,81 +9,16 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { presetToAvatarDataUrl } from "@/lib/avatarImage";
-import {
-  CLUB_AVATARS,
-  PLAYER_AVATARS,
-  NBA_TEAM_AVATARS,
-  CITY_AVATARS,
-  NBA_PLAYER_AVATARS,
-  SPORTS_AVATARS,
-  FAMOUS_AVATARS,
-  type AvatarPackName,
-} from "@/lib/avatarPacks";
+import { usePacks } from "@/store/packs";
+import { PackManager } from "@/components/PackManager";
+import type { AvatarPack } from "@/lib/pack";
 
 export type AvatarGalleryCategory = "personal" | "group";
 
-interface Tab {
-  id: AvatarPackName;
-  label: string;
-  presets: { label: string; url: string }[];
-  /** "cover" fills the square (photos); "contain" keeps the logo shape */
-  fit: "cover" | "contain";
-}
-
-const PERSONAL_TABS = (t: (k: string) => string): Tab[] => [
-  {
-    id: "players",
-    label: t("avatar.tabFootballStars"),
-    presets: PLAYER_AVATARS,
-    fit: "cover",
-  },
-  {
-    id: "nba-players",
-    label: t("avatar.tabNbaStars"),
-    presets: NBA_PLAYER_AVATARS,
-    fit: "cover",
-  },
-  {
-    id: "sports",
-    label: t("avatar.tabSportsStars"),
-    presets: SPORTS_AVATARS,
-    fit: "cover",
-  },
-  {
-    id: "famous",
-    label: t("avatar.tabFamousPeople"),
-    presets: FAMOUS_AVATARS,
-    fit: "cover",
-  },
-];
-
-const GROUP_TABS = (t: (k: string) => string): Tab[] => [
-  {
-    id: "cities",
-    label: t("avatar.tabCities"),
-    presets: CITY_AVATARS,
-    fit: "contain",
-  },
-  {
-    id: "clubs",
-    label: t("avatar.tabFootballClubs"),
-    presets: CLUB_AVATARS,
-    fit: "contain",
-  },
-  {
-    id: "nba-teams",
-    label: t("avatar.tabNbaTeams"),
-    presets: NBA_TEAM_AVATARS,
-    fit: "contain",
-  },
-];
-
 /**
- * A grid of built-in preset avatars with tab navigation. Two categories:
- * - "personal": Football | NBA | Sports Stars | Famous People (cover fit)
- * - "group":    City paintings | Football Clubs | NBA Teams (contain fit)
+ * A grid of installed avatar libraries with tab navigation for people or channels.
  *
- * Clicking a preset normalizes it to the same 256×256 JPEG an upload produces and
+ * Clicking an image normalizes it to the same 256×256 JPEG an upload produces and
  * hands it back via `onPick`, so the caller stores it exactly like a custom photo.
  */
 export function AvatarGallery({
@@ -98,21 +33,15 @@ export function AvatarGallery({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<AvatarPackName>(
-    category === "personal" ? "players" : "cities",
-  );
+  const [activeTab, setActiveTab] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
 
-  const tabs = category === "personal" ? PERSONAL_TABS(t) : GROUP_TABS(t);
-
-  // Sync active tab when category changes externally (e.g. dialog re-opened)
-  const defaultTab = category === "personal" ? "players" : "cities";
-  if (!tabs.find((t) => t.id === activeTab)) {
-    setActiveTab(defaultTab);
-  }
-
-  const currentTab = tabs.find((t) => t.id === activeTab) ?? tabs[0];
-  const presets = currentTab.presets;
+  const tabs = usePacks((state) => state.packs).filter(
+    (pack): pack is AvatarPack =>
+      pack.kind === "avatar" && pack.category === category,
+  );
+  const currentTab = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
+  const presets = currentTab?.avatars ?? [];
 
   const choose = async (url: string) => {
     setBusy(url);
@@ -147,15 +76,15 @@ export function AvatarGallery({
               <button
                 key={tab.id}
                 type="button"
-                aria-pressed={activeTab === tab.id}
+                aria-pressed={currentTab?.id === tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={`shrink-0 rounded-lg border-l-2 px-3 py-2.5 text-left text-sm font-medium whitespace-nowrap outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-popover sm:w-full ${
-                  activeTab === tab.id
+                  currentTab?.id === tab.id
                     ? "border-primary bg-popover text-foreground shadow-sm"
                     : "border-transparent text-muted-foreground hover:bg-popover/70 hover:text-foreground"
                 }`}
               >
-                {tab.label}
+                {tab.name}
               </button>
             ))}
           </nav>
@@ -165,6 +94,11 @@ export function AvatarGallery({
               data-testid="avatar-gallery"
               className="grid max-h-[min(54vh,480px)] grid-cols-3 content-start gap-2 overflow-y-auto p-3 sm:max-h-[min(60vh,520px)] sm:grid-cols-4 sm:gap-3 sm:p-5"
             >
+              {presets.length === 0 && (
+                <p className="col-span-full p-4 text-center text-sm text-muted-foreground">
+                  {t("packs.noAvatars")}
+                </p>
+              )}
               {presets.map((p) => (
                 <button
                   key={p.url}
@@ -183,7 +117,7 @@ export function AvatarGallery({
                       decoding="async"
                       className="h-full w-full rounded-[28%] bg-secondary object-cover"
                       style={
-                        currentTab.fit === "contain"
+                        currentTab?.fit === "contain"
                           ? { objectFit: "contain" }
                           : undefined
                       }
@@ -201,6 +135,9 @@ export function AvatarGallery({
               ))}
             </div>
           </div>
+        </div>
+        <div className="max-h-52 overflow-y-auto border-t px-5 py-3 sm:px-7">
+          <PackManager kind="avatar" category={category} />
         </div>
       </DialogContent>
     </Dialog>

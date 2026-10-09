@@ -1,3 +1,4 @@
+import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
@@ -512,6 +513,7 @@ test.describe("Mesh-Talk UI flow", () => {
   test("Settings: pick themes (light, oled, brand palette)", async ({
     page,
   }) => {
+    await seedMarketPacks(page, ["barcelona", "messi"]);
     await enterChat(page);
     // App boots dark.
     await expect(page.locator("html")).toHaveClass(/dark/);

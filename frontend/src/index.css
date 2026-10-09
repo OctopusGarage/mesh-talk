@@ -319,7 +319,16 @@
     background-color: hsl(var(--conversation-surface));
   }
 
-  html[data-palette="argentina"]:not([data-wallpaper="off"])
+  html[data-pack-theme]:not([data-wallpaper="off"]) [data-testid="chat-shell"] {
+    background-image:
+      linear-gradient(
+        hsl(var(--background) / 0.44),
+        hsl(var(--background) / 0.58)
+      ),
+      var(--pack-wallpaper-url);
+  }
+
+  html[data-pack-theme][data-palette="argentina"]:not([data-wallpaper="off"])
     [data-testid="chat-shell"] {
     background-image:
       radial-gradient(
@@ -328,10 +337,10 @@
         hsl(205 55% 96% / 0.55) 100%
       ),
       linear-gradient(165deg, hsl(205 55% 95% / 0.64), hsl(202 55% 97% / 0.82)),
-      url("./assets/themes/argentina-bg.webp");
+      var(--pack-wallpaper-url);
   }
 
-  html[data-palette="barcelona"]:not([data-wallpaper="off"])
+  html[data-pack-theme][data-palette="barcelona"]:not([data-wallpaper="off"])
     [data-testid="chat-shell"] {
     background-image:
       radial-gradient(
@@ -340,10 +349,10 @@
         hsl(226 48% 5% / 0.62) 100%
       ),
       linear-gradient(165deg, hsl(224 46% 9% / 0.74), hsl(226 44% 11% / 0.9)),
-      url("./assets/themes/barcelona-bg.jpg");
+      var(--pack-wallpaper-url);
   }
 
-  html[data-palette="messi"]:not([data-wallpaper="off"])
+  html[data-pack-theme][data-palette="messi"]:not([data-wallpaper="off"])
     [data-testid="chat-shell"] {
     background-image:
       radial-gradient(
@@ -352,14 +361,14 @@
         hsl(208 50% 96% / 0.55) 100%
       ),
       linear-gradient(165deg, hsl(208 46% 95% / 0.66), hsl(206 50% 97% / 0.82)),
-      url("./assets/themes/messi-bg.jpg");
+      var(--pack-wallpaper-url);
   }
 
-  html[data-palette="nature"]:not([data-wallpaper="off"])
+  html[data-pack-theme][data-palette="nature"]:not([data-wallpaper="off"])
     [data-testid="chat-shell"] {
     background-image:
       linear-gradient(hsl(44 34% 97% / 0.4), hsl(44 34% 97% / 0.52)),
-      var(--nature-wallpaper-url);
+      var(--pack-wallpaper-url);
   }
 
   html[data-palette]:not([data-wallpaper="off"]) .conversation-log-surface {
