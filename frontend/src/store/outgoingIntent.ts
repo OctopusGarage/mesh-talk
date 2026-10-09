@@ -7,6 +7,7 @@ import {
   fromHistoryItem,
   reconcileMessages,
   applyProjection,
+  completeSendIntentState,
 } from "./conversationState";
 export {
   reconcileMessages,
@@ -280,58 +281,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
   const key = convKey(c);
   const clientId = message.clientId!;
   const update = (next: ChatMessage | null) =>
-    guarded((s) => {
-      if (!s.intents[clientId]) return {};
-      const intents = { ...s.intents };
-      const currentIntent = s.intents[clientId];
-      if (
-        next?.id &&
-        (s.deleted[key]?.includes(next.id) ||
-          currentIntent.deletedIds?.includes(next.id))
-      ) {
-        delete intents[clientId];
-        return {
-          intents,
-          messages: s.messages[key]
-            ? {
-                ...s.messages,
-                [key]: s.messages[key].filter(
-                  (m) => m.clientId !== clientId && m.id !== next.id,
-                ),
-              }
-            : s.messages,
-        };
-      }
-      const existing = next?.id
-        ? s.messages[key]?.find((m) => m.id === next.id)
-        : undefined;
-      const resolved = next
-        ? {
-            ...next,
-            delivery:
-              existing?.delivery === "delivered"
-                ? ("delivered" as const)
-                : next.delivery,
-            ...(next.file && existing?.file && !existing.metadataPending
-              ? { file: existing.file, metadataPending: false }
-              : {}),
-          }
-        : null;
-      if (resolved) intents[clientId] = { ...currentIntent, message: resolved };
-      else delete intents[clientId];
-      // Completion must not repopulate an evicted conversation's cache.
-      const messages = { ...s.messages };
-      if (messages[key]) {
-        const rows = messages[key].filter(
-          (m) => m.clientId !== clientId && (!next?.id || m.id !== next.id),
-        );
-        messages[key] =
-          resolved && !(resolved.id && currentIntent.acceptanceHistoryOnly)
-            ? [...rows, resolved]
-            : rows;
-      }
-      return { intents, messages };
-    });
+    guarded((state) => completeSendIntentState(state, c, clientId, next));
   try {
     let accepted: ChatMessage | null = null;
     if (c.kind === "account") {
@@ -373,18 +323,9 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
         };
       }
       if (!lease.current()) return;
-      if (!get().intents[clientId]) {
-        if (accepted?.id)
-          guarded((s) => ({
-            deleted: boundedConversationMap(
-              s.deleted,
-              key,
-              [...(s.deleted[key] ?? []), accepted!.id!].slice(-256),
-            ),
-          }));
-        return;
-      }
+      const hadIntent = !!get().intents[clientId];
       update(accepted);
+      if (!hadIntent) return;
     } else {
       if (payload.kind === "text")
         await chat.sendChannelMessage(c.id, payload.text, payload.replyTo);

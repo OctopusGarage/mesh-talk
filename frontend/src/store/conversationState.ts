@@ -80,6 +80,78 @@ export function protectIntentDeletion(
     : { ...intent, acceptanceHistoryOnly: true };
 }
 
+/** Settle a send against the same cache, deletion, and intent rules as history. */
+export function completeSendIntentState(
+  state: ConversationSnapshot,
+  conversation: Conversation,
+  clientId: string,
+  next: ChatMessage | null,
+): Partial<ChatState> {
+  const key = convKey(conversation);
+  const intent = state.intents[clientId];
+  if (!intent) {
+    return next?.id
+      ? {
+          deleted: boundedConversationMap(
+            state.deleted,
+            key,
+            [...(state.deleted[key] ?? []), next.id].slice(-256),
+          ),
+        }
+      : {};
+  }
+  const intents = { ...state.intents };
+  if (
+    next?.id &&
+    (state.deleted[key]?.includes(next.id) ||
+      intent.deletedIds?.includes(next.id))
+  ) {
+    delete intents[clientId];
+    return {
+      intents,
+      messages: state.messages[key]
+        ? {
+            ...state.messages,
+            [key]: state.messages[key].filter(
+              (message) =>
+                message.clientId !== clientId && message.id !== next.id,
+            ),
+          }
+        : state.messages,
+    };
+  }
+  const existing = next?.id
+    ? state.messages[key]?.find((message) => message.id === next.id)
+    : undefined;
+  const resolved = next
+    ? {
+        ...next,
+        delivery:
+          existing?.delivery === "delivered"
+            ? ("delivered" as const)
+            : next.delivery,
+        ...(next.file && existing?.file && !existing.metadataPending
+          ? { file: existing.file, metadataPending: false }
+          : {}),
+      }
+    : null;
+  if (resolved) intents[clientId] = { ...intent, message: resolved };
+  else delete intents[clientId];
+  // Completion must not repopulate an evicted conversation's cache.
+  const messages = { ...state.messages };
+  if (messages[key]) {
+    const rows = messages[key].filter(
+      (message) =>
+        message.clientId !== clientId && (!next?.id || message.id !== next.id),
+    );
+    messages[key] =
+      resolved && !(resolved.id && intent.acceptanceHistoryOnly)
+        ? [...rows, resolved]
+        : rows;
+  }
+  return { intents, messages };
+}
+
 /** Exact event ID only. Never associate identical content, paths or filenames. */
 export function reconcileMessages(
   history: ChatMessage[],
