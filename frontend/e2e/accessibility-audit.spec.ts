@@ -51,6 +51,38 @@ test("settings dialog has no detectable WCAG A/AA violations", async ({
   await expectNoWcagViolations(page);
 });
 
+test("settings controls stay legible when privacy cannot load", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const ipc = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            command: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const original = ipc.invoke;
+    ipc.invoke = (command, args) =>
+      command === "get_privacy"
+        ? Promise.reject(new Error("privacy unavailable"))
+        : original(command, args);
+  });
+  await enterChat(page);
+  await page.getByTestId("sidebar-nav-settings").click();
+  const managePrivacy = page.getByTestId("manage-privacy");
+  await expect(managePrivacy).toBeDisabled();
+  expect(
+    await managePrivacy.evaluate((button) =>
+      Number(getComputedStyle(button).opacity),
+    ),
+  ).toBeGreaterThanOrEqual(0.7);
+  await expectNoWcagViolations(page);
+});
+
 test("members dialog has no detectable WCAG A/AA violations", async ({
   page,
 }) => {

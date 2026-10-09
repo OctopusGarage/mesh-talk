@@ -406,7 +406,7 @@ impl Node {
         manifest: &FileManifestV3,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
-        use super::delivery_store::{DeliveryDestination, DeliveryTransaction, OutgoingDelivery};
+        use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         let own = self.identity.public();
@@ -453,71 +453,27 @@ impl Node {
             .ok_or_else(|| NodeError::File("no file destinations".into()))?
             .event
             .id;
-        let final_chunk = self
-            .log
-            .lock()
-            .expect("log lock not poisoned")
-            .events(&manifest.v2.file_conv)
-            .last()
-            .map(|event| event.id);
-        let file = super::delivery_store::FileCard {
-            id,
-            conversation: host,
-            wall_clock: clock,
-            file_conversation: manifest.v2.file_conv,
-            final_chunk,
-            chunk_count: manifest.v2.chunk_count,
-            destinations: destinations
-                .iter()
-                .map(|d| super::delivery_store::FileDestination {
-                    binding: super::delivery_store::DeliveryReference {
-                        device: d.device.clone(),
-                        account: d.account.clone(),
-                        event_id: d.event.id,
-                        receipt_eligible: d.receipt_eligible,
-                    },
-                    active: true,
-                })
-                .collect(),
-            completion_binding: None,
-        };
-        store
-            .validate_staged_file(
-                &file,
-                &self.log.lock().expect("log lock not poisoned"),
-                &author,
-            )
-            .map_err(NodeError::Log)?;
-        let mut transaction = Some(DeliveryTransaction::OutgoingManifest {
-            message: OutgoingDelivery {
-                logical_id: id,
-                sender_account: self.account_id(),
-                recipient_account: target_account,
-                conversation: host,
-                wall_clock: clock,
-                destinations,
-            },
-            received: Box::new(super::received_log::ReceivedEntry {
-                event_id: id,
-                conversation: host,
-                from: own.user_id(),
-                wall_clock: clock,
+        let transaction = {
+            let log = self.log.lock().expect("log lock not poisoned");
+            store.prepare_outgoing_manifest(
+                OutgoingDelivery {
+                    logical_id: id,
+                    sender_account: self.account_id(),
+                    recipient_account: target_account,
+                    conversation: host,
+                    wall_clock: clock,
+                    destinations,
+                },
                 plaintext,
-            }),
-            file,
-        });
-        authorize(&mut || {
-            store
-                .begin(transaction.take().expect("accept is single-use"))
-                .map(|_| ())
-                .map_err(NodeError::Log)
-        })?;
-        if self.recover_delivery(&mut store).is_ok() {
+                &log,
+            )
+        }
+        .map_err(NodeError::Log)?;
+        if self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
             book.record_event(id, AnyManifest::V3(manifest.clone()));
         }
-        self.delivery_notify.notify_one();
         Ok(id)
     }
 

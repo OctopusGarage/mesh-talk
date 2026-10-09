@@ -2,25 +2,37 @@ import { useAuth } from "./auth";
 
 let runtimeSnapshot = () => ({ runEpoch: 0, identityEpoch: 0 });
 
+type RuntimeSnapshot = ReturnType<typeof runtimeSnapshot>;
+
+/** Capture the owner and runtime generation once, then validate both after awaits. */
+export function captureChatOwner(
+  read: () => RuntimeSnapshot,
+  identitySensitive = true,
+) {
+  const auth = captureOwner();
+  const snapshot = read();
+  return {
+    ...auth,
+    run: snapshot.runEpoch,
+    current: () => {
+      const now = read();
+      return (
+        auth.owner !== null &&
+        auth.current() &&
+        now.runEpoch === snapshot.runEpoch &&
+        (!identitySensitive || now.identityEpoch === snapshot.identityEpoch)
+      );
+    },
+  };
+}
+
 /** Register a read-only snapshot without coupling auxiliary stores back to chat. */
 export function registerRuntimeSnapshot(read: typeof runtimeSnapshot) {
   runtimeSnapshot = read;
 }
 
 export function captureRuntimeOwner() {
-  const owner = captureOwner();
-  const snapshot = runtimeSnapshot();
-  return {
-    ...owner,
-    current: () => {
-      const now = runtimeSnapshot();
-      return (
-        owner.current() &&
-        now.runEpoch === snapshot.runEpoch &&
-        now.identityEpoch === snapshot.identityEpoch
-      );
-    },
-  };
+  return captureChatOwner(runtimeSnapshot);
 }
 
 /** UI cancellation only: an already-admitted legacy native command is not aborted. */

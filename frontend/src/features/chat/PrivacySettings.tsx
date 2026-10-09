@@ -141,6 +141,7 @@ export function PrivacySettings() {
               variant="outline"
               data-testid="manage-privacy"
               disabled={!enabled}
+              className="disabled:opacity-75"
             >
               {t("privacy.manage")}
             </Button>
