@@ -10,6 +10,8 @@ import {
   Pencil,
   Pin,
   PinOff,
+  Radar,
+  Settings,
   Sun,
   X,
 } from "lucide-react";
@@ -350,11 +352,12 @@ function useSidebarWidth() {
   return { width, onPointerDown, reset, onKeyDown };
 }
 
-/** Secondary actions stay labeled in the utility menu; files, diagnostics, and
- * settings already have persistent places in the tool rail. */
+/** Secondary actions share one labeled utility menu beside connection status. */
 function UtilityMenu() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const theme = useTheme((s) => s.theme);
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useAuth((s) => s.logout);
@@ -362,58 +365,91 @@ function UtilityMenu() {
   const callsEnabled = useSettings((s) => s.callsEnabled);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          data-testid="sidebar-overflow"
-          title={t("sidebar.moreActions")}
-          aria-label={t("sidebar.moreActions")}
+    <>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="sidebar-overflow"
+            title={t("sidebar.moreActions")}
+            aria-label={t("sidebar.moreActions")}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="start"
+          side="top"
+          className="w-56 p-1.5"
+          data-testid="sidebar-overflow-menu"
         >
-          <MoreHorizontal className="h-4 w-4" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        side="top"
-        className="w-56 p-1.5"
-        data-testid="sidebar-overflow-menu"
-      >
-        <div className="grid gap-0.5">
-          <LinkDeviceDialog menuItem />
-          {callsEnabled && <WebRtcTestDialog menuItem />}
-          <AboutDialog menuItem />
-          <div className="my-1 h-px bg-border" />
-          <button
-            type="button"
-            data-testid="sidebar-theme-toggle"
-            onClick={() => toggleTheme()}
-            className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
-          >
-            {theme === "light" ? (
-              <Moon className="h-4 w-4 text-muted-foreground" />
-            ) : (
-              <Sun className="h-4 w-4 text-muted-foreground" />
-            )}
-            <span>
-              {theme === "light"
-                ? t("sidebar.darkMode")
-                : t("sidebar.lightMode")}
-            </span>
-          </button>
-          <button
-            type="button"
-            data-testid="sidebar-sign-out"
-            onClick={() => logout()}
-            className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
-          >
-            <LogOut className="h-4 w-4" />
-            <span>{t("sidebar.signOut")}</span>
-          </button>
-        </div>
-      </PopoverContent>
-    </Popover>
+          <div className="grid gap-0.5">
+            <LinkDeviceDialog menuItem />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 px-2"
+              data-testid="sidebar-nav-connection"
+              onClick={() => {
+                setOpen(false);
+                setConnectionOpen(true);
+              }}
+            >
+              <Radar className="h-4 w-4" />
+              {t("redesign.connection")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 px-2"
+              data-testid="sidebar-nav-settings"
+              onClick={() => {
+                setOpen(false);
+                setSettingsOpen(true);
+              }}
+            >
+              <Settings className="h-4 w-4" />
+              {t("settings.title")}
+            </Button>
+            {callsEnabled && <WebRtcTestDialog menuItem />}
+            <AboutDialog menuItem />
+            <div className="my-1 h-px bg-border" />
+            <button
+              type="button"
+              data-testid="sidebar-theme-toggle"
+              onClick={() => toggleTheme()}
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+            >
+              {theme === "light" ? (
+                <Moon className="h-4 w-4 text-muted-foreground" />
+              ) : (
+                <Sun className="h-4 w-4 text-muted-foreground" />
+              )}
+              <span>
+                {theme === "light"
+                  ? t("sidebar.darkMode")
+                  : t("sidebar.lightMode")}
+              </span>
+            </button>
+            <button
+              type="button"
+              data-testid="sidebar-sign-out"
+              onClick={() => logout()}
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>{t("sidebar.signOut")}</span>
+            </button>
+          </div>
+        </PopoverContent>
+      </Popover>
+      <DiagnosticsDialog
+        open={connectionOpen}
+        onOpenChange={setConnectionOpen}
+      />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+    </>
   );
 }
 
@@ -922,12 +958,10 @@ export function Sidebar() {
       </nav>
 
       <div
-        className="sidebar-tools grid gap-0.5 border-t px-2 py-1.5"
+        className="sidebar-tools border-t px-2 py-1.5"
         aria-label={t("redesign.tools")}
       >
         <FilesTray navigation />
-        <DiagnosticsDialog />
-        <SettingsDialog />
       </div>
 
       {/* Stranded prompt: nobody's online and the grace window has passed — offer the

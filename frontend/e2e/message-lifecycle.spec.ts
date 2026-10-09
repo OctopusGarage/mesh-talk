@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
 
@@ -106,7 +107,7 @@ test("clear chat history (from the history dialog) empties the conversation", as
 
 test("retention setting persists", async ({ page }) => {
   await enterBobDm(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   const sel = page.getByTestId("settings-retention-select");
   await expect(sel).toBeVisible();
   await sel.selectOption("30");

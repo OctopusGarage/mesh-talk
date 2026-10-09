@@ -25,7 +25,7 @@ Spacing follows a 4px unit. A conversation row has a 56px minimum height and a f
 
 ## Application frame
 
-The sidebar defaults to 284px and remains user resizable. Search is directly below the app mark. Conversations are grouped into pinned, direct messages and channels. Row actions appear on hover and keyboard focus and remain available on touch. Arrow keys move through conversation options. Files, connection and settings are consistently placed above the account and connection summary.
+The sidebar defaults to 284px and remains user resizable. Search is directly below the app mark. Conversations are grouped into pinned, direct messages and channels. Row actions appear on hover and keyboard focus and remain available on touch. Arrow keys move through conversation options. Received files occupies one utility row above the account summary. Connection and Settings sit in the footer menu alongside Link a device and About, keeping the conversation rail compact at every window height.
 
 The conversation header identifies the contact or channel, with history, membership, call and verification beside that identity. The message log and composer share an 820px maximum content width. Messages have distinct sent and received fills; delivery denotes account receipt, never a read receipt. Replies, mentions, pending or failed sends and file transfer retain distinct visible states.
 

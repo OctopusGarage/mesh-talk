@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { expect, test } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
@@ -5,7 +6,7 @@ test("a failed settings save keeps the stored value and offers recovery", async 
   page,
 }) => {
   await enterChat(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   const notifications = page.getByRole("switch", { name: "Notifications" });
   await expect(notifications).toBeEnabled();
   await expect(notifications).toHaveAttribute("aria-checked", "true");
@@ -40,7 +41,7 @@ test("a failed settings load is explained and can be retried", async ({
       window as unknown as { __mockFailNext: (command: string) => void }
     ).__mockFailNext("get_app_settings");
   });
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByTestId("settings-error")).toContainText(
     "Couldn’t load settings",
   );

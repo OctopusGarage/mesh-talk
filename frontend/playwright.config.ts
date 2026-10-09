@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const port = Number(process.env.MESH_TALK_E2E_PORT ?? 5173);
+const url = `http://localhost:${port}`;
+
 // Browser E2E for the Mesh-Talk UI. Runs the Vite dev server + drives the real React app in
 // headless Chromium with a mocked Tauri IPC layer (see e2e/tauri-mock.ts).
 export default defineConfig({
@@ -21,14 +24,14 @@ export default defineConfig({
     },
   },
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: url,
     timezoneId: "Asia/Tokyo",
     trace: "retain-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
     command: "npm run dev",
-    url: "http://localhost:5173",
+    url,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

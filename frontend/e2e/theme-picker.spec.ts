@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 test.use({ viewport: { width: 1100, height: 800 } });
 
@@ -24,7 +25,7 @@ test("theme picker applies + persists a brand palette, and clears it for base mo
       .last()
       .evaluate((dot) => getComputedStyle(dot).backgroundColor);
   const darkOnline = await onlineColor();
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByTestId("theme-picker")).toBeVisible();
 
   await page.getByTestId("theme-barcelona").click();
@@ -45,7 +46,7 @@ test("theme changes stay scoped and reduced motion keeps control feedback", asyn
   page,
 }) => {
   await login(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
 
   const normal = await page.getByTestId("theme-light").evaluate((button) => {
     (button as HTMLButtonElement).click();
@@ -95,7 +96,7 @@ test("theme previews match the canvas, signal, and rail colors they apply", asyn
   page,
 }) => {
   await login(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   for (const id of [
     "dark",
     "light",
@@ -146,7 +147,7 @@ test("wallpaper can be hidden without changing the personal theme", async ({
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   const shell = page.getByTestId("chat-shell");
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await page.getByTestId("theme-barcelona").click();
   await expect
     .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
@@ -165,7 +166,7 @@ test("wallpaper can be hidden without changing the personal theme", async ({
 
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await wallpaper.click();
   await expect
     .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
@@ -177,7 +178,7 @@ test("nature theme offers all 50 wallpapers and restores the selected scene", as
 }) => {
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await page.getByTestId("theme-nature").click();
 
   const gallery = page.getByTestId("nature-wallpaper-picker");
@@ -209,7 +210,7 @@ test("nature theme offers all 50 wallpapers and restores the selected scene", as
 
   await page.reload();
   await login(page);
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByTestId("theme-nature")).toHaveAttribute(
     "aria-pressed",
     "true",

@@ -1,5 +1,6 @@
 import { expect, test } from "./tauri-mock";
 import { enterChat, openBobDm } from "./helpers/session";
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import {
   expectDialogFitsViewport,
   expectElementsWithin,
@@ -25,11 +26,7 @@ test("conversation and destinations remain usable at the minimum size", async ({
   await enterChat(page);
   await openBobDm(page);
   await expectElementsWithin(page, '[data-testid="composer-input"]', "body");
-  await expectElementsWithin(
-    page,
-    '[data-testid="sidebar-nav-settings"]',
-    "body",
-  );
+  await expectElementsWithin(page, '[data-testid="sidebar-overflow"]', "body");
   await expectNoHorizontalOverflow(page, "chat shell");
 
   for (const [trigger, surface] of [
@@ -37,7 +34,13 @@ test("conversation and destinations remain usable at the minimum size", async ({
     ["sidebar-nav-connection", "diagnostics-dialog"],
     ["sidebar-nav-settings", "settings-dialog"],
   ]) {
-    await page.getByTestId(trigger).click();
+    if (trigger === "sidebar-action-files")
+      await page.getByTestId(trigger).click();
+    else
+      await openSidebarMenuAction(
+        page,
+        trigger as "sidebar-nav-connection" | "sidebar-nav-settings",
+      );
     await expect(page.getByTestId(surface)).toBeVisible();
     await expectDialogFitsViewport(page, surface);
     await page.keyboard.press("Escape");

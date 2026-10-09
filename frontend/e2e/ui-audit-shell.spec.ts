@@ -1,4 +1,5 @@
 import { expect, test } from "./tauri-mock";
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { enterChat, BOB, CAROL } from "./helpers/session";
 import {
   expectElementsWithin,
@@ -54,15 +55,20 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
     "aria-label",
     /person online on the LAN/,
   );
+  await page.getByTestId("sidebar-overflow").click();
   await expect(page.getByTestId("sidebar-nav-connection")).toHaveText(
     "Connection",
   );
   await expect(page.getByTestId("sidebar-nav-settings")).toHaveText("Settings");
-  await page.getByTestId("sidebar-nav-connection").click();
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
   await expect(page.getByTestId("diagnostics-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByTestId("settings-dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("sidebar-overflow-menu")).toBeHidden();
+  await page.getByRole("button", { name: "New channel" }).click();
+  await expect(page.getByTestId("create-channel-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expectMinTargetSize(
     page.getByTestId("sidebar-action-search"),
@@ -122,6 +128,37 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   await expect(
     page.getByTestId(`conversation-row-${BOB.account}`),
   ).toContainText("thanks! glad to be here");
+});
+
+test("sidebar files stay on one line and connection and settings remain in the footer menu", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("mesh-talk-sidebar-width", "230");
+  });
+  await page.setViewportSize({ width: 760, height: 520 });
+  await enterChat(page);
+
+  const files = page.getByTestId("sidebar-action-files");
+  await expect(files).toBeVisible();
+  const fileLabel = await files
+    .locator(".sidebar-tool-label")
+    .evaluate((label) => ({
+      content: label.scrollWidth,
+      box: label.clientWidth,
+    }));
+  expect(fileLabel.content).toBeLessThanOrEqual(fileLabel.box + 1);
+
+  await page.getByTestId("sidebar-overflow").click();
+  const menu = page.getByTestId("sidebar-overflow-menu");
+  for (const id of [
+    "sidebar-nav-connection",
+    "sidebar-nav-settings",
+    "sidebar-action-link",
+    "sidebar-action-about",
+  ]) {
+    await expect(menu.getByTestId(id)).toBeVisible();
+  }
 });
 
 test("stranded prompt dismiss target meets interaction invariants", async ({

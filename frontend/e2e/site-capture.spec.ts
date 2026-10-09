@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { test, expect } from "./tauri-mock";
@@ -53,8 +54,13 @@ test("capture current desktop surfaces for the site and README", async ({
   });
   await page.screenshot({ path: resolve(output, "hero-messi.png") });
 
+  await page.getByTestId("sidebar-overflow").click();
+  await expect(page.getByTestId("sidebar-overflow-menu")).toBeVisible();
+  await page.screenshot({ path: resolve(output, "sidebar-utilities.png") });
+  await page.keyboard.press("Escape");
+
   for (const theme of ["barcelona", "argentina"] as const) {
-    await page.getByTestId("sidebar-nav-settings").click();
+    await openSidebarMenuAction(page, "sidebar-nav-settings");
     await page.getByTestId(`theme-${theme}`).click();
     await expect(page.locator("html")).toHaveAttribute("data-palette", theme);
     await waitForThemePaint(page);
@@ -67,7 +73,7 @@ test("capture current desktop surfaces for the site and README", async ({
     await page.screenshot({ path: resolve(output, `hero-${theme}.png`) });
   }
 
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await page.getByTestId("theme-messi").click();
   await page.keyboard.press("Escape");
 
@@ -78,7 +84,7 @@ test("capture current desktop surfaces for the site and README", async ({
   await page.screenshot({ path: resolve(output, "verify.png") });
   await page.keyboard.press("Escape");
 
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByTestId("settings-dialog")).toBeVisible();
   await page.screenshot({ path: resolve(output, "settings.png") });
   await expect(page.getByTestId("theme-picker")).toBeVisible();

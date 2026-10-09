@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
 const bob = "acc_bob_bbbb2222";
@@ -15,7 +16,7 @@ async function login(page: Page, username = "tester") {
   await expect(page.getByTestId("chat-shell")).toBeVisible();
 }
 async function manage(page: Page) {
-  await page.getByTestId("sidebar-nav-settings").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await page.getByTestId("manage-hidden-contacts").click();
   await expect(page.getByTestId("hidden-contacts-dialog")).toBeVisible();
 }

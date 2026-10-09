@@ -1,3 +1,4 @@
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./tauri-mock";
 import {
@@ -167,7 +168,7 @@ test("CJK and emoji search results stay usable with dense history", async ({
 test("a long device name stays inside diagnostics", async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 520 });
   await enter(page, "worst");
-  await page.getByTestId("sidebar-nav-connection").click();
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
   await page.getByTestId("diagnostics-tab-peers").click();
   const dialog = page.getByTestId("diagnostics-dialog");
   await expect(dialog).toBeVisible();
@@ -281,7 +282,9 @@ for (const mode of ["empty", "offline"]) {
     await page.setViewportSize({ width: 760, height: 520 });
     await enter(page, mode);
     await expectNoHorizontalOverflow(page, `${mode} roster`);
+    await page.getByTestId("sidebar-overflow").click();
     await expect(page.getByTestId("sidebar-nav-settings")).toBeVisible();
+    await page.keyboard.press("Escape");
     if (mode === "offline") {
       await page.getByTestId(`conversation-row-${BOB}`).click();
       await expect(page.getByRole("log")).toBeVisible();
@@ -345,7 +348,9 @@ test("rapid incoming messages and conversation switches stay usable", async ({
   await log.evaluate(async (element) => {
     for (let frame = 0; frame < 4; frame++) {
       element.scrollTop = element.scrollHeight;
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
     }
   });
   await expect
@@ -398,7 +403,7 @@ test("long connection and security errors stay inside their dialogs", async ({
       }
     ).__mockFailNext("diag_network_info", message);
   }, error);
-  await page.getByTestId("sidebar-nav-connection").click();
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
   await expect(
     page.getByTestId("diagnostics-dialog").getByRole("alert"),
   ).toBeVisible();

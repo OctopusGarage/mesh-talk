@@ -277,30 +277,6 @@
     }
   }
 
-  @media (max-height: 660px) {
-    .sidebar-tools {
-      display: flex !important;
-      justify-content: space-around !important;
-    }
-
-    .sidebar-tools > button {
-      width: 3rem !important;
-      justify-content: center !important;
-      padding-inline: 0.5rem !important;
-    }
-
-    .sidebar-tool-label {
-      display: none;
-    }
-
-    .sidebar-tools [data-testid="sidebar-action-files"] > span:last-child {
-      position: absolute;
-      right: -0.125rem;
-      top: -0.125rem;
-      margin: 0;
-    }
-  }
-
   html[data-palette]:not([data-wallpaper="off"]) [data-testid="chat-shell"] {
     background-position: center;
     background-repeat: no-repeat;
