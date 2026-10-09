@@ -339,7 +339,14 @@ test("rapid incoming messages and conversation switches stay usable", async ({
       log.evaluate((element) => element.scrollHeight - element.clientHeight),
     )
     .toBeGreaterThan(200);
-  await log.press("End");
+  // End is not consistently handled by the virtualized scroller on macOS.
+  // Set up the at-bottom state across layout frames before injecting messages.
+  await log.evaluate(async (element) => {
+    for (let frame = 0; frame < 4; frame++) {
+      element.scrollTop = element.scrollHeight;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+  });
   await expect
     .poll(() =>
       log.evaluate(
