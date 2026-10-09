@@ -13,6 +13,7 @@ export function requiredBrowserPaths(tier) {
     ["portable-core.spec.ts", "portable authentication rejects the wrong password"],
     ["portable-core.spec.ts", "portable registration sign in and sign out"],
     ["portable-core.spec.ts", "light theme persists across browser reload and sign in"],
+    ["portable-core.spec.ts", "city avatar thumbnails load after scrolling the gallery"],
   ];
   for (const size of ["760x520", "1040x720"]) for (const title of [
     "shell and avatar expose bounded interactive targets", "DM sends and renders incoming event delivery",
