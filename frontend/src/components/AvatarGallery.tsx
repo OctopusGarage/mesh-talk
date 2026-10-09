@@ -24,7 +24,7 @@ export type AvatarGalleryCategory = "personal" | "group";
 
 const EAGER_THUMBNAILS = 24;
 const EMPTY_THUMBNAIL =
-  "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+  "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACAUwAOw==";
 
 interface Tab {
   id: AvatarPackName;

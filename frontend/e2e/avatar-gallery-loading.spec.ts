@@ -20,7 +20,7 @@ test("gallery defers offscreen thumbnails until they are scrolled into view", as
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
-  await page.getByRole("button", { name: "🏀 NBA" }).click();
+  await page.getByRole("button", { name: "NBA", exact: true }).click();
   const gallery = page.getByTestId("avatar-gallery");
   await expect(gallery.locator("img")).toHaveCount(60);
   await page.waitForLoadState("networkidle");
