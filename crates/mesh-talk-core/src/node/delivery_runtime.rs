@@ -410,20 +410,16 @@ impl Node {
             None
         };
         self.log.lock().expect("log lock not poisoned").sync()?;
-        let file = super::delivery_store::FileCard {
-            id: event.id,
-            conversation: received.conversation,
-            wall_clock: received.wall_clock,
-            file_conversation: manifest.file_conv(),
-            chunk_count: manifest.chunk_count(),
-            final_chunk: None,
-            destinations: vec![],
-            completion_binding: Some(super::delivery_store::FileCompletionBinding {
+        let file = super::delivery_store::FileCard::incoming(
+            event,
+            &received,
+            &manifest,
+            super::delivery_store::FileCompletionBinding {
                 source: peer.clone(),
                 certificate: proof.account_cert.clone(),
                 owner_account: self.account_id(),
-            }),
-        };
+            },
+        );
         store.begin(DeliveryTransaction::IncomingManifest {
             sender: peer,
             original: Box::new(event.clone()),

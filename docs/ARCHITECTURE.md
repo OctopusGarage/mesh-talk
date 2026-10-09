@@ -167,7 +167,10 @@ DM file cards use the same authenticated delivery controls, without a ratchet
 transition. FileManifest wire layouts remain unchanged: the receiver confirms its
 exact per-device manifest event, and the sender's bounded original-event index
 resolves that confirmation to the first manifest event's stable canonical card ID.
-An outgoing transaction journals the immutable fanout manifests, canonical local
+The delivery store derives outgoing and incoming File cards from the accepted
+manifest identity. It prepares an outgoing card, local row, and fanout as one
+transaction from the signed destination events and validated staged chunks.
+That transaction journals the immutable fanout manifests, canonical local
 file row and bounded destination/scope metadata before publication. Incoming
 transactions install the file row before appending their immutable receipt.
 Live recovery publishes callbacks once after durable installation; startup replay
