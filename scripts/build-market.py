@@ -27,7 +27,7 @@ def add_image(files, path, destination=None):
     if path.suffix.lower() == ".svg":
         destination = str(Path(destination).with_suffix(".png"))
         files[destination] = subprocess.check_output(
-            ["magick", str(path), "-background", "none", "-resize", "256x256", "png:-"]
+            ["magick", str(path), "-background", "none", "-resize", "256x256", "-strip", "png:-"]
         )
     else:
         content = path.read_bytes()
@@ -77,7 +77,7 @@ for pack_id, name, category, fit, description in AVATARS:
 
 
 def palette(name):
-    match = re.search(r'html\[data-palette="' + name + r'"\] \{([^}]*)\}', CSS)
+    match = re.search(r'html\[data-palette="' + name + r'"\]:not\(\[data-pack-theme\]\) \{([^}]*)\}', CSS)
     if not match:
         raise ValueError(f"Missing {name} palette")
     return {key: value.strip() for key, value in re.findall(r"--([a-z-]+):\s*([^;]+);", match.group(1))

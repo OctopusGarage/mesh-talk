@@ -57,7 +57,7 @@
     "category": "group",
     "description": "Football club emblems",
     "file": "packs/clubs.zip",
-    "sha256": "d95a2bc6634070719225af045976d7b21689a62051f80c491bc0af44afd16f63"
+    "sha256": "529ce25f6a4a9735eb22db1df687baff468e87cc68c9db351a1c066fd4ae7838"
   },
   {
     "id": "nba-teams",
@@ -85,7 +85,7 @@
     "kind": "theme",
     "description": "Deep blue and garnet with a stadium wallpaper",
     "file": "packs/barcelona.zip",
-    "sha256": "811a171e2562a6a2175dde185153eef288e77da087a1bd938e307cc4cd63b25b"
+    "sha256": "6972947102cecd14b2e19f7174e0ee724a6c118822c0c9a3884ef84a0a65db31"
   },
   {
     "id": "messi",

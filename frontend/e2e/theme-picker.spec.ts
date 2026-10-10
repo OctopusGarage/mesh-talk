@@ -266,6 +266,64 @@ test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async 
   await expect(selected).toHaveAttribute("aria-pressed", "true");
 });
 
+test("upgrading preserves the old Nature wallpaper choice", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("mesh-talk-theme", "dark");
+    localStorage.setItem(
+      "mesh-talk-nature-wallpaper",
+      "050-maldives-wallpaper",
+    );
+  });
+  await seedMarketPacks(page, ["nature"]);
+  await login(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await page.getByTestId("theme-nature").click();
+  await expect(
+    page.getByTestId("nature-wallpaper-050-maldives-wallpaper"),
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+test("a replacement theme uses its declared base for omitted colors", async ({
+  page,
+}) => {
+  await login(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await page.getByTestId("theme-barcelona").click();
+  await page
+    .getByTestId("pack-manager-theme")
+    .locator('input[type="file"]')
+    .setInputFiles({
+      name: "barcelona.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from(
+        zipSync({
+          "manifest.json": strToU8(
+            JSON.stringify({
+              format: 1,
+              id: "barcelona",
+              version: "2.0.0",
+              name: "Pale Barcelona",
+              kind: "theme",
+              base: "light",
+              colors: { background: "0 0% 100%" },
+            }),
+          ),
+        }),
+      ),
+    });
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--foreground")
+          .trim(),
+      ),
+    )
+    .toBe("172 20% 15%");
+});
+
 test("each theme remembers its wallpaper and previews the applied image", async ({
   page,
 }) => {

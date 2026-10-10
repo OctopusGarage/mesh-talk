@@ -116,15 +116,14 @@
   }
 
   /*
-    Football-brand palettes — complete, cohesive looks selected via `data-palette` on <html>
-    (layered over the dark base). Each spends its boldness on ONE crest accent (--signal)
-    with the brand's surfaces tinted to match; the attribute selector outranks the base
-    classes so it always wins. Disciplined: only the accent + surface hue change.
+    These curated palette values feed the marketplace ZIP builder. Installed packs apply
+    their own tokens inline, so the selectors below only serve an unpacked legacy theme.
+    Each look spends its boldness on ONE crest accent (--signal).
   */
 
   /* Argentina — Albiceleste, the LIGHT way: sky-blue + white, the way the kit reads. A
      celeste crest accent on a bright sky-paper field, navy text, sun-gold @mentions. */
-  html[data-palette="argentina"] {
+  html[data-palette="argentina"]:not([data-pack-theme]) {
     --background: 205 55% 95%;
     --foreground: 215 50% 15%;
     --card: 202 52% 99%;
@@ -160,7 +159,7 @@
 
   /* Barcelona — Blaugrana: a garnet crest over deep blue surfaces, with a regal gold
      @mention accent and warm-paper text. */
-  html[data-palette="barcelona"] {
+  html[data-palette="barcelona"]:not([data-pack-theme]) {
     --background: 224 46% 9%;
     --foreground: 40 28% 92%;
     --card: 226 40% 12%;
@@ -197,7 +196,7 @@
   /* Messi — an airy, LIGHT BLUE theme bridging both his homes: Barça blaugrana blue + the
      Argentina celeste, on a bright sky-paper field. Deep-navy text (his shirt number), a
      vivid blue crest accent, a touch of GOAT gold for @mentions. The one light brand theme. */
-  html[data-palette="messi"] {
+  html[data-palette="messi"]:not([data-pack-theme]) {
     --background: 208 46% 95%;
     --foreground: 222 47% 15%;
     --card: 206 50% 99%;
@@ -232,7 +231,7 @@
   }
 
   /* Nature — warm paper and restrained forest-green controls around the selected study. */
-  html[data-palette="nature"] {
+  html[data-palette="nature"]:not([data-pack-theme]) {
     --background: 44 34% 96%;
     --foreground: 160 22% 16%;
     --card: 42 35% 99%;
@@ -342,9 +341,13 @@
       radial-gradient(
         125% 92% at 50% 34%,
         transparent 26%,
-        hsl(205 55% 96% / 0.72) 100%
+        hsl(var(--background) / 0.72) 100%
       ),
-      linear-gradient(165deg, hsl(205 55% 95% / 0.84), hsl(202 55% 97% / 0.91)),
+      linear-gradient(
+        165deg,
+        hsl(var(--background) / 0.84),
+        hsl(var(--card) / 0.91)
+      ),
       var(--pack-wallpaper-url);
   }
 
@@ -354,9 +357,13 @@
       radial-gradient(
         125% 90% at 50% 32%,
         transparent 30%,
-        hsl(226 48% 5% / 0.62) 100%
+        hsl(var(--background) / 0.62) 100%
       ),
-      linear-gradient(165deg, hsl(224 46% 9% / 0.74), hsl(226 44% 11% / 0.9)),
+      linear-gradient(
+        165deg,
+        hsl(var(--background) / 0.74),
+        hsl(var(--card) / 0.9)
+      ),
       var(--pack-wallpaper-url);
   }
 
@@ -366,16 +373,23 @@
       radial-gradient(
         125% 92% at 50% 34%,
         transparent 26%,
-        hsl(208 50% 96% / 0.72) 100%
+        hsl(var(--background) / 0.72) 100%
       ),
-      linear-gradient(165deg, hsl(208 46% 95% / 0.85), hsl(206 50% 97% / 0.92)),
+      linear-gradient(
+        165deg,
+        hsl(var(--background) / 0.85),
+        hsl(var(--card) / 0.92)
+      ),
       var(--pack-wallpaper-url);
   }
 
   html[data-pack-theme][data-palette="nature"]:not([data-wallpaper="off"])
     [data-testid="chat-shell"] {
     background-image:
-      linear-gradient(hsl(44 34% 97% / 0.4), hsl(44 34% 97% / 0.52)),
+      linear-gradient(
+        hsl(var(--background) / 0.4),
+        hsl(var(--background) / 0.52)
+      ),
       var(--pack-wallpaper-url);
   }
 
