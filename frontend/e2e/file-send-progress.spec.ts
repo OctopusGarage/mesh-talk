@@ -10,7 +10,7 @@ test("concurrent sends keep progress with their own file bubbles", async ({
     const win = window as unknown as Window & {
       __sendProgress: {
         requests: Array<{ key: string; release: () => void }>;
-        emit: (key: string, done: number) => void;
+        emit: (key: string, done: number, total?: number) => void;
       };
       __mockEmit: (name: string, payload: unknown) => void;
       __TAURI_INTERNALS__: {
@@ -25,12 +25,12 @@ test("concurrent sends keep progress with their own file bubbles", async ({
     const requests: Array<{ key: string; release: () => void }> = [];
     win.__sendProgress = {
       requests,
-      emit: (key, done) =>
+      emit: (key, done, total = 4) =>
         win.__mockEmit("file-progress", {
           file_conv: key,
           direction: "send",
           done,
-          total: 4,
+          total,
         }),
     };
     win.__TAURI_INTERNALS__.invoke = (cmd, args) => {
@@ -71,7 +71,9 @@ test("concurrent sends keep progress with their own file bubbles", async ({
   await page.evaluate(([first, second]) => {
     const state = (
       window as unknown as {
-        __sendProgress: { emit: (key: string, done: number) => void };
+        __sendProgress: {
+          emit: (key: string, done: number, total?: number) => void;
+        };
       }
     ).__sendProgress;
     state.emit(first, 1);
@@ -81,13 +83,35 @@ test("concurrent sends keep progress with their own file bubbles", async ({
     page
       .getByTestId("message-bubble")
       .filter({ hasText: "alpha.bin" })
-      .getByText("25%"),
+      .getByText("25%", { exact: true }),
   ).toBeVisible();
   await expect(
     page
       .getByTestId("message-bubble")
       .filter({ hasText: "beta.bin" })
-      .getByText("50%"),
+      .getByText("50%", { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(([first]) => {
+    (
+      window as unknown as {
+        __sendProgress: {
+          emit: (key: string, done: number, total?: number) => void;
+        };
+      }
+    ).__sendProgress.emit(first, 200, 201);
+  }, keys);
+  const firstBar = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "alpha.bin" })
+    .getByRole("progressbar", { name: /Sending/ });
+  await expect(firstBar).toHaveAttribute("aria-valuenow", "99");
+  await expect(firstBar).toHaveAttribute("aria-valuemin", "0");
+  await expect(firstBar).toHaveAttribute("aria-valuemax", "100");
+  await expect(
+    page
+      .getByTestId("message-bubble")
+      .filter({ hasText: "alpha.bin" })
+      .getByText("99%", { exact: true }),
   ).toBeVisible();
   await page.evaluate(() => {
     for (const request of (

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { invalidateFileAvailability } from "@/store/fileAvailability";
 
 const KEY = "mesh-talk-downloads";
 const CAP = 500;
@@ -31,8 +32,9 @@ export function useSavedDownloads(): Record<string, string> {
 export function rememberSavedDownload(fileConv: string, path: string): void {
   const next = { ...snapshot(), [fileConv]: path };
   const keys = Object.keys(next);
-  for (const key of keys.slice(0, Math.max(0, keys.length - CAP)))
-    delete next[key];
+  const evicted = keys.slice(0, Math.max(0, keys.length - CAP));
+  for (const key of evicted) delete next[key];
+  if (evicted.length) invalidateFileAvailability(evicted);
   paths = next;
   try {
     localStorage.setItem(KEY, JSON.stringify(next));

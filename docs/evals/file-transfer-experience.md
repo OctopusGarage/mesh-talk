@@ -52,3 +52,31 @@ Validation run on this branch: `make test`, `cargo clippy --all-targets -- -D wa
 frontend typecheck, lint, unit tests (276 passing), production build, format check, and
 the seven focused Playwright scenarios covering send progress, receive controls, media
 recovery, tray membership, remembered downloads, and automatic delivery.
+
+## Follow-up evaluation — 2026-10-10
+
+`make e2e` passed all five real multi-process scenarios, including encrypted file
+transfer between two CLI nodes. The deterministic `make eval-smoke` passed, and
+`make ai-eval` passed all five model-backed agent-contract cases using Codex CLI
+in read-only mode (`target/ai-eval/report.json`).
+
+A separate read-only AI review of this transfer change found three issues in the
+interaction code: saved-path cache eviction could leave a stale ready status, a
+sender bar could round to 100% before completion, and the sender bar had no
+accessible progress semantics. The fixes invalidate evicted readiness, cap active
+progress at 99%, and add a named progressbar with measured values and polite
+announcements at ten-point intervals. A second AI review confirmed those fixes
+but found an in-flight status-reply race; generation invalidation and a delayed
+reply regression test now cover it. A final read-only AI check passed that fix
+(`target/ai-eval/file-transfer-race-check.json`).
+
+Focused frontend unit tests (5), browser scenarios (2), typecheck, and lint passed
+after the fixes. Model reviews inspected source and tests; browser and Rust test
+results are the execution evidence. The browser suite still uses mocked Tauri IPC,
+while the CLI E2E uses real nodes; a two-desktop transfer on a real network remains
+a separate manual check.
+
+The full `./scripts/check-health.sh` gate passed on the final code: 278 frontend
+unit tests, 229 browser scenarios passed with one intentional site-capture skip,
+713 core and 90 Tauri unit tests, the remaining workspace tests, formatting,
+typecheck, lint, dependency and secret scans, security audits, and both builds.

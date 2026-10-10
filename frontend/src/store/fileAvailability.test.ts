@@ -3,6 +3,7 @@ import { chat } from "@/lib/api";
 import {
   refreshFileAvailability,
   resetFileAvailability,
+  invalidateFileAvailability,
   useFileAvailability,
 } from "./fileAvailability";
 
@@ -48,4 +49,23 @@ it("discards a late status reply after the runtime identity changes", async () =
   finish([{ file_conv: "old-account-file", done: 1, total: 1, ready: true }]);
   await pending;
   expect(useFileAvailability.getState().statuses).toEqual({});
+});
+
+it("discards a late ready reply after the saved path is evicted", async () => {
+  let finish!: (
+    value: { file_conv: string; done: number; total: number; ready: boolean }[],
+  ) => void;
+  vi.mocked(chat.fileStatuses).mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = refreshFileAvailability(["evicted-file"]);
+  invalidateFileAvailability(["evicted-file"]);
+  finish([{ file_conv: "evicted-file", done: 1, total: 1, ready: true }]);
+  await pending;
+  expect(
+    useFileAvailability.getState().statuses["evicted-file"],
+  ).toBeUndefined();
 });

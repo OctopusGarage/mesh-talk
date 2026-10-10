@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { rememberSavedDownload, savedDownloadPath } from "./savedDownloads";
+import { useFileAvailability } from "@/store/fileAvailability";
 
 it("remembers the exact destination of a saved file", () => {
   const store = new Map<string, string>();
@@ -14,4 +15,17 @@ it("remembers the exact destination of a saved file", () => {
     "/Downloads/report (1).pdf",
   );
   vi.unstubAllGlobals();
+});
+
+it("invalidates a cached ready status when its saved path is evicted", () => {
+  useFileAvailability
+    .getState()
+    .merge([{ file_conv: "evicted-file", done: 1, total: 1, ready: true }]);
+  rememberSavedDownload("evicted-file", "/Downloads/old.pdf");
+  for (let i = 0; i < 500; i++)
+    rememberSavedDownload(`new-file-${i}`, `/Downloads/${i}.pdf`);
+  expect(savedDownloadPath("evicted-file")).toBeUndefined();
+  expect(
+    useFileAvailability.getState().statuses["evicted-file"],
+  ).toBeUndefined();
 });

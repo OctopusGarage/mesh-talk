@@ -13,7 +13,7 @@ export function TransferBar({
   const { t } = useTranslation();
   const tr = useTransfer(transferKey);
   if (!tr || tr.total === 0) return null;
-  const pct = Math.min(100, Math.round((tr.done / tr.total) * 100));
+  const pct = Math.min(99, Math.max(0, Math.floor((tr.done / tr.total) * 100)));
   const verb =
     tr.direction === "send" ? t("transfer.sending") : t("transfer.saving");
   return (
@@ -22,7 +22,17 @@ export function TransferBar({
         <span className="text-muted-foreground">{verb}</span>
         <span className="font-mono text-signal">{pct}%</span>
       </div>
-      <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+      <span className="sr-only" role="status" aria-live="polite">
+        {verb} {Math.floor(pct / 10) * 10}%
+      </span>
+      <div
+        role="progressbar"
+        aria-label={verb}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+        className="h-1 w-full overflow-hidden rounded-full bg-muted"
+      >
         <div
           className="h-full w-full origin-left rounded-full bg-signal"
           style={{

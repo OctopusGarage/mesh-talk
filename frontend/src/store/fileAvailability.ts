@@ -29,6 +29,19 @@ export const useFileAvailability = create<AvailabilityState>((set) => ({
   reset: () => set({ statuses: {} }),
 }));
 
+/** A saved file may have its chunks pruned, so a cached ready result must not outlive
+ * the remembered local destination. */
+export function invalidateFileAvailability(fileConvs: string[]) {
+  // Reject any reply that began before the local copy was evicted. Otherwise an
+  // old ready snapshot could restore a Save action after chunks were pruned.
+  generation++;
+  useFileAvailability.setState((state) => {
+    const statuses = { ...state.statuses };
+    for (const fileConv of fileConvs) delete statuses[fileConv];
+    return { statuses };
+  });
+}
+
 const watched = new Map<string, number>();
 let timer: ReturnType<typeof setInterval> | undefined;
 let inFlight = false;
