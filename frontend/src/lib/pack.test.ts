@@ -96,6 +96,43 @@ describe("customization pack", () => {
     ).toThrow(/unsupported zip file/i);
   });
 
+  it("rejects image files that the manifest does not reference", () => {
+    expect(() =>
+      parsePack(
+        archive(
+          {
+            format: 1,
+            id: "test.faces",
+            version: "1.0.0",
+            name: "Faces",
+            kind: "avatar",
+            category: "personal",
+            fit: "cover",
+            avatars: [{ label: "Ada", file: "images/ada.png" }],
+          },
+          { "images/ada.png": png, "images/hidden.png": png },
+        ),
+      ),
+    ).toThrow(/unreferenced image/i);
+  });
+
+  it("rejects a supplied theme image with an invalid path", () => {
+    expect(() =>
+      parsePack(
+        archive({
+          format: 1,
+          id: "test.theme",
+          version: "1.0.0",
+          name: "Theme",
+          kind: "theme",
+          base: "dark",
+          colors: { primary: "170 70% 55%" },
+          wallpaper: false,
+        }),
+      ),
+    ).toThrow(/image path/i);
+  });
+
   it("rejects duplicate ZIP entry names", () => {
     const bytes = archive(
       {
