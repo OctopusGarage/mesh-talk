@@ -13,6 +13,15 @@ export const test = mocked.extend<{ portableEvidence: void }>({
       const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], {
         encoding: "utf8",
       }).trim();
+      // Portable scenarios are offline and must not depend on the public catalog.
+      // WebKit reports failed cross-origin catalog requests as page errors.
+      await page.route("**/marketplace/catalog.json", (route) =>
+        route.fulfill({
+          contentType: "application/json",
+          headers: { "access-control-allow-origin": "*" },
+          body: JSON.stringify({ schemaVersion: 1, packs: [] }),
+        }),
+      );
       page.on("pageerror", (error) => errors.push(error.message));
       try {
         expect(sourceSha).toMatch(/^[a-f0-9]{40}$/);
