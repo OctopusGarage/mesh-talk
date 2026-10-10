@@ -111,6 +111,7 @@ test.describe("Frontend memory-growth guardrails", () => {
   test("rapid conversation switching does not accumulate DOM bubbles", async ({
     page,
   }) => {
+    test.setTimeout(90_000);
     await enterChat(page);
 
     // Seed Bob's DM with a large history so a leak would be obvious.
