@@ -30,6 +30,7 @@ export default defineConfig({
     "automatic-delivery.spec.ts",
     "media-recovery.spec.ts",
     "media-lifecycle.spec.ts",
+    "screenshot-portable.spec.ts",
   ],
   grepInvert: tier === "core" ? /@extended/ : undefined,
   fullyParallel: true,
