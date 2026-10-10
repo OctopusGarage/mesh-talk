@@ -93,5 +93,13 @@
     "description": "Forest green palette and fifty landscape wallpapers",
     "file": "packs/nature.zip",
     "sha256": "aac84e963785b892e411ea1c7603ba04d3770a114caa1b80017f87779256a5d8"
+  },
+  {
+    "id": "noto-favorites",
+    "name": "Noto Favorites",
+    "kind": "sticker",
+    "description": "Eight animated emoji stickers from Google Noto",
+    "file": "packs/noto-favorites.zip",
+    "sha256": "f5f2506720fe90d182b294360261c6679517bd5a56becf547a6ee6cb9c2ac1ad"
   }
 ]

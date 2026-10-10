@@ -1,4 +1,6 @@
 import { test, expect } from "./tauri-mock";
+import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
 
@@ -39,39 +41,72 @@ test("open the sticker panel and send an animated sticker", async ({
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
 });
 
-test("choose the cat sticker collection and send one of its bundled stickers", async ({
+test("install and remove a sticker ZIP with fallback for sent messages", async ({
   page,
 }) => {
   await enterBobDm(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
-  await page.getByTestId("sticker-pack-cats").click();
-  await expect(
-    page
-      .getByTestId("sticker-panel")
-      .locator('[data-testid^="sticker-option-cat-"]'),
-  ).toHaveCount(45);
-  for (let pack = 1; pack <= 5; pack++) {
-    const image = page
-      .getByTestId(`sticker-option-cat-0${pack}-01`)
-      .locator("img");
-    await expect(image).toBeVisible();
-    await expect
-      .poll(() =>
-        image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
-      )
-      .toBeGreaterThan(0);
-  }
-
-  const option = page.getByTestId("sticker-option-cat-01-01");
-  await expect(option.locator("img")).toBeVisible();
-  await option.click();
-  await expect(page.getByTestId("sticker-panel")).toBeHidden();
+  await page.getByText("Manage sticker packs").click();
+  const manager = page.getByTestId("pack-manager-sticker");
+  await manager
+    .locator('input[type="file"]')
+    .setInputFiles(resolve("../site/market/packs/noto-favorites.zip"));
+  await expect(manager.getByText("Noto Favorites")).toBeVisible();
+  await page.getByTestId("sticker-option-pack:noto-favorites:1f602").click();
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
-    "alt",
-    "Cool cat",
+    "src",
+    /^data:image\/webp;base64,/,
   );
+
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  await page.getByText("Manage sticker packs").click();
+  await page
+    .getByTestId("pack-manager-sticker")
+    .getByRole("button", { name: "Remove Noto Favorites" })
+    .click();
+  await expect(
+    page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("message-sticker-fallback").last()).toHaveText(
+    "😂",
+  );
+});
+
+test("installs a sticker from the verified marketplace catalog", async ({
+  page,
+}) => {
+  const catalog = JSON.parse(
+    readFileSync(resolve("../site/market/catalog.json"), "utf8"),
+  ) as { id: string }[];
+  const entry = catalog.find((item) => item.id === "noto-favorites");
+  if (!entry) throw new Error("Missing sticker catalog entry");
+  await page.route("**/market/catalog.json", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*" },
+      body: JSON.stringify([entry]),
+    }),
+  );
+  await page.route("**/market/packs/noto-favorites.zip", (route) =>
+    route.fulfill({
+      contentType: "application/zip",
+      headers: { "access-control-allow-origin": "*" },
+      body: readFileSync(resolve("../site/market/packs/noto-favorites.zip")),
+    }),
+  );
+  await enterBobDm(page);
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  await page.getByText("Manage sticker packs").click();
+  const manager = page.getByTestId("pack-manager-sticker");
+  await manager.getByRole("button", { name: "Install", exact: true }).click();
+  await expect(
+    page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
+  ).toBeVisible();
 });
 
 test("composer popovers dismiss on an outside click (no second button press)", async ({

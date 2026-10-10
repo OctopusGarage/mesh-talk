@@ -15,9 +15,10 @@ if (variant === "lite") {
   const catalog = JSON.parse(
     readFileSync(resolve(root, "site/market/catalog.json"), "utf8"),
   );
-  const expected = catalog.map(({ id }) => `${id}.zip`).sort();
+  const bundled = catalog.filter(({ kind }) => kind !== "sticker");
+  const expected = bundled.map(({ id }) => `${id}.zip`).sort();
   assert.deepEqual(readdirSync(packDirectory).sort(), expected);
-  for (const { id, sha256 } of catalog) {
+  for (const { id, sha256 } of bundled) {
     const actual = createHash("sha256")
       .update(readFileSync(resolve(packDirectory, `${id}.zip`)))
       .digest("hex");

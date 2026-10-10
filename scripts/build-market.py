@@ -106,5 +106,27 @@ for pack_id, name, base, description in THEMES:
         manifest["crest"] = add_image(files, crest)
     publish(manifest, files, description)
 
+STICKER_SOURCE = ROOT / "frontend/src/assets/stickers/noto"
+STICKERS = [
+    ("1f44d", "Thumbs up"), ("1f602", "Joy"), ("1f60d", "Heart eyes"),
+    ("1f622", "Crying"), ("1f64f", "Thank you"), ("1f680", "Rocket"),
+    ("1f389", "Celebration"), ("2764_fe0f", "Heart"),
+]
+sticker_files = {}
+sticker_entries = []
+for sticker_id, sticker_label in STICKERS:
+    source = STICKER_SOURCE / f"{sticker_id}.webp"
+    destination = f"images/{sticker_id}.webp"
+    sticker_files[destination] = source.read_bytes()
+    sticker_entries.append({
+        "id": sticker_id,
+        "label": sticker_label,
+        "fallback": "".join(chr(int(codepoint, 16)) for codepoint in sticker_id.split("_")),
+        "file": destination,
+    })
+publish({"format": 1, "id": "noto-favorites", "version": "1.0.0",
+         "name": "Noto Favorites", "kind": "sticker", "stickers": sticker_entries},
+        sticker_files, "Eight animated emoji stickers from Google Noto")
+
 (OUT / "catalog.json").write_text(json.dumps(CATALOG, ensure_ascii=False, indent=2) + "\n")
 print(f"Built {len(CATALOG)} packs in {OUT}")
