@@ -115,6 +115,7 @@ it("restores the reading position after switching away and back", async () => {
   expect(viewport.initialIndex).toBe(1);
   await nextAnimationFrame();
   expect(scroller.scrollTop).toBe(120);
+  expect(viewport.showJump).toBe(true);
 });
 
 it("navigates to an exact search result and reports a later miss", async () => {
