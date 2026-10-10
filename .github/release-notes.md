@@ -5,15 +5,14 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.1.6
+### What's new in v0.2.1
 
-- Fixed the narrow window drag area before selecting a conversation on Windows (#161).
-- Prevented conversation and channel controls from overlapping the Windows caption buttons
-  (#162).
-- Fixed scrolling to the latest message in long conversations, including attachment access.
-
-The duplicate tray icon (#151), VMware blank window (#133), and periodic screen flicker
-(#138) remain open pending confirmation or further fixes in affected environments.
+- Added 50 Cat Acrylic personal avatars, 45 matching chat wallpapers, and a sticker collection
+  with assets compressed for the desktop app (#187).
+- Added pasted-file sending and quick access to saved downloads (#186).
+- Restored the “Jump to latest messages” control when returning to an earlier reading position
+  (#188).
+- Added Windows ARM64 and Linux ARM64 installer packages.
 
 ### Downloads
 
