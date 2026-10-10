@@ -91,11 +91,81 @@ test("installs a verified marketplace download", async ({ page }) => {
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   const manager = page.getByTestId("pack-manager-avatar");
+  await expect(
+    manager.getByRole("button", { name: "Reinstall", exact: true }),
+  ).toBeVisible();
   await manager.getByRole("button", { name: "Remove Football stars" }).click();
   await manager.getByRole("button", { name: "Install", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Football stars", exact: true }),
   ).toBeVisible();
+});
+
+test("keeps the existing marketplace usable before versioned catalog deployment", async ({
+  page,
+}) => {
+  const catalog = JSON.parse(
+    readFileSync(resolve("../site/market/catalog.json"), "utf8"),
+  ) as { id: string; version?: string }[];
+  const player = catalog.find((item) => item.id === "players");
+  if (!player) throw new Error("Missing players catalog entry");
+  const legacy = { ...player };
+  delete legacy.version;
+  await page.route("**/market/catalog.json", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*" },
+      body: JSON.stringify([legacy]),
+    }),
+  );
+  await enterChat(page);
+  await page.getByTestId("open-profile").click();
+  await page.getByRole("button", { name: "Change your photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  const manager = page.getByTestId("pack-manager-avatar");
+  await expect(manager.getByRole("button", { name: "Replace" })).toBeVisible();
+  await manager.getByRole("button", { name: "Remove Football stars" }).click();
+  await manager.getByRole("button", { name: "Install", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Football stars", exact: true }),
+  ).toBeVisible();
+});
+
+test("rejects a marketplace ZIP whose contents differ from its listing", async ({
+  page,
+}) => {
+  const catalog = JSON.parse(
+    readFileSync(resolve("../site/market/catalog.json"), "utf8"),
+  ) as { id: string; name: string }[];
+  const player = catalog.find((item) => item.id === "players");
+  if (!player) throw new Error("Missing players catalog entry");
+  await page.route("**/market/catalog.json", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*" },
+      body: JSON.stringify([{ ...player, name: "A different listing" }]),
+    }),
+  );
+  await page.route("**/market/packs/players.zip", (route) =>
+    route.fulfill({
+      contentType: "application/zip",
+      headers: { "access-control-allow-origin": "*" },
+      body: readFileSync(resolve("../site/market/packs/players.zip")),
+    }),
+  );
+  await enterChat(page);
+  await page.getByTestId("open-profile").click();
+  await page.getByRole("button", { name: "Change your photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  const manager = page.getByTestId("pack-manager-avatar");
+  await manager.getByRole("button", { name: "Remove Football stars" }).click();
+  await manager.getByRole("button", { name: "Install", exact: true }).click();
+  await expect(manager.getByRole("alert")).toContainText(
+    "does not match its marketplace listing",
+  );
+  await expect(
+    page.getByRole("button", { name: "Football stars", exact: true }),
+  ).toHaveCount(0);
 });
 
 test("rejects an image that has a PNG signature but cannot be decoded", async ({

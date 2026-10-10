@@ -11,6 +11,7 @@ const MARKET_BASE = "https://octopusgarage.github.io/mesh-talk/market/";
 interface CatalogEntry {
   id: string;
   name: string;
+  version?: string;
   kind: "avatar" | "theme" | "sticker";
   category?: "personal" | "group";
   description: string;
@@ -28,12 +29,18 @@ function catalogEntries(value: unknown): CatalogEntry[] {
       typeof entry.id !== "string" ||
       !/^[a-z0-9][a-z0-9._-]{2,79}$/.test(entry.id) ||
       typeof entry.name !== "string" ||
+      (entry.version !== undefined &&
+        (typeof entry.version !== "string" ||
+          !/^\d+\.\d+\.\d+$/.test(entry.version))) ||
       typeof entry.description !== "string" ||
       (entry.kind !== "avatar" &&
         entry.kind !== "theme" &&
         entry.kind !== "sticker") ||
+      (entry.kind === "avatar"
+        ? entry.category !== "personal" && entry.category !== "group"
+        : entry.category !== undefined) ||
       typeof entry.file !== "string" ||
-      !/^packs\/[a-z0-9._-]+\.zip$/.test(entry.file) ||
+      entry.file !== `packs/${entry.id}.zip` ||
       typeof entry.sha256 !== "string" ||
       !/^[a-f0-9]{64}$/.test(entry.sha256)
     ) {
@@ -113,8 +120,18 @@ export function PackManager({
     return () => controller.abort();
   }, [t]);
 
-  const installBytes = async (bytes: Uint8Array) => {
+  const installBytes = async (bytes: Uint8Array, listing?: CatalogEntry) => {
     const pack = parsePack(bytes);
+    if (
+      listing &&
+      (pack.id !== listing.id ||
+        pack.name !== listing.name ||
+        (listing.version !== undefined && pack.version !== listing.version) ||
+        pack.kind !== listing.kind ||
+        (pack.kind === "avatar" && pack.category !== listing.category))
+    ) {
+      throw new Error(t("packs.listingMismatch"));
+    }
     if (
       pack.kind !== kind ||
       (pack.kind === "avatar" && pack.category !== category)
@@ -149,7 +166,7 @@ export function PackManager({
       const bytes = await readDownload(response);
       if ((await digest(bytes)) !== item.sha256)
         throw new Error(t("packs.checksumFailed"));
-      await installBytes(bytes);
+      await installBytes(bytes, item);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -229,32 +246,40 @@ export function PackManager({
           <p className="text-xs font-medium text-muted-foreground">
             {t("packs.marketplace")}
           </p>
-          {available.map((item) => (
-            <div
-              key={item.id}
-              className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-xs"
-            >
-              <span className="min-w-0">
-                <strong className="block truncate font-medium">
-                  {item.name}
-                </strong>
-                <span className="line-clamp-2 text-muted-foreground">
-                  {item.description}
-                </span>
-              </span>
-              <button
-                type="button"
-                disabled={busy !== null}
-                onClick={() => void marketInstall(item)}
-                className="inline-flex shrink-0 items-center gap-1 rounded-md bg-primary px-2 py-1.5 font-medium text-primary-foreground disabled:opacity-50"
+          {available.map((item) => {
+            const installed = packs.find((pack) => pack.id === item.id);
+            return (
+              <div
+                key={item.id}
+                className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-xs"
               >
-                <Download className="h-3.5 w-3.5" />
-                {packs.some((pack) => pack.id === item.id)
-                  ? t("packs.update")
-                  : t("packs.install")}
-              </button>
-            </div>
-          ))}
+                <span className="min-w-0">
+                  <strong className="block truncate font-medium">
+                    {item.name}{" "}
+                    {item.version && (
+                      <span className="font-normal">v{item.version}</span>
+                    )}
+                  </strong>
+                  <span className="line-clamp-2 text-muted-foreground">
+                    {item.description}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => void marketInstall(item)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-primary px-2 py-1.5 font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  {installed
+                    ? item.version && installed.version === item.version
+                      ? t("packs.reinstall")
+                      : t("packs.replace")
+                    : t("packs.install")}
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       {error && (

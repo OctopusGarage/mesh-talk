@@ -159,8 +159,11 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
   if (bytes.length > MAX_PACK_ZIP_BYTES)
     throw new Error("Pack ZIP is too large");
   let total = 0;
+  const seen = new Set<string>();
   const files = unzipSync(bytes, {
     filter: (entry) => {
+      if (seen.has(entry.name)) throw new Error("Duplicate ZIP entry");
+      seen.add(entry.name);
       total += entry.originalSize;
       if (
         entry.name.startsWith("/") ||
@@ -247,14 +250,20 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
     const colors = object(raw.colors);
     if (
       !Object.keys(colors).length ||
-      Object.keys(colors).some(
-        (token) =>
-          !TOKEN_NAMES.has(token) ||
-          typeof colors[token] !== "string" ||
-          !/^\d{1,3}(?:\.\d+)?\s+\d{1,3}(?:\.\d+)?%\s+\d{1,3}(?:\.\d+)?%$/.test(
-            colors[token],
-          ),
-      )
+      Object.keys(colors).some((token) => {
+        const value = colors[token];
+        if (!TOKEN_NAMES.has(token) || typeof value !== "string") return true;
+        const match =
+          /^(\d{1,3}(?:\.\d+)?)\s+(\d{1,3}(?:\.\d+)?)%\s+(\d{1,3}(?:\.\d+)?)%$/.exec(
+            value,
+          );
+        return (
+          !match ||
+          Number(match[1]) > 360 ||
+          Number(match[2]) > 100 ||
+          Number(match[3]) > 100
+        );
+      })
     ) {
       throw new Error("Invalid theme color");
     }
@@ -267,10 +276,13 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
       ) {
         throw new Error("Invalid wallpaper list");
       }
+      const wallpaperIds = new Set<string>();
       wallpapers = raw.wallpapers.map((item) => {
         const entry = object(item);
         const id = named(entry.id, "wallpaper id");
-        if (!/^[a-z0-9-]+$/.test(id)) throw new Error("Invalid wallpaper id");
+        if (!/^[a-z0-9-]+$/.test(id) || wallpaperIds.has(id))
+          throw new Error("Invalid or duplicate wallpaper id");
+        wallpaperIds.add(id);
         return {
           id,
           title: named(entry.title, "wallpaper title"),

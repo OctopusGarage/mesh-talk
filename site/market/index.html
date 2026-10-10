@@ -316,7 +316,7 @@
           const card = document.createElement("article");
           const kind = document.createElement("span");
           kind.className = "kind";
-          kind.textContent =
+          const category =
             item.kind === "theme"
               ? "Theme"
               : item.kind === "sticker"
@@ -324,6 +324,9 @@
                 : item.category === "group"
                   ? "Channel avatars"
                   : "Personal avatars";
+          kind.textContent = item.version
+            ? `${category} · v${item.version}`
+            : category;
           const title = document.createElement("h2");
           title.textContent = item.name;
           const description = document.createElement("p");
