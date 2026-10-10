@@ -5,8 +5,14 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.2.3
+### What's new in v0.3.0
 
+- Install and remove avatar, theme, and sticker ZIP libraries, including your own packs.
+- Choose the default edition with 14 optional packs preinstalled or the lite edition with
+  no optional packs. Both editions keep light, dark, OLED, and built-in Noto stickers.
+- Browse and install shared packs from the [OctopusGarage Marketplace](https://octopusgarage.github.io/marketplace/),
+  with versioned downloads and SHA-256 verification. The [Pack Studio](https://octopusgarage.github.io/marketplace/studio/)
+  builds and checks packs locally in your browser.
 - Show sender progress and time remaining for file, image, and folder transfers based on chunks
   confirmed by the recipient. Failed sends stay visible with an actionable error.
 - Ask before receiving generic attachments, with automatic receive controls for all contacts or
@@ -16,10 +22,9 @@ replies, @mentions, search, and multi-device.
 - Support large folders with a compact manifest and reduce reconciliation overhead by batching
   existing file followups. Smaller attachments keep the format supported by older clients.
 - Load bundled stickers and other built-in images directly, reducing chat startup work.
+- Capture and annotate screenshots on macOS, Windows, and Linux, subject to desktop capture
+  permissions and portal support.
 
-Version 0.2.2 added received-file progress, folder sharing, and region screenshot capture with
-annotation on macOS, Windows, and Linux. Screenshot availability depends on desktop permissions
-and portal support.
 
 ### Downloads
 
