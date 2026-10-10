@@ -14,6 +14,7 @@ const KEY = "mesh-talk-theme";
 const WALLPAPER_KEY = "mesh-talk-wallpaper";
 const PACK_WALLPAPERS_KEY = "mesh-talk-pack-wallpapers";
 const LEGACY_PACK_WALLPAPER_KEY = "mesh-talk-pack-wallpaper";
+const LEGACY_NATURE_WALLPAPER_KEY = "mesh-talk-nature-wallpaper";
 let themeTransitionTimer: number | undefined;
 
 function readWallpaper(): boolean {
@@ -35,12 +36,13 @@ function read(): Theme {
 
 function readPackWallpapers(activeTheme: string): Record<string, string> {
   if (typeof localStorage === "undefined") return {};
+  let selections: Record<string, string> = {};
   try {
     const saved = localStorage.getItem(PACK_WALLPAPERS_KEY);
     if (saved) {
       const parsed: unknown = JSON.parse(saved);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return Object.fromEntries(
+        selections = Object.fromEntries(
           Object.entries(parsed).filter(
             ([packId, wallpaperId]) =>
               /^[a-z0-9][a-z0-9._-]{2,79}$/.test(packId) &&
@@ -54,10 +56,28 @@ function readPackWallpapers(activeTheme: string): Record<string, string> {
     // A damaged preference must not prevent the theme picker from loading.
   }
   const legacy = localStorage.getItem(LEGACY_PACK_WALLPAPER_KEY);
-  if (!legacy || ALL_THEMES.includes(activeTheme)) return {};
-  const selections = { [activeTheme]: legacy };
-  localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selections));
-  localStorage.removeItem(LEGACY_PACK_WALLPAPER_KEY);
+  const legacyNature = localStorage.getItem(LEGACY_NATURE_WALLPAPER_KEY);
+  let migrated = false;
+  if (
+    legacy &&
+    !ALL_THEMES.includes(activeTheme) &&
+    /^[a-z0-9-]+$/.test(legacy)
+  ) {
+    if (!selections[activeTheme]) {
+      selections[activeTheme] = legacy;
+      migrated = true;
+    }
+    localStorage.removeItem(LEGACY_PACK_WALLPAPER_KEY);
+  }
+  if (legacyNature && /^[a-z0-9-]+$/.test(legacyNature)) {
+    if (!selections.nature) {
+      selections.nature = legacyNature;
+      migrated = true;
+    }
+    localStorage.removeItem(LEGACY_NATURE_WALLPAPER_KEY);
+  }
+  if (migrated)
+    localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selections));
   return selections;
 }
 
