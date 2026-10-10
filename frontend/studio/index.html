@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Build and verify Mesh-Talk avatar, theme, and sticker packs in your browser."
+    />
+    <title>Pack Studio — Mesh-Talk</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <nav class="wrap" aria-label="Main navigation">
+        <a class="brand" href="../">Mesh<span>·</span>Talk</a>
+        <a class="back-link" href="../">← Marketplace</a>
+      </nav>
+    </header>
+
+    <main class="wrap">
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">Pack Studio <span> / </span> Creator tools</p>
+        <h1 id="page-title">Make it yours.<br /><em>Check it here.</em></h1>
+        <p class="lead">
+          Create avatar, theme, and sticker packs for Mesh-Talk. Build a ZIP
+          from a folder or inspect one you already have. Your files stay in this
+          browser.
+        </p>
+        <div class="hero-actions">
+          <button id="download-kit" class="button button-primary" type="button">
+            Download creator toolkit <span aria-hidden="true">↓</span>
+          </button>
+          <a
+            class="button button-outline"
+            href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/CUSTOMIZATION_PACKS.md"
+            >Read the pack format ↗</a
+          >
+        </div>
+      </section>
+
+      <section class="workspace" aria-label="Pack tools">
+        <div class="tool-card" id="verify-card">
+          <div class="tool-heading">
+            <span class="step">01</span>
+            <div>
+              <h2>Verify a ZIP</h2>
+              <p>Check an existing pack before installing or sharing it.</p>
+            </div>
+          </div>
+          <button class="drop-zone" id="drop-zone" type="button">
+            <span class="drop-icon" aria-hidden="true">↥</span>
+            <strong>Choose a pack ZIP</strong>
+            <span>or drop it here · maximum 12 MiB</span>
+          </button>
+          <input
+            id="zip-input"
+            type="file"
+            accept=".zip,application/zip"
+            tabindex="-1"
+          />
+        </div>
+        <div class="tool-card" id="build-card">
+          <div class="tool-heading">
+            <span class="step">02</span>
+            <div>
+              <h2>Build a ZIP</h2>
+              <p>
+                Select a folder with <code>manifest.json</code> and
+                <code>images/</code>.
+              </p>
+            </div>
+          </div>
+          <button class="folder-label" id="folder-button" type="button">
+            <span class="folder-icon" aria-hidden="true">⌁</span
+            ><span>Choose source folder</span><span aria-hidden="true">→</span>
+          </button>
+          <input
+            id="folder-input"
+            type="file"
+            webkitdirectory
+            multiple
+            tabindex="-1"
+          />
+          <p class="small-note">
+            The builder includes only images named in your manifest and an
+            optional <code>credits.json</code>.
+          </p>
+        </div>
+      </section>
+
+      <section id="result" class="result" aria-live="polite" hidden>
+        <div class="result-head">
+          <span id="result-badge" class="result-badge"></span>
+          <h2 id="result-title"></h2>
+        </div>
+        <p id="result-message"></p>
+        <dl id="result-facts" class="result-facts"></dl>
+        <div id="preview" class="preview"></div>
+      </section>
+
+      <section class="notes" aria-label="How this works">
+        <div>
+          <span class="note-mark">✓</span>
+          <h3>Same format checks as the app</h3>
+          <p>
+            ZIP paths, sizes, manifest fields, image signatures, image decoding,
+            and pixel limits are checked here.
+          </p>
+        </div>
+        <div>
+          <span class="note-mark">◎</span>
+          <h3>Private by design</h3>
+          <p>
+            ZIPs and source images are processed on your device. This page does
+            not upload them.
+          </p>
+        </div>
+        <div>
+          <span class="note-mark">!</span>
+          <h3>Review the artwork</h3>
+          <p>
+            Validation cannot prove ownership, detect offensive images, or
+            guarantee that a file is free of decoder vulnerabilities.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        Mesh-Talk Pack Studio ·
+        <a
+          href="https://github.com/OctopusGarage/mesh-talk/issues/new?template=pack_submission.yml"
+          >Propose a marketplace pack ↗</a
+        >
+      </div>
+    </footer>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

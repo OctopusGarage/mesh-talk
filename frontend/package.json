@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "build:lite": "vite build --mode lite",
+    "build:studio": "vite build --config vite.studio.config.ts",
     "pack:build": "node --experimental-strip-types scripts/pack.mjs build",
     "pack:check": "node --experimental-strip-types scripts/pack.mjs check",
     "preview": "vite preview",

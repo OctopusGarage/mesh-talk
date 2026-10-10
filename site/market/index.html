@@ -97,6 +97,20 @@
       .hint strong {
         color: #e9f2f0;
       }
+      .studio-link {
+        display: inline-block;
+        border: 1px solid #2fe6ce;
+        border-radius: 9px;
+        padding: 11px 16px;
+        color: #08141a;
+        background: #2fe6ce;
+        font-size: 14px;
+        font-weight: 700;
+        text-decoration: none;
+      }
+      .studio-link:hover {
+        background: #78f4e2;
+      }
       .tools {
         display: flex;
         flex-wrap: wrap;
@@ -218,21 +232,29 @@
       <div class="eyebrow">Customize your space</div>
       <h1>Make Mesh-Talk yours.</h1>
       <p class="intro">
-        Discover optional avatar, theme, and sticker libraries. Each download is a
-        data-only ZIP pack: images and a manifest, with no executable code.
+        Discover optional avatar, theme, and sticker libraries. Each download is
+        a data-only ZIP pack: images and a manifest, with no executable code.
       </p>
       <div class="hint">
         <strong>Install in the app:</strong> Open Settings → Appearance for
         themes, choose a profile or channel avatar to open the gallery, or open
-        the chat sticker picker and expand Manage sticker packs. You
-        can install a pack directly from the in-app marketplace, or download a
-        ZIP here and choose <strong>Install ZIP</strong>.
+        the chat sticker picker and expand Manage sticker packs. You can install
+        a pack directly from the in-app marketplace, or download a ZIP here and
+        choose <strong>Install ZIP</strong>.
       </div>
       <p>
         Made your own pack? Read the
-        <a href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/CUSTOMIZATION_PACKS.md">creation and safety guide</a>
-        or <a href="https://github.com/OctopusGarage/mesh-talk/issues/new?template=pack_submission.yml">propose it for the marketplace</a>.
+        <a
+          href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/CUSTOMIZATION_PACKS.md"
+          >creation and safety guide</a
+        >
+        or
+        <a
+          href="https://github.com/OctopusGarage/mesh-talk/issues/new?template=pack_submission.yml"
+          >propose it for the marketplace</a
+        >.
       </p>
+      <a class="studio-link" href="studio/">Open Pack Studio →</a>
       <div class="tools">
         <div class="filters" aria-label="Filter packs">
           <button type="button" data-filter="all" aria-pressed="true">
@@ -299,9 +321,9 @@
               ? "Theme"
               : item.kind === "sticker"
                 ? "Stickers"
-              : item.category === "group"
-                ? "Channel avatars"
-                : "Personal avatars";
+                : item.category === "group"
+                  ? "Channel avatars"
+                  : "Personal avatars";
           const title = document.createElement("h2");
           title.textContent = item.name;
           const description = document.createElement("p");

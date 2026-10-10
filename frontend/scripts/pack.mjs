@@ -3,25 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile, lstat, mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { zipSync } from "fflate";
-import { parsePack } from "../src/lib/pack.ts";
-
-function referencedImages(manifest) {
-  const entries =
-    manifest.kind === "avatar"
-      ? manifest.avatars
-      : manifest.kind === "sticker"
-        ? manifest.stickers
-        : manifest.kind === "theme"
-          ? [manifest, ...(manifest.wallpapers ?? [])]
-          : [];
-  return [
-    ...new Set(
-      entries.flatMap((item) =>
-        [item?.file, item?.wallpaper, item?.crest].filter(Boolean),
-      ),
-    ),
-  ];
-}
+import { parsePack, referencedPackImages } from "../src/lib/pack.ts";
 
 async function build(folder, output) {
   const source = resolve(folder);
@@ -42,7 +24,7 @@ async function build(folder, output) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  for (const path of referencedImages(manifest)) {
+  for (const path of referencedPackImages(manifest)) {
     if (
       typeof path !== "string" ||
       isAbsolute(path) ||
