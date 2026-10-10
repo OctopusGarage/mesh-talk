@@ -8,22 +8,14 @@ export async function seedMarketPacks(page: Page, ids: string[]) {
   const packs = ids.map((id) =>
     parsePack(readFileSync(resolve(`../site/market/packs/${id}.zip`))),
   );
-  // This first navigation starts bundled-pack fetches. Wait for them to finish
-  // before the caller navigates again; WebKit reports aborted fetches as errors.
-  const bundled =
-    process.env.MESH_TALK_VARIANT === "lite"
-      ? []
-      : (JSON.parse(
-          readFileSync(resolve("bundled-packs.lock.json"), "utf8"),
-        ) as { id: string }[]);
-  const bundledRequests = bundled.map(({ id }) =>
-    page.waitForEvent("requestfinished", {
-      predicate: (request) =>
-        new URL(request.url()).pathname === `/builtin-packs/${id}.zip`,
-      timeout: 45_000,
-    }),
-  );
   await page.goto("/");
+  // Wait for the store's full load, including bundled seeding, before the
+  // caller navigates again. Individual fetches may fail or be skipped.
+  await page.evaluate(async () => {
+    const modulePath = "/src/store/packs.ts";
+    const { usePacks } = await import(/* @vite-ignore */ modulePath);
+    await usePacks.getState().load();
+  });
   await page.evaluate(async (entries) => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("mesh-talk-customization", 2);
@@ -44,5 +36,4 @@ export async function seedMarketPacks(page: Page, ids: string[]) {
     });
     db.close();
   }, packs);
-  await Promise.all(bundledRequests);
 }
