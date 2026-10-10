@@ -13,6 +13,7 @@ const THEMES = [
   "barcelona",
   "messi",
   "nature",
+  "cat-acrylic",
 ];
 const MIN_TEXT_CONTRAST = 4.5;
 
@@ -32,7 +33,11 @@ test("attention text is readable on dialog surfaces in every theme", async ({
         ["dark", "oled", "barcelona"].includes(theme),
       );
       root.classList.toggle("oled", theme === "oled");
-      if (["argentina", "barcelona", "messi", "nature"].includes(theme))
+      if (
+        ["argentina", "barcelona", "messi", "nature", "cat-acrylic"].includes(
+          theme,
+        )
+      )
         root.dataset.palette = theme;
       else delete root.dataset.palette;
       const style = getComputedStyle(probe);
@@ -103,6 +108,7 @@ test("message text and links stay readable across every theme", async ({
           "barcelona",
           "messi",
           "nature",
+          "cat-acrylic",
         ].includes(theme);
         const darkBase =
           theme === "dark" || theme === "oled" || theme === "barcelona";
@@ -220,9 +226,13 @@ test("destructive confirmation stays readable across every theme", async ({
     );
     if (!button) throw new Error("Missing delete confirmation");
     return themes.map((theme) => {
-      const palette = ["argentina", "barcelona", "messi", "nature"].includes(
-        theme,
-      );
+      const palette = [
+        "argentina",
+        "barcelona",
+        "messi",
+        "nature",
+        "cat-acrylic",
+      ].includes(theme);
       root.classList.toggle(
         "dark",
         theme === "dark" || theme === "oled" || theme === "barcelona",
@@ -283,9 +293,13 @@ test("changed identity warning stays readable across every theme", async ({
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Missing canvas context");
     return themes.map((theme) => {
-      const palette = ["argentina", "barcelona", "messi", "nature"].includes(
-        theme,
-      );
+      const palette = [
+        "argentina",
+        "barcelona",
+        "messi",
+        "nature",
+        "cat-acrylic",
+      ].includes(theme);
       root.classList.toggle(
         "dark",
         theme === "dark" || theme === "oled" || theme === "barcelona",

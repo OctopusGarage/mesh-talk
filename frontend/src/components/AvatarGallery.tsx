@@ -17,6 +17,7 @@ import {
   NBA_PLAYER_AVATARS,
   SPORTS_AVATARS,
   FAMOUS_AVATARS,
+  CAT_ACRYLIC_AVATARS,
   type AvatarPackName,
 } from "@/lib/avatarPacks";
 
@@ -31,6 +32,12 @@ interface Tab {
 }
 
 const PERSONAL_TABS = (t: (k: string) => string): Tab[] => [
+  {
+    id: "cat-acrylic",
+    label: t("avatar.tabCatAcrylic"),
+    presets: CAT_ACRYLIC_AVATARS,
+    fit: "cover",
+  },
   {
     id: "players",
     label: t("avatar.tabFootballStars"),

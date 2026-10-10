@@ -39,6 +39,41 @@ test("open the sticker panel and send an animated sticker", async ({
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
 });
 
+test("choose the cat sticker collection and send one of its bundled stickers", async ({
+  page,
+}) => {
+  await enterBobDm(page);
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  await page.getByTestId("sticker-pack-cats").click();
+  await expect(
+    page
+      .getByTestId("sticker-panel")
+      .locator('[data-testid^="sticker-option-cat-"]'),
+  ).toHaveCount(45);
+  for (let pack = 1; pack <= 5; pack++) {
+    const image = page
+      .getByTestId(`sticker-option-cat-0${pack}-01`)
+      .locator("img");
+    await expect(image).toBeVisible();
+    await expect
+      .poll(() =>
+        image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(0);
+  }
+
+  const option = page.getByTestId("sticker-option-cat-01-01");
+  await expect(option.locator("img")).toBeVisible();
+  await option.click();
+  await expect(page.getByTestId("sticker-panel")).toBeHidden();
+  await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
+    "alt",
+    "Cool cat",
+  );
+});
+
 test("composer popovers dismiss on an outside click (no second button press)", async ({
   page,
 }) => {

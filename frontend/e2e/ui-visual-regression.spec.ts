@@ -10,6 +10,7 @@ const THEMES = [
   "barcelona",
   "messi",
   "nature",
+  "cat-acrylic",
 ] as const;
 
 const VIEWPORTS = [
@@ -111,8 +112,9 @@ for (const viewport of VIEWPORTS) {
         await expect(shell).toHaveScreenshot(
           snapshotName("chat-shell", theme, viewport.width, viewport.height),
           // Detailed artwork rasterizes differently on Linux and macOS at compact size.
-          ["argentina", "barcelona", "messi", "nature"].includes(theme) &&
-            viewport.width === 760
+          ["argentina", "barcelona", "messi", "nature", "cat-acrylic"].includes(
+            theme,
+          ) && viewport.width === 760
             ? { maxDiffPixelRatio: 0.04 }
             : {},
         );

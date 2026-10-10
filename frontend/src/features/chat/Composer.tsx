@@ -15,7 +15,11 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
-import { STICKERS } from "@/lib/stickerPacks";
+import {
+  STICKERS,
+  STICKER_PACKS,
+  type StickerPackId,
+} from "@/lib/stickerPacks";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
 
@@ -93,7 +97,15 @@ function useReducedMotion() {
   return reduced;
 }
 
-function StickerThumb({ src, alt }: { src: string; alt: string }) {
+function StickerThumb({
+  src,
+  alt,
+  fallback,
+}: {
+  src: string;
+  alt: string;
+  fallback: string;
+}) {
   const reducedMotion = useReducedMotion();
   const [thumb, setThumb] = useState<string | null>(null);
 
@@ -144,7 +156,7 @@ function StickerThumb({ src, alt }: { src: string; alt: string }) {
         className="flex h-12 w-12 items-center justify-center text-2xl leading-none"
         aria-hidden="true"
       >
-        {alt}
+        {fallback}
       </div>
     )
   ) : (
@@ -194,7 +206,7 @@ export function Composer({
   /** Drop text into the composer from outside (WeChat-style "re-edit" of a recalled
    * message). `n` is a bump counter so the same text can be re-applied. */
   prefill?: { text: string; n: number } | null;
-  /** Send an animated sticker (by id, with its emoji-char fallback) as its own message. */
+  /** Send a bundled sticker (by id, with its emoji fallback) as its own message. */
   onSendSticker?: (stickerId: string, fallback: string) => void;
   /** Pick + send an image/video via the NATIVE file dialog (reliable in the webview;
    * a JS `<input type=file>` is flaky in WKWebView). Paste/screenshot still use bytes. */
@@ -210,6 +222,7 @@ export function Composer({
   const [expressionTab, setExpressionTab] = useState<
     "emoji" | "stickers" | null
   >(null);
+  const [stickerPack, setStickerPack] = useState<StickerPackId>("noto");
   const [showTools, setShowTools] = useState(false);
   const [panelPointerMotion, setPanelPointerMotion] = useState(false);
   const panelMotion = { pointer: panelPointerMotion, reduced: !motionOK };
@@ -563,8 +576,32 @@ export function Composer({
                   data-testid="sticker-panel"
                   className="overflow-y-auto p-2"
                 >
+                  <div
+                    className="mb-2 grid grid-cols-2 gap-1 border-b pb-2"
+                    aria-label={t("composer.stickerPacks")}
+                  >
+                    {STICKER_PACKS.map((pack) => (
+                      <button
+                        key={pack}
+                        type="button"
+                        data-testid={`sticker-pack-${pack}`}
+                        aria-pressed={stickerPack === pack}
+                        onClick={() => setStickerPack(pack)}
+                        className={cn(
+                          "min-w-0 rounded-md px-2 py-1.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          stickerPack === pack
+                            ? "bg-accent text-foreground"
+                            : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
+                        )}
+                      >
+                        {pack === "noto"
+                          ? t("composer.stickerPackEmoji")
+                          : t("composer.stickerPackCats")}
+                      </button>
+                    ))}
+                  </div>
                   <div className="grid grid-cols-5 gap-1">
-                    {STICKERS.map((s) => (
+                    {STICKERS.filter((s) => s.pack === stickerPack).map((s) => (
                       <button
                         key={s.id}
                         type="button"
@@ -575,12 +612,16 @@ export function Composer({
                           setExpressionTab(null);
                         }}
                         className="rounded-lg p-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        title={s.emoji}
+                        title={s.label}
                         aria-label={t("composer.sendSticker", {
-                          emoji: s.emoji,
+                          emoji: s.label,
                         })}
                       >
-                        <StickerThumb src={s.url} alt={s.emoji} />
+                        <StickerThumb
+                          src={s.url}
+                          alt={s.label}
+                          fallback={s.emoji}
+                        />
                       </button>
                     ))}
                   </div>
