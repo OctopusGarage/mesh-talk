@@ -2,6 +2,7 @@
   {
     "id": "players",
     "name": "Football stars",
+    "version": "1.0.0",
     "kind": "avatar",
     "category": "personal",
     "description": "Football player portraits",
@@ -11,6 +12,7 @@
   {
     "id": "nba-players",
     "name": "NBA stars",
+    "version": "1.0.0",
     "kind": "avatar",
     "category": "personal",
     "description": "Basketball player portraits",
@@ -20,6 +22,7 @@
   {
     "id": "sports",
     "name": "Sports stars",
+    "version": "1.0.0",
     "kind": "avatar",
     "category": "personal",
     "description": "Athletes from different sports",
@@ -29,6 +32,7 @@
   {
     "id": "famous",
     "name": "Famous people",
+    "version": "1.0.0",
     "kind": "avatar",
     "category": "personal",
     "description": "Portraits of notable people",
@@ -38,6 +42,7 @@
   {
     "id": "cities",
     "name": "City paintings",
+    "version": "1.0.0",
     "kind": "avatar",
     "category": "group",
     "description": "Painted city landmarks",
@@ -47,6 +52,7 @@
   {
     "id": "clubs",
     "name": "Football clubs",
+    "version": "1.0.0",
     "kind": "avatar",
     "category": "group",
     "description": "Football club emblems",
@@ -56,6 +62,7 @@
   {
     "id": "nba-teams",
     "name": "NBA teams",
+    "version": "1.0.0",
     "kind": "avatar",
     "category": "group",
     "description": "Basketball team emblems",
@@ -65,6 +72,7 @@
   {
     "id": "argentina",
     "name": "Argentina",
+    "version": "1.0.0",
     "kind": "theme",
     "description": "Sky blue and white with a stadium wallpaper",
     "file": "packs/argentina.zip",
@@ -73,6 +81,7 @@
   {
     "id": "barcelona",
     "name": "Barcelona",
+    "version": "1.0.0",
     "kind": "theme",
     "description": "Deep blue and garnet with a stadium wallpaper",
     "file": "packs/barcelona.zip",
@@ -81,6 +90,7 @@
   {
     "id": "messi",
     "name": "Messi",
+    "version": "1.0.0",
     "kind": "theme",
     "description": "Bright blue palette with a football wallpaper",
     "file": "packs/messi.zip",
@@ -89,6 +99,7 @@
   {
     "id": "nature",
     "name": "Nature",
+    "version": "1.0.0",
     "kind": "theme",
     "description": "Forest green palette and fifty landscape wallpapers",
     "file": "packs/nature.zip",
@@ -97,6 +108,7 @@
   {
     "id": "noto-favorites",
     "name": "Noto Favorites",
+    "version": "1.0.0",
     "kind": "sticker",
     "description": "Eight animated emoji stickers from Google Noto",
     "file": "packs/noto-favorites.zip",

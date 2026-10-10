@@ -594,6 +594,8 @@
     "marketplace": "マーケット",
     "install": "インストール",
     "update": "更新",
+    "replace": "置き換える",
+    "reinstall": "再インストール",
     "remove": "削除",
     "browseMarket": "マーケットを見る",
     "noAvatars": "アバターライブラリがありません。下からインストールしてください。",
@@ -601,6 +603,7 @@
     "marketUnavailable": "現在マーケットを利用できません。",
     "downloadFailed": "パックをダウンロードできませんでした。",
     "checksumFailed": "ダウンロードしたパックの検証に失敗しました。",
-    "wrongType": "このZIPは別の種類のライブラリです。"
+    "wrongType": "このZIPは別の種類のライブラリです。",
+    "listingMismatch": "ダウンロードしたパックはマーケットの掲載内容と一致しません。"
   }
 }

@@ -97,6 +97,12 @@ h1 em {
   gap: 12px;
   margin-top: 30px;
 }
+.toolkit-status {
+  min-height: 20px;
+  margin: 10px 0 0;
+  color: #a8c1bc;
+  font-size: 13px;
+}
 .button {
   display: inline-flex;
   align-items: center;
@@ -148,12 +154,13 @@ h1 em {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 34px;
+  min-width: 52px;
   height: 34px;
   border: 1px solid #2c6368;
   border-radius: 8px;
   color: #2fe6ce;
-  font-size: 12px;
+  padding-inline: 6px;
+  font-size: 11px;
   font-weight: 750;
 }
 h2,
@@ -258,6 +265,9 @@ code {
 .result.error {
   border-color: #bb6e69;
   background: #321e23;
+}
+.result[aria-busy="true"] .result-badge {
+  background: #a8c1bc;
 }
 .result-head {
   display: flex;

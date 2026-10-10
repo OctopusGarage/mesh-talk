@@ -59,6 +59,55 @@ test("rejects a ZIP with an image that cannot be decoded", async ({ page }) => {
   );
 });
 
+test("keeps the latest result when an earlier image check finishes later", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const decode = Image.prototype.decode;
+    let checks = 0;
+    Image.prototype.decode = async function () {
+      const pending = decode.call(this);
+      if (++checks === 1)
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      return pending;
+    };
+  });
+  const image = unzipSync(readFileSync(sampleZip))["images/1f602.webp"];
+  const makeZip = (name: string) =>
+    Buffer.from(
+      zipSync({
+        "manifest.json": strToU8(
+          JSON.stringify({
+            format: 1,
+            id: `test.${name.toLowerCase()}`,
+            version: "1.0.0",
+            name,
+            kind: "avatar",
+            category: "personal",
+            fit: "cover",
+            avatars: [{ label: name, file: "images/avatar.webp" }],
+          }),
+        ),
+        "images/avatar.webp": image,
+      }),
+    );
+  await page.goto("/studio/");
+  await page.locator("#zip-input").setInputFiles({
+    name: "slow.zip",
+    mimeType: "application/zip",
+    buffer: makeZip("Slow"),
+  });
+  await page.locator("#zip-input").setInputFiles({
+    name: "fast.zip",
+    mimeType: "application/zip",
+    buffer: makeZip("Fast"),
+  });
+  await expect(page.locator("#result-title")).toHaveText("Fast");
+  await expect(page.locator("#result-badge")).toHaveText("Passed");
+  await page.waitForTimeout(750);
+  await expect(page.locator("#result-title")).toHaveText("Fast");
+});
+
 test("downloads the creator toolkit with three examples and CLI sources", async ({
   page,
 }) => {
@@ -106,16 +155,24 @@ test("builds a ZIP from a selected source folder", async ({
     resolve(source, "images/joy.webp"),
     published["images/1f602.webp"],
   );
+  writeFileSync(
+    resolve(source, "notes.txt"),
+    "This file is not part of a pack",
+  );
   await page.goto("/studio/");
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#folder-input").setInputFiles(source);
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe("test.studio.zip");
   await expect(page.locator("#result-title")).toHaveText("Studio test");
+  await expect(page.locator("#result-message")).toContainText(
+    "1 unrelated source file was left out",
+  );
   const path = await download.path();
   if (!path) throw new Error("Built ZIP download path missing");
   const archive = unzipSync(readFileSync(path));
   expect(archive["images/joy.webp"]).toBeDefined();
+  expect(archive["notes.txt"]).toBeUndefined();
   expect(
     JSON.parse(new TextDecoder().decode(archive["manifest.json"])).id,
   ).toBe("test.studio");

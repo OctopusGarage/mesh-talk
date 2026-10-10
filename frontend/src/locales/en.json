@@ -594,6 +594,8 @@
     "marketplace": "Marketplace",
     "install": "Install",
     "update": "Update",
+    "replace": "Replace",
+    "reinstall": "Reinstall",
     "remove": "Remove",
     "browseMarket": "Browse marketplace",
     "noAvatars": "No avatar libraries installed. Install one below to choose a preset.",
@@ -601,6 +603,7 @@
     "marketUnavailable": "Marketplace is unavailable right now.",
     "downloadFailed": "Could not download this pack.",
     "checksumFailed": "Downloaded pack failed its checksum.",
-    "wrongType": "This ZIP is for a different library type."
+    "wrongType": "This ZIP is for a different library type.",
+    "listingMismatch": "The downloaded pack does not match its marketplace listing."
   }
 }

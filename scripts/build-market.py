@@ -45,7 +45,8 @@ def publish(manifest, files, description):
             info.compress_type = zipfile.ZIP_DEFLATED
             output.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
     CATALOG.append({
-        "id": manifest["id"], "name": manifest["name"], "kind": manifest["kind"],
+        "id": manifest["id"], "name": manifest["name"], "version": manifest["version"],
+        "kind": manifest["kind"],
         **({"category": manifest["category"]} if manifest["kind"] == "avatar" else {}),
         "description": description, "file": f"packs/{archive.name}",
         "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),

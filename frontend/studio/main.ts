@@ -25,6 +25,21 @@ const resultTitle = byId<HTMLElement>("result-title");
 const resultMessage = byId<HTMLElement>("result-message");
 const resultFacts = byId<HTMLElement>("result-facts");
 const preview = byId<HTMLElement>("preview");
+const toolkitStatus = byId<HTMLElement>("toolkit-status");
+let currentOperation = 0;
+
+function begin(action: string, label: string): number {
+  const operation = ++currentOperation;
+  result.hidden = false;
+  result.classList.remove("error");
+  result.setAttribute("aria-busy", "true");
+  resultBadge.textContent = "Checking";
+  resultTitle.textContent = label;
+  resultMessage.textContent = action;
+  resultFacts.replaceChildren();
+  preview.replaceChildren();
+  return operation;
+}
 
 function fact(label: string, value: string): void {
   const group = document.createElement("div");
@@ -48,9 +63,11 @@ function packImages(pack: CustomizationPack): { url: string; label: string }[] {
   ];
 }
 
-function showError(action: string, error: unknown): void {
+function showError(action: string, error: unknown, operation: number): void {
+  if (operation !== currentOperation) return;
   result.hidden = false;
   result.classList.add("error");
+  result.removeAttribute("aria-busy");
   resultBadge.textContent = "Failed";
   resultTitle.textContent = `Could not ${action} this pack`;
   resultMessage.textContent =
@@ -71,19 +88,24 @@ async function showVerified(
   pack: CustomizationPack,
   bytes: Uint8Array,
   built: boolean,
+  operation: number,
+  ignoredFiles = 0,
 ): Promise<void> {
+  const checksum = await sha256(bytes);
+  if (operation !== currentOperation) return;
   const images = packImages(pack);
   result.hidden = false;
   result.classList.remove("error");
+  result.removeAttribute("aria-busy");
   resultBadge.textContent = "Passed";
   resultTitle.textContent = pack.name;
   resultMessage.textContent = built
-    ? "Your ZIP was built and checked. The download should begin now."
-    : "Structure, image data, and pixel limits passed. Review the artwork and its rights before sharing.";
+    ? `Your ZIP was built and checked. Download starting.${ignoredFiles ? ` ${ignoredFiles} unrelated source ${ignoredFiles === 1 ? "file was" : "files were"} left out.` : ""}`
+    : "Technical checks passed. Review the artwork and its rights before sharing.";
   resultFacts.replaceChildren();
   fact("Type", pack.kind === "avatar" ? `${pack.category} avatars` : pack.kind);
   fact("Version / images", `${pack.version} / ${images.length}`);
-  fact("SHA-256", await sha256(bytes));
+  fact("SHA-256", checksum);
   preview.replaceChildren();
   for (const image of images.slice(0, 8)) {
     const thumbnail = document.createElement("img");
@@ -97,21 +119,27 @@ async function showVerified(
 
 async function checkBytes(
   bytes: Uint8Array,
+  operation: number,
   built = false,
+  ignoredFiles = 0,
 ): Promise<CustomizationPack> {
   const pack = parsePack(bytes);
   await verifyPackImages(pack);
-  await showVerified(pack, bytes, built);
+  await showVerified(pack, bytes, built, operation, ignoredFiles);
   return pack;
 }
 
 async function verifyFile(file: File): Promise<void> {
+  const operation = begin(
+    "Checking the ZIP and decoding its images…",
+    file.name,
+  );
   try {
     if (file.size > MAX_PACK_ZIP_BYTES)
       throw new Error("Pack ZIP is too large (12 MiB maximum)");
-    await checkBytes(new Uint8Array(await file.arrayBuffer()));
+    await checkBytes(new Uint8Array(await file.arrayBuffer()), operation);
   } catch (error) {
-    showError("verify", error);
+    showError("verify", error, operation);
   }
 }
 
@@ -129,6 +157,7 @@ function download(bytes: Uint8Array, name: string): void {
 }
 
 async function buildFolder(selected: FileList): Promise<void> {
+  const operation = begin("Building and checking your ZIP…", "Source folder");
   try {
     const files = new Map<string, File>();
     for (const file of selected) {
@@ -148,7 +177,8 @@ async function buildFolder(selected: FileList): Promise<void> {
       "manifest.json": manifestBytes,
     };
     let unpackedBytes = manifestFile.size;
-    for (const name of referencedPackImages(manifest)) {
+    const referenced = referencedPackImages(manifest);
+    for (const name of referenced) {
       const image = files.get(name);
       if (!image) throw new Error(`Missing image: ${name}`);
       if (image.size > 3 * 1024 * 1024)
@@ -164,11 +194,15 @@ async function buildFolder(selected: FileList): Promise<void> {
         throw new Error("credits.json is too large (64 KiB maximum)");
       archive["credits.json"] = new Uint8Array(await credits.arrayBuffer());
     }
+    const included = new Set(["manifest.json", "credits.json", ...referenced]);
+    const ignoredFiles = [...files.keys()].filter(
+      (name) => !included.has(name),
+    ).length;
     const bytes = zipSync(archive, { level: 6 });
-    const pack = await checkBytes(bytes, true);
-    download(bytes, `${pack.id}.zip`);
+    const pack = await checkBytes(bytes, operation, true, ignoredFiles);
+    if (operation === currentOperation) download(bytes, `${pack.id}.zip`);
   } catch (error) {
-    showError("build", error);
+    showError("build", error, operation);
   }
 }
 
@@ -304,5 +338,12 @@ dropZone.addEventListener("drop", (event) => {
   if (file) void verifyFile(file);
 });
 byId<HTMLButtonElement>("download-kit").addEventListener("click", () => {
-  void downloadKit().catch((error) => showError("download the toolkit", error));
+  toolkitStatus.textContent = "Preparing creator toolkit…";
+  void downloadKit()
+    .then(() => {
+      toolkitStatus.textContent = "Creator toolkit downloaded.";
+    })
+    .catch((error) => {
+      toolkitStatus.textContent = `Could not download toolkit: ${error instanceof Error ? error.message : String(error)}`;
+    });
 });

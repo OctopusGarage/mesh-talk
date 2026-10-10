@@ -96,6 +96,33 @@ describe("customization pack", () => {
     ).toThrow(/unsupported zip file/i);
   });
 
+  it("rejects duplicate ZIP entry names", () => {
+    const bytes = archive(
+      {
+        format: 1,
+        id: "test.faces",
+        version: "1.0.0",
+        name: "Faces",
+        kind: "avatar",
+        category: "personal",
+        fit: "cover",
+        avatars: [{ label: "Ada", file: "images/a.png" }],
+      },
+      { "images/a.png": png, "images/b.png": png },
+    );
+    const original = strToU8("images/b.png");
+    const duplicate = strToU8("images/a.png");
+    let replacements = 0;
+    for (let index = 0; index <= bytes.length - original.length; index++) {
+      if (original.every((byte, offset) => bytes[index + offset] === byte)) {
+        bytes.set(duplicate, index);
+        replacements++;
+      }
+    }
+    expect(replacements).toBe(2); // Local header and central directory.
+    expect(() => parsePack(bytes)).toThrow(/duplicate ZIP entry/i);
+  });
+
   it("rejects unsafe theme token values", () => {
     expect(() =>
       parsePack(
@@ -110,6 +137,47 @@ describe("customization pack", () => {
         }),
       ),
     ).toThrow(/color/i);
+  });
+
+  it("rejects theme colors outside the HSL range", () => {
+    for (const value of ["361 50% 50%", "180 101% 50%", "180 50% 101%"]) {
+      expect(() =>
+        parsePack(
+          archive({
+            format: 1,
+            id: "test.theme",
+            version: "1.0.0",
+            name: "Out of range",
+            kind: "theme",
+            base: "dark",
+            colors: { primary: value },
+          }),
+        ),
+      ).toThrow(/theme color/i);
+    }
+  });
+
+  it("rejects duplicate wallpaper IDs that would select the wrong image", () => {
+    expect(() =>
+      parsePack(
+        archive(
+          {
+            format: 1,
+            id: "test.theme",
+            version: "1.0.0",
+            name: "Repeating walls",
+            kind: "theme",
+            base: "dark",
+            colors: { primary: "180 50% 50%" },
+            wallpapers: [
+              { id: "same", title: "One", file: "images/a.png" },
+              { id: "same", title: "Two", file: "images/b.png" },
+            ],
+          },
+          { "images/a.png": png, "images/b.png": png },
+        ),
+      ),
+    ).toThrow(/duplicate wallpaper id/i);
   });
 
   it("loads an animated sticker pack with an explicit fallback", () => {
@@ -178,7 +246,13 @@ describe("customization pack", () => {
         new URL("../../../site/market/catalog.json", import.meta.url),
         "utf8",
       ),
-    ) as { id: string; kind: string; file: string; sha256: string }[];
+    ) as {
+      id: string;
+      kind: string;
+      version: string;
+      file: string;
+      sha256: string;
+    }[];
     expect(catalog).toHaveLength(12);
     expect(catalog.filter((item) => item.kind !== "sticker")).toHaveLength(11);
     for (const item of catalog) {
@@ -188,7 +262,9 @@ describe("customization pack", () => {
       expect(createHash("sha256").update(bytes).digest("hex"), item.id).toBe(
         item.sha256,
       );
-      expect(parsePack(bytes).id).toBe(item.id);
+      const pack = parsePack(bytes);
+      expect(pack.id).toBe(item.id);
+      expect(pack.version).toBe(item.version);
     }
   });
 });

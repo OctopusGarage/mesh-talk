@@ -62,7 +62,7 @@ A theme:
 
 `base` may be `light` or `dark`. `colors` overrides the named design tokens from `frontend/src/lib/pack.ts`; each value is an HSL triplet without `hsl(...)`. A theme may also provide a `crest` image, or a `wallpapers` array of `{ "id", "title", "file" }` entries instead of one `wallpaper`. Keep text and controls legible against your colors; the app does not automatically correct contrast.
 
-Theme colors must use token names from [`frontend/src/lib/pack.ts`](../frontend/src/lib/pack.ts) (for example `background`, `foreground`, `primary`, `card`, and `border`). At least one color is required. Wallpaper IDs contain only lowercase letters, digits, and hyphens; wallpaper titles are at most 80 characters. A good workflow is to start with three colors, install the ZIP locally, and inspect both text and controls in the app before adding more overrides.
+Theme colors must use token names from [`frontend/src/lib/pack.ts`](../frontend/src/lib/pack.ts) (for example `background`, `foreground`, `primary`, `card`, and `border`). At least one color is required. HSL hue must be 0–360; saturation and lightness must each be 0–100%. Wallpaper IDs must be unique within the pack and contain only lowercase letters, digits, and hyphens; wallpaper titles are at most 80 characters. A good workflow is to start with three colors, install the ZIP locally, and inspect both text and controls in the app before adding more overrides.
 
 A sticker library:
 
@@ -81,11 +81,11 @@ A sticker library:
 
 A sticker pack has 1–100 stickers. Each sticker ID is unique within its pack, uses lowercase letters, digits, underscores, or hyphens, and is at most 40 characters. `fallback` is required, at most eight Unicode code points, and appears when a recipient has not installed the same pack. Sticker images are stored locally; chat messages send only the pack/sticker ID and fallback, so recipients must install the pack to see its artwork. The built-in Noto stickers remain available in both editions. The marketplace also offers a downloadable Noto Favorites example pack; it is not preinstalled.
 
-Package the files with a normal ZIP tool, keeping `manifest.json` at the root. Open **Settings → Appearance → Install ZIP** for a theme, open an avatar gallery and choose **Install ZIP** for an avatar library, or open a chat's **Stickers → Manage sticker packs → Install ZIP** for stickers. The same screens show marketplace packs with **Install** or **Update** and installed packs with **Remove**. Invalid packs leave installed packs untouched.
+Package the files with a normal ZIP tool, keeping `manifest.json` at the root. Open **Settings → Appearance → Install ZIP** for a theme, open an avatar gallery and choose **Install ZIP** for an avatar library, or open a chat's **Stickers → Manage sticker packs → Install ZIP** for stickers. The same screens show marketplace packs with their versions and **Install**, **Reinstall**, or **Replace** actions, plus **Remove** for installed packs. Invalid packs leave installed packs untouched.
 
 ### Build and check your ZIP
 
-The [Pack Studio](https://octopusgarage.github.io/mesh-talk/market/studio/) on GitHub Pages can build a ZIP from a source folder, verify an existing ZIP, show a small image preview and checksum, and download a creator toolkit with working avatar, theme, and sticker examples plus the command-line checker. It processes files locally in the browser; no pack is uploaded. The Studio is part of this draft PR and will become available on Pages after publication.
+The [Pack Studio](https://octopusgarage.github.io/mesh-talk/market/studio/) on GitHub Pages can build a ZIP from a source folder, verify an existing ZIP, show a small image preview and checksum, and download a creator toolkit with working avatar, theme, and sticker examples plus the command-line checker. It processes files locally in the browser; no pack is uploaded. The builder lists how many unrelated source files it omitted, and the latest selected ZIP or folder owns the result when checks overlap. The Studio is part of this draft PR and will become available on Pages after publication.
 
 Use any image editor or drawing tool to create the images, then save them in the supported format. From the repository root, install the frontend dependencies once with `cd frontend && npm ci`. With Node 22.6 or newer, run:
 
@@ -99,7 +99,7 @@ npm run pack:check -- ../my-pack.zip
 
 ### What installation checks
 
-The app rejects oversized archives, unexpected files, unsafe paths, unsupported image types, bad image signatures, invalid manifest values, and images that its browser engine cannot decode or that exceed 4096 pixels on either side or 16 million pixels total. Marketplace downloads also need to match the catalog's SHA-256. These checks protect the app's pack format; a checksum proves download integrity, not that a creator is trustworthy. They cannot guarantee that an image has no maliciously crafted decoder payload, and they do not identify offensive, copyrighted, or otherwise inappropriate artwork. Review previews and the source before importing an unfamiliar pack. A locally installed ZIP does not become public automatically.
+The app rejects oversized archives, duplicate ZIP entries, unexpected files, unsafe paths, unsupported image types, bad image signatures, invalid manifest values, and images that its browser engine cannot decode or that exceed 4096 pixels on either side or 16 million pixels total. Marketplace downloads also need to match the catalog's SHA-256 and the selected listing's ID, name, version, type, and avatar category. These checks protect the app's pack format; a checksum proves download integrity relative to the catalog, not that a creator is trustworthy. They cannot guarantee that an image has no maliciously crafted decoder payload, and they do not identify offensive, copyrighted, or otherwise inappropriate artwork. Review previews and the source before importing an unfamiliar pack. A locally installed ZIP does not become public automatically.
 
 ## Marketplace publishing
 

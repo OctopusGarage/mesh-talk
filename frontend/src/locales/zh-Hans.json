@@ -594,6 +594,8 @@
     "marketplace": "资源市场",
     "install": "安装",
     "update": "更新",
+    "replace": "替换",
+    "reinstall": "重新安装",
     "remove": "移除",
     "browseMarket": "浏览资源市场",
     "noAvatars": "尚未安装头像资源库。请在下方安装后选择头像。",
@@ -601,6 +603,7 @@
     "marketUnavailable": "资源市场暂时无法访问。",
     "downloadFailed": "无法下载资源包。",
     "checksumFailed": "下载的资源包未通过校验。",
-    "wrongType": "此 ZIP 属于其他资源库类型。"
+    "wrongType": "此 ZIP 属于其他资源库类型。",
+    "listingMismatch": "下载的资源包与市场条目不一致。"
   }
 }
