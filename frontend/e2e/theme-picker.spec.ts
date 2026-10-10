@@ -1,6 +1,10 @@
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import { seedMarketPacks } from "./helpers/packs";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { strToU8, unzipSync, zipSync } from "fflate";
+import { parsePack } from "../src/lib/pack";
 test.use({ viewport: { width: 1100, height: 800 } });
 
 async function login(page: import("@playwright/test").Page) {
@@ -260,4 +264,87 @@ test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async 
     "true",
   );
   await expect(selected).toHaveAttribute("aria-pressed", "true");
+});
+
+test("each theme remembers its wallpaper and previews the applied image", async ({
+  page,
+}) => {
+  await seedMarketPacks(page, ["nature"]);
+  const published = unzipSync(
+    readFileSync(resolve("../site/market/packs/nature.zip")),
+  );
+  const images = Object.keys(published)
+    .filter((name) => name.startsWith("images/") && name.endsWith(".webp"))
+    .slice(0, 3);
+  expect(images).toHaveLength(3);
+  const custom = parsePack(
+    zipSync({
+      "manifest.json": strToU8(
+        JSON.stringify({
+          format: 1,
+          id: "test.scenes",
+          version: "1.0.0",
+          name: "Other scenes",
+          kind: "theme",
+          base: "dark",
+          colors: { background: "180 20% 12%" },
+          wallpaper: images[2],
+          wallpapers: [
+            { id: "one", title: "First", file: images[0] },
+            { id: "two", title: "Second", file: images[1] },
+          ],
+        }),
+      ),
+      ...Object.fromEntries(images.map((name) => [name, published[name]])),
+    }),
+  );
+  if (custom.kind !== "theme") throw new Error("Expected a theme pack");
+  await page.evaluate(async (pack) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("mesh-talk-customization", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("packs", "readwrite");
+      tx.objectStore("packs").put(pack);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  }, custom);
+  await login(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await page.getByTestId("theme-nature").click();
+  const natureLast = page.getByTestId(
+    "nature-wallpaper-050-maldives-wallpaper",
+  );
+  await expect(
+    page.getByTestId("nature-wallpaper-picker").getByRole("button").first(),
+  ).toHaveAttribute("aria-pressed", "true");
+  await natureLast.click();
+
+  await page.getByTestId("theme-test.scenes").click();
+  const customFirst = page.getByTestId("test.scenes-wallpaper-one");
+  await expect(customFirst).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByTestId("theme-preview-test.scenes").locator("img"),
+  ).toHaveAttribute("src", custom.wallpapers?.[0].url ?? "");
+  await page.getByTestId("test.scenes-wallpaper-two").click();
+  await page.getByTestId("theme-nature").click();
+  await expect(natureLast).toHaveAttribute("aria-pressed", "true");
+  await page.getByTestId("theme-test.scenes").click();
+  await expect(page.getByTestId("test.scenes-wallpaper-two")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await page.reload();
+  await login(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(page.getByTestId("test.scenes-wallpaper-two")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await page.getByTestId("theme-nature").click();
+  await expect(natureLast).toHaveAttribute("aria-pressed", "true");
 });

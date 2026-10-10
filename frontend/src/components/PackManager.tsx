@@ -5,7 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
 import { usePacks } from "@/store/packs";
 import { useTheme } from "@/lib/theme";
-import { MAX_PACK_ZIP_BYTES, parsePack } from "@/lib/pack";
+import { MAX_PACK_ZIP_BYTES } from "@/lib/pack";
 
 const MARKET_BASE = "https://octopusgarage.github.io/mesh-talk/market/";
 interface CatalogEntry {
@@ -102,6 +102,8 @@ export function PackManager({
   const install = usePacks((s) => s.install);
   const remove = usePacks((s) => s.remove);
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
+  const [marketError, setMarketError] = useState(false);
+  const [catalogRetry, setCatalogRetry] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -109,36 +111,35 @@ export function PackManager({
     const controller = new AbortController();
     fetch(`${MARKET_BASE}catalog.json`, { signal: controller.signal })
       .then((response) => {
-        if (!response.ok) throw new Error(t("packs.marketUnavailable"));
+        if (!response.ok) throw new Error("Catalog unavailable");
         return response.json();
       })
       .then((value) => setCatalog(catalogEntries(value)))
-      .catch((cause) => {
-        if (!controller.signal.aborted)
-          setError(cause instanceof Error ? cause.message : String(cause));
+      .catch(() => {
+        if (!controller.signal.aborted) setMarketError(true);
       });
     return () => controller.abort();
-  }, [t]);
+  }, [catalogRetry]);
 
   const installBytes = async (bytes: Uint8Array, listing?: CatalogEntry) => {
-    const pack = parsePack(bytes);
-    if (
-      listing &&
-      (pack.id !== listing.id ||
-        pack.name !== listing.name ||
-        (listing.version !== undefined && pack.version !== listing.version) ||
-        pack.kind !== listing.kind ||
-        (pack.kind === "avatar" && pack.category !== listing.category))
-    ) {
-      throw new Error(t("packs.listingMismatch"));
-    }
-    if (
-      pack.kind !== kind ||
-      (pack.kind === "avatar" && pack.category !== category)
-    ) {
-      throw new Error(t("packs.wrongType"));
-    }
-    await install(bytes);
+    await install(bytes, (pack) => {
+      if (
+        listing &&
+        (pack.id !== listing.id ||
+          pack.name !== listing.name ||
+          (listing.version !== undefined && pack.version !== listing.version) ||
+          pack.kind !== listing.kind ||
+          (pack.kind === "avatar" && pack.category !== listing.category))
+      ) {
+        throw new Error(t("packs.listingMismatch"));
+      }
+      if (
+        pack.kind !== kind ||
+        (pack.kind === "avatar" && pack.category !== category)
+      ) {
+        throw new Error(t("packs.wrongType"));
+      }
+    });
     useTheme.getState().refresh();
     setError("");
   };
@@ -280,6 +281,24 @@ export function PackManager({
               </div>
             );
           })}
+        </div>
+      )}
+      {marketError && (
+        <div
+          className="flex items-center gap-2 text-xs text-muted-foreground"
+          role="status"
+        >
+          <span>{t("packs.marketUnavailable")}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setMarketError(false);
+              setCatalogRetry((count) => count + 1);
+            }}
+            className="shrink-0 text-primary underline"
+          >
+            {t("packs.retry")}
+          </button>
         </div>
       )}
       {error && (

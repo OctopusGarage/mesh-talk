@@ -15,7 +15,10 @@ interface PacksState {
   packs: CustomizationPack[];
   loaded: boolean;
   load: () => Promise<void>;
-  install: (bytes: Uint8Array) => Promise<CustomizationPack>;
+  install: (
+    bytes: Uint8Array,
+    requirePack?: (pack: CustomizationPack) => void,
+  ) => Promise<CustomizationPack>;
   remove: (id: string) => Promise<void>;
 }
 
@@ -38,56 +41,62 @@ function database(): Promise<IDBDatabase> {
 async function seedBundledPacks(): Promise<void> {
   if (BUNDLED_PACK_IDS.length === 0) return;
   const db = await database();
-  let seeded: boolean;
   try {
-    seeded = await new Promise<boolean>((resolve, reject) => {
-      const request = db
-        .transaction(META_NAME, "readonly")
-        .objectStore(META_NAME)
-        .get(BUNDLED_SEED_KEY);
-      request.onsuccess = () => resolve(request.result === true);
-      request.onerror = () => reject(request.error);
-    });
+    if (await seeded(BUNDLED_SEED_KEY, db)) return;
+    for (const id of BUNDLED_PACK_IDS) {
+      const key = `${BUNDLED_SEED_KEY}:${id}`;
+      if (await seeded(key, db)) continue;
+      try {
+        const response = await fetch(
+          new URL(`builtin-packs/${id}.zip`, document.baseURI),
+        );
+        if (!response.ok) throw new Error(`Could not load bundled pack: ${id}`);
+        const pack = parsePack(new Uint8Array(await response.arrayBuffer()));
+        if (pack.id !== id) throw new Error(`Bundled pack ID mismatch: ${id}`);
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction([STORE_NAME, META_NAME], "readwrite");
+          const store = tx.objectStore(STORE_NAME);
+          const existing = store.get(id);
+          existing.onsuccess = () => {
+            if (existing.result === undefined) store.put(pack);
+            tx.objectStore(META_NAME).put(true, key);
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        });
+      } catch (error) {
+        console.warn(
+          `Could not seed bundled pack ${id}; will retry next launch`,
+          error,
+        );
+      }
+    }
   } finally {
     db.close();
   }
-  if (seeded) return;
+}
 
-  const packs = await Promise.all(
-    BUNDLED_PACK_IDS.map(async (id) => {
-      const response = await fetch(
-        new URL(`builtin-packs/${id}.zip`, document.baseURI),
-      );
-      if (!response.ok) throw new Error(`Could not load bundled pack: ${id}`);
-      const pack = parsePack(new Uint8Array(await response.arrayBuffer()));
-      if (pack.id !== id) throw new Error(`Bundled pack ID mismatch: ${id}`);
-      return pack;
-    }),
-  );
+function seeded(key: string, db: IDBDatabase): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const request = db
+      .transaction(META_NAME, "readonly")
+      .objectStore(META_NAME)
+      .get(key);
+    request.onsuccess = () => resolve(request.result === true);
+    request.onerror = () => reject(request.error);
+  });
+}
 
-  const writeDb = await database();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = writeDb.transaction([STORE_NAME, META_NAME], "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const marker = tx.objectStore(META_NAME).get(BUNDLED_SEED_KEY);
-      marker.onsuccess = () => {
-        if (marker.result === true) return;
-        for (const pack of packs) {
-          const existing = store.get(pack.id);
-          existing.onsuccess = () => {
-            if (existing.result === undefined) store.put(pack);
-          };
-        }
-        tx.objectStore(META_NAME).put(true, BUNDLED_SEED_KEY);
-      };
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-  } finally {
-    writeDb.close();
-  }
+function orderedPacks(packs: CustomizationPack[]): CustomizationPack[] {
+  return packs.sort((a, b) => {
+    const aOrder = bundledOrder.get(a.id);
+    const bOrder = bundledOrder.get(b.id);
+    if (aOrder !== undefined && bOrder !== undefined) return aOrder - bOrder;
+    if (aOrder !== undefined) return -1;
+    if (bOrder !== undefined) return 1;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 async function transaction<T>(
@@ -112,33 +121,26 @@ export const usePacks = create<PacksState>((set, get) => ({
   packs: [],
   loaded: false,
   load: async () => {
+    if (loadPromise) return loadPromise;
     if (get().loaded) return;
-    loadPromise ??= seedBundledPacks()
+    loadPromise = transaction<CustomizationPack[]>("readonly", (store) =>
+      store.getAll(),
+    )
+      .then((packs) => set({ packs: orderedPacks(packs), loaded: true }))
+      .then(seedBundledPacks)
       .then(() =>
         transaction<CustomizationPack[]>("readonly", (store) => store.getAll()),
       )
-      .then((packs) =>
-        set({
-          packs: packs.sort((a, b) => {
-            const aOrder = bundledOrder.get(a.id);
-            const bOrder = bundledOrder.get(b.id);
-            if (aOrder !== undefined && bOrder !== undefined)
-              return aOrder - bOrder;
-            if (aOrder !== undefined) return -1;
-            if (bOrder !== undefined) return 1;
-            return a.name.localeCompare(b.name);
-          }),
-          loaded: true,
-        }),
-      )
+      .then((packs) => set({ packs: orderedPacks(packs) }))
       .finally(() => {
         loadPromise = undefined;
       });
     await loadPromise;
   },
-  install: async (bytes) => {
+  install: async (bytes, requirePack) => {
     await get().load();
     const pack = parsePack(bytes);
+    requirePack?.(pack);
     await verifyPackImages(pack);
     await transaction("readwrite", (store) => store.put(pack));
     set((state) => ({

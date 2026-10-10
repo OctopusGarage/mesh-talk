@@ -20,7 +20,6 @@ void usePacks
   .then(() => useTheme.getState().refresh())
   .catch((error) => {
     console.error("Could not load customization packs", error);
-    useTheme.getState().set("dark");
   });
 
 // Desktop app: suppress the webview's native right-click context menu (Cut/Copy/Inspect…)

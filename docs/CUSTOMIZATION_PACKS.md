@@ -60,7 +60,7 @@ A theme:
 }
 ```
 
-`base` may be `light` or `dark`. `colors` overrides the named design tokens from `frontend/src/lib/pack.ts`; each value is an HSL triplet without `hsl(...)`. A theme may also provide a `crest` image, or a `wallpapers` array of `{ "id", "title", "file" }` entries instead of one `wallpaper`. Keep text and controls legible against your colors; the app does not automatically correct contrast.
+`base` may be `light` or `dark`. `colors` overrides the named design tokens from `frontend/src/lib/pack.ts`; each value is an HSL triplet without `hsl(...)`. A theme may also provide a `crest` image, or a `wallpapers` array of `{ "id", "title", "file" }` entries instead of one `wallpaper`. The app remembers the selected wallpaper separately for each installed theme and shows it in that theme's preview. Keep text and controls legible against your colors; the app does not automatically correct contrast.
 
 Theme colors must use token names from [`frontend/src/lib/pack.ts`](../frontend/src/lib/pack.ts) (for example `background`, `foreground`, `primary`, `card`, and `border`). At least one color is required. HSL hue must be 0–360; saturation and lightness must each be 0–100%. Wallpaper IDs must be unique within the pack and contain only lowercase letters, digits, and hyphens; wallpaper titles are at most 80 characters. A good workflow is to start with three colors, install the ZIP locally, and inspect both text and controls in the app before adding more overrides.
 
