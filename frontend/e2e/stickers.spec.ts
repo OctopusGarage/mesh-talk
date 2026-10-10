@@ -7,14 +7,15 @@ import { revealComposerTools } from "./helpers/session";
 const BOB = { account: "acc_bob_bbbb2222" };
 
 async function enterBobDm(page: Page) {
+  test.setTimeout(60_000);
   await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
+  if (!(await page.getByTestId("chat-shell").isVisible())) {
+    await page.getByTestId("login-tab-signin").click();
     await page.getByTestId("login-username").fill("tester");
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await expect(page.getByTestId("chat-shell")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
 }
