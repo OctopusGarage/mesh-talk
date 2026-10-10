@@ -47,6 +47,7 @@ def publish(manifest, files, description):
     CATALOG.append({
         "id": manifest["id"], "name": manifest["name"], "version": manifest["version"],
         "kind": manifest["kind"],
+        "preinstall": manifest["kind"] != "sticker" or manifest["id"] == "cats",
         **({"category": manifest["category"]} if manifest["kind"] == "avatar" else {}),
         "description": description, "file": f"packs/{archive.name}",
         "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
@@ -58,6 +59,7 @@ AVATARS = [
     ("nba-players", "NBA stars", "personal", "cover", "Basketball player portraits"),
     ("sports", "Sports stars", "personal", "cover", "Athletes from different sports"),
     ("famous", "Famous people", "personal", "cover", "Portraits of notable people"),
+    ("cat-acrylic-avatars", "Cat Acrylic", "personal", "cover", "Fifty acrylic cat portraits"),
     ("cities", "City paintings", "group", "contain", "Painted city landmarks"),
     ("clubs", "Football clubs", "group", "contain", "Football club emblems"),
     ("nba-teams", "NBA teams", "group", "contain", "Basketball team emblems"),
@@ -89,16 +91,17 @@ THEMES = [
     ("barcelona", "Barcelona", "dark", "Deep blue and garnet with a stadium wallpaper"),
     ("messi", "Messi", "light", "Bright blue palette with a football wallpaper"),
     ("nature", "Nature", "light", "Forest green palette and fifty landscape wallpapers"),
+    ("cat-acrylic", "Cat Acrylic", "light", "Warm paper and blue ink with forty-five cat paintings"),
 ]
 for pack_id, name, base, description in THEMES:
     files = {}
     manifest = {"format": 1, "id": pack_id, "version": "1.0.0", "name": name,
                 "kind": "theme", "base": base, "colors": palette(pack_id)}
-    if pack_id == "nature":
+    if pack_id in {"nature", "cat-acrylic"}:
         manifest["wallpapers"] = [
             {"id": path.stem, "title": label(path).replace(" Wallpaper", "").replace("Giant S", "Giant's"),
              "file": add_image(files, path)}
-            for path in sorted((ASSETS / "themes/nature").glob("*.webp"))
+            for path in sorted((ASSETS / "themes" / pack_id).glob("*.webp"))
         ]
     else:
         background = next((ASSETS / "themes").glob(f"{pack_id}-bg.*"))
@@ -128,6 +131,21 @@ for sticker_id, sticker_label in STICKERS:
 publish({"format": 1, "id": "noto-favorites", "version": "1.0.0",
          "name": "Noto Favorites", "kind": "sticker", "stickers": sticker_entries},
         sticker_files, "Eight animated emoji stickers from Google Noto")
+
+CAT_STICKER_SOURCE = ASSETS / "stickers/cats"
+cat_metadata = json.loads((CAT_STICKER_SOURCE / "metadata.json").read_text())
+cat_files = sorted(CAT_STICKER_SOURCE.glob("*.webp"))
+if {item["id"] for item in cat_metadata} != {path.stem for path in cat_files}:
+    raise ValueError("Cat sticker metadata does not match the artwork")
+cat_sticker_files = {}
+cat_sticker_entries = []
+for item in cat_metadata:
+    source = CAT_STICKER_SOURCE / f"{item['id']}.webp"
+    destination = add_image(cat_sticker_files, source, f"images/{item['id']}.webp")
+    cat_sticker_entries.append({**item, "file": destination})
+publish({"format": 1, "id": "cats", "version": "1.0.0",
+         "name": "Cat Stickers", "kind": "sticker", "stickers": cat_sticker_entries},
+        cat_sticker_files, "Forty-five expressive cat stickers")
 
 (OUT / "catalog.json").write_text(json.dumps(CATALOG, ensure_ascii=False, indent=2) + "\n")
 print(f"Built {len(CATALOG)} packs in {OUT}")

@@ -65,15 +65,18 @@ export function stickerById(
   id: string,
   packs: CustomizationPack[] = [],
 ): Sticker | undefined {
-  if (!id.startsWith("pack:")) return BY_ID.get(id);
-  const separator = id.lastIndexOf(":");
+  // Messages sent by the earlier bundled cat collection used unprefixed IDs.
+  const lookupId = id.startsWith("cat-") ? `pack:cats:${id}` : id;
+  if (!lookupId.startsWith("pack:")) return BY_ID.get(lookupId);
+  const separator = lookupId.lastIndexOf(":");
   if (separator <= 5) return undefined;
   const pack = packs.find(
-    (item) => item.kind === "sticker" && item.id === id.slice(5, separator),
+    (item) =>
+      item.kind === "sticker" && item.id === lookupId.slice(5, separator),
   );
   if (pack?.kind !== "sticker") return undefined;
   const sticker = pack.stickers.find(
-    (item) => item.id === id.slice(separator + 1),
+    (item) => item.id === lookupId.slice(separator + 1),
   );
   return (
     sticker && {

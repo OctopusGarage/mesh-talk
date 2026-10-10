@@ -4,6 +4,7 @@
     "name": "Football stars",
     "version": "1.0.0",
     "kind": "avatar",
+    "preinstall": true,
     "category": "personal",
     "description": "Football player portraits",
     "file": "packs/players.zip",
@@ -14,6 +15,7 @@
     "name": "NBA stars",
     "version": "1.0.0",
     "kind": "avatar",
+    "preinstall": true,
     "category": "personal",
     "description": "Basketball player portraits",
     "file": "packs/nba-players.zip",
@@ -24,6 +26,7 @@
     "name": "Sports stars",
     "version": "1.0.0",
     "kind": "avatar",
+    "preinstall": true,
     "category": "personal",
     "description": "Athletes from different sports",
     "file": "packs/sports.zip",
@@ -34,16 +37,29 @@
     "name": "Famous people",
     "version": "1.0.0",
     "kind": "avatar",
+    "preinstall": true,
     "category": "personal",
     "description": "Portraits of notable people",
     "file": "packs/famous.zip",
     "sha256": "0f3dabab98290f7a2a94a715bbe05c444f73920e684677d7099848db6afa0455"
   },
   {
+    "id": "cat-acrylic-avatars",
+    "name": "Cat Acrylic",
+    "version": "1.0.0",
+    "kind": "avatar",
+    "preinstall": true,
+    "category": "personal",
+    "description": "Fifty acrylic cat portraits",
+    "file": "packs/cat-acrylic-avatars.zip",
+    "sha256": "ca3a3b6c1586205bd91bae326f1f69ce2814d491d082634665aa235a7c8934a3"
+  },
+  {
     "id": "cities",
     "name": "City paintings",
     "version": "1.0.0",
     "kind": "avatar",
+    "preinstall": true,
     "category": "group",
     "description": "Painted city landmarks",
     "file": "packs/cities.zip",
@@ -54,6 +70,7 @@
     "name": "Football clubs",
     "version": "1.0.0",
     "kind": "avatar",
+    "preinstall": true,
     "category": "group",
     "description": "Football club emblems",
     "file": "packs/clubs.zip",
@@ -64,6 +81,7 @@
     "name": "NBA teams",
     "version": "1.0.0",
     "kind": "avatar",
+    "preinstall": true,
     "category": "group",
     "description": "Basketball team emblems",
     "file": "packs/nba-teams.zip",
@@ -74,6 +92,7 @@
     "name": "Argentina",
     "version": "1.0.0",
     "kind": "theme",
+    "preinstall": true,
     "description": "Sky blue and white with a stadium wallpaper",
     "file": "packs/argentina.zip",
     "sha256": "1333a1e861bbef692e7e15fabfe69f6c2e0e455b2ab021474c4d23a08e93f16e"
@@ -83,6 +102,7 @@
     "name": "Barcelona",
     "version": "1.0.0",
     "kind": "theme",
+    "preinstall": true,
     "description": "Deep blue and garnet with a stadium wallpaper",
     "file": "packs/barcelona.zip",
     "sha256": "6972947102cecd14b2e19f7174e0ee724a6c118822c0c9a3884ef84a0a65db31"
@@ -92,6 +112,7 @@
     "name": "Messi",
     "version": "1.0.0",
     "kind": "theme",
+    "preinstall": true,
     "description": "Bright blue palette with a football wallpaper",
     "file": "packs/messi.zip",
     "sha256": "ae18ad1d5960e436337b6efb7a9265e03312d313228021256fc8cfc13491750f"
@@ -101,17 +122,39 @@
     "name": "Nature",
     "version": "1.0.0",
     "kind": "theme",
+    "preinstall": true,
     "description": "Forest green palette and fifty landscape wallpapers",
     "file": "packs/nature.zip",
     "sha256": "aac84e963785b892e411ea1c7603ba04d3770a114caa1b80017f87779256a5d8"
+  },
+  {
+    "id": "cat-acrylic",
+    "name": "Cat Acrylic",
+    "version": "1.0.0",
+    "kind": "theme",
+    "preinstall": true,
+    "description": "Warm paper and blue ink with forty-five cat paintings",
+    "file": "packs/cat-acrylic.zip",
+    "sha256": "bca23f634025025b483778a1cb7f1e9be92aeccde862bfc72aa5a88ec205faf9"
   },
   {
     "id": "noto-favorites",
     "name": "Noto Favorites",
     "version": "1.0.0",
     "kind": "sticker",
+    "preinstall": false,
     "description": "Eight animated emoji stickers from Google Noto",
     "file": "packs/noto-favorites.zip",
     "sha256": "f5f2506720fe90d182b294360261c6679517bd5a56becf547a6ee6cb9c2ac1ad"
+  },
+  {
+    "id": "cats",
+    "name": "Cat Stickers",
+    "version": "1.0.0",
+    "kind": "sticker",
+    "preinstall": true,
+    "description": "Forty-five expressive cat stickers",
+    "file": "packs/cats.zip",
+    "sha256": "6ba0f66d1767b59bf8a969d0a341916d62177d1b9f8f4dbe828e3059b6ce8d3d"
   }
 ]

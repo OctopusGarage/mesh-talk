@@ -13,10 +13,15 @@ export default defineConfig(({ command, mode }) => {
   ) as {
     id: string;
     kind: "avatar" | "theme" | "sticker";
+    preinstall?: boolean;
     file: string;
     sha256: string;
   }[];
-  const bundled = lite ? [] : catalog.filter(({ kind }) => kind !== "sticker");
+  const bundled = lite
+    ? []
+    : catalog.filter(
+        ({ kind, preinstall }) => preinstall ?? kind !== "sticker",
+      );
   return {
     define: {
       "import.meta.env.VITE_BUNDLED_PACK_IDS": JSON.stringify(

@@ -278,9 +278,12 @@ describe("customization pack", () => {
       version: string;
       file: string;
       sha256: string;
+      preinstall: boolean;
     }[];
-    expect(catalog).toHaveLength(12);
-    expect(catalog.filter((item) => item.kind !== "sticker")).toHaveLength(11);
+    expect(catalog).toHaveLength(15);
+    expect(new Set(catalog.map((item) => item.id)).size).toBe(catalog.length);
+    expect(catalog.filter((item) => item.kind !== "sticker")).toHaveLength(13);
+    expect(catalog.filter((item) => item.preinstall)).toHaveLength(14);
     for (const item of catalog) {
       const bytes = readFileSync(
         new URL(`../../../site/market/${item.file}`, import.meta.url),

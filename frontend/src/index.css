@@ -263,7 +263,7 @@
   }
 
   /* Cat Acrylic — warm paper, blue ink, and soft honey around the paintings. */
-  html[data-palette="cat-acrylic"] {
+  html[data-palette="cat-acrylic"]:not([data-pack-theme]) {
     --background: 42 55% 96%;
     --foreground: 202 40% 16%;
     --card: 43 65% 99%;
@@ -393,11 +393,14 @@
       var(--pack-wallpaper-url);
   }
 
-  html[data-palette="cat-acrylic"]:not([data-wallpaper="off"])
+  html[data-pack-theme][data-palette="cat-acrylic"]:not([data-wallpaper="off"])
     [data-testid="chat-shell"] {
     background-image:
-      linear-gradient(hsl(42 55% 97% / 0.38), hsl(42 55% 97% / 0.5)),
-      var(--cat-acrylic-wallpaper-url);
+      linear-gradient(
+        hsl(var(--background) / 0.38),
+        hsl(var(--background) / 0.5)
+      ),
+      var(--pack-wallpaper-url);
   }
 
   html[data-palette]:not([data-wallpaper="off"]) .conversation-log-surface {

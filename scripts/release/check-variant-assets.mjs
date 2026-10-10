@@ -15,7 +15,9 @@ if (variant === "lite") {
   const catalog = JSON.parse(
     readFileSync(resolve(root, "site/market/catalog.json"), "utf8"),
   );
-  const bundled = catalog.filter(({ kind }) => kind !== "sticker");
+  const bundled = catalog.filter(
+    ({ kind, preinstall }) => preinstall ?? kind !== "sticker",
+  );
   const expected = bundled.map(({ id }) => `${id}.zip`).sort();
   assert.deepEqual(readdirSync(packDirectory).sort(), expected);
   for (const { id, sha256 } of bundled) {
