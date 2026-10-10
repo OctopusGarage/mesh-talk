@@ -21,9 +21,7 @@ test("personal avatar gallery offers the player pack", async ({ page }) => {
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
-  await page
-    .getByRole("button", { name: "Football stars", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Football", exact: true }).click();
   const tiles = page.getByTestId("avatar-gallery").locator("button");
   await expect.poll(async () => tiles.count()).toBe(18); // 18 players
 });
@@ -42,6 +40,17 @@ test("personal avatar gallery offers all Cat Acrylic portraits", async ({
   await expect(gallery).toBeHidden();
 });
 
+test("bundled avatar tabs retain their translated names", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("mesh-talk-lang", "ja"));
+  await login(page);
+  await page.getByTestId("open-profile").click();
+  await page.getByRole("button", { name: "自分の写真を変更" }).click();
+  await page.getByText("ギャラリーから選択…").click();
+  await expect(
+    page.getByRole("button", { name: "サッカー", exact: true }),
+  ).toBeVisible();
+});
+
 test("group avatar gallery offers the club pack", async ({ page }) => {
   await seedMarketPacks(page, ["clubs"]);
   await login(page);
@@ -50,9 +59,7 @@ test("group avatar gallery offers the club pack", async ({ page }) => {
   await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
-  await page
-    .getByRole("button", { name: "Football clubs", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Clubs", exact: true }).click();
   await expect
     .poll(async () =>
       page.getByTestId("avatar-gallery").locator("button").count(),

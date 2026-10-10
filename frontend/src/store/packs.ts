@@ -11,6 +11,12 @@ const BUNDLED_PACK_IDS = (import.meta.env.VITE_BUNDLED_PACK_IDS as string)
   .filter(Boolean);
 const bundledOrder = new Map(BUNDLED_PACK_IDS.map((id, index) => [id, index]));
 
+export class PackIdConflictError extends Error {
+  constructor() {
+    super("A different library type already uses this pack ID.");
+  }
+}
+
 interface PacksState {
   packs: CustomizationPack[];
   loaded: boolean;
@@ -117,6 +123,35 @@ async function transaction<T>(
   }
 }
 
+async function savePack(pack: CustomizationPack): Promise<void> {
+  const db = await database();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      let conflictingType = false;
+      const existing = store.get(pack.id);
+      existing.onsuccess = () => {
+        const previous = existing.result as CustomizationPack | undefined;
+        conflictingType =
+          previous !== undefined &&
+          (previous.kind !== pack.kind ||
+            (previous.kind === "avatar" &&
+              pack.kind === "avatar" &&
+              previous.category !== pack.category));
+        if (conflictingType) tx.abort();
+        else store.put(pack);
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () =>
+        reject(conflictingType ? new PackIdConflictError() : tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export const usePacks = create<PacksState>((set, get) => ({
   packs: [],
   loaded: false,
@@ -142,7 +177,7 @@ export const usePacks = create<PacksState>((set, get) => ({
     const pack = parsePack(bytes);
     requirePack?.(pack);
     await verifyPackImages(pack);
-    await transaction("readwrite", (store) => store.put(pack));
+    await savePack(pack);
     set((state) => ({
       packs: [...state.packs.filter((item) => item.id !== pack.id), pack],
     }));
