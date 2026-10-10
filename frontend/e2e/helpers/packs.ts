@@ -8,6 +8,26 @@ export async function seedMarketPacks(page: Page, ids: string[]) {
   const packs = ids.map((id) =>
     parsePack(readFileSync(resolve(`../site/market/packs/${id}.zip`))),
   );
+  // This first navigation starts bundled-pack fetches. Wait for them to finish
+  // before the caller navigates again; WebKit reports aborted fetches as errors.
+  const bundled =
+    process.env.MESH_TALK_VARIANT === "lite"
+      ? []
+      : (
+          JSON.parse(
+            readFileSync(resolve("../site/market/catalog.json"), "utf8"),
+          ) as {
+            id: string;
+            kind: string;
+          }[]
+        ).filter((pack) => pack.kind !== "sticker");
+  const bundledRequests = bundled.map(({ id }) =>
+    page.waitForEvent("requestfinished", {
+      predicate: (request) =>
+        new URL(request.url()).pathname === `/builtin-packs/${id}.zip`,
+      timeout: 45_000,
+    }),
+  );
   await page.goto("/");
   await page.evaluate(async (entries) => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -29,4 +49,5 @@ export async function seedMarketPacks(page: Page, ids: string[]) {
     });
     db.close();
   }, packs);
+  await Promise.all(bundledRequests);
 }
