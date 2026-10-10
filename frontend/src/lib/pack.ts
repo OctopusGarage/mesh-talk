@@ -137,20 +137,39 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
     filter: (entry) => {
       total += entry.originalSize;
       if (
+        entry.name.startsWith("/") ||
+        entry.name.includes("\\") ||
+        entry.name.split("/").some((part) => part === ".." || part === ".")
+      ) {
+        throw new Error("Invalid ZIP path");
+      }
+      if (
+        entry.name !== "manifest.json" &&
+        entry.name !== "credits.json" &&
+        !/^images\/(?:[a-zA-Z0-9_-]+\/)*$/.test(entry.name) &&
+        !/^images\/[a-zA-Z0-9_./-]+\.(png|jpe?g|webp|gif)$/.test(entry.name)
+      ) {
+        throw new Error("Unsupported ZIP file");
+      }
+      if (
         total > MAX_UNPACKED ||
-        (entry.originalSize > MAX_IMAGE && entry.name !== "manifest.json")
+        (entry.originalSize > MAX_IMAGE && entry.name !== "manifest.json") ||
+        ((entry.name === "manifest.json" || entry.name === "credits.json") &&
+          entry.originalSize > 64 * 1024)
       ) {
         throw new Error("Pack content is too large");
       }
-      if (entry.name.startsWith("/") || entry.name.split("/").includes("..")) {
-        throw new Error("Invalid ZIP path");
-      }
-      return entry.name === "manifest.json" || entry.name.startsWith("images/");
+      return (
+        entry.name === "manifest.json" ||
+        entry.name === "credits.json" ||
+        (entry.name.startsWith("images/") && !entry.name.endsWith("/"))
+      );
     },
   });
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes || manifestBytes.length > 64 * 1024)
     throw new Error("Missing manifest.json");
+  if (files["credits.json"]) JSON.parse(strFromU8(files["credits.json"]));
   const raw = object(JSON.parse(strFromU8(manifestBytes)));
   if (raw.format !== 1) throw new Error("Unsupported pack format");
   if (

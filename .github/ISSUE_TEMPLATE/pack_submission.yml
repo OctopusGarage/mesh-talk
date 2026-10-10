@@ -1,0 +1,56 @@
+name: Share a customization pack
+description: Propose an avatar, theme, or sticker pack for the curated marketplace
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [the pack format and sharing guide](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/CUSTOMIZATION_PACKS.md) first. You can share a ZIP directly with friends without submitting it here. A marketplace listing needs maintainer review and a pull request containing the source assets and generated ZIP.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Pack type
+      options:
+        - Personal avatars
+        - Channel avatars
+        - Theme
+        - Stickers
+    validations:
+      required: true
+  - type: input
+    id: name-id-version
+    attributes:
+      label: Name, ID, and version
+      placeholder: "Reactions / example.reactions / 1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source repository or draft pull request
+      description: Link to the manifest and original image assets. Do not post private files or credentials.
+      placeholder: "https://github.com/you/your-pack"
+    validations:
+      required: true
+  - type: textarea
+    id: preview
+    attributes:
+      label: Preview and description
+      description: Show representative images and explain where the pack came from.
+    validations:
+      required: true
+  - type: textarea
+    id: rights
+    attributes:
+      label: Image rights and attribution
+      description: List creators, source URLs, licenses, and any permission needed to redistribute each asset.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation result
+      description: Paste the output of `cd frontend && npm run pack:check -- path/to/pack.zip` and note whether you reviewed the images.
+      render: shell
+    validations:
+      required: true

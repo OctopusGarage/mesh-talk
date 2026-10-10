@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { parsePack, type CustomizationPack } from "@/lib/pack";
+import { verifyPackImages } from "@/lib/packImages";
 
 const DB_NAME = "mesh-talk-customization";
 const STORE_NAME = "packs";
@@ -138,6 +139,7 @@ export const usePacks = create<PacksState>((set, get) => ({
   install: async (bytes) => {
     await get().load();
     const pack = parsePack(bytes);
+    await verifyPackImages(pack);
     await transaction("readwrite", (store) => store.put(pack));
     set((state) => ({
       packs: [...state.packs.filter((item) => item.id !== pack.id), pack],

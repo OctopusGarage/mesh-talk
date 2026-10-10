@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
+import { strToU8, zipSync } from "fflate";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
@@ -95,4 +96,36 @@ test("installs a verified marketplace download", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: "Football stars", exact: true }),
   ).toBeVisible();
+});
+
+test("rejects an image that has a PNG signature but cannot be decoded", async ({
+  page,
+}) => {
+  const zip = zipSync({
+    "manifest.json": strToU8(
+      JSON.stringify({
+        format: 1,
+        id: "broken.image",
+        version: "1.0.0",
+        name: "Broken image",
+        kind: "avatar",
+        category: "personal",
+        fit: "cover",
+        avatars: [{ label: "Broken", file: "images/broken.png" }],
+      }),
+    ),
+    "images/broken.png": new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0]),
+  });
+  await enterChat(page);
+  await page.getByTestId("open-profile").click();
+  await page.getByRole("button", { name: "Change your photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  const manager = page.getByTestId("pack-manager-avatar");
+  await manager.locator('input[type="file"]').setInputFiles({
+    name: "broken.zip",
+    mimeType: "application/zip",
+    buffer: Buffer.from(zip),
+  });
+  await expect(manager.getByRole("alert")).toContainText("cannot be decoded");
+  await expect(manager.getByText("Broken image")).toHaveCount(0);
 });

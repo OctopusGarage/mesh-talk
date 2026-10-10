@@ -73,7 +73,27 @@ describe("customization pack", () => {
           { "images/ada.svg": strToU8("<svg onload='alert(1)'>") },
         ),
       ),
-    ).toThrow(/image/i);
+    ).toThrow(/unsupported zip file/i);
+  });
+
+  it("rejects executable or unrelated files hidden in a pack", () => {
+    expect(() =>
+      parsePack(
+        archive(
+          {
+            format: 1,
+            id: "test.faces",
+            version: "1.0.0",
+            name: "Faces",
+            kind: "avatar",
+            category: "personal",
+            fit: "cover",
+            avatars: [{ label: "Ada", file: "images/ada.png" }],
+          },
+          { "images/ada.png": png, "setup.js": strToU8("alert(1)") },
+        ),
+      ),
+    ).toThrow(/unsupported zip file/i);
   });
 
   it("rejects unsafe theme token values", () => {
