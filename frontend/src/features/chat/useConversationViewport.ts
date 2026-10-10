@@ -58,7 +58,12 @@ export function useConversationViewport(
         frame = requestAnimationFrame(restore);
         return;
       }
-      if (scroller) scroller.scrollTop = Math.min(top, Math.max(0, maxTop));
+      if (scroller) {
+        scroller.scrollTop = Math.min(top, Math.max(0, maxTop));
+        const bottom = maxTop - scroller.scrollTop <= 48;
+        atBottom.current.set(key, bottom);
+        setShowJump(!bottom);
+      }
       restoringScroll.current = null;
     };
     frame = requestAnimationFrame(restore);
