@@ -5,13 +5,18 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.2.2
+### What's new in v0.3.0
 
-- Added per-file transfer progress and guarded download/open actions until received files are ready.
-- Added directory attachments with safe extraction and a shortcut to the downloads folder.
-- Added screenshot capture and annotation on macOS, Windows, and Linux: select a region, annotate,
-  then explicitly send or cancel. Availability depends on the desktop's capture permissions and
-  portal support.
+- Install and remove avatar, theme, and sticker ZIP libraries, including your own packs.
+- Choose the default edition with 14 optional packs preinstalled or the lite edition with
+  no optional packs. Both editions keep light, dark, OLED, and built-in Noto stickers.
+- Browse and install shared packs from the [OctopusGarage Marketplace](https://octopusgarage.github.io/marketplace/),
+  with versioned downloads and SHA-256 verification. The [Pack Studio](https://octopusgarage.github.io/marketplace/studio/)
+  builds and checks packs locally in your browser.
+- Track each file transfer and open downloads when they are ready.
+- Attach directories with safe extraction and a shortcut to the downloads folder.
+- Capture and annotate screenshots on macOS, Windows, and Linux, subject to desktop capture
+  permissions and portal support.
 
 ### Downloads
 
