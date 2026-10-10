@@ -1,5 +1,10 @@
 # Mesh-Talk — Architecture & Protocol Review (principles)
 
+> **Mobile status, 2026-10-11:** Read [the mobile PWA feasibility and open-issues record](mobile-pwa-feasibility.md)
+> before using this review as a mobile implementation plan. In particular, changing desktop IPs,
+> insecure LAN HTTP, startup/role failures, and incomplete end-to-end proof block a release claim.
+> The feasibility record supersedes conflicting mobile conclusions below.
+
 A from-first-principles map of how Mesh-Talk connects nodes, moves data, and secures it — with the
 real diagrams, the wire protocol, and an honest list of where the design is solid vs fragile. For
 the module-by-module reference see [`ARCHITECTURE.md`](./ARCHITECTURE.md); this doc is about *why it

@@ -1,55 +1,44 @@
-# Deploying the Mesh-Talk PWA
+# Experimental Mesh-Talk PWA deployment
 
-The browser/mobile build is a plain static site (`frontend/dist`: HTML + JS + the ~470 KB wasm).
-It is just the **one-time app download** — once a phone loads it (and "Add to Home Screen" on
-iOS), the service worker caches it and the app runs locally. After that, messaging is
-peer-to-peer over **WebRTC**, end-to-end encrypted; the host is never in the message path.
+> **Prototype only.** Read the [mobile PWA feasibility and open-issues record](../docs/mobile-pwa-feasibility.md)
+> before deployment or further implementation. The earlier `http://LAN-IP` QR recipe is not a
+> reliable installable PWA design and does not recover automatically when the desktop IP changes.
 
-## Recommended: one-command pure-LAN hub (no TLS, no GitHub Pages)
+The browser build contains a WebAssembly node and uses WebRTC DataChannels plus Noise to sync
+encrypted events with a desktop gateway. The signaling relay exchanges connection setup; the
+**desktop gateway is in the encrypted data path** to other LAN peers. The app currently syncs
+while its page is running; its service worker only caches the app shell.
 
-A single command hosts the app **and** runs the signaling relay on the LAN:
+## Requirements for a PWA deployment
 
-```sh
-# build the PWA once
-cd frontend && npm run build && cd ..
-# host it + run the relay (any machine on the Wi-Fi / hotspot)
-cargo run -p mesh-talk-signal --release -- \
-  --serve-dir frontend/dist --port 47480 --http-port 8080
-```
+1. Serve the app from one stable, trusted `https://` origin. A phone opening
+   `http://<desktop-LAN-IP>` does not gain a secure context simply because the desktop is on the
+   same LAN. Without a secure context, the intended service worker and QR camera flow fail, and
+   browser-supported PWA installation is not established.
+2. Provide a reachable `wss://` signaling endpoint for that HTTPS page. WebRTC creates its own
+   DTLS certificate/fingerprint for the data channel; the **website** and WSS endpoint still need
+   a trusted TLS deployment. A DNS-01 certificate for a stable domain can cover a private LAN
+   service, but requires domain/DNS control and a renewal plan.
+3. Resolve the desktop's current network endpoint after IP changes. A QR containing an IP address
+   is only a one-time hint. Previously gossiped relay URLs and a `.local` fallback are insufficient
+   as the only recovery mechanism, especially on Android. The current branch has no proven
+   no-rescan recovery path.
+4. Keep the desktop gateway running after login and relay startup, verify pairing and the expected
+   hub identity, and test both phone-first and desktop-first joins. These are open implementation
+   issues, not deployment settings.
+5. Test on real devices. Host-only ICE candidates require a mutually reachable network; isolated
+   Wi-Fi, different subnets, or remote connections need additional transport support such as TURN.
 
-It prints a ready-to-use join URL with your LAN IP, e.g.:
+For local development, the branch's `mesh-talk-signal --serve-dir` command can still serve the
+static shell and signaling over HTTP/WS. That setup is useful for inspecting the prototype, but
+`http://LAN-IP` is a different browser origin after every address change and is **not** the
+recommended mobile installation path.
 
-```
-→ open or QR this on a phone (same Wi-Fi): http://192.168.1.10:8080/?relay=ws://192.168.1.10:47480&room=mesh-talk
-```
+Do not promise that entering the same password recovers a lost browser identity: a missing
+IndexedDB keystore currently causes a fresh random identity. Provide encrypted backup or account
+linking before relying on browser storage for a mobile release.
 
-On each phone: open that URL in the browser (turn it into a QR with any generator, or scan one
-shown by the host) → the app downloads, **Add to Home Screen**, and the `?relay=…&room=…` in the
-URL auto-configures the gateway, so it connects with no typing. Two phones on the same room then
-discover each other and exchange encrypted DMs.
-
-**Why this avoids certificates:** the app is served over `http://` (not HTTPS), so the browser is
-allowed to open the plain `ws://` relay directly. WebRTC itself never needed a certificate; the
-only thing that *would* require one is connecting a `ws://` relay from an **HTTPS** page (mixed
-content) — which only happens if you host the app on HTTPS GitHub Pages (see below). Pure LAN over
-http has no such issue.
-
-## Alternative: GitHub Pages (install from anywhere)
-
-If you want to install the app from the public internet rather than a LAN host:
-
-1. Repo → Settings → Pages → Source: **GitHub Actions** (one time).
-2. Run the **"Deploy PWA to GitHub Pages"** workflow → publishes to `https://<owner>.github.io/mesh-talk/`.
-
-Because Pages is HTTPS, the app then needs a **`wss://`** relay (a plain `ws://` LAN relay is
-blocked as mixed content). Put `mesh-talk-signal` behind a TLS reverse proxy (e.g. Caddy, which
-gets a cert automatically) and point Settings → Gateway at `wss://your-host`. This only affects
-peer **discovery** — not the download or the encrypted WebRTC traffic.
-
-## iOS notes
-
-- Install is Safari → Add to Home Screen (no App Store, no packaging, no Apple developer account).
-- iOS may evict a PWA's IndexedDB after ~7 days unused; the identity is recoverable by signing in
-  again with the password, but un-synced local history could be lost.
-- iOS PWAs have no true background execution — the background sync loop runs only while the app is
-  open/foreground.
+References: [PWA installability](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable),
+[service-worker secure contexts](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API),
+[WebSocket security](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_client_applications),
+[DNS-01 certificates](https://letsencrypt.org/docs/challenge-types/).

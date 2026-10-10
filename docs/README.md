@@ -15,6 +15,9 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`PROJECT.md`](../PROJECT.md) | Top-level context pointer for AI tools / new contributors. |
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
+| [`docs/mobile-pwa-feasibility.md`](mobile-pwa-feasibility.md) | **Current mobile decision record** — dynamic-IP failure, HTTPS/PWA constraints, gateway defects, evidence, and Android/PWA options. Read before resuming mobile work. |
+| [`docs/ARCHITECTURE-REVIEW.md`](ARCHITECTURE-REVIEW.md) | Earlier protocol and topology review; its mobile claims are superseded where the feasibility record differs. |
+| [`docs/solution.md`](solution.md) | Earlier mobile topology exploration; its pure-LAN PWA conclusions are superseded by the feasibility record. |
 | [`specifications/TODO.md`](../specifications/TODO.md) | Implementation status (feature-complete) + deliberate design notes / external constraints. |
 
 ## Development
@@ -36,6 +39,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`specifications/deployment_guide.md`](../specifications/deployment_guide.md) | Building/running the desktop app and the headless / post-office node on macOS, Windows, Linux. |
 | [`specifications/platform_permissions.md`](../specifications/platform_permissions.md) | Per-platform entitlements, networking (UDP multicast 224.0.0.167:47474), notifications, at-rest secrets. |
 | [`specifications/troubleshooting_guide.md`](../specifications/troubleshooting_guide.md) | Diagnosing discovery, connection, delivery, build, and platform issues. |
+| [`frontend/DEPLOY.md`](../frontend/DEPLOY.md) | Experimental PWA deployment notes and prerequisites; not a production deployment recipe. |
 
 ## Security
 
