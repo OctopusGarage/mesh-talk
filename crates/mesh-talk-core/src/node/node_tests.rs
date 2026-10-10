@@ -1867,6 +1867,104 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
 }
 
+#[tokio::test]
+async fn two_nodes_transfer_nested_directory_and_save_it() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = listener.local_addr().unwrap();
+    let alice_roster = seed_roster(&bob, "Bob", bob_addr.port(), &alice.public().user_id());
+    let bob_roster = seed_roster(&alice, "Alice", 1, &bob.public().user_id());
+    let (a_dm, _) = mpsc::unbounded_channel();
+    let (a_ch, _) = mpsc::unbounded_channel();
+    let (a_f, _) = mpsc::unbounded_channel();
+    let (b_dm, _) = mpsc::unbounded_channel();
+    let (b_ch, _) = mpsc::unbounded_channel();
+    let (b_f, mut received) = mpsc::unbounded_channel();
+    let alice_node = Node::open(
+        alice,
+        alice_roster,
+        a_dm,
+        a_ch,
+        a_f,
+        &dir.path().join("a.log"),
+        &dir.path().join("a-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let bob_node = Node::open(
+        bob,
+        bob_roster,
+        b_dm,
+        b_ch,
+        b_f,
+        &dir.path().join("b.log"),
+        &dir.path().join("b-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+
+    let source = dir.path().join("photos");
+    std::fs::create_dir_all(source.join("nested/empty")).unwrap();
+    std::fs::write(source.join("nested/pic.txt"), b"folder bytes").unwrap();
+    let file_conv = alice_node
+        .send_file_dm(&bob_node.user_id(), &source, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    // Older clients use the unchanged file save path and get a usable tar archive.
+    let legacy_tar = dir.path().join("legacy.tar");
+    alice_node.save_file(file_conv, &legacy_tar).unwrap();
+    let mut archive = tar::Archive::new(std::fs::File::open(&legacy_tar).unwrap());
+    assert!(archive
+        .entries()
+        .unwrap()
+        .any(|item| item.unwrap().path().unwrap() == std::path::Path::new("nested/pic.txt")));
+    let card = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(card.name, "photos.tar");
+    assert_eq!(card.mime, crate::file::directory::MIME);
+    assert!(!card.media);
+    let downloads = dir.path().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    // Model extraction failing after archive verification: chunks remain available
+    // so the user can retry the folder save instead of losing the transfer.
+    let temporary_archive = downloads.join("attempt.tar");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match bob_node.save_directory_archive(card.file_conv, &temporary_archive) {
+                Ok(()) => break,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .expect("archive became complete");
+    std::fs::remove_file(&temporary_archive).unwrap();
+    assert!(bob_node.file_ready_to_save(card.file_conv));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match bob_node.save_file_into_dir(card.file_conv, &downloads) {
+                Ok(path) => break path,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .map(|path| {
+        assert_eq!(path, downloads.join("photos"));
+        assert_eq!(
+            std::fs::read(path.join("nested/pic.txt")).unwrap(),
+            b"folder bytes"
+        );
+        assert!(path.join("nested/empty").is_dir());
+    })
+    .expect("directory saved within 5s");
+}
+
 // Regression: when the sender's one-shot chunk push misses (the recipient wasn't reachable
 // at send time — the discovery race) and there is NO post office, the recipient still gets
 // the manifest but 0 chunks. It must then PULL the chunks directly from peers and converge.

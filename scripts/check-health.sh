@@ -86,6 +86,10 @@ if ! node --test scripts/diagnostics/*.test.mjs; then
     exit 1
 fi
 
+print_status "success" "Checking target cache cleanup safeguards..."
+scripts/test-clean-target-cache.sh
+scripts/test-auto-clean-targets.sh
+
 # Keep Cargo's target/ from growing without bound. This is intentionally best-effort:
 # cleanup failures should not block formatting, tests, or commits.
 if [ -x "scripts/clean-target-cache.sh" ]; then

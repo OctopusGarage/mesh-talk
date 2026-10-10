@@ -11,6 +11,8 @@ import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { ease, useMotionOK } from "@/lib/motion";
 import { useChat, captureChatOwnership } from "@/store/chat";
+import { useFileStatus } from "@/store/fileAvailability";
+import { ReceiveProgress } from "./ReceiveProgress";
 import {
   blobMime,
   isVideo,
@@ -44,10 +46,17 @@ export function MediaPreview({
   const motionOK = useMotionOK();
   const setError = useChat((s) => s.setError);
   const savedPath = useSavedDownloads()[fileConv];
+  const status = useFileStatus(savedPath ? undefined : fileConv);
+  const available = !!savedPath || !!status?.ready;
   const video = isVideo(name);
   const withinCap = withinInlineCap(name, size);
-  const url = useFileObjectUrl(fileConv, withinCap, blobMime(name, mime));
+  const url = useFileObjectUrl(
+    fileConv,
+    available && withinCap,
+    blobMime(name, mime),
+  );
   const [lightbox, setLightbox] = useState(false);
+  const [saving, setSaving] = useState(false);
   const playerRef = useRef<HTMLVideoElement>(null);
   const closeLightbox = () => {
     playerRef.current?.pause();
@@ -64,8 +73,9 @@ export function MediaPreview({
   // under every bubble) — the chat shows just the media.
   const saveAs = async () => {
     const lease = captureChatOwnership();
-    if (!lease.current()) return;
+    if (!lease.current() || !available || saving) return;
     try {
+      setSaving(true);
       const defaultPath = await defaultSavePath(name);
       if (!lease.current()) return;
       const dest = await save({ defaultPath });
@@ -76,6 +86,8 @@ export function MediaPreview({
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));
+    } finally {
+      setSaving(false);
     }
   };
   const reveal = async () => {
@@ -112,6 +124,7 @@ export function MediaPreview({
       <button
         type="button"
         data-testid="media-detail-save"
+        disabled={saving}
         onClick={() => void (savedPath ? reveal() : saveAs())}
         title={
           savedPath ? t("files.savedTo", { path: savedPath }) : t("common.save")
@@ -149,6 +162,7 @@ export function MediaPreview({
         <button
           type="button"
           data-testid="media-fallback-save"
+          disabled={saving}
           onClick={() => void (savedPath ? reveal() : saveAs())}
           title={
             savedPath
@@ -181,7 +195,22 @@ export function MediaPreview({
   if (!video && imgFailed) {
     return unpreviewable("files.imageUnsupported", "file-image-unsupported");
   }
-  if (!url) return null;
+  if (!available)
+    return (
+      <div className="min-w-40 p-2 text-xs" title={name}>
+        <span className="block truncate">{name}</span>
+        <ReceiveProgress status={status} />
+      </div>
+    );
+  if (!url)
+    return (
+      <div
+        className="flex min-h-24 min-w-40 items-center justify-center rounded-lg bg-muted/40 px-3 text-center text-xs text-muted-foreground"
+        role="status"
+      >
+        {t("common.loading")} {name}
+      </div>
+    );
 
   if (video) {
     // A captured poster frame (see useVideoPoster); a neutral box while it's still loading.

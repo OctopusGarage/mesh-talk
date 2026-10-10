@@ -5,14 +5,13 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.2.1
+### What's new in v0.2.2
 
-- Added 50 Cat Acrylic personal avatars, 45 matching chat wallpapers, and a sticker collection
-  with assets compressed for the desktop app (#187).
-- Added pasted-file sending and quick access to saved downloads (#186).
-- Restored the “Jump to latest messages” control when returning to an earlier reading position
-  (#188).
-- Added Windows ARM64 and Linux ARM64 installer packages.
+- Added per-file transfer progress and guarded download/open actions until received files are ready.
+- Added directory attachments with safe extraction and a shortcut to the downloads folder.
+- Added screenshot capture and annotation on macOS, Windows, and Linux: select a region, annotate,
+  then explicitly send or cancel. Availability depends on the desktop's capture permissions and
+  portal support.
 
 ### Downloads
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Download, FolderOpen, Search, X } from "lucide-react";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Download, ExternalLink, FolderOpen, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -17,11 +17,20 @@ import { Input } from "@/components/ui/input";
 import { IdentityGlyph } from "@/components/identity";
 import { chat, settings as settingsApi } from "@/lib/api";
 import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
+import {
+  attachmentLabel,
+  isDirectoryAttachment,
+} from "@/lib/directoryAttachment";
 import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { useChat, captureChatOwnership } from "@/store/chat";
+import {
+  useFileAvailability,
+  watchFileAvailability,
+} from "@/store/fileAvailability";
 import { TransferBar } from "./TransferBar";
+import { ReceiveProgress } from "./ReceiveProgress";
 import { fileGlyph } from "./mediaFile";
 
 export function FilesTray({ navigation = false }: { navigation?: boolean }) {
@@ -33,11 +42,27 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   const incoming = useChat((s) => s.incomingFiles);
   const files = incoming.filter((f) => !f.media);
   const [query, setQuery] = useState("");
+  const [savingFile, setSavingFile] = useState<string | null>(null);
   const visibleFiles = files.filter((f) =>
     `${f.name} ${f.fromName}`
       .toLocaleLowerCase()
       .includes(query.trim().toLocaleLowerCase()),
   );
+  // Saved destinations survive restart, so rows reveal the local copy after chunks are pruned.
+  const savedPaths = useSavedDownloads();
+  const visibleFileKeys = visibleFiles
+    .filter((file) => !savedPaths[file.fileConv])
+    .map((file) => file.fileConv)
+    .join("|");
+  const statuses = useFileAvailability((s) => s.statuses);
+  useEffect(() => {
+    if (!open) return;
+    const stop = visibleFileKeys
+      .split("|")
+      .filter(Boolean)
+      .map((fileConv) => watchFileAvailability(fileConv));
+    return () => stop.forEach((unwatch) => unwatch());
+  }, [open, visibleFileKeys]);
   const dismissFile = useChat((s) => s.dismissFile);
   const setError = useChat((s) => s.setError);
 
@@ -46,11 +71,14 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   const [downloadDir, setDownloadDir] = useState("");
   const [folderLoaded, setFolderLoaded] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
+  const [folderOpenError, setFolderOpenError] = useState<string | null>(null);
+  const [openingDir, setOpeningDir] = useState(false);
   const folderRequest = useRef(0);
   const loadDir = useCallback(async () => {
     const request = ++folderRequest.current;
     setFolderLoaded(false);
     setFolderError(null);
+    setFolderOpenError(null);
     try {
       const settings = await settingsApi.get();
       if (request !== folderRequest.current) return;
@@ -81,6 +109,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
           setDownloadDir(dir);
           setFolderLoaded(true);
           setFolderError(null);
+          setFolderOpenError(null);
         }
       }
     } catch (e) {
@@ -89,20 +118,44 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
     }
   };
 
-  // Where each saved file landed (by fileConv), so a saved row can reveal/open it instead
-  // of offering Save again. PERSISTED to localStorage (keyed by the globally-unique
-  // file_conv) so it survives reload/restart — otherwise a re-save would hit the pruned
-  // chunks of an already-downloaded file and error ("file incomplete"). The row stays in
-  // the tray until the user dismisses it.
-  const savedPaths = useSavedDownloads();
+  const openDownloadDir = async () => {
+    const lease = captureChatOwnership();
+    if (!lease.current() || !folderLoaded || folderError || openingDir) return;
+    setOpeningDir(true);
+    setFolderOpenError(null);
+    try {
+      const dir = downloadDir || (await chat.defaultDownloadDir());
+      if (!lease.current()) return;
+      if (!dir) {
+        setFolderOpenError(t("files.folderUnknown"));
+        return;
+      }
+      await openPath(dir);
+    } catch (e) {
+      if (lease.current())
+        setFolderOpenError(t("files.couldntOpen", { error: errorMessage(e) }));
+    } finally {
+      setOpeningDir(false);
+    }
+  };
 
   // Save into the effective download folder with no prompt: the folder the user chose, else
   // the OS Downloads folder (the common default). Only falls back to a Save-as dialog if no
   // folder is resolvable at all.
-  const saveToDefault = async (fileConv: string, name: string) => {
+  const saveToDefault = async (
+    fileConv: string,
+    name: string,
+    mime: string,
+  ) => {
     const lease = captureChatOwnership();
-    if (!lease.current()) return;
+    if (
+      !lease.current() ||
+      savingFile !== null ||
+      !useFileAvailability.getState().statuses[fileConv]?.ready
+    )
+      return;
     try {
+      setSavingFile(fileConv);
       const dir = await effectiveDownloadDir();
       if (!lease.current()) return;
       if (dir) {
@@ -110,30 +163,48 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
         if (lease.current()) rememberSavedDownload(fileConv, path);
         return;
       }
-      const dest = await save({ defaultPath: name });
+      const dest = isDirectoryAttachment(mime)
+        ? await openDialog({ directory: true })
+        : await save({ defaultPath: name });
       if (lease.current() && typeof dest === "string") {
-        await chat.saveFile(fileConv, dest);
-        if (lease.current()) rememberSavedDownload(fileConv, dest);
+        const path = isDirectoryAttachment(mime)
+          ? await chat.saveFileToDir(fileConv, dest)
+          : (await chat.saveFile(fileConv, dest), dest);
+        if (lease.current()) rememberSavedDownload(fileConv, path);
       }
     } catch (e) {
       if (lease.current()) handleSaveError(e);
+    } finally {
+      setSavingFile(null);
     }
   };
 
   // Always-prompt "Save as…" override; the dialog opens at the Downloads folder.
-  const saveAs = async (fileConv: string, name: string) => {
+  const saveAs = async (fileConv: string, name: string, mime: string) => {
     const lease = captureChatOwnership();
-    if (!lease.current()) return;
+    if (
+      !lease.current() ||
+      savingFile !== null ||
+      !useFileAvailability.getState().statuses[fileConv]?.ready
+    )
+      return;
     try {
+      setSavingFile(fileConv);
       const defaultPath = await defaultSavePath(name);
       if (!lease.current()) return;
-      const dest = await save({ defaultPath });
+      const dest = isDirectoryAttachment(mime)
+        ? await openDialog({ directory: true })
+        : await save({ defaultPath });
       if (lease.current() && typeof dest === "string") {
-        await chat.saveFile(fileConv, dest);
-        if (lease.current()) rememberSavedDownload(fileConv, dest);
+        const path = isDirectoryAttachment(mime)
+          ? await chat.saveFileToDir(fileConv, dest)
+          : (await chat.saveFile(fileConv, dest), dest);
+        if (lease.current()) rememberSavedDownload(fileConv, path);
       }
     } catch (e) {
       if (lease.current()) handleSaveError(e);
+    } finally {
+      setSavingFile(null);
     }
   };
 
@@ -231,6 +302,18 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                   : t("common.loading")}
             </span>
           </button>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            data-testid="files-open-folder"
+            disabled={!folderLoaded || !!folderError || openingDir}
+            onClick={() => void openDownloadDir()}
+            className="h-9 shrink-0 gap-1.5"
+          >
+            <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            {t("files.openFolder")}
+          </Button>
         </div>
         {folderError && (
           <div
@@ -246,6 +329,15 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
             >
               {t("contactVisibility.retry")}
             </button>
+          </div>
+        )}
+        {folderOpenError && (
+          <div
+            role="alert"
+            data-testid="files-open-folder-error"
+            className="border-b px-6 py-2 text-xs text-destructive"
+          >
+            {folderOpenError}
           </div>
         )}
         {files.length === 0 ? (
@@ -267,9 +359,11 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                 className="rounded-lg px-2 py-3 hover:bg-accent/50"
               >
                 <div className="flex items-center gap-2">
-                  {fileGlyph(f.name)}
+                  {fileGlyph(f.name, f.mime)}
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{f.name}</div>
+                    <div className="truncate text-sm font-medium">
+                      {attachmentLabel(f.name, f.mime)}
+                    </div>
                     <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                       <IdentityGlyph
                         seed={f.fromName}
@@ -311,7 +405,12 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                       size="sm"
                       variant="secondary"
                       className="min-h-9"
-                      onClick={() => void saveToDefault(f.fileConv, f.name)}
+                      disabled={
+                        !statuses[f.fileConv]?.ready || savingFile !== null
+                      }
+                      onClick={() =>
+                        void saveToDefault(f.fileConv, f.name, f.mime)
+                      }
                     >
                       {t("common.save")}
                     </Button>
@@ -329,11 +428,17 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                 {!savedPaths[f.fileConv] && (
                   <button
                     type="button"
-                    onClick={() => void saveAs(f.fileConv, f.name)}
-                    className="mt-1 pl-6 text-xs text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    disabled={
+                      !statuses[f.fileConv]?.ready || savingFile !== null
+                    }
+                    onClick={() => void saveAs(f.fileConv, f.name, f.mime)}
+                    className="mt-1 pl-6 text-xs text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {t("files.saveAs")}
                   </button>
+                )}
+                {!savedPaths[f.fileConv] && (
+                  <ReceiveProgress status={statuses[f.fileConv]} />
                 )}
                 <TransferBar transferKey={f.fileConv} />
               </div>

@@ -702,6 +702,13 @@ export const test = base.extend({
           safety_number: () => safetyNumber(),
 
           // files
+          file_statuses: (a) =>
+            (a.fileConvs as string[]).map((file_conv) => ({
+              file_conv,
+              done: 1,
+              total: 1,
+              ready: true,
+            })),
           save_file: ok,
           save_file_to_dir: () => "/home/tester/Downloads/file.bin",
           read_file: () => new ArrayBuffer(0),
@@ -710,16 +717,34 @@ export const test = base.extend({
           read_media: () => {
             throw new Error("no stored media for this file");
           },
-          write_temp_file: (a) => `/tmp/${String(a.name || "pasted.png")}`,
-          // A deterministic 1x1 PNG (decoded from a fixed base64). Returned as a number[]
-          // (the byte array the real command yields) so the screenshot send path flows.
+          write_temp_file: (a) => {
+            if (dataMode === "screenshot-write-fails")
+              throw new Error("disk full");
+            (
+              window as unknown as { __lastWrittenFileBytes?: number[] }
+            ).__lastWrittenFileBytes = a.bytes as number[];
+            return `/tmp/${String(a.name || "pasted.png")}`;
+          },
+          screenshot_available: () => dataMode !== "screenshot-unavailable",
+          // A deterministic 320x180 PNG, generated in-browser so the mock always
+          // supplies a decodable image for the selection and annotation flow.
           capture_screen: () => {
-            const b64 =
-              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+            const canvas = document.createElement("canvas");
+            canvas.width = 320;
+            canvas.height = 180;
+            const context = canvas.getContext("2d");
+            if (!context)
+              throw new Error("Canvas unavailable in screenshot mock");
+            if (dataMode === "screenshot-light") {
+              const gradient = context.createLinearGradient(0, 0, 0, 180);
+              gradient.addColorStop(0, "#cce3ed");
+              gradient.addColorStop(1, "#91b5a6");
+              context.fillStyle = gradient;
+            } else context.fillStyle = "#1c293d";
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            const b64 = canvas.toDataURL("image/png").split(",")[1];
             const bin = atob(b64);
-            const out: number[] = [];
-            for (let i = 0; i < bin.length; i++) out.push(bin.charCodeAt(i));
-            return out;
+            return Array.from(bin, (char) => char.charCodeAt(0));
           },
 
           // search

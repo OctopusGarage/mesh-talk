@@ -56,6 +56,12 @@ objc2 = "0.6"
 # Inspect the real display backend; do not infer X11 from environment variables.
 [target.'cfg(target_os = "linux")'.dependencies]
 raw-window-handle = "0.6"
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screenshot"] }
+url = "2.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+xcap = "0.9.8"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 tauri-plugin-wdio-webdriver = "=1.4.0"

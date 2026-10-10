@@ -206,6 +206,9 @@
     "reactionRemove": "移除你的 {{emoji}} 表情回應"
   },
   "transfer": {
+    "receiving": "正在接收檔案…",
+    "waiting": "等待檔案…",
+    "receivingProgress": "正在接收檔案：{{percent}}%",
     "sending": "正在傳送檔案…",
     "saving": "正在儲存檔案…"
   },
@@ -215,6 +218,7 @@
     "send": "傳送",
     "notQueued": "訊息未加入傳送佇列。請檢查連線或待傳送訊息後重試。",
     "attach": "附加檔案",
+    "attachDirectory": "附加資料夾",
     "image": "傳送圖片",
     "emoji": "表情符號",
     "insertEmoji": "插入 {{emoji}}",
@@ -232,7 +236,22 @@
     "now": "擷取螢幕",
     "hidden": "隱藏視窗後擷取",
     "permission": "螢幕擷取需要「螢幕錄製」權限。請在 系統設定 → 隱私權與安全性 → 螢幕錄製 中授予，然後重新啟動 Mesh-Talk。",
-    "failed": "無法擷取螢幕：{{error}}"
+    "failed": "無法擷取螢幕：{{error}}",
+    "editorTitle": "截圖",
+    "editorHint": "拖曳選取區域，加入標註後傳送。",
+    "editorHintSelected": "標註已選區域，然後傳送。",
+    "invalidImage": "無法開啟擷取的影像，請重試。",
+    "unavailable": "目前的桌面工作階段無法使用截圖功能。",
+    "canvasLabel": "截圖區域選取與標註畫布",
+    "selectRegion": "重新選取區域",
+    "pen": "畫筆",
+    "rectangle": "矩形",
+    "arrow": "箭頭",
+    "text": "文字",
+    "textValue": "標註文字",
+    "undo": "復原標註",
+    "cancel": "取消",
+    "send": "傳送截圖"
   },
   "settings": {
     "title": "設定",
@@ -314,6 +333,7 @@
     "alreadyDownloaded": "已經下載過了 — 按「顯示」查看位置。",
     "couldntOpen": "無法開啟：{{error}}",
     "chooseFolder": "選擇預設下載資料夾",
+    "openFolder": "開啟資料夾",
     "noDefaultFolder": "預設儲存到系統下載資料夾",
     "reveal": "在資料夾中顯示",
     "saveAs": "另存新檔…",

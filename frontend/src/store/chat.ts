@@ -6,6 +6,7 @@ import { notifyInbound } from "@/lib/notify";
 import { useAvatars } from "@/store/avatars";
 import { useCalls } from "@/store/calls";
 import { useTransfers } from "@/store/transfers";
+import { resetFileAvailability } from "@/store/fileAvailability";
 import {
   captureOwner,
   captureChatOwner,
@@ -85,6 +86,7 @@ export interface IncomingFile {
   fromName: string;
   name: string;
   size: number;
+  mime: string;
   fileConv: string;
   /** Inline media (media button) vs generic attachment (attach button), by sender intent. */
   media: boolean;
@@ -384,6 +386,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     // Fresh slate per login (the store survives logout/login of a different account).
     lastUnknownSenderRefresh = 0;
     useTransfers.getState().reset();
+    resetFileAvailability();
     useCalls.getState().teardown();
     set({
       ready: false,
@@ -503,6 +506,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       ) {
         // Runtime/account replacement can happen without a host logout. Invalidate
         // old in-flight conversation work; the run's owned ticker performs fresh boot.
+        resetFileAvailability();
         rawSet((state) => ({
           ...invalidateConversationIdentity(),
           identityEpoch: state.identityEpoch + 1,
@@ -908,6 +912,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
               fromName,
               name: e.name,
               size: e.size,
+              mime: e.mime,
               fileConv: e.file_conv,
               media: e.media,
             },

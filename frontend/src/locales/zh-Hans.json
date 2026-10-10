@@ -206,6 +206,9 @@
     "reactionRemove": "移除你的 {{emoji}} 表情回应"
   },
   "transfer": {
+    "receiving": "正在接收文件…",
+    "waiting": "等待文件…",
+    "receivingProgress": "正在接收文件：{{percent}}%",
     "sending": "正在发送文件…",
     "saving": "正在保存文件…"
   },
@@ -215,6 +218,7 @@
     "send": "发送",
     "notQueued": "消息未加入发送队列。请检查连接或待发送消息后重试。",
     "attach": "附加文件",
+    "attachDirectory": "附加文件夹",
     "image": "发送图片",
     "emoji": "表情",
     "insertEmoji": "插入 {{emoji}}",
@@ -232,7 +236,22 @@
     "now": "截取屏幕",
     "hidden": "隐藏窗口后截图",
     "permission": "截屏需要“屏幕录制”权限。请在 系统设置 → 隐私与安全性 → 屏幕录制 中授予，然后重启 Mesh-Talk。",
-    "failed": "无法截取屏幕：{{error}}"
+    "failed": "无法截取屏幕：{{error}}",
+    "editorTitle": "截图",
+    "editorHint": "拖动选择区域，添加标注后发送。",
+    "editorHintSelected": "标注已选区域，然后发送。",
+    "invalidImage": "无法打开截取的图像，请重试。",
+    "unavailable": "当前桌面会话无法使用截图功能。",
+    "canvasLabel": "截图区域选择与标注画布",
+    "selectRegion": "重新选择区域",
+    "pen": "画笔",
+    "rectangle": "矩形",
+    "arrow": "箭头",
+    "text": "文字",
+    "textValue": "标注文字",
+    "undo": "撤销标注",
+    "cancel": "取消",
+    "send": "发送截图"
   },
   "settings": {
     "title": "设置",
@@ -314,6 +333,7 @@
     "alreadyDownloaded": "已经下载过了 — 点“显示”查看位置。",
     "couldntOpen": "无法打开：{{error}}",
     "chooseFolder": "选择默认下载文件夹",
+    "openFolder": "打开文件夹",
     "noDefaultFolder": "默认保存到系统下载文件夹",
     "reveal": "在文件夹中显示",
     "saveAs": "另存为…",

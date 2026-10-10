@@ -3,6 +3,7 @@
 //! carries chunks as events and seals the manifest with the conversation crypto.
 
 pub mod crypto;
+pub(crate) mod directory;
 pub mod manifest;
 
 pub use crypto::{

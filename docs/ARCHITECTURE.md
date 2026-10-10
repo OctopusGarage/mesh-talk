@@ -206,6 +206,18 @@ event sync frames before acceptance. MFM3 hash-list size is preflighted before
 staging; files whose manifests cannot fit are rejected despite the nominal 4 GiB
 file-size ceiling. Empty files retain their existing one-empty-chunk encoding.
 
+Directory attachments are packed into a tar payload and sent through this same
+encrypted, chunked MFM3 file path. A dedicated MIME marker identifies folders to
+current clients; existing MFM3-capable clients still receive a normal `.tar`
+attachment. The
+sender bounds depth, entry count, path length and archive size and rejects links
+and special files. The recipient first verifies the whole transfer, then extracts
+only regular files and directories into a private staging directory, rejects
+unsafe paths and oversized expansion, sanitizes cross-platform name components
+with collision-safe mapping, and renames the completed folder into the chosen
+download directory. Nested and empty directories are preserved. Chunk reclamation
+waits until the extracted folder is durable so failed extraction remains retryable.
+
 File progress counts currently held chunks; historical completion does not
 pretend that exported bytes remain on this node. The CLI keeps bounded pending
 and recent-save queues and runs readiness checks and one export at a time on the

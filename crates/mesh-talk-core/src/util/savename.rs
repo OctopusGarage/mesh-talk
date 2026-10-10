@@ -52,6 +52,26 @@ pub fn sanitize_filename(raw: &str) -> String {
         return "file".to_string();
     }
 
+    // Windows reserves these device basenames even when followed by an extension.
+    // Prefix on every platform so a folder sent from Unix remains savable on Windows.
+    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved_port = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|digit| {
+            matches!(
+                digit,
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || reserved_port
+    {
+        cleaned.insert(0, '_');
+    }
+
     // Cap to a sane length (bytes), preserving the extension where possible.
     const MAX: usize = 200;
     if cleaned.len() > MAX {
@@ -209,6 +229,14 @@ mod tests {
         assert_eq!(sanitize_filename("a<b>c|d\"e.txt"), "a_b_c_d_e.txt");
         // a control char becomes _
         assert_eq!(sanitize_filename("a\u{7}b.txt"), "a_b.txt");
+    }
+
+    #[test]
+    fn windows_device_names_are_safe_on_all_platforms() {
+        assert_eq!(sanitize_filename("CON.txt"), "_CON.txt");
+        assert_eq!(sanitize_filename("lpt9"), "_lpt9");
+        assert_eq!(sanitize_filename("COM¹.log"), "_COM¹.log");
+        assert_eq!(sanitize_filename("report?.txt"), "report_.txt");
     }
 
     #[test]

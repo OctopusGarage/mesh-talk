@@ -206,6 +206,9 @@
     "reactionRemove": "移除你嘅 {{emoji}} 表情回應"
   },
   "transfer": {
+    "receiving": "收緊檔案…",
+    "waiting": "等緊檔案…",
+    "receivingProgress": "收緊檔案：{{percent}}%",
     "sending": "正在傳送檔案…",
     "saving": "正在儲存檔案…"
   },
@@ -215,6 +218,7 @@
     "send": "傳送",
     "notQueued": "訊息未能加入傳送佇列。請檢查連線或待傳送訊息，再試一次。",
     "attach": "附加檔案",
+    "attachDirectory": "附加資料夾",
     "image": "傳送圖片",
     "emoji": "表情符號",
     "insertEmoji": "插入 {{emoji}}",
@@ -232,7 +236,22 @@
     "now": "擷取螢幕",
     "hidden": "先隱藏視窗再截圖",
     "permission": "截圖需要「螢幕錄製」權限。請前往「系統設定 → 私隱與保安 → 螢幕錄製」將其開啟，然後重新啟動 Mesh-Talk。",
-    "failed": "無法截圖：{{error}}"
+    "failed": "無法截圖：{{error}}",
+    "editorTitle": "截圖",
+    "editorHint": "拖曳揀選範圍，加上標註後傳送。",
+    "editorHintSelected": "喺揀好嘅範圍加標註，再傳送。",
+    "invalidImage": "開唔到截取嘅圖片，請再試。",
+    "unavailable": "呢個桌面工作階段用唔到截圖功能。",
+    "canvasLabel": "截圖範圍揀選同標註畫布",
+    "selectRegion": "重新揀選範圍",
+    "pen": "畫筆",
+    "rectangle": "矩形",
+    "arrow": "箭嘴",
+    "text": "文字",
+    "textValue": "標註文字",
+    "undo": "復原標註",
+    "cancel": "取消",
+    "send": "傳送截圖"
   },
   "settings": {
     "title": "設定",
@@ -314,6 +333,7 @@
     "alreadyDownloaded": "已經下載過了——點選「顯示」即可找到。",
     "couldntOpen": "無法開啟：{{error}}",
     "chooseFolder": "選擇預設下載資料夾",
+    "openFolder": "開啟資料夾",
     "noDefaultFolder": "預設儲存至系統下載資料夾",
     "reveal": "在資料夾中顯示",
     "saveAs": "另存為…",

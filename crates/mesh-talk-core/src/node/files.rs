@@ -553,7 +553,27 @@ impl Node {
         &self,
         path: &Path,
         kind: FileKind,
+        on_progress: impl FnMut(FileProgress),
+    ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        if path.is_dir() {
+            let archive = crate::file::directory::pack(path)?;
+            let name = crate::file::directory::archive_name(path)?;
+            return self.stage_regular_file(
+                archive.path(),
+                FileKind::File,
+                on_progress,
+                Some((name, crate::file::directory::MIME)),
+            );
+        }
+        self.stage_regular_file(path, kind, on_progress, None)
+    }
+
+    fn stage_regular_file(
+        &self,
+        path: &Path,
+        kind: FileKind,
         mut on_progress: impl FnMut(FileProgress),
+        directory: Option<(String, &str)>,
     ) -> Result<(FileManifestV3, ConversationId), NodeError> {
         let size = std::fs::metadata(path)
             .map_err(|e| NodeError::File(format!("stat file: {e}")))?
@@ -563,10 +583,15 @@ impl Node {
                 "file too large: {size} bytes (max {MAX_FILE_SIZE})"
             )));
         }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".to_string());
+        let name = directory.as_ref().map_or_else(
+            || {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".to_string())
+            },
+            |(name, _)| name.clone(),
+        );
+        let mime = directory.map_or_else(|| mime_from_name(&name), |(_, mime)| mime.to_string());
 
         // MFM3 carries one hash per chunk. Its existing positional wire format
         // must fit a sync frame, even when the declared file size is supported.
@@ -575,7 +600,7 @@ impl Node {
             v2: FileManifestV2 {
                 name: name.clone(),
                 size,
-                mime: mime_from_name(&name),
+                mime: mime.clone(),
                 checksum: [0; 32],
                 file_key: [0; 32],
                 file_nonce: [0; 8],
@@ -651,7 +676,6 @@ impl Node {
             let _ = self.media.store_from_path(file_conv, &name, path);
         }
 
-        let mime = mime_from_name(&name);
         let manifest = FileManifestV3 {
             v2: FileManifestV2 {
                 name,
@@ -888,16 +912,20 @@ impl Node {
         file_conv: ConversationId,
         dir: &Path,
     ) -> Result<std::path::PathBuf, NodeError> {
-        let name = self
+        let manifest = self
             .files
             .lock()
             .expect("files mutex not poisoned")
             .manifest(&file_conv)
-            .map(|m| m.name().to_string())
+            .cloned()
             .ok_or_else(|| NodeError::File("unknown file".into()))?;
-        let dest = crate::util::savename::safe_save_path(dir, &name).ok_or_else(|| {
-            NodeError::File("could not place file safely within directory".into())
-        })?;
+        if manifest.mime() == crate::file::directory::MIME {
+            return crate::file::directory::save(self, file_conv, dir, &manifest);
+        }
+        let dest =
+            crate::util::savename::safe_save_path(dir, manifest.name()).ok_or_else(|| {
+                NodeError::File("could not place file safely within directory".into())
+            })?;
         self.save_file_progress(file_conv, &dest, |_| {})?;
         Ok(dest)
     }
@@ -916,7 +944,32 @@ impl Node {
         &self,
         file_conv: ConversationId,
         dest: &Path,
+        on_progress: impl FnMut(FileProgress),
+    ) -> Result<(), NodeError> {
+        self.save_file_progress_inner(file_conv, dest, on_progress, true)
+    }
+
+    /// Directory extraction must succeed before chunk reclamation. Keep the verified
+    /// archive recoverable if disk space or archive validation fails afterward.
+    pub(crate) fn save_directory_archive(
+        &self,
+        file_conv: ConversationId,
+        dest: &Path,
+    ) -> Result<(), NodeError> {
+        self.save_file_progress_inner(file_conv, dest, |_| {}, false)
+    }
+
+    pub(crate) fn complete_directory_save(&self, file_conv: ConversationId) {
+        let candidates = self.completion_candidates(file_conv);
+        self.commit_file_completion(file_conv, &candidates);
+    }
+
+    fn save_file_progress_inner(
+        &self,
+        file_conv: ConversationId,
+        dest: &Path,
         mut on_progress: impl FnMut(FileProgress),
+        commit_completion: bool,
     ) -> Result<(), NodeError> {
         let manifest = self
             .files
@@ -1040,7 +1093,9 @@ impl Node {
         super::media_store::sync_parent(dest)
             .map_err(|e| NodeError::File(format!("sync directory: {e}")))?;
         // The file is fully reassembled + verified on disk: reclaim its chunk events.
-        self.commit_file_completion(file_conv, &candidates);
+        if commit_completion {
+            self.commit_file_completion(file_conv, &candidates);
+        }
         Ok(())
     }
 

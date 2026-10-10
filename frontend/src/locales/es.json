@@ -206,6 +206,9 @@
     "reactionRemove": "Quitar tu reacción {{emoji}}"
   },
   "transfer": {
+    "receiving": "Recibiendo archivo…",
+    "waiting": "Esperando archivo…",
+    "receivingProgress": "Recibiendo archivo: {{percent}}%",
     "sending": "Enviando archivo…",
     "saving": "Guardando archivo…"
   },
@@ -215,6 +218,7 @@
     "send": "Enviar",
     "notQueued": "El mensaje no se puso en cola. Comprueba la conexión o los envíos pendientes e inténtalo de nuevo.",
     "attach": "Adjuntar un archivo",
+    "attachDirectory": "Adjuntar una carpeta",
     "image": "Enviar una imagen",
     "emoji": "Emoji",
     "insertEmoji": "Insertar {{emoji}}",
@@ -232,7 +236,22 @@
     "now": "Capturar pantalla",
     "hidden": "Ocultar ventana y capturar",
     "permission": "La captura de pantalla necesita el permiso de Grabación de pantalla. Concédelo en Ajustes del sistema → Privacidad y seguridad → Grabación de pantalla, luego reinicia Mesh-Talk.",
-    "failed": "No se pudo capturar la pantalla: {{error}}"
+    "failed": "No se pudo capturar la pantalla: {{error}}",
+    "editorTitle": "Captura de pantalla",
+    "editorHint": "Arrastra para seleccionar un área, anótala y envíala.",
+    "editorHintSelected": "Anota el área seleccionada y envíala.",
+    "invalidImage": "No se pudo abrir la captura. Inténtalo de nuevo.",
+    "unavailable": "La captura de pantalla no está disponible en esta sesión de escritorio.",
+    "canvasLabel": "Área de selección y anotación de captura",
+    "selectRegion": "Seleccionar otra área",
+    "pen": "Dibujar",
+    "rectangle": "Rectángulo",
+    "arrow": "Flecha",
+    "text": "Texto",
+    "textValue": "Texto de anotación",
+    "undo": "Deshacer anotación",
+    "cancel": "Cancelar",
+    "send": "Enviar captura"
   },
   "settings": {
     "title": "Ajustes",
@@ -314,6 +333,7 @@
     "alreadyDownloaded": "Ya descargado — usa Mostrar para encontrarlo.",
     "couldntOpen": "No se pudo abrir: {{error}}",
     "chooseFolder": "Elegir carpeta de descargas predeterminada",
+    "openFolder": "Abrir carpeta",
     "noDefaultFolder": "Guardando en la carpeta Descargas del sistema",
     "reveal": "Mostrar en carpeta",
     "saveAs": "Guardar como…",

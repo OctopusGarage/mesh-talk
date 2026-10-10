@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import {
+  open as openDialog,
+  save as saveDialog,
+} from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   FileX,
   History,
@@ -23,6 +27,15 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IdentityGlyph } from "@/components/identity";
 import { chat } from "@/lib/api";
+import {
+  attachmentLabel,
+  isDirectoryAttachment,
+} from "@/lib/directoryAttachment";
+import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import {
+  useFileAvailability,
+  watchFileAvailability,
+} from "@/store/fileAvailability";
 import { errorMessage } from "@/lib/error";
 import { formatDay, formatTime, humanSize } from "@/lib/format";
 import { renderWithMentions } from "@/lib/mentions";
@@ -37,6 +50,7 @@ import {
 } from "@/store/chat";
 import { MediaPreview } from "./MediaPreview";
 import { fileGlyph } from "./mediaFile";
+import { ReceiveProgress } from "./ReceiveProgress";
 import { ClearHistoryButton } from "./ClearHistoryButton";
 
 // Per-conversation history pulls the full backlog (the conversation stream itself caps at
@@ -169,6 +183,21 @@ export function ConversationHistoryDialog({
       links: newestFirst(links),
     };
   }, [items]);
+  const statuses = useFileAvailability((s) => s.statuses);
+  const savedPaths = useSavedDownloads();
+  const historyFileKeys = files
+    .map((m) => m.file?.fileConv)
+    .filter((fileConv) => fileConv && !savedPaths[fileConv])
+    .filter(Boolean)
+    .join("|");
+  useEffect(() => {
+    if (!open) return;
+    const stop = historyFileKeys
+      .split("|")
+      .filter(Boolean)
+      .map(watchFileAvailability);
+    return () => stop.forEach((unwatch) => unwatch());
+  }, [open, historyFileKeys]);
 
   // "All" tab is searchable; the result list filters this conversation's messages.
   const allFiltered = useMemo(
@@ -178,11 +207,31 @@ export function ConversationHistoryDialog({
 
   const saveFile = async (file: NonNullable<ChatMessage["file"]>) => {
     const lease = captureChatOwnership();
+    if (
+      !lease.current() ||
+      !useFileAvailability.getState().statuses[file.fileConv]?.ready
+    )
+      return;
+    try {
+      const dest = isDirectoryAttachment(file.mime)
+        ? await openDialog({ directory: true })
+        : await saveDialog({ defaultPath: file.name });
+      if (lease.current() && typeof dest === "string") {
+        const path = isDirectoryAttachment(file.mime)
+          ? await chat.saveFileToDir(file.fileConv, dest)
+          : (await chat.saveFile(file.fileConv, dest), dest);
+        if (lease.current()) rememberSavedDownload(file.fileConv, path);
+      }
+    } catch (e) {
+      if (lease.current()) setError(errorMessage(e));
+    }
+  };
+
+  const revealFile = async (path: string) => {
+    const lease = captureChatOwnership();
     if (!lease.current()) return;
     try {
-      const dest = await saveDialog({ defaultPath: file.name });
-      if (lease.current() && typeof dest === "string")
-        await chat.saveFile(file.fileConv, dest);
+      await revealItemInDir(path);
     } catch (e) {
       if (lease.current()) setError(errorMessage(e));
     }
@@ -302,8 +351,11 @@ export function ConversationHistoryDialog({
                           </div>
                         ) : m.file ? (
                           <span className="inline-flex items-center gap-1.5">
-                            {fileGlyph(m.file.name)}
-                            <Highlighted text={m.file.name} term={query} />
+                            {fileGlyph(m.file.name, m.file.mime)}
+                            <Highlighted
+                              text={attachmentLabel(m.file.name, m.file.mime)}
+                              term={query}
+                            />
                           </span>
                         ) : (
                           <Highlighted text={m.text} term={query} />
@@ -362,10 +414,10 @@ export function ConversationHistoryDialog({
                           data-testid="history-file-item"
                           className="flex items-center gap-2 rounded-lg px-2.5 py-2 hover:bg-accent/50"
                         >
-                          {fileGlyph(m.file.name)}
+                          {fileGlyph(m.file.name, m.file.mime)}
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-sm">
-                              {m.file.name}
+                              {attachmentLabel(m.file.name, m.file.mime)}
                             </div>
                             <div className="flex items-center gap-2 text-xs text-muted-foreground">
                               <span className="font-mono">
@@ -374,14 +426,29 @@ export function ConversationHistoryDialog({
                               <span aria-hidden>·</span>
                               <span>{formatDay(m.wallClock)}</span>
                             </div>
+                            {!savedPaths[m.file.fileConv] && (
+                              <ReceiveProgress
+                                status={statuses[m.file.fileConv]}
+                              />
+                            )}
                           </div>
                           <Button
                             size="sm"
                             variant="secondary"
                             className="h-7"
-                            onClick={() => void saveFile(m.file!)}
+                            disabled={
+                              !savedPaths[m.file.fileConv] &&
+                              !statuses[m.file.fileConv]?.ready
+                            }
+                            onClick={() =>
+                              void (savedPaths[m.file!.fileConv]
+                                ? revealFile(savedPaths[m.file!.fileConv])
+                                : saveFile(m.file!))
+                            }
                           >
-                            {t("common.save")}
+                            {savedPaths[m.file.fileConv]
+                              ? t("files.reveal")
+                              : t("common.save")}
                           </Button>
                         </div>
                       ),

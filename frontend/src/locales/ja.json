@@ -207,7 +207,10 @@
   },
   "transfer": {
     "sending": "ファイルを送信中…",
-    "saving": "ファイルを保存中…"
+    "saving": "ファイルを保存中…",
+    "receiving": "ファイルを受信中…",
+    "waiting": "ファイルを待機中…",
+    "receivingProgress": "ファイルを受信中: {{percent}}%"
   },
   "composer": {
     "replyingTo": "返信先",
@@ -215,6 +218,7 @@
     "send": "送信",
     "notQueued": "メッセージを送信待ちにできませんでした。接続と保留中の送信を確認して、もう一度お試しください。",
     "attach": "ファイルを添付",
+    "attachDirectory": "フォルダーを添付",
     "image": "画像を送信",
     "emoji": "絵文字",
     "insertEmoji": "{{emoji}} を挿入",
@@ -232,7 +236,22 @@
     "now": "画面をキャプチャ",
     "hidden": "ウィンドウを隠してキャプチャ",
     "permission": "画面キャプチャには画面収録の権限が必要です。システム設定 → プライバシーとセキュリティ → 画面収録 で許可してください。その後 Mesh-Talk を再起動してください。",
-    "failed": "画面をキャプチャできませんでした：{{error}}"
+    "failed": "画面をキャプチャできませんでした：{{error}}",
+    "editorTitle": "スクリーンショット",
+    "editorHint": "ドラッグして範囲を選択し、注釈を付けて送信します。",
+    "editorHintSelected": "選択した範囲に注釈を付けて送信します。",
+    "invalidImage": "キャプチャ画像を開けませんでした。もう一度お試しください。",
+    "unavailable": "このデスクトップ環境では画面キャプチャを利用できません。",
+    "canvasLabel": "スクリーンショットの範囲選択と注釈",
+    "selectRegion": "範囲を選び直す",
+    "pen": "描画",
+    "rectangle": "四角形",
+    "arrow": "矢印",
+    "text": "テキスト",
+    "textValue": "注釈テキスト",
+    "undo": "注釈を元に戻す",
+    "cancel": "キャンセル",
+    "send": "スクリーンショットを送信"
   },
   "settings": {
     "title": "設定",
@@ -314,6 +333,7 @@
     "alreadyDownloaded": "ダウンロード済みです —「表示」で見つけられます。",
     "couldntOpen": "開けませんでした：{{error}}",
     "chooseFolder": "既定のダウンロードフォルダを選択",
+    "openFolder": "フォルダーを開く",
     "noDefaultFolder": "システムのダウンロードフォルダーに保存します",
     "reveal": "フォルダで表示",
     "saveAs": "名前を付けて保存…",

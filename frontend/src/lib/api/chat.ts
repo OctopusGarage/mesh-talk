@@ -4,6 +4,7 @@ import type {
   ChannelInfo,
   ChannelMembersInfo,
   HistoryItem,
+  FileStatus,
   PeerInfo,
   ReactionInfo,
   SafetyNumber,
@@ -35,12 +36,19 @@ export const chat = {
       stickerId,
       fallback,
     }),
-  enqueueFile: (owner: string, account: string, path: string, media: boolean) =>
+  enqueueFile: (
+    owner: string,
+    account: string,
+    path: string,
+    media: boolean,
+    progressKey?: string,
+  ) =>
     invoke<{ id: string; fileConv: string }>("owner_enqueue_file", {
       owner,
       account,
       path,
       media,
+      ...(progressKey ? { progressKey } : {}),
     }),
   ownerHistory: (owner: string, account: string, limit: number) =>
     invoke<HistoryItem[]>("owner_account_history", { owner, account, limit }),
@@ -139,8 +147,18 @@ export const chat = {
     emoji: string,
     remove: boolean,
   ) => invoke<void>("react_channel", { channelId, target, emoji, remove }),
-  sendFileChannel: (channelId: string, path: string, media: boolean) =>
-    invoke<string>("send_file_channel", { channelId, path, media }),
+  sendFileChannel: (
+    channelId: string,
+    path: string,
+    media: boolean,
+    progressKey?: string,
+  ) =>
+    invoke<string>("send_file_channel", {
+      channelId,
+      path,
+      media,
+      ...(progressKey ? { progressKey } : {}),
+    }),
 
   // Contact trust / safety numbers
   getTrust: (accountId: string, currentFingerprint: string) =>
@@ -153,6 +171,8 @@ export const chat = {
   // Files + search + device linking
   saveFile: (fileConv: string, dest: string) =>
     invoke<void>("save_file", { fileConv, dest }),
+  fileStatuses: (fileConvs: string[]) =>
+    invoke<FileStatus[]>("file_statuses", { fileConvs }),
   saveFileToDir: (fileConv: string, dir: string) =>
     invoke<string>("save_file_to_dir", { fileConv, dir }),
   /** The platform's standard Downloads folder (macOS ~/Downloads, Windows Downloads, Linux
@@ -177,6 +197,7 @@ export const chat = {
     invoke<number[]>("capture_screen", { hideWindow }).then(
       (b) => new Uint8Array(b),
     ),
+  screenshotAvailable: () => invoke<boolean>("screenshot_available"),
   search: (query: string) => invoke<SearchHitInfo[]>("search", { query }),
   startLinking: () => invoke<string>("start_linking"),
   stopLinking: () => invoke<void>("stop_linking"),

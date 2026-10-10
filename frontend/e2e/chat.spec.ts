@@ -8,8 +8,8 @@ const BOB = { account: "acc_bob_bbbb2222" };
 const CAROL = { account: "acc_carol_cccc3333" };
 const CHANNEL = { id: "chan_team_dddd4444" };
 
-async function register(page: Page, user = "tester") {
-  await page.goto("/");
+async function register(page: Page, user = "tester", path = "/") {
+  await page.goto(path);
   await page.getByTestId("login-tab-register").click();
   await page.getByTestId("login-username").fill(user);
   await page.getByTestId("login-password").fill("password123");
@@ -24,8 +24,8 @@ async function signIn(page: Page, user = "tester") {
 }
 
 /** Full path to a rendered, ready chat shell with the roster loaded. */
-async function enterChat(page: Page, user = "tester") {
-  await register(page, user);
+async function enterChat(page: Page, user = "tester", path = "/") {
+  await register(page, user, path);
   await signIn(page, user);
   await expect(page.getByTestId("chat-shell")).toBeVisible();
   // Roster has loaded once the seeded contact row is present (node boot resolved).
@@ -254,10 +254,41 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("screenshot-menu")).toBeVisible();
     await expect(page.getByTestId("screenshot-now")).toBeVisible();
     await expect(page.getByTestId("screenshot-hidden")).toBeVisible();
-    // Choosing "capture now" invokes the command (mock returns PNG bytes → image send),
-    // the menu closes, and nothing errors out.
+    // Capture opens the editor; the screenshot is sent only after region selection
+    // and an explicit Send action.
     await page.getByTestId("screenshot-now").click();
     await expect(page.getByTestId("screenshot-menu")).toHaveCount(0);
+    await expect(page.getByTestId("screenshot-editor")).toBeVisible();
+    await expect(page.getByTestId("screenshot-send")).toBeDisabled();
+    await expect(
+      page.getByRole("article", { name: /pasted\.png/ }),
+    ).toHaveCount(0);
+    await page
+      .getByTestId("screenshot-canvas")
+      .dragTo(page.getByTestId("screenshot-canvas"), {
+        sourcePosition: { x: 10, y: 10 },
+        targetPosition: { x: 80, y: 60 },
+      });
+    await expect(page.getByTestId("screenshot-send")).toBeEnabled();
+    await page
+      .getByTestId("screenshot-canvas")
+      .dragTo(page.getByTestId("screenshot-canvas"), {
+        sourcePosition: { x: 25, y: 25 },
+        targetPosition: { x: 60, y: 45 },
+      });
+    await page.getByTestId("screenshot-send").click();
+    await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
+    await expect(
+      page.getByRole("article", { name: /pasted\.png/ }),
+    ).toBeVisible();
+    const crop = await page.evaluate(() => {
+      const bytes = (window as unknown as { __lastWrittenFileBytes?: number[] })
+        .__lastWrittenFileBytes;
+      if (!bytes) return null;
+      const view = new DataView(new Uint8Array(bytes).buffer);
+      return { width: view.getUint32(16), height: view.getUint32(20) };
+    });
+    expect(crop).toEqual({ width: 70, height: 50 });
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
 
     // The "hide window & capture" mode also runs cleanly.
@@ -266,7 +297,37 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("screenshot-hidden")).toBeVisible();
     await page.getByTestId("screenshot-hidden").click();
     await expect(page.getByTestId("screenshot-menu")).toHaveCount(0);
+    await expect(page.getByTestId("screenshot-editor")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
+  });
+
+  test("unavailable screen capture cannot be opened", async ({ page }) => {
+    await enterChat(page, "tester", "/?data=screenshot-unavailable");
+    await openBobDm(page);
+    await revealComposerTools(page);
+    await expect(page.getByTestId("composer-screenshot")).toBeDisabled();
+  });
+
+  test("screenshot stays editable when saving fails", async ({ page }) => {
+    await enterChat(page, "tester", "/?data=screenshot-write-fails");
+    await openBobDm(page);
+    await revealComposerTools(page);
+    await page.getByTestId("composer-screenshot").click();
+    await page.getByTestId("screenshot-now").click();
+    await expect(page.getByTestId("screenshot-editor")).toBeVisible();
+    await page
+      .getByTestId("screenshot-canvas")
+      .dragTo(page.getByTestId("screenshot-canvas"), {
+        sourcePosition: { x: 10, y: 10 },
+        targetPosition: { x: 80, y: 60 },
+      });
+    await page.getByTestId("screenshot-send").click();
+    await expect(
+      page.getByTestId("screenshot-editor").getByRole("alert"),
+    ).toContainText("disk full");
+    await expect(page.getByTestId("screenshot-editor")).toBeVisible();
   });
 
   test("add an emoji reaction and see the chip", async ({ page }) => {

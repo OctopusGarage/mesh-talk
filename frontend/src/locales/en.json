@@ -207,7 +207,10 @@
   },
   "transfer": {
     "sending": "Sending file…",
-    "saving": "Saving file…"
+    "saving": "Saving file…",
+    "receiving": "Receiving file…",
+    "waiting": "Waiting for file…",
+    "receivingProgress": "Receiving file: {{percent}}%"
   },
   "composer": {
     "replyingTo": "Replying to",
@@ -215,6 +218,7 @@
     "send": "Send",
     "notQueued": "Message not queued. Check the connection or pending sends, then try again.",
     "attach": "Attach a file",
+    "attachDirectory": "Attach a folder",
     "image": "Send a picture",
     "emoji": "Emoji",
     "insertEmoji": "Insert {{emoji}}",
@@ -232,7 +236,22 @@
     "now": "Capture screen",
     "hidden": "Hide window & capture",
     "permission": "Screen capture needs the Screen Recording permission. Grant it in System Settings → Privacy & Security → Screen Recording, then restart Mesh-Talk.",
-    "failed": "Couldn't capture the screen: {{error}}"
+    "failed": "Couldn't capture the screen: {{error}}",
+    "editorTitle": "Screenshot",
+    "editorHint": "Drag to select an area, add annotations, then send.",
+    "editorHintSelected": "Annotate the selected area, then send.",
+    "invalidImage": "The captured image could not be opened. Try again.",
+    "unavailable": "Screen capture is unavailable in this desktop session.",
+    "canvasLabel": "Screenshot selection and annotation canvas",
+    "selectRegion": "Select a new area",
+    "pen": "Draw",
+    "rectangle": "Rectangle",
+    "arrow": "Arrow",
+    "text": "Text",
+    "textValue": "Annotation text",
+    "undo": "Undo annotation",
+    "cancel": "Cancel",
+    "send": "Send screenshot"
   },
   "settings": {
     "title": "Settings",
@@ -314,6 +333,7 @@
     "alreadyDownloaded": "Already downloaded — use Reveal to find it.",
     "couldntOpen": "Couldn't open: {{error}}",
     "chooseFolder": "Choose default download folder",
+    "openFolder": "Open folder",
     "noDefaultFolder": "Saving to your system Downloads folder",
     "reveal": "Reveal",
     "saveAs": "Save as…",

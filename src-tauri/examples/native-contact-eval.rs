@@ -72,10 +72,9 @@ fn native_focus_state() -> serde_json::Value {
         return serde_json::json!({"error":"not main thread"});
     };
     let app = NSApplication::sharedApplication(main);
-    let window = app.keyWindow().or_else(|| unsafe { app.mainWindow() });
-    // SAFETY: observation runs on the AppKit main thread, in the owned app.
+    let window = app.keyWindow().or_else(|| app.mainWindow());
     serde_json::json!({
-        "applicationActive": unsafe { app.isActive() },
+        "applicationActive": app.isActive(),
         "keyWindow": window.as_ref().is_some_and(|window| window.isKeyWindow()),
         "firstResponderClass": window.and_then(|window| window.firstResponder()).map(|responder| responder.class().name().to_string_lossy().into_owned()),
     })
@@ -128,7 +127,8 @@ fn dispatch_native_key(key: &str) -> Result<(), String> {
     let application = NSApplication::sharedApplication(main);
     if key == "Focus" {
         // SAFETY: AppKit's main thread, and only this application's own windows.
-        let window = unsafe { application.mainWindow() }
+        let window = application
+            .mainWindow()
             .or_else(|| application.keyWindow())
             .or_else(|| application.windows().firstObject())
             .ok_or("Owned app has no window")?;
@@ -150,15 +150,10 @@ fn dispatch_native_key(key: &str) -> Result<(), String> {
         .ok_or("Owned app has no key window")?;
     let characters = NSString::from_str(characters);
     for event_type in [NSEventType::KeyDown, NSEventType::KeyUp] {
-        // SAFETY: executed on AppKit's main thread; valid owned key window,
-        // immutable strings, supported key codes, nil graphics context, and all
-        // retained objects outlive synchronous delivery into that same window.
-        let event = unsafe {
-            NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
                 event_type, NSPoint::new(0.0, 0.0), NSEventModifierFlags::empty(), 0.0,
                 window.windowNumber(), None, &characters, &characters, false, code,
-            )
-        }.ok_or("AppKit failed to construct an evaluation key event")?;
+            ).ok_or("AppKit failed to construct an evaluation key event")?;
         window.sendEvent(&event);
     }
     Ok(())
