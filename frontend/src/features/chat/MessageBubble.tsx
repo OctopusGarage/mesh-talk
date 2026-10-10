@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Copy,
   CornerUpLeft,
   Download,
+  FolderOpen,
   RotateCw,
   SmilePlus,
   Trash2,
@@ -26,6 +28,7 @@ import {
 import { cn } from "@/lib/utils";
 import { chat } from "@/lib/api";
 import { defaultSavePath } from "@/lib/download";
+import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp } from "@/lib/motion";
@@ -50,6 +53,7 @@ function FileBubble({
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
+  const savedPath = useSavedDownloads()[file.fileConv];
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -60,11 +64,24 @@ function FileBubble({
       const dest = await save({
         defaultPath,
       });
-      if (lease.current() && typeof dest === "string")
+      if (lease.current() && typeof dest === "string") {
         await chat.saveFile(file.fileConv, dest);
+        if (lease.current()) rememberSavedDownload(file.fileConv, dest);
+      }
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));
+    }
+  };
+
+  const reveal = async () => {
+    if (!savedPath) return;
+    const lease = captureChatOwnership();
+    try {
+      await revealItemInDir(savedPath);
+    } catch (e) {
+      if (lease.current())
+        setError(t("files.couldntOpen", { error: errorMessage(e) }));
     }
   };
 
@@ -106,10 +123,14 @@ function FileBubble({
         </div>
         <button
           type="button"
-          onClick={() => void saveAs()}
+          onClick={() => void (savedPath ? reveal() : saveAs())}
           disabled={metadataPending || !file.fileConv}
-          title={t("common.save")}
-          aria-label={t("common.save")}
+          title={
+            savedPath
+              ? t("files.savedTo", { path: savedPath })
+              : t("common.save")
+          }
+          aria-label={savedPath ? t("files.reveal") : t("common.save")}
           className={cn(
             "rounded-md p-1 transition-colors",
             mine
@@ -117,9 +138,18 @@ function FileBubble({
               : "text-muted-foreground hover:bg-accent hover:text-foreground",
           )}
         >
-          <Download className="h-4 w-4" />
+          {savedPath ? (
+            <FolderOpen className="h-4 w-4" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
         </button>
       </div>
+      {savedPath && (
+        <div className="mt-1 truncate text-[11px] opacity-70" title={savedPath}>
+          {t("files.savedTo", { path: savedPath })}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,10 +1,12 @@
 import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Download, Play, X } from "lucide-react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Download, FolderOpen, Play, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { chat } from "@/lib/api";
 import { defaultSavePath } from "@/lib/download";
+import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { ease, useMotionOK } from "@/lib/motion";
@@ -41,6 +43,7 @@ export function MediaPreview({
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const setError = useChat((s) => s.setError);
+  const savedPath = useSavedDownloads()[fileConv];
   const video = isVideo(name);
   const withinCap = withinInlineCap(name, size);
   const url = useFileObjectUrl(fileConv, withinCap, blobMime(name, mime));
@@ -66,11 +69,23 @@ export function MediaPreview({
       const defaultPath = await defaultSavePath(name);
       if (!lease.current()) return;
       const dest = await save({ defaultPath });
-      if (lease.current() && typeof dest === "string")
+      if (lease.current() && typeof dest === "string") {
         await chat.saveFile(fileConv, dest);
+        if (lease.current()) rememberSavedDownload(fileConv, dest);
+      }
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));
+    }
+  };
+  const reveal = async () => {
+    if (!savedPath) return;
+    const lease = captureChatOwnership();
+    try {
+      await revealItemInDir(savedPath);
+    } catch (e) {
+      if (lease.current())
+        setError(t("files.couldntOpen", { error: errorMessage(e) }));
     }
   };
   // The detail bar shown at the bottom of the lightbox: filename · size · download. Clicks
@@ -86,14 +101,29 @@ export function MediaPreview({
       <span className="shrink-0 font-mono text-xs text-white/70">
         {humanSize(size)}
       </span>
+      {savedPath && (
+        <span
+          className="min-w-0 max-w-48 truncate text-xs text-white/70"
+          title={savedPath}
+        >
+          {savedPath}
+        </span>
+      )}
       <button
         type="button"
         data-testid="media-detail-save"
-        onClick={() => void saveAs()}
+        onClick={() => void (savedPath ? reveal() : saveAs())}
+        title={
+          savedPath ? t("files.savedTo", { path: savedPath }) : t("common.save")
+        }
         className="flex shrink-0 items-center gap-1.5 rounded-md bg-white/15 px-2.5 py-1 text-xs font-medium hover:bg-white/25"
       >
-        <Download className="h-3.5 w-3.5" />
-        {t("common.save")}
+        {savedPath ? (
+          <FolderOpen className="h-3.5 w-3.5" />
+        ) : (
+          <Download className="h-3.5 w-3.5" />
+        )}
+        {savedPath ? t("files.reveal") : t("common.save")}
       </button>
     </div>
   );
@@ -119,13 +149,21 @@ export function MediaPreview({
         <button
           type="button"
           data-testid="media-fallback-save"
-          onClick={() => void saveAs()}
-          title={t("common.save")}
-          aria-label={t("common.save")}
+          onClick={() => void (savedPath ? reveal() : saveAs())}
+          title={
+            savedPath
+              ? t("files.savedTo", { path: savedPath })
+              : t("common.save")
+          }
+          aria-label={savedPath ? t("files.reveal") : t("common.save")}
           className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium hover:bg-accent"
         >
-          <Download className="h-3.5 w-3.5" />
-          {t("common.save")}
+          {savedPath ? (
+            <FolderOpen className="h-3.5 w-3.5" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
+          {savedPath ? t("files.reveal") : t("common.save")}
         </button>
       )}
     </div>
