@@ -182,6 +182,7 @@ export function Composer({
   onAttachDirectory,
   onPasteFiles,
   onScreenshot,
+  screenshotAvailable = true,
   placeholder,
   replyTo,
   onCancelReply,
@@ -200,6 +201,7 @@ export function Composer({
   onPasteFiles?: (files: File[]) => Promise<void>;
   /** Capture a screenshot and send it (hideWindow = hide the app first). */
   onScreenshot?: (hideWindow: boolean) => void;
+  screenshotAvailable?: boolean;
   placeholder: string;
   replyTo?: ChatMessage | null;
   onCancelReply?: () => void;
@@ -688,11 +690,16 @@ export function Composer({
               size="icon"
               data-testid="composer-screenshot"
               data-composer-popover=""
+              disabled={!screenshotAvailable}
               className={cn(
                 "h-9 w-9 shrink-0 rounded-md text-muted-foreground",
                 showShot && "bg-accent text-foreground",
               )}
-              title={t("screenshot.trigger")}
+              title={t(
+                screenshotAvailable
+                  ? "screenshot.trigger"
+                  : "screenshot.unavailable",
+              )}
               aria-label={t("screenshot.trigger")}
               aria-expanded={showShot}
               aria-controls="composer-screenshot-panel"

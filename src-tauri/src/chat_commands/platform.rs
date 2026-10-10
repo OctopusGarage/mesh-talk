@@ -190,13 +190,41 @@ fn current_ssid() -> Option<String> {
 /// - `Err(CommandError)` on a real failure (e.g. missing permission) so the UI can prompt.
 ///
 /// Per-platform capture mechanism:
-/// - macOS: shells out to the built-in `screencapture -i` interactive region/window
-///   selector, which blocks until the user selects an area or presses Esc.
+/// - macOS: uses the built-in interactive `screencapture -i` area/window selector.
 ///   NOTE: macOS screen capture requires the "Screen Recording" permission (TCC). If it is
 ///   not granted, the produced PNG is blank/empty; the user must grant it in
 ///   System Settings → Privacy & Security → Screen Recording.
-/// - Windows/Linux: not wired up yet — returns a clear error (cross-platform capture is a
-///   documented follow-up; see `capture_png`).
+/// - Windows: captures the primary display through xcap.
+/// - Linux: requests a display image from the desktop Screenshot portal.
+/// All platforms return the capture to the shared select/annotate/send editor.
+#[tauri::command]
+pub async fn screenshot_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        true // The OS can prompt for Screen Recording permission when needed.
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tokio::task::spawn_blocking(|| {
+            xcap::Monitor::all().is_ok_and(|monitors| !monitors.is_empty())
+        })
+        .await
+        .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotProxy};
+        let Ok(proxy) = ScreenshotProxy::new().await else {
+            return false;
+        };
+        proxy.version() < 3
+            || proxy
+                .available_targets()
+                .await
+                .is_ok_and(|targets| targets.contains(AvailableTargets::Screen))
+    }
+}
+
 #[tauri::command]
 pub async fn capture_screen(
     app: tauri::AppHandle,
@@ -213,7 +241,15 @@ pub async fn capture_screen(
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     }
 
-    let result = capture_png().await;
+    let result = capture_png().await.and_then(|bytes| {
+        if bytes.is_empty() || valid_screenshot_png(&bytes) {
+            Ok(bytes)
+        } else {
+            Err(CommandError::Internal(
+                "screen capture returned an invalid PNG".into(),
+            ))
+        }
+    });
 
     if hide_window {
         if let Some(w) = &window {
@@ -262,8 +298,8 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
         screen_recording::request_access();
         return Err(CommandError::Internal(SCREEN_PERMISSION_ERR.into()));
     }
-    // Interactive selector: `-i` lets the user drag a region or pick a window; Esc cancels.
-    // It writes a PNG to the given path only if the user actually selects something.
+    // The native selector lets the user choose a desktop region. The shared editor starts
+    // with that region selected so annotation follows without a second drag.
     let tmp = std::env::temp_dir().join(format!(
         "mesh-talk-shot-{}.png",
         std::time::SystemTime::now()
@@ -279,11 +315,9 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
             .status()
             .map_err(|e| CommandError::Internal(format!("screencapture failed: {e}")))?;
         if !status.success() {
-            // The user pressed Esc / cancelled — no file, nothing to send.
             return Ok(Vec::new());
         }
         match std::fs::read(&tmp_clone) {
-            // Cancel can also exit 0 without writing the file.
             Err(_) => Ok(Vec::new()),
             Ok(b) => {
                 let _ = std::fs::remove_file(&tmp_clone);
@@ -296,16 +330,108 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
     Ok(bytes)
 }
 
-/// Windows/Linux: screenshot capture isn't wired up yet (the macOS path uses the native
-/// `screencapture` selector). Returning a clear error keeps the build dependency-free — a
-/// cross-platform capture crate (e.g. `xcap`) pulls in extra system libraries (libxcb,
-/// libdbus) that CI's Linux/Windows build steps don't install, so wiring it up (with the
-/// matching CI apt packages + region selection) is a documented follow-up.
-#[cfg(not(target_os = "macos"))]
+/// The native capture backend returns an image; selection and annotation stay in React.
+#[cfg(target_os = "windows")]
 async fn capture_png() -> Result<Vec<u8>, CommandError> {
-    Err(CommandError::Internal(
-        "screenshot capture is currently only supported on macOS".into(),
-    ))
+    tokio::task::spawn_blocking(|| {
+        let monitors = xcap::Monitor::all()
+            .map_err(|e| CommandError::Internal(format!("cannot enumerate displays: {e}")))?;
+        let monitor = monitors
+            .iter()
+            .find(|monitor| monitor.is_primary().unwrap_or(false))
+            .or_else(|| monitors.first())
+            .ok_or_else(|| CommandError::Internal("no display available for screenshot".into()))?;
+        let pixels = monitor
+            .capture_image()
+            .map_err(|e| CommandError::Internal(format!("cannot capture display: {e}")))?;
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .map_err(|e| CommandError::Internal(format!("cannot encode screenshot: {e}")))?;
+        Ok(output.into_inner())
+    })
+    .await
+    .map_err(|e| CommandError::Internal(format!("capture task failed: {e}")))?
+}
+
+#[cfg(target_os = "linux")]
+fn portal_file_path(uri: &str) -> Result<std::path::PathBuf, CommandError> {
+    url::Url::parse(uri)
+        .map_err(|e| CommandError::Internal(format!("invalid screenshot URI: {e}")))?
+        .to_file_path()
+        .map_err(|_| CommandError::Internal("screenshot portal returned a non-local file".into()))
+}
+
+#[cfg(target_os = "linux")]
+async fn capture_png() -> Result<Vec<u8>, CommandError> {
+    use ashpd::desktop::screenshot::{AvailableTargets, Screenshot, ScreenshotProxy};
+    use ashpd::desktop::ResponseError;
+
+    let proxy = ScreenshotProxy::new()
+        .await
+        .map_err(|e| CommandError::Internal(format!("screenshot portal unavailable: {e}")))?;
+    let mut request = Screenshot::request().interactive(true).modal(false);
+    if proxy.version() >= 3 {
+        let targets = proxy
+            .available_targets()
+            .await
+            .map_err(|e| CommandError::Internal(format!("cannot query screenshot targets: {e}")))?;
+        if targets.contains(AvailableTargets::Screen) {
+            request = request.target(AvailableTargets::Screen);
+        } else {
+            return Err(CommandError::Internal(
+                "screenshot portal cannot capture a display".into(),
+            ));
+        }
+    }
+    let response = request.send().await.and_then(|request| request.response());
+    let shot = match response {
+        Ok(shot) => shot,
+        Err(ashpd::Error::Response(ResponseError::Cancelled)) => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(CommandError::Internal(format!(
+                "screenshot portal failed: {e}"
+            )))
+        }
+    };
+    let path = portal_file_path(shot.uri().as_str())?;
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| CommandError::Internal(format!("cannot access portal screenshot: {e}")))?;
+    if metadata.len() > 128 * 1024 * 1024 {
+        return Err(CommandError::Internal("screenshot exceeds 128 MB".into()));
+    }
+    tokio::fs::read(path)
+        .await
+        .map_err(|e| CommandError::Internal(format!("cannot read portal screenshot: {e}")))
+}
+
+fn valid_screenshot_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.get(12..16) == Some(b"IHDR")
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_bytes_must_be_a_png() {
+        assert!(!valid_screenshot_png(&[]));
+        assert!(!valid_screenshot_png(b"not a PNG"));
+        assert!(valid_screenshot_png(&[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+        ]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portal_result_must_be_a_local_file_uri() {
+        assert_eq!(
+            portal_file_path("file:///tmp/a%20b.png").unwrap(),
+            std::path::PathBuf::from("/tmp/a b.png")
+        );
+        assert!(portal_file_path("https://example.com/a.png").is_err());
+    }
 }
 
 /// A fingerprint rendered for human comparison: the same fingerprint grouped into

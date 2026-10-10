@@ -197,6 +197,7 @@ export const chat = {
     invoke<number[]>("capture_screen", { hideWindow }).then(
       (b) => new Uint8Array(b),
     ),
+  screenshotAvailable: () => invoke<boolean>("screenshot_available"),
   search: (query: string) => invoke<SearchHitInfo[]>("search", { query }),
   startLinking: () => invoke<string>("start_linking"),
   stopLinking: () => invoke<void>("stop_linking"),

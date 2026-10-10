@@ -236,7 +236,22 @@
     "now": "Capture screen",
     "hidden": "Hide window & capture",
     "permission": "Screen capture needs the Screen Recording permission. Grant it in System Settings → Privacy & Security → Screen Recording, then restart Mesh-Talk.",
-    "failed": "Couldn't capture the screen: {{error}}"
+    "failed": "Couldn't capture the screen: {{error}}",
+    "editorTitle": "Screenshot",
+    "editorHint": "Drag to select an area, add annotations, then send.",
+    "editorHintSelected": "Annotate the selected area, then send.",
+    "invalidImage": "The captured image could not be opened. Try again.",
+    "unavailable": "Screen capture is unavailable in this desktop session.",
+    "canvasLabel": "Screenshot selection and annotation canvas",
+    "selectRegion": "Select a new area",
+    "pen": "Draw",
+    "rectangle": "Rectangle",
+    "arrow": "Arrow",
+    "text": "Text",
+    "textValue": "Annotation text",
+    "undo": "Undo annotation",
+    "cancel": "Cancel",
+    "send": "Send screenshot"
   },
   "settings": {
     "title": "Settings",

@@ -32,6 +32,8 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md) | Stable AI eval and smoke cases. |
 | [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md) | Screenshot-assisted UI and UX review, browser evidence, and decisions. |
 | [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md) | File and image transfer audit, interaction states, and validation evidence. |
+| [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md) | Screenshot interaction evaluation, test evidence, and native release gate. |
+| [`docs/research/screenshot-platform-support.md`](research/screenshot-platform-support.md) | Windows and Linux screenshot capture feasibility, API limits, and validation plan. |
 | [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md) | Hidden-contact real mesh, three-platform native UI, evidence gates and usability rubric. |
 | [`docs/evals/quality-gates.md`](evals/quality-gates.md) | Scenario-based review, mutation evidence, six-platform artifact verification and controlled release publication. |
 | [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md) | Product workflow evaluation layers, three-platform real backend/native evidence, portable browser boundaries and fail-closed CI gating. |

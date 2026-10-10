@@ -365,6 +365,7 @@ pub fn run_tauri_configured(
             crate::chat_commands::rescan_peers,
             crate::chat_commands::write_temp_file,
             crate::chat_commands::capture_screen,
+            crate::chat_commands::screenshot_available,
             crate::chat_commands::set_badge,
             crate::chat_commands::network_name,
             crate::logger::get_logs_dir,

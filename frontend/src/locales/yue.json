@@ -236,7 +236,22 @@
     "now": "擷取螢幕",
     "hidden": "先隱藏視窗再截圖",
     "permission": "截圖需要「螢幕錄製」權限。請前往「系統設定 → 私隱與保安 → 螢幕錄製」將其開啟，然後重新啟動 Mesh-Talk。",
-    "failed": "無法截圖：{{error}}"
+    "failed": "無法截圖：{{error}}",
+    "editorTitle": "截圖",
+    "editorHint": "拖曳揀選範圍，加上標註後傳送。",
+    "editorHintSelected": "喺揀好嘅範圍加標註，再傳送。",
+    "invalidImage": "開唔到截取嘅圖片，請再試。",
+    "unavailable": "呢個桌面工作階段用唔到截圖功能。",
+    "canvasLabel": "截圖範圍揀選同標註畫布",
+    "selectRegion": "重新揀選範圍",
+    "pen": "畫筆",
+    "rectangle": "矩形",
+    "arrow": "箭嘴",
+    "text": "文字",
+    "textValue": "標註文字",
+    "undo": "復原標註",
+    "cancel": "取消",
+    "send": "傳送截圖"
   },
   "settings": {
     "title": "設定",

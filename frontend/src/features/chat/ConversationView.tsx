@@ -18,8 +18,9 @@ import {
   AvatarEditMenu,
 } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
-import { needsCustomWindowControls } from "@/lib/platform";
+import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
 import { Composer } from "./Composer";
+import { ScreenshotEditor } from "./ScreenshotEditor";
 import {
   messageRowKey,
   useConversationViewport,
@@ -398,6 +399,24 @@ export function ConversationView() {
     id: string;
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [screenshotBytes, setScreenshotBytes] = useState<Uint8Array | null>(
+    null,
+  );
+  const [screenshotAvailable, setScreenshotAvailable] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void chatApi.screenshotAvailable().then(
+      (available) => {
+        if (active) setScreenshotAvailable(available);
+      },
+      () => {
+        if (active) setScreenshotAvailable(false);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
   const myId = useChat((s) => s.myId);
@@ -569,15 +588,17 @@ export function ConversationView() {
     name?: string,
   ) => {
     const lease = captureComposer();
-    if (!lease()) return;
+    if (!lease()) return false;
     try {
       const path = await chatApi.writeTempFile(Array.from(bytes), ext, name);
-      if (!lease()) return;
+      if (!lease()) return false;
       // Image button / paste / screenshot → media intent (inline preview).
       await sendFile(path, true);
+      return true;
     } catch (e) {
       if (lease())
         setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
+      throw e;
     }
   };
 
@@ -907,6 +928,7 @@ export function ConversationView() {
       </Dialog>
 
       <Composer
+        screenshotAvailable={screenshotAvailable}
         key={key}
         initialDraft={drafts.current.get(key) ?? ""}
         onDraftChange={(text) => {
@@ -1029,8 +1051,7 @@ export function ConversationView() {
           try {
             const bytes = await chatApi.captureScreen(hideWindow);
             // Empty bytes = the user cancelled the capture: send nothing.
-            if (current() && bytes.length > 0)
-              await sendImageBytes(bytes, "png");
+            if (current() && bytes.length > 0) setScreenshotBytes(bytes);
           } catch (e) {
             if (!current()) return;
             const msg = errorMessage(e);
@@ -1044,6 +1065,17 @@ export function ConversationView() {
           }
         }}
       />
+      {screenshotBytes && (
+        <ScreenshotEditor
+          bytes={screenshotBytes}
+          initialRegion={isMacOverlay()}
+          onCancel={() => setScreenshotBytes(null)}
+          onSend={async (bytes) => {
+            await sendImageBytes(bytes, "png");
+            setScreenshotBytes(null);
+          }}
+        />
+      )}
     </main>
   );
 }
