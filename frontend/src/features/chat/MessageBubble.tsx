@@ -390,7 +390,7 @@ export function MessageBubble({
                   sticker ? (
                     <img
                       src={sticker.url}
-                      alt={sticker.emoji}
+                      alt={sticker.label}
                       data-testid="message-sticker"
                       draggable={false}
                       className="h-32 w-32 select-none"

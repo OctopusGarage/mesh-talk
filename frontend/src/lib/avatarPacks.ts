@@ -55,7 +55,8 @@ export type AvatarPackName =
   | "nba-teams"
   | "cities"
   | "sports"
-  | "famous";
+  | "famous"
+  | "cat-acrylic";
 
 export function avatarPack(name: AvatarPackName): AvatarPreset[] {
   switch (name) {
@@ -73,6 +74,8 @@ export function avatarPack(name: AvatarPackName): AvatarPreset[] {
       return SPORTS_AVATARS;
     case "famous":
       return FAMOUS_AVATARS;
+    case "cat-acrylic":
+      return CAT_ACRYLIC_AVATARS;
   }
 }
 
@@ -120,3 +123,19 @@ export const FAMOUS_AVATARS: AvatarPreset[] = pack(
     import: "default",
   }),
 );
+
+/** Small acrylic cat portraits — preset PERSONAL avatars. */
+export const CAT_ACRYLIC_AVATARS: AvatarPreset[] = Object.entries(
+  import.meta.glob<string>("../assets/avatars/cat-acrylic/*.webp", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }),
+)
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([path, url]) => ({
+    label: (path.split("/").pop() ?? "")
+      .replace(/\.webp$/, "")
+      .replace("cat-", "Cat "),
+    url,
+  }));

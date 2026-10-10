@@ -262,6 +262,38 @@
     --conversation-surface: 44 34% 96%;
     --composer-surface: 42 35% 99%;
   }
+
+  /* Cat Acrylic — warm paper, blue ink, and soft honey around the paintings. */
+  html[data-palette="cat-acrylic"] {
+    --background: 42 55% 96%;
+    --foreground: 202 40% 16%;
+    --card: 43 65% 99%;
+    --card-foreground: 202 40% 16%;
+    --popover: 43 65% 99%;
+    --popover-foreground: 202 40% 16%;
+    --primary: 193 60% 31%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 39 38% 89%;
+    --secondary-foreground: 202 40% 16%;
+    --muted: 40 35% 92%;
+    --muted-foreground: 202 18% 36%;
+    --accent: 192 38% 87%;
+    --accent-foreground: 202 40% 16%;
+    --border: 38 32% 81%;
+    --input: 38 32% 77%;
+    --ring: 193 60% 31%;
+    --signal: 193 60% 31%;
+    --attention: 30 72% 35%;
+    --verified: 154 56% 34%;
+    --mention: 193 60% 31%;
+    --bubble-own: 193 30% 85%;
+    --bubble-own-foreground: 202 40% 16%;
+    --bubble-own-link: 193 70% 25%;
+    --message-link: 193 70% 25%;
+    --shell-rail: 39 42% 91%;
+    --conversation-surface: 42 55% 96%;
+    --composer-surface: 43 65% 99%;
+  }
 }
 
 /* Brand artwork belongs to the stable conversation frame; navigation and controls stay quiet.
@@ -336,6 +368,13 @@
     background-image:
       linear-gradient(hsl(44 34% 97% / 0.4), hsl(44 34% 97% / 0.52)),
       var(--nature-wallpaper-url);
+  }
+
+  html[data-palette="cat-acrylic"]:not([data-wallpaper="off"])
+    [data-testid="chat-shell"] {
+    background-image:
+      linear-gradient(hsl(42 55% 97% / 0.38), hsl(42 55% 97% / 0.5)),
+      var(--cat-acrylic-wallpaper-url);
   }
 
   html[data-palette]:not([data-wallpaper="off"]) .conversation-log-surface {

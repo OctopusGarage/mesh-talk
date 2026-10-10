@@ -23,6 +23,20 @@ test("personal avatar gallery offers the player pack", async ({ page }) => {
   await expect.poll(async () => tiles.count()).toBe(18); // 18 players
 });
 
+test("personal avatar gallery offers all Cat Acrylic portraits", async ({
+  page,
+}) => {
+  await login(page);
+  await page.getByTestId("open-profile").click();
+  await page.getByRole("button", { name: "Change your photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  await page.getByRole("button", { name: "Cat Acrylic" }).click();
+  const gallery = page.getByTestId("avatar-gallery");
+  await expect(gallery.locator("button")).toHaveCount(50);
+  await gallery.getByRole("button", { name: "Cat 01" }).click();
+  await expect(gallery).toBeHidden();
+});
+
 test("group avatar gallery offers the club pack", async ({ page }) => {
   await login(page);
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();

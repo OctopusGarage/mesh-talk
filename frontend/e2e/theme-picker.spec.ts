@@ -105,6 +105,7 @@ test("theme previews match the canvas, signal, and rail colors they apply", asyn
     "barcelona",
     "messi",
     "nature",
+    "cat-acrylic",
   ]) {
     const preview = page.getByTestId(`theme-preview-${id}`);
     const previewCanvas = await preview.evaluate(
@@ -224,4 +225,35 @@ test("nature theme offers all 50 wallpapers and restores the selected scene", as
         .evaluate((el) => getComputedStyle(el).backgroundImage),
     )
     .toBe("none");
+});
+
+test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async ({
+  page,
+}) => {
+  await login(page);
+  await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await page.getByTestId("theme-cat-acrylic").click();
+  const gallery = page.getByTestId("cat-acrylic-wallpaper-picker");
+  await expect(gallery.getByRole("button")).toHaveCount(45);
+  const selected = gallery.getByRole("button", { name: "Cat 45" });
+  await selected.click();
+  await expect(selected).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => palette(page)).toBe("cat-acrylic");
+  await expect
+    .poll(() =>
+      page
+        .getByTestId("chat-shell")
+        .evaluate((el) => getComputedStyle(el).backgroundImage),
+    )
+    .toContain("cat-45");
+
+  await page.reload();
+  await login(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(page.getByTestId("theme-cat-acrylic")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(selected).toHaveAttribute("aria-pressed", "true");
 });

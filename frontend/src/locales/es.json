@@ -88,6 +88,7 @@
     "tabNbaStars": "Estrellas NBA",
     "tabSportsStars": "Deportistas",
     "tabFamousPeople": "Personas famosas",
+    "tabCatAcrylic": "Gatos acrílicos",
     "tabFootballClubs": "Clubes",
     "tabNbaTeams": "Equipos NBA",
     "tabCities": "Ciudades pintadas"
@@ -219,6 +220,9 @@
     "insertEmoji": "Insertar {{emoji}}",
     "couldntOpenFile": "No se pudo abrir el archivo: {{error}}",
     "stickers": "Stickers",
+    "stickerPacks": "Paquetes de stickers",
+    "stickerPackEmoji": "Emoji",
+    "stickerPackCats": "Stickers de gatos",
     "sendSticker": "Enviar sticker {{emoji}}",
     "cancelReply": "Cancelar respuesta",
     "tools": "Herramientas de mensaje"
@@ -256,6 +260,8 @@
     "theme_barcelona": "Barcelona",
     "theme_messi": "Messi",
     "theme_nature": "Naturaleza",
+    "theme_cat-acrylic": "Gatos acrílicos",
+    "catAcrylicWallpapers": "Elegir una pintura de gatos",
     "natureWallpapers": "Elegir un paisaje",
     "downloadFolder": "Carpeta de descargas",
     "downloadFolderDesc": "Los archivos adjuntos se guardan en Descargas, salvo que elijas otra carpeta.",

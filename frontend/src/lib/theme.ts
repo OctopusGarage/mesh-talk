@@ -3,17 +3,39 @@ import {
   DEFAULT_NATURE_WALLPAPER,
   getNatureWallpaper,
 } from "@/lib/natureWallpapers";
+import {
+  DEFAULT_CAT_ACRYLIC_WALLPAPER,
+  getCatAcrylicWallpaper,
+} from "@/lib/catAcrylicWallpapers";
 
 // Base modes use the default Ink & Signal look. Football and nature themes apply
 // their own palette via `data-palette`; nature also selects a separate wallpaper.
 export type Theme =
-  "light" | "dark" | "oled" | "argentina" | "barcelona" | "messi" | "nature";
+  | "light"
+  | "dark"
+  | "oled"
+  | "argentina"
+  | "barcelona"
+  | "messi"
+  | "nature"
+  | "cat-acrylic";
 
 /** Personal palettes (driven by `html[data-palette=…]`); the rest are base modes. */
-const PALETTES = new Set<Theme>(["argentina", "barcelona", "messi", "nature"]);
+const PALETTES = new Set<Theme>([
+  "argentina",
+  "barcelona",
+  "messi",
+  "nature",
+  "cat-acrylic",
+]);
 
 /** Light palettes build on light defaults; Barcelona remains dark. */
-const LIGHT_PALETTES = new Set<Theme>(["argentina", "messi", "nature"]);
+const LIGHT_PALETTES = new Set<Theme>([
+  "argentina",
+  "messi",
+  "nature",
+  "cat-acrylic",
+]);
 
 /** Every selectable theme, in display order. */
 export const ALL_THEMES: Theme[] = [
@@ -24,11 +46,13 @@ export const ALL_THEMES: Theme[] = [
   "barcelona",
   "messi",
   "nature",
+  "cat-acrylic",
 ];
 
 const KEY = "mesh-talk-theme";
 const WALLPAPER_KEY = "mesh-talk-wallpaper";
 const NATURE_WALLPAPER_KEY = "mesh-talk-nature-wallpaper";
+const CAT_ACRYLIC_WALLPAPER_KEY = "mesh-talk-cat-acrylic-wallpaper";
 let themeTransitionTimer: number | undefined;
 
 function readWallpaper(): boolean {
@@ -60,6 +84,24 @@ function applyNatureWallpaper(id: string) {
   const url = getNatureWallpaper(id).url;
   document.documentElement.style.setProperty(
     "--nature-wallpaper-url",
+    `url("${url}")`,
+  );
+}
+
+function readCatAcrylicWallpaper(): string {
+  if (typeof localStorage === "undefined")
+    return DEFAULT_CAT_ACRYLIC_WALLPAPER.id;
+  return getCatAcrylicWallpaper(
+    localStorage.getItem(CAT_ACRYLIC_WALLPAPER_KEY) ??
+      DEFAULT_CAT_ACRYLIC_WALLPAPER.id,
+  ).id;
+}
+
+function applyCatAcrylicWallpaper(id: string) {
+  if (typeof document === "undefined") return;
+  const url = getCatAcrylicWallpaper(id).url;
+  document.documentElement.style.setProperty(
+    "--cat-acrylic-wallpaper-url",
     `url("${url}")`,
   );
 }
@@ -100,20 +142,24 @@ function apply(t: Theme, animate: boolean) {
 const initial = read();
 const initialWallpaper = readWallpaper();
 const initialNatureWallpaper = readNatureWallpaper();
+const initialCatAcrylicWallpaper = readCatAcrylicWallpaper();
 apply(initial, false); // before first paint — no animation
 applyWallpaper(initialWallpaper);
 applyNatureWallpaper(initialNatureWallpaper);
+applyCatAcrylicWallpaper(initialCatAcrylicWallpaper);
 
 interface ThemeState {
   theme: Theme;
   wallpaperEnabled: boolean;
   natureWallpaperId: string;
+  catAcrylicWallpaperId: string;
   /** Quick light↔dark toggle (the sidebar icon button); from any brand/oled it lands on dark. */
   toggle: () => void;
   /** Set an explicit theme (the Settings picker). */
   set: (t: Theme) => void;
   setWallpaperEnabled: (enabled: boolean) => void;
   setNatureWallpaper: (id: string) => void;
+  setCatAcrylicWallpaper: (id: string) => void;
 }
 
 function persist(t: Theme, animate: boolean) {
@@ -125,6 +171,7 @@ export const useTheme = create<ThemeState>((set, get) => ({
   theme: initial,
   wallpaperEnabled: initialWallpaper,
   natureWallpaperId: initialNatureWallpaper,
+  catAcrylicWallpaperId: initialCatAcrylicWallpaper,
   toggle: () => {
     const next: Theme = get().theme === "light" ? "dark" : "light";
     persist(next, true);
@@ -149,5 +196,14 @@ export const useTheme = create<ThemeState>((set, get) => ({
     applyNatureWallpaper(wallpaper.id);
     persist("nature", true);
     set({ theme: "nature", natureWallpaperId: wallpaper.id });
+  },
+  setCatAcrylicWallpaper: (id: string) => {
+    const wallpaper = getCatAcrylicWallpaper(id);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(CAT_ACRYLIC_WALLPAPER_KEY, wallpaper.id);
+    }
+    applyCatAcrylicWallpaper(wallpaper.id);
+    persist("cat-acrylic", true);
+    set({ theme: "cat-acrylic", catAcrylicWallpaperId: wallpaper.id });
   },
 }));

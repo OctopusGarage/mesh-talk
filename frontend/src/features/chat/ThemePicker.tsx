@@ -3,6 +3,10 @@ import { cn } from "@/lib/utils";
 import { ALL_THEMES, useTheme, type Theme } from "@/lib/theme";
 import { THEME_CREST } from "@/lib/themeCrest";
 import { getNatureWallpaper, NATURE_WALLPAPERS } from "@/lib/natureWallpapers";
+import {
+  CAT_ACRYLIC_WALLPAPERS,
+  getCatAcrylicWallpaper,
+} from "@/lib/catAcrylicWallpapers";
 
 // Preview [canvas, signal, rail] values mirror index.css. The browser test compares
 // all three values with their applied CSS tokens so a palette edit cannot leave stale previews.
@@ -14,6 +18,7 @@ const SWATCH: Record<Theme, [string, string, string]> = {
   barcelona: ["hsl(224 46% 9%)", "hsl(344 72% 52%)", "hsl(226 40% 12%)"],
   messi: ["hsl(208 46% 95%)", "hsl(214 84% 48%)", "hsl(208 40% 92%)"],
   nature: ["hsl(44 34% 96%)", "hsl(154 42% 31%)", "hsl(43 28% 93%)"],
+  "cat-acrylic": ["hsl(42 55% 96%)", "hsl(193 60% 31%)", "hsl(39 42% 91%)"],
 };
 
 /** A gallery of theme cards, each previewing its palette; click to apply (with a crossfade). */
@@ -24,6 +29,9 @@ export function ThemePicker() {
   const natureWallpaperId = useTheme((s) => s.natureWallpaperId);
   const setNatureWallpaper = useTheme((s) => s.setNatureWallpaper);
   const natureWallpaper = getNatureWallpaper(natureWallpaperId);
+  const catAcrylicWallpaperId = useTheme((s) => s.catAcrylicWallpaperId);
+  const setCatAcrylicWallpaper = useTheme((s) => s.setCatAcrylicWallpaper);
+  const catAcrylicWallpaper = getCatAcrylicWallpaper(catAcrylicWallpaperId);
 
   const cards = (themes: Theme[]) =>
     themes.map((id) => {
@@ -51,9 +59,13 @@ export function ThemePicker() {
             className="flex h-12 items-center justify-center overflow-hidden rounded-lg ring-1 ring-inset ring-white/5"
             style={{ background: bg }}
           >
-            {id === "nature" ? (
+            {id === "nature" || id === "cat-acrylic" ? (
               <img
-                src={natureWallpaper.url}
+                src={
+                  id === "nature"
+                    ? natureWallpaper.url
+                    : catAcrylicWallpaper.url
+                }
                 alt=""
                 className="h-full w-full object-cover"
               />
@@ -115,6 +127,42 @@ export function ThemePicker() {
                   className={cn(
                     "overflow-hidden rounded-md border text-left transition-colors hover:border-signal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     natureWallpaperId === wallpaper.id
+                      ? "border-signal ring-2 ring-signal"
+                      : "border-border",
+                  )}
+                >
+                  <img
+                    src={wallpaper.url}
+                    alt=""
+                    loading="lazy"
+                    className="aspect-[3/2] w-full object-cover"
+                  />
+                  <span className="block truncate px-1.5 py-1 text-[11px]">
+                    {wallpaper.title}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {theme === "cat-acrylic" && (
+          <div className="mt-3" data-testid="cat-acrylic-wallpaper-picker">
+            <p className="mb-2 text-xs font-medium text-muted-foreground">
+              {t("settings.catAcrylicWallpapers")}
+            </p>
+            <div className="grid max-h-64 grid-cols-3 gap-2 overflow-y-auto rounded-lg border border-border bg-card p-2 sm:grid-cols-4">
+              {CAT_ACRYLIC_WALLPAPERS.map((wallpaper) => (
+                <button
+                  key={wallpaper.id}
+                  type="button"
+                  data-testid={`cat-acrylic-wallpaper-${wallpaper.id}`}
+                  aria-label={wallpaper.title}
+                  aria-pressed={catAcrylicWallpaperId === wallpaper.id}
+                  title={wallpaper.title}
+                  onClick={() => setCatAcrylicWallpaper(wallpaper.id)}
+                  className={cn(
+                    "overflow-hidden rounded-md border text-left transition-colors hover:border-signal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    catAcrylicWallpaperId === wallpaper.id
                       ? "border-signal ring-2 ring-signal"
                       : "border-border",
                   )}

@@ -101,6 +101,7 @@ for (const theme of [
   "barcelona",
   "messi",
   "nature",
+  "cat-acrylic",
 ]) {
   test(`conversation in ${theme} has no detectable WCAG A/AA violations`, async ({
     page,
