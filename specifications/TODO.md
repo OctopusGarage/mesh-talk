@@ -11,7 +11,7 @@ stack is the entire product and is feature-complete:
   **multi-device** (account identity, device linking, account-addressed fan-out +
   self-sync, history backfill, re-key). ✅
 
-The v0.2.0 desktop implementation adds the native-direction visual system,
+The v0.3.0 desktop implementation adds the native-direction visual system,
 resizable and virtualized conversation navigation, large-roster member and channel
 pickers, consistent focus/touch feedback, optional wallpaper, and lazy avatar-gallery
 thumbnails. These are presentation and interaction changes; the protocol semantics above

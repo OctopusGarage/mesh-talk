@@ -1,6 +1,6 @@
 {
   "name": "mesh-talk-frontend",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Frontend for Mesh-Talk — a serverless, end-to-end-encrypted LAN messenger",
   "type": "module",
   "scripts": {

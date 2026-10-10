@@ -271,5 +271,5 @@ For additional help, please:
 2. Search existing issues on the project's GitHub repository
 3. Create a new issue with detailed information about your problem
 
-Version: 0.2.0
+Version: 0.3.0
 Last Updated: 2026-10-08
