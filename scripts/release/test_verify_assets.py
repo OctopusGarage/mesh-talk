@@ -32,19 +32,21 @@ class ReleaseAssetsTests(unittest.TestCase):
                 cpu = 0x0100000C if platform.endswith("arm64") else 0x01000007
                 entries[app + "MacOS/mesh-talk"] = b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little") + b"\0" * 24
             self.entries[platform] = entries
-            self.write_archive(platform)
-            (self.root / (self.name(platform) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
+            for variant in ("default", "lite"):
+                self.write_archive(platform, variant=variant)
+                (self.root / (self.name(platform, variant) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
         (self.root / "mesh-talk.cdx.json").write_text(json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "mesh-talk"}]}))
 
     @staticmethod
-    def name(platform):
-        return f"mesh-talk_v0.1.5_{platform}.zip"
+    def name(platform, variant="default"):
+        suffix = "_lite" if variant == "lite" else ""
+        return f"mesh-talk_v0.1.5_{platform}{suffix}.zip"
 
-    def write_archive(self, platform, checksums=None):
+    def write_archive(self, platform, checksums=None, variant="default"):
         entries = self.entries[platform]
         if checksums is None:
             checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in entries.items() if name.count("/") == 1)
-        with zipfile.ZipFile(self.root / self.name(platform), "w") as archive:
+        with zipfile.ZipFile(self.root / self.name(platform, variant), "w") as archive:
             for name, data in entries.items():
                 archive.writestr(name, data)
             archive.writestr("release/SHA256SUMS", checksums)
@@ -55,7 +57,12 @@ class ReleaseAssetsTests(unittest.TestCase):
         return verify_directory(self.root, "v0.1.5", "0.1.5", check_installers=False)
 
     def test_complete_release(self):
-        self.assertEqual(len(self.verify()), 6)
+        self.assertEqual(len(self.verify()), 12)
+
+    def test_missing_lite_variant(self):
+        (self.root / self.name("windows_arm64", "lite")).unlink()
+        with self.assertRaisesRegex(ValueError, "asset set"):
+            self.verify()
 
     def test_missing_platform(self):
         (self.root / self.name("windows_x86_64")).unlink()

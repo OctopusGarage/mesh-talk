@@ -227,6 +227,7 @@
     "stickerPacks": "ステッカーパック",
     "stickerPackEmoji": "絵文字",
     "stickerPackCats": "猫ステッカー",
+    "manageStickers": "ステッカーパックを管理",
     "sendSticker": "{{emoji}} ステッカーを送信",
     "cancelReply": "返信をキャンセル",
     "tools": "メッセージツール"
@@ -585,5 +586,27 @@
     "advanced": "詳細設定",
     "identityStep": "このデバイスに保存されるIDを作成します。",
     "discoveryStep": "サインインして、同じローカルネットワーク上の人を探します。"
+  },
+  "packs": {
+    "libraries": "ライブラリ",
+    "importZip": "ZIPをインストール…",
+    "installed": "インストール済み",
+    "marketplace": "マーケット",
+    "install": "インストール",
+    "update": "更新",
+    "replace": "置き換える",
+    "reinstall": "再インストール",
+    "remove": "削除",
+    "browseMarket": "マーケットを見る",
+    "noAvatars": "アバターライブラリがありません。下からインストールしてください。",
+    "noThemes": "個人用テーマがありません。下からインストールしてください。",
+    "marketUnavailable": "現在マーケットを利用できません。",
+    "retry": "再試行",
+    "downloadFailed": "パックをダウンロードできませんでした。",
+    "checksumFailed": "ダウンロードしたパックの検証に失敗しました。",
+    "wrongType": "このZIPは別の種類のライブラリです。",
+    "listingMismatch": "ダウンロードしたパックはマーケットの掲載内容と一致しません。",
+    "rightsPending": "画像の権利を確認中",
+    "idConflict": "別の種類のライブラリがこのパックIDを使用しています。"
   }
 }

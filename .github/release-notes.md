@@ -5,19 +5,26 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.2.2
+### What's new in v0.3.0
 
-- Added per-file transfer progress and guarded download/open actions until received files are ready.
-- Added directory attachments with safe extraction and a shortcut to the downloads folder.
-- Added screenshot capture and annotation on macOS, Windows, and Linux: select a region, annotate,
-  then explicitly send or cancel. Availability depends on the desktop's capture permissions and
-  portal support.
+- Install and remove avatar, theme, and sticker ZIP libraries, including your own packs.
+- Choose the default edition with 14 optional packs preinstalled or the lite edition with
+  no optional packs. Both editions keep light, dark, OLED, and built-in Noto stickers.
+- Browse and install shared packs from the [OctopusGarage Marketplace](https://octopusgarage.github.io/marketplace/),
+  with versioned downloads and SHA-256 verification. The [Pack Studio](https://octopusgarage.github.io/marketplace/studio/)
+  builds and checks packs locally in your browser.
+- Track each file transfer and open downloads when they are ready.
+- Attach directories with safe extraction and a shortcut to the downloads folder.
+- Capture and annotate screenshots on macOS, Windows, and Linux, subject to desktop capture
+  permissions and portal support.
 
 ### Downloads
 
 Pick the zip for your platform. Each zip contains the installer(s) **plus** a `SHA256SUMS`
 file, and ships alongside a cosign signature (`.zip.bundle`) and a SLSA build-provenance
 attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
+
+Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
 
 | Platform | Asset |
 |----------|-------|
@@ -32,6 +39,7 @@ attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
 
 These builds are **not signed by a commercial CA** (free distribution), but every artifact is
 independently verifiable. Replace `<os>_<arch>` with your platform (e.g. `macos_arm64`).
+For lite, append `_lite` after `<os>_<arch>` in the examples.
 
 **1. Checksum** — unzip, then in the extracted folder:
 - macOS / Linux: `shasum -a 256 -c SHA256SUMS`

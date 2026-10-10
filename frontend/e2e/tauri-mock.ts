@@ -24,6 +24,15 @@ import v8ToIstanbul from "v8-to-istanbul";
  */
 export const test = base.extend({
   page: async ({ page }, provide) => {
+    // Keep UI scenarios independent of the public catalog. Marketplace tests
+    // register their own routes later and override this empty default.
+    await page.route("**/marketplace/catalog.json", (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        headers: { "access-control-allow-origin": "*" },
+        body: JSON.stringify({ schemaVersion: 1, packs: [] }),
+      }),
+    );
     await page.addInitScript(() => {
       // E2E-only fixture switch. The URL keeps each adversarial state reloadable without
       // adding test controls to the product UI: ?data=worst|huge|peers-huge|members-huge|empty|offline.
@@ -420,10 +429,10 @@ export const test = base.extend({
 
       if (dataMode === "site") {
         const player = (name: string) =>
-          `/src/assets/avatars/players/${encodeURIComponent(name)}.webp`;
+          `/site-capture/avatars/players/${encodeURIComponent(name)}.webp`;
         avatars[SELF.account] = player("Cesc Fàbregas");
         avatars[CHANNEL.channel_id] =
-          "/src/assets/avatars/clubs/02-barcelona.svg";
+          "/site-capture/avatars/clubs/02-barcelona.svg";
         receivedAvatars[BOB.account_id] = player("Lionel Messi");
         receivedAvatars[CAROL.account_id] = player("Neymar");
       }

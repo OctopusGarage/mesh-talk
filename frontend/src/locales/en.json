@@ -227,6 +227,7 @@
     "stickerPacks": "Sticker packs",
     "stickerPackEmoji": "Emoji",
     "stickerPackCats": "Cat Stickers",
+    "manageStickers": "Manage sticker packs",
     "sendSticker": "Send {{emoji}} sticker",
     "cancelReply": "Cancel reply",
     "tools": "Message tools"
@@ -585,5 +586,27 @@
     "advanced": "Advanced",
     "identityStep": "Create an identity that stays on this device.",
     "discoveryStep": "Sign in, then find people on the same local network."
+  },
+  "packs": {
+    "libraries": "Libraries",
+    "importZip": "Install ZIP…",
+    "installed": "Installed libraries",
+    "marketplace": "Marketplace",
+    "install": "Install",
+    "update": "Update",
+    "replace": "Replace",
+    "reinstall": "Reinstall",
+    "remove": "Remove",
+    "browseMarket": "Browse marketplace",
+    "noAvatars": "No avatar libraries installed. Install one below to choose a preset.",
+    "noThemes": "No personal themes installed. Install one below to personalize the app.",
+    "marketUnavailable": "Marketplace is unavailable right now.",
+    "retry": "Retry",
+    "downloadFailed": "Could not download this pack.",
+    "checksumFailed": "Downloaded pack failed its checksum.",
+    "wrongType": "This ZIP is for a different library type.",
+    "listingMismatch": "The downloaded pack does not match its marketplace listing.",
+    "rightsPending": "Artwork rights pending review",
+    "idConflict": "A different library type already uses this pack ID."
   }
 }

@@ -227,6 +227,7 @@
     "stickerPacks": "貼圖包",
     "stickerPackEmoji": "表情",
     "stickerPackCats": "貓咪貼圖",
+    "manageStickers": "管理貼圖包",
     "sendSticker": "傳送 {{emoji}} 貼圖",
     "cancelReply": "取消回覆",
     "tools": "訊息工具"
@@ -585,5 +586,27 @@
     "advanced": "進階設定",
     "identityStep": "建立一個儲存喺呢部裝置嘅身分。",
     "discoveryStep": "登入之後，搵同一個本地網絡上嘅人。"
+  },
+  "packs": {
+    "libraries": "資源庫",
+    "importZip": "安裝 ZIP…",
+    "installed": "已安裝嘅資源庫",
+    "marketplace": "資源市集",
+    "install": "安裝",
+    "update": "更新",
+    "replace": "取代",
+    "reinstall": "重新安裝",
+    "remove": "移除",
+    "browseMarket": "瀏覽資源市集",
+    "noAvatars": "仲未安裝頭像資源庫。喺下面安裝之後就可以揀頭像。",
+    "noThemes": "仲未安裝個人主題。喺下面安裝啦。",
+    "marketUnavailable": "資源市集暫時用唔到。",
+    "retry": "再試",
+    "downloadFailed": "下載唔到資源包。",
+    "checksumFailed": "下載嘅資源包驗證失敗。",
+    "wrongType": "呢個 ZIP 係另一種資源庫。",
+    "listingMismatch": "下載嘅資源包同市集條目唔一致。",
+    "rightsPending": "圖片使用權等緊審核",
+    "idConflict": "另一種資源庫已經用咗呢個資源包 ID。"
   }
 }

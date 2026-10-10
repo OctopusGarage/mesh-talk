@@ -78,6 +78,29 @@ jobs:
             frontend/test-results/
           retention-days: 7
 
+  lite:
+    name: Lite UI and asset check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Verify lite build has no bundled packs
+        run: npm run build:lite && node ../scripts/release/check-variant-assets.mjs lite
+      - name: Run lite installation flow
+        run: npx playwright test e2e/packs-lite.spec.ts --workers=1 --retries=0
+        env:
+          MESH_TALK_VARIANT: lite
+
   portable:
     name: Portable UI (${{ matrix.os }}, ${{ matrix.browser }})
     strategy:
@@ -161,18 +184,20 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [e2e, portable, firefox-extended]
+    needs: [e2e, lite, portable, firefox-extended]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - name: Require complete selected UI matrices
         env:
           BASELINE: ${{ needs.e2e.result }}
+          LITE: ${{ needs.lite.result }}
           PORTABLE: ${{ needs.portable.result }}
           FIREFOX: ${{ needs.firefox-extended.result }}
           EXTENDED: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended) }}
         run: |
           test "$BASELINE" = success
+          test "$LITE" = success
           test "$PORTABLE" = success
           if [ "$EXTENDED" = true ]; then
             test "$FIREFOX" = success

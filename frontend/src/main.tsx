@@ -5,6 +5,8 @@ import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 // Bundle fonts LOCALLY (offline desktop app, CSP-safe — no CDN). Variable packages.
 import "./lib/theme"; // apply the persisted theme before first paint
+import { useTheme } from "./lib/theme";
+import { usePacks } from "./store/packs";
 import "./lib/i18n"; // initialize i18next before first paint
 import { applyPlatformClass } from "./lib/platform";
 import "./index.css";
@@ -12,6 +14,13 @@ import "./index.css";
 // Mark the root with `data-os="macos"` under the overlay title bar so the sidebar header
 // gets traffic-light clearance (macOS only; no-op elsewhere). Runs before first paint.
 applyPlatformClass();
+void usePacks
+  .getState()
+  .load()
+  .then(() => useTheme.getState().refresh())
+  .catch((error) => {
+    console.error("Could not load customization packs", error);
+  });
 
 // Desktop app: suppress the webview's native right-click context menu (Cut/Copy/Inspect…)
 // in production builds so it doesn't behave like a browser. Kept in dev for debugging.

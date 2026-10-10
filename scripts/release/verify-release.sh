@@ -16,7 +16,10 @@ source_sha="${6:?source commit required}"
 [[ "$source_ref" == refs/tags/* || "$source_ref" == refs/heads/* ]]
 
 for platform in macos_arm64 macos_x86_64 windows_arm64 windows_x86_64 linux_aarch64 linux_x86_64; do
-    archive="$asset_dir/mesh-talk_${tag}_${platform}.zip"
+  for variant in default lite; do
+    suffix=""
+    if [[ "$variant" == lite ]]; then suffix="_lite"; fi
+    archive="$asset_dir/mesh-talk_${tag}_${platform}${suffix}.zip"
     test -f "$archive" && test ! -L "$archive" && test -s "$archive"
     test -f "$archive.bundle" && test ! -L "$archive.bundle" && test -s "$archive.bundle"
     cosign verify-blob --bundle "$archive.bundle" \
@@ -26,6 +29,7 @@ for platform in macos_arm64 macos_x86_64 windows_arm64 windows_x86_64 linux_aarc
         --source-ref "$source_ref" --source-digest "$source_sha" \
         --signer-workflow "$repository/.github/workflows/release.yml" \
         --deny-self-hosted-runners
+  done
 done
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

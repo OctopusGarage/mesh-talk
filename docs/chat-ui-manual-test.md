@@ -1,6 +1,6 @@
 # Chat UI — manual smoke checklist
 
-This is a **supplementary** smoke checklist for the v0.2.0 native-direction desktop UI.
+This is a **supplementary** smoke checklist for the v0.3.0 native-direction desktop UI.
 It is meant for a quick human walk-through of the real app; it is *not* the
 primary regression net:
 

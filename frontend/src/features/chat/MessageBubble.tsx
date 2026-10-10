@@ -38,6 +38,7 @@ import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp } from "@/lib/motion";
 import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
+import { usePacks } from "@/store/packs";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
 import { useFileStatus, useFileAvailability } from "@/store/fileAvailability";
@@ -250,11 +251,14 @@ export function MessageBubble({
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
+  const installedPacks = usePacks((s) => s.packs);
   const mine = m.fromMe;
   const isFile = !!m.file;
   // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
   // the big emoji char when this build doesn't bundle that sticker (version skew).
-  const sticker = m.sticker ? stickerById(m.sticker) : undefined;
+  const sticker = m.sticker
+    ? stickerById(m.sticker, installedPacks)
+    : undefined;
   const isSticker = !!m.sticker;
   const [pickerOpen, setPickerOpen] = useState(false);
   // Copy the message text to the clipboard. File messages have no text → no-op.

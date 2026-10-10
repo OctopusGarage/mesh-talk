@@ -1,11 +1,12 @@
 {
   "name": "mesh-talk-frontend",
-  "version": "0.2.2",
-  "description": "Frontend for Mesh-Talk — a serverless, end-to-end-encrypted LAN messenger",
+  "version": "0.3.0",
+  "description": "Frontend for Mesh-Talk \u2014 a serverless, end-to-end-encrypted LAN messenger",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:lite": "vite build --mode lite",
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -39,6 +40,7 @@
     "@tauri-apps/plugin-shell": "^2.4.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "fflate": "^0.8.3",
     "framer-motion": "^13.5.0",
     "i18next": "^26.4.2",
     "lucide-react": "^1.49.0",

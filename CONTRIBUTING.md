@@ -119,3 +119,7 @@ cleanup, or unload the macOS schedule with
 Set `MT_TARGET_GC_SCAN_ROOT` when installing to scan a different directory.
 The existing `make clean-target-cache` still prunes older artifacts in the
 current checkout during health checks.
+
+## Sharing customization packs
+
+See [`docs/CUSTOMIZATION_PACKS.md`](docs/CUSTOMIZATION_PACKS.md) for the avatar, theme, and sticker ZIP format, build/check commands, and the marketplace submission process. Use the [pack submission issue form](https://github.com/OctopusGarage/marketplace/issues/new?template=pack_submission.yml) to propose a pack; a pull request is needed to publish it in the curated catalog.

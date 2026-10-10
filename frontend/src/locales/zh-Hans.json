@@ -227,6 +227,7 @@
     "stickerPacks": "贴纸包",
     "stickerPackEmoji": "表情",
     "stickerPackCats": "猫咪贴纸",
+    "manageStickers": "管理贴纸包",
     "sendSticker": "发送 {{emoji}} 贴纸",
     "cancelReply": "取消回复",
     "tools": "消息工具"
@@ -585,5 +586,27 @@
     "advanced": "高级设置",
     "identityStep": "创建保存在此设备上的身份。",
     "discoveryStep": "登录后，查找同一本地网络上的其他人。"
+  },
+  "packs": {
+    "libraries": "资源库",
+    "importZip": "安装 ZIP…",
+    "installed": "已安装的资源库",
+    "marketplace": "资源市场",
+    "install": "安装",
+    "update": "更新",
+    "replace": "替换",
+    "reinstall": "重新安装",
+    "remove": "移除",
+    "browseMarket": "浏览资源市场",
+    "noAvatars": "尚未安装头像资源库。请在下方安装后选择头像。",
+    "noThemes": "尚未安装个性主题。请在下方安装。",
+    "marketUnavailable": "资源市场暂时无法访问。",
+    "retry": "重试",
+    "downloadFailed": "无法下载资源包。",
+    "checksumFailed": "下载的资源包未通过校验。",
+    "wrongType": "此 ZIP 属于其他资源库类型。",
+    "listingMismatch": "下载的资源包与市场条目不一致。",
+    "rightsPending": "图片使用权待审核",
+    "idConflict": "其他类型的资源库已使用这个资源包 ID。"
   }
 }

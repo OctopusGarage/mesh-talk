@@ -76,6 +76,7 @@ coverage/
 frontend/playwright-report/
 frontend/test-results/
 frontend/eval-results/
+site/market/studio/
 .worktrees/
 # Personal design/spec work remains local; never commit generated superpowers plans.
 docs/superpowers/
