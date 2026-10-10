@@ -461,7 +461,7 @@ If you're unable to resolve your issue using this guide:
 
 ## Version Information
 
-This troubleshooting guide applies to Mesh-Talk version 0.2.0.
+This troubleshooting guide applies to Mesh-Talk version 0.3.0.
 Last updated: October 8, 2026
 
 For the latest version of this guide, please refer to the official documentation.
