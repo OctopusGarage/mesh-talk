@@ -86,6 +86,9 @@ export default defineConfig(({ command, mode }) => {
     server: {
       port: Number(process.env.MESH_TALK_E2E_PORT ?? 5173),
       strictPort: true,
+      // A dev-server reconnect can reload the page mid-test and erase mock
+      // authentication state. Playwright never edits source while it runs.
+      hmr: process.env.MESH_TALK_E2E === "1" ? false : undefined,
     },
     test: {
       environment: "node",
