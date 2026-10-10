@@ -41,7 +41,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`fuzz/README.md`](../fuzz/README.md) | Current protocol fuzz targets, scope, and local commands. |
 | [`frontend/DESIGN.md`](../frontend/DESIGN.md) | Current native-direction visual system and interaction rules. |
 | [`docs/screenshots/README.md`](screenshots/README.md) | How current demo screenshots are captured and shared with the site. |
-| [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md) | ZIP pack format, local installation, and GitHub Pages marketplace publishing. |
+| [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md) | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing. |
 
 ## Operations & Deployment
 

@@ -95,6 +95,32 @@ function path(value: unknown, sticker = false): string {
   return value;
 }
 
+/** The only image files a creator tool should include when building a ZIP. */
+export function referencedPackImages(manifest: unknown): string[] {
+  const raw = object(manifest);
+  let entries: unknown[] = [];
+  if (
+    (raw.kind === "avatar" && Array.isArray(raw.avatars)) ||
+    (raw.kind === "sticker" && Array.isArray(raw.stickers))
+  ) {
+    entries =
+      raw.kind === "avatar"
+        ? (raw.avatars as unknown[])
+        : (raw.stickers as unknown[]);
+  } else if (raw.kind === "theme") {
+    entries = [raw, ...(Array.isArray(raw.wallpapers) ? raw.wallpapers : [])];
+  }
+  const references = entries.flatMap((item) => {
+    const entry = object(item);
+    return [entry.file, entry.wallpaper, entry.crest].filter(
+      (value) => value !== undefined,
+    );
+  });
+  return [
+    ...new Set(references.map((value) => path(value, raw.kind === "sticker"))),
+  ];
+}
+
 function image(
   files: Record<string, Uint8Array>,
   value: unknown,

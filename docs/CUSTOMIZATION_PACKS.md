@@ -85,6 +85,8 @@ Package the files with a normal ZIP tool, keeping `manifest.json` at the root. O
 
 ### Build and check your ZIP
 
+The [Pack Studio](https://octopusgarage.github.io/mesh-talk/market/studio/) on GitHub Pages can build a ZIP from a source folder, verify an existing ZIP, show a small image preview and checksum, and download a creator toolkit with working avatar, theme, and sticker examples plus the command-line checker. It processes files locally in the browser; no pack is uploaded. The Studio is part of this draft PR and will become available on Pages after publication.
+
 Use any image editor or drawing tool to create the images, then save them in the supported format. From the repository root, install the frontend dependencies once with `cd frontend && npm ci`. With Node 22.6 or newer, run:
 
 ```bash
