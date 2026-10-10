@@ -23,9 +23,17 @@ async function selectRegion(page: import("@playwright/test").Page) {
 test("screenshot selection annotation and explicit send produce cropped PNG", async ({
   page,
 }, testInfo) => {
-  await enterChat(page);
+  await enterChat(page, "tester", "/?data=screenshot-light");
   await openBobDm(page);
   await openCapture(page, "screenshot-now");
+  await expect(page.getByTestId("screenshot-backdrop")).toBeVisible();
+  await expect
+    .poll(() =>
+      page
+        .getByTestId("screenshot-backdrop")
+        .evaluate((image) => (image as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(0);
   // The macOS native selector returns an already selected region; Windows and
   // Linux receive a full-screen capture that requires a drag in the editor.
   if (

@@ -87,6 +87,7 @@ export function ScreenshotEditor({
   const imageRef = useRef<HTMLImageElement | null>(null);
   const dragRef = useRef<{ start: Point; points: Point[] } | null>(null);
   const [ready, setReady] = useState(false);
+  const [backdropUrl, setBackdropUrl] = useState<string | null>(null);
   const [region, setRegion] = useState<Region | null>(null);
   const [marks, setMarks] = useState<Mark[]>([]);
   const [preview, setPreview] = useState<Mark | null>(null);
@@ -129,6 +130,7 @@ export function ScreenshotEditor({
     image.onload = () => {
       if (!active) return;
       imageRef.current = image;
+      setBackdropUrl(url);
       const canvas = canvasRef.current;
       if (canvas) {
         canvas.width = image.naturalWidth;
@@ -146,7 +148,10 @@ export function ScreenshotEditor({
       setReady(true);
     };
     image.onerror = () => {
-      if (active) setFailure(invalidImageMessage.current);
+      if (active) {
+        setBackdropUrl(null);
+        setFailure(invalidImageMessage.current);
+      }
     };
     image.src = url;
     return () => {
@@ -189,6 +194,9 @@ export function ScreenshotEditor({
         canvas.width,
         canvas.height - region.y - region.height,
       );
+      ctx.strokeStyle = "rgba(9, 14, 24, 0.9)";
+      ctx.lineWidth = 4;
+      ctx.strokeRect(region.x, region.y, region.width, region.height);
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 2;
       ctx.setLineDash([8, 5]);
@@ -358,7 +366,19 @@ export function ScreenshotEditor({
           <X size={20} />
         </button>
       </header>
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden p-5">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-slate-900 p-5">
+        {backdropUrl && (
+          <>
+            <img
+              data-testid="screenshot-backdrop"
+              src={backdropUrl}
+              alt=""
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover opacity-75 blur-3xl"
+            />
+            <div className="pointer-events-none absolute inset-0 bg-slate-950/25" />
+          </>
+        )}
         <canvas
           ref={canvasRef}
           data-testid="screenshot-canvas"
@@ -369,7 +389,7 @@ export function ScreenshotEditor({
             dragRef.current = null;
             setPreview(null);
           }}
-          className="max-h-full max-w-full cursor-crosshair touch-none shadow-2xl"
+          className="relative max-h-full max-w-full cursor-crosshair touch-none ring-1 ring-black/50 shadow-[0_20px_50px_rgba(0,0,0,0.45)]"
           aria-label={t("screenshot.canvasLabel")}
         />
       </div>

@@ -735,7 +735,12 @@ export const test = base.extend({
             const context = canvas.getContext("2d");
             if (!context)
               throw new Error("Canvas unavailable in screenshot mock");
-            context.fillStyle = "#1c293d";
+            if (dataMode === "screenshot-light") {
+              const gradient = context.createLinearGradient(0, 0, 0, 180);
+              gradient.addColorStop(0, "#cce3ed");
+              gradient.addColorStop(1, "#91b5a6");
+              context.fillStyle = gradient;
+            } else context.fillStyle = "#1c293d";
             context.fillRect(0, 0, canvas.width, canvas.height);
             const b64 = canvas.toDataURL("image/png").split(",")[1];
             const bin = atob(b64);
