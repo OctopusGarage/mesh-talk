@@ -7,47 +7,68 @@ import { PackIdConflictError, usePacks } from "@/store/packs";
 import { useTheme } from "@/lib/theme";
 import { MAX_PACK_ZIP_BYTES } from "@/lib/pack";
 
-const MARKET_BASE = "https://octopusgarage.github.io/mesh-talk/market/";
+const MARKET_BASE = "https://octopusgarage.github.io/marketplace/";
+const MARKET_ORIGIN = new URL(MARKET_BASE).origin;
 interface CatalogEntry {
   id: string;
   name: string;
-  version?: string;
+  version: string;
   kind: "avatar" | "theme" | "sticker";
   category?: "personal" | "group";
   description: string;
   file: string;
   sha256: string;
+  bytes: number;
+  apps: string[];
+  rightsStatus: "pending" | "documented";
 }
 
 function catalogEntries(value: unknown): CatalogEntry[] {
-  if (!Array.isArray(value)) throw new Error("Invalid marketplace catalog");
-  return value.map((item) => {
-    if (!item || typeof item !== "object")
-      throw new Error("Invalid marketplace entry");
-    const entry = item as Record<string, unknown>;
-    if (
-      typeof entry.id !== "string" ||
-      !/^[a-z0-9][a-z0-9._-]{2,79}$/.test(entry.id) ||
-      typeof entry.name !== "string" ||
-      (entry.version !== undefined &&
-        (typeof entry.version !== "string" ||
-          !/^\d+\.\d+\.\d+$/.test(entry.version))) ||
-      typeof entry.description !== "string" ||
-      (entry.kind !== "avatar" &&
-        entry.kind !== "theme" &&
-        entry.kind !== "sticker") ||
-      (entry.kind === "avatar"
-        ? entry.category !== "personal" && entry.category !== "group"
-        : entry.category !== undefined) ||
-      typeof entry.file !== "string" ||
-      entry.file !== `packs/${entry.id}.zip` ||
-      typeof entry.sha256 !== "string" ||
-      !/^[a-f0-9]{64}$/.test(entry.sha256)
-    ) {
-      throw new Error("Invalid marketplace entry");
-    }
-    return entry as unknown as CatalogEntry;
-  });
+  if (!value || typeof value !== "object")
+    throw new Error("Invalid marketplace catalog");
+  const document = value as Record<string, unknown>;
+  if (document.schemaVersion !== 1 || !Array.isArray(document.packs))
+    throw new Error("Invalid marketplace catalog");
+  const ids = new Set<string>();
+  return document.packs
+    .map((item) => {
+      if (!item || typeof item !== "object")
+        throw new Error("Invalid marketplace entry");
+      const entry = item as Record<string, unknown>;
+      if (
+        typeof entry.id !== "string" ||
+        !/^[a-z0-9][a-z0-9._-]{2,79}$/.test(entry.id) ||
+        typeof entry.name !== "string" ||
+        typeof entry.version !== "string" ||
+        !/^\d+\.\d+\.\d+$/.test(entry.version) ||
+        typeof entry.description !== "string" ||
+        (entry.kind !== "avatar" &&
+          entry.kind !== "theme" &&
+          entry.kind !== "sticker") ||
+        (entry.kind === "avatar"
+          ? entry.category !== "personal" && entry.category !== "group"
+          : entry.category !== undefined) ||
+        typeof entry.file !== "string" ||
+        typeof entry.sha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(entry.sha256) ||
+        entry.file !==
+          `packs/${entry.id}/${entry.version}/${entry.sha256}.zip` ||
+        typeof entry.bytes !== "number" ||
+        !Number.isSafeInteger(entry.bytes) ||
+        entry.bytes < 1 ||
+        entry.bytes > MAX_PACK_ZIP_BYTES ||
+        !Array.isArray(entry.apps) ||
+        !entry.apps.every((app) => typeof app === "string") ||
+        (entry.rightsStatus !== "pending" &&
+          entry.rightsStatus !== "documented") ||
+        ids.has(entry.id as string)
+      ) {
+        throw new Error("Invalid marketplace entry");
+      }
+      ids.add(entry.id as string);
+      return entry as unknown as CatalogEntry;
+    })
+    .filter((entry) => entry.apps.includes("mesh-talk"));
 }
 
 async function digest(bytes: Uint8Array): Promise<string> {
@@ -117,7 +138,8 @@ export function PackManager({
     const controller = new AbortController();
     fetch(`${MARKET_BASE}catalog.json`, { signal: controller.signal })
       .then((response) => {
-        if (!response.ok) throw new Error("Catalog unavailable");
+        if (!response.ok || new URL(response.url).origin !== MARKET_ORIGIN)
+          throw new Error("Catalog unavailable");
         return response.json();
       })
       .then((value) => setCatalog(catalogEntries(value)))
@@ -169,8 +191,11 @@ export function PackManager({
     setBusy(item.id);
     try {
       const response = await fetch(new URL(item.file, MARKET_BASE));
-      if (!response.ok) throw new Error(t("packs.downloadFailed"));
+      if (!response.ok || new URL(response.url).origin !== MARKET_ORIGIN)
+        throw new Error(t("packs.downloadFailed"));
       const bytes = await readDownload(response);
+      if (bytes.byteLength !== item.bytes)
+        throw new Error(t("packs.checksumFailed"));
       if ((await digest(bytes)) !== item.sha256)
         throw new Error(t("packs.checksumFailed"));
       await installBytes(bytes, item);
@@ -270,6 +295,11 @@ export function PackManager({
                   <span className="line-clamp-2 text-muted-foreground">
                     {item.description}
                   </span>
+                  {item.rightsStatus === "pending" && (
+                    <span className="block text-muted-foreground">
+                      {t("packs.rightsPending")}
+                    </span>
+                  )}
                 </span>
                 <button
                   type="button"
@@ -313,7 +343,7 @@ export function PackManager({
         </p>
       )}
       <a
-        href="https://octopusgarage.github.io/mesh-talk/market/"
+        href="https://octopusgarage.github.io/marketplace/"
         target="_blank"
         rel="noreferrer"
         onClick={(event) => {

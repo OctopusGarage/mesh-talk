@@ -122,4 +122,4 @@ current checkout during health checks.
 
 ## Sharing customization packs
 
-See [`docs/CUSTOMIZATION_PACKS.md`](docs/CUSTOMIZATION_PACKS.md) for the avatar, theme, and sticker ZIP format, build/check commands, and the marketplace submission process. Use the [pack submission issue form](https://github.com/OctopusGarage/mesh-talk/issues/new?template=pack_submission.yml) to propose a pack; a pull request is needed to publish it in the curated catalog.
+See [`docs/CUSTOMIZATION_PACKS.md`](docs/CUSTOMIZATION_PACKS.md) for the avatar, theme, and sticker ZIP format, build/check commands, and the marketplace submission process. Use the [pack submission issue form](https://github.com/OctopusGarage/marketplace/issues/new?template=pack_submission.yml) to propose a pack; a pull request is needed to publish it in the curated catalog.

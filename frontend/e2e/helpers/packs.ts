@@ -13,15 +13,9 @@ export async function seedMarketPacks(page: Page, ids: string[]) {
   const bundled =
     process.env.MESH_TALK_VARIANT === "lite"
       ? []
-      : (
-          JSON.parse(
-            readFileSync(resolve("../site/market/catalog.json"), "utf8"),
-          ) as {
-            id: string;
-            kind: string;
-            preinstall?: boolean;
-          }[]
-        ).filter((pack) => pack.preinstall ?? pack.kind !== "sticker");
+      : (JSON.parse(
+          readFileSync(resolve("bundled-packs.lock.json"), "utf8"),
+        ) as { id: string }[]);
   const bundledRequests = bundled.map(({ id }) =>
     page.waitForEvent("requestfinished", {
       predicate: (request) =>

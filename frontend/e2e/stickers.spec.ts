@@ -106,14 +106,14 @@ test("installs a sticker from the verified marketplace catalog", async ({
   ) as { id: string }[];
   const entry = catalog.find((item) => item.id === "noto-favorites");
   if (!entry) throw new Error("Missing sticker catalog entry");
-  await page.route("**/market/catalog.json", (route) =>
+  await page.route("**/marketplace/catalog.json", (route) =>
     route.fulfill({
       contentType: "application/json",
       headers: { "access-control-allow-origin": "*" },
-      body: JSON.stringify([entry]),
+      body: JSON.stringify({ schemaVersion: 1, packs: [entry] }),
     }),
   );
-  await page.route("**/market/packs/noto-favorites.zip", (route) =>
+  await page.route("**/marketplace/packs/noto-favorites/*/*.zip", (route) =>
     route.fulfill({
       contentType: "application/zip",
       headers: { "access-control-allow-origin": "*" },

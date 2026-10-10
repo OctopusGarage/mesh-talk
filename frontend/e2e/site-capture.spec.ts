@@ -36,16 +36,14 @@ test("capture current desktop surfaces for the site and README", async ({
   await mkdir(output, { recursive: true });
   const avatarFiles: Record<string, string> = {
     "players/Cesc Fàbregas.webp": resolve(
-      "../marketplace/assets/avatars/players/Cesc Fàbregas.webp",
+      "e2e/fixtures/site-capture/Cesc Fàbregas.webp",
     ),
     "players/Lionel Messi.webp": resolve(
-      "../marketplace/assets/avatars/players/Lionel Messi.webp",
+      "e2e/fixtures/site-capture/Lionel Messi.webp",
     ),
-    "players/Neymar.webp": resolve(
-      "../marketplace/assets/avatars/players/Neymar.webp",
-    ),
+    "players/Neymar.webp": resolve("e2e/fixtures/site-capture/Neymar.webp"),
     "clubs/02-barcelona.svg": resolve(
-      "../marketplace/assets/avatars/clubs/02-barcelona.svg",
+      "e2e/fixtures/site-capture/02-barcelona.svg",
     ),
   };
   await page.route("**/site-capture/avatars/**", (route) => {
