@@ -710,7 +710,7 @@ export const test = base.extend({
           read_media: () => {
             throw new Error("no stored media for this file");
           },
-          write_temp_file: () => "/tmp/pasted.png",
+          write_temp_file: (a) => `/tmp/${String(a.name || "pasted.png")}`,
           // A deterministic 1x1 PNG (decoded from a fixed base64). Returned as a number[]
           // (the byte array the real command yields) so the screenshot send path flows.
           capture_screen: () => {

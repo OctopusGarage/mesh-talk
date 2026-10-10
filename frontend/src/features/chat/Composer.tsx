@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
 import { STICKERS } from "@/lib/stickerPacks";
 import type { ChatMessage } from "@/store/chat";
+import { clipboardFiles } from "./clipboardFiles";
 
 // A small curated palette — enough for everyday chat without pulling in a heavy emoji library.
 const EMOJIS = [
@@ -165,7 +166,7 @@ export function Composer({
   initialDraft = "",
   onDraftChange,
   onAttach,
-  onPasteImage,
+  onPasteFiles,
   onScreenshot,
   placeholder,
   replyTo,
@@ -180,8 +181,8 @@ export function Composer({
   initialDraft?: string;
   onDraftChange?: (text: string) => void;
   onAttach?: () => void;
-  /** Send an image pasted from the clipboard (bytes + file extension). */
-  onPasteImage?: (bytes: Uint8Array, ext: string, name?: string) => void;
+  /** Send copied files after the user presses Enter or Send. */
+  onPasteFiles?: (files: File[]) => Promise<void>;
   /** Capture a screenshot and send it (hideWindow = hide the app first). */
   onScreenshot?: (hideWindow: boolean) => void;
   placeholder: string;
@@ -203,6 +204,8 @@ export function Composer({
   const motionOK = useMotionOK();
   const [text, setText] = useState(initialDraft);
   const [sendRejected, setSendRejected] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [sendingFiles, setSendingFiles] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const [expressionTab, setExpressionTab] = useState<
     "emoji" | "stickers" | null
@@ -314,6 +317,17 @@ export function Composer({
   };
 
   const send = () => {
+    if (pendingFiles.length) {
+      if (sendingFiles || !onPasteFiles) return;
+      setSendingFiles(true);
+      void onPasteFiles(pendingFiles)
+        .then(
+          () => setPendingFiles([]),
+          () => setSendRejected(true),
+        )
+        .finally(() => setSendingFiles(false));
+      return;
+    }
     const t = text.trim();
     if (!t) return;
     if (!onSend(t)) {
@@ -342,22 +356,16 @@ export function Composer({
     }
   };
 
-  // Paste-to-attach: if the clipboard carries an image (e.g. a screenshot), send it as a
-  // file instead of pasting nothing. Text paste falls through to the default behavior.
+  // Stage copied files (including screenshots) for the normal Enter/Send shortcut.
+  // Desktop clipboards often include the filename as text too; consume that only when
+  // actual file bytes are present. Ordinary text paste still uses the browser default.
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!onPasteImage) return;
-    const item = Array.from(e.clipboardData.items).find((i) =>
-      i.type.startsWith("image/"),
-    );
-    if (!item) return;
-    const file = item.getAsFile();
-    if (!file) return;
+    if (!onPasteFiles) return;
+    const files = clipboardFiles(e.clipboardData);
+    if (!files.length) return;
     e.preventDefault();
-    const ext = (file.type.split("/")[1] || "png").toLowerCase();
-    void file
-      .arrayBuffer()
-      .then((buf) => onPasteImage(new Uint8Array(buf), ext))
-      .catch(() => {});
+    setPendingFiles((current) => [...current, ...files]);
+    setSendRejected(false);
   };
 
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
@@ -395,6 +403,38 @@ export function Composer({
           >
             <X className="h-3.5 w-3.5" />
           </button>
+        </div>
+      )}
+
+      {pendingFiles.length > 0 && (
+        <div
+          data-testid="composer-pending-files"
+          className="mx-auto mb-2 flex max-w-[820px] flex-wrap gap-2"
+        >
+          {pendingFiles.map((file, index) => (
+            <span
+              key={`${file.name}-${index}`}
+              className="flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs"
+            >
+              <Paperclip className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate" title={file.name}>
+                {file.name}
+              </span>
+              <button
+                type="button"
+                disabled={sendingFiles}
+                aria-label={`${t("common.dismiss")} ${file.name}`}
+                onClick={() =>
+                  setPendingFiles((files) =>
+                    files.filter((_, i) => i !== index),
+                  )
+                }
+                className="rounded p-1 hover:bg-accent"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
         </div>
       )}
 
@@ -710,7 +750,9 @@ export function Composer({
             className={cn(
               "h-9 w-9 shrink-0 rounded-md bg-signal text-primary-foreground",
             )}
-            disabled={!text.trim()}
+            disabled={
+              sendingFiles || (!text.trim() && pendingFiles.length === 0)
+            }
             onClick={() => {
               send();
               ref.current?.focus();

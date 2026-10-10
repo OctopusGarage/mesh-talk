@@ -17,23 +17,12 @@ import { Input } from "@/components/ui/input";
 import { IdentityGlyph } from "@/components/identity";
 import { chat, settings as settingsApi } from "@/lib/api";
 import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
+import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { useChat, captureChatOwnership } from "@/store/chat";
 import { TransferBar } from "./TransferBar";
 import { fileGlyph } from "./mediaFile";
-
-/** localStorage key for the persisted file_conv → saved-path map (where downloads landed). */
-const DOWNLOADS_KEY = "mesh-talk-downloads";
-/** Cap on remembered download locations, so the persisted map stays bounded. */
-const SAVED_PATHS_CAP = 500;
-function loadSavedPaths(): Record<string, string> {
-  try {
-    return JSON.parse(localStorage.getItem(DOWNLOADS_KEY) || "{}");
-  } catch {
-    return {};
-  }
-}
 
 export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   const { t } = useTranslation();
@@ -105,26 +94,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   // file_conv) so it survives reload/restart — otherwise a re-save would hit the pruned
   // chunks of an already-downloaded file and error ("file incomplete"). The row stays in
   // the tray until the user dismisses it.
-  const [savedPaths, setSavedPaths] =
-    useState<Record<string, string>>(loadSavedPaths);
-  // Remember (and persist) where a file was saved. Bounded to the most recent
-  // SAVED_PATHS_CAP entries so the persisted map can't grow without limit over the app's
-  // lifetime (it's only a convenience hint for the Reveal action).
-  const remember = (fileConv: string, path: string) =>
-    setSavedPaths((m) => {
-      const next: Record<string, string> = { ...m, [fileConv]: path };
-      const keys = Object.keys(next);
-      if (keys.length > SAVED_PATHS_CAP) {
-        for (const k of keys.slice(0, keys.length - SAVED_PATHS_CAP))
-          delete next[k];
-      }
-      try {
-        localStorage.setItem(DOWNLOADS_KEY, JSON.stringify(next));
-      } catch {
-        // best-effort: a quota/serialization failure just loses the persisted hint.
-      }
-      return next;
-    });
+  const savedPaths = useSavedDownloads();
 
   // Save into the effective download folder with no prompt: the folder the user chose, else
   // the OS Downloads folder (the common default). Only falls back to a Save-as dialog if no
@@ -137,13 +107,13 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       if (!lease.current()) return;
       if (dir) {
         const path = await chat.saveFileToDir(fileConv, dir);
-        if (lease.current()) remember(fileConv, path);
+        if (lease.current()) rememberSavedDownload(fileConv, path);
         return;
       }
       const dest = await save({ defaultPath: name });
       if (lease.current() && typeof dest === "string") {
         await chat.saveFile(fileConv, dest);
-        if (lease.current()) remember(fileConv, dest);
+        if (lease.current()) rememberSavedDownload(fileConv, dest);
       }
     } catch (e) {
       if (lease.current()) handleSaveError(e);
@@ -160,7 +130,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       const dest = await save({ defaultPath });
       if (lease.current() && typeof dest === "string") {
         await chat.saveFile(fileConv, dest);
-        if (lease.current()) remember(fileConv, dest);
+        if (lease.current()) rememberSavedDownload(fileConv, dest);
       }
     } catch (e) {
       if (lease.current()) handleSaveError(e);
@@ -313,6 +283,14 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                         {humanSize(f.size)}
                       </span>
                     </div>
+                    {savedPaths[f.fileConv] && (
+                      <div
+                        className="truncate text-[11px] text-muted-foreground"
+                        title={savedPaths[f.fileConv]}
+                      >
+                        {t("files.savedTo", { path: savedPaths[f.fileConv] })}
+                      </div>
+                    )}
                   </div>
                   {savedPaths[f.fileConv] ? (
                     <Button

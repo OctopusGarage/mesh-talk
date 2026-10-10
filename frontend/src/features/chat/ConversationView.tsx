@@ -972,7 +972,40 @@ export function ConversationView() {
           }
           return accepted;
         }}
-        onPasteImage={sendImageBytes}
+        onPasteFiles={async (files) => {
+          const current = captureComposer();
+          for (const file of files) {
+            if (!current()) return;
+            try {
+              // The temp-file IPC accepts at most 64 MiB. Reject before materializing a
+              // large File as a JSON byte array in the webview.
+              if (file.size > 64 * 1024 * 1024)
+                throw new Error(
+                  "Copied file exceeds 64 MB; use Attach instead",
+                );
+              const ext =
+                file.name.split(".").pop() || file.type.split("/")[1] || "bin";
+              const path = await chatApi.writeTempFile(
+                Array.from(new Uint8Array(await file.arrayBuffer())),
+                ext,
+                file.name || undefined,
+              );
+              if (!current()) return;
+              await sendFile(
+                path,
+                file.type.startsWith("image/") ||
+                  isImage(file.name) ||
+                  isVideo(file.name),
+              );
+            } catch (e) {
+              if (current())
+                setError(
+                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
+                );
+              throw e;
+            }
+          }
+        }}
         onScreenshot={async (hideWindow) => {
           const current = captureComposer();
           if (!current()) return;
