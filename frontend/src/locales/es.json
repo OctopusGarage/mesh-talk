@@ -601,6 +601,7 @@
     "noAvatars": "No hay bibliotecas de avatares instaladas. Instala una para elegir un avatar.",
     "noThemes": "No hay temas personales instalados. Instala uno para personalizar la aplicación.",
     "marketUnavailable": "La tienda no está disponible ahora.",
+    "retry": "Reintentar",
     "downloadFailed": "No se pudo descargar el paquete.",
     "checksumFailed": "El paquete descargado no pasó la verificación.",
     "wrongType": "Este ZIP es de otro tipo de biblioteca.",

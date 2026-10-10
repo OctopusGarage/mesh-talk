@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
-import { ALL_THEMES, useTheme } from "@/lib/theme";
+import { ALL_THEMES, selectedPackWallpaper, useTheme } from "@/lib/theme";
 import { usePacks } from "@/store/packs";
 import { PackManager } from "@/components/PackManager";
 
@@ -14,12 +14,15 @@ export function ThemePicker() {
   const { t } = useTranslation();
   const theme = useTheme((s) => s.theme);
   const setTheme = useTheme((s) => s.set);
-  const wallpaperId = useTheme((s) => s.packWallpaperId);
+  const wallpaperIds = useTheme((s) => s.packWallpaperIds);
   const setWallpaper = useTheme((s) => s.setPackWallpaper);
   const packs = usePacks((s) => s.packs).filter(
     (pack) => pack.kind === "theme",
   );
   const current = packs.find((pack) => pack.id === theme);
+  const selectedWallpaperId = current
+    ? selectedPackWallpaper(current, wallpaperIds)?.id
+    : undefined;
 
   const cards = (
     items: {
@@ -98,10 +101,8 @@ export function ThemePicker() {
                   `hsl(${pack.colors["shell-rail"] ?? pack.colors.secondary ?? "178 17% 13%"})`,
                 ] as [string, string, string],
                 image:
+                  selectedPackWallpaper(pack, wallpaperIds)?.url ??
                   pack.wallpaper ??
-                  pack.wallpapers?.find((item) => item.id === wallpaperId)
-                    ?.url ??
-                  pack.wallpapers?.[0]?.url ??
                   pack.crest,
               })),
             )}
@@ -130,11 +131,11 @@ export function ThemePicker() {
                   type="button"
                   data-testid={`${current.id}-wallpaper-${wallpaper.id}`}
                   aria-label={wallpaper.title}
-                  aria-pressed={wallpaperId === wallpaper.id}
+                  aria-pressed={selectedWallpaperId === wallpaper.id}
                   onClick={() => setWallpaper(wallpaper.id)}
                   className={cn(
                     "overflow-hidden rounded-md border text-left focus-visible:ring-2 focus-visible:ring-ring",
-                    wallpaperId === wallpaper.id
+                    selectedWallpaperId === wallpaper.id
                       ? "border-signal ring-2 ring-signal"
                       : "border-border",
                   )}

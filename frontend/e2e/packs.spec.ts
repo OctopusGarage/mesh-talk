@@ -3,9 +3,43 @@ import { readFileSync } from "node:fs";
 import { strToU8, zipSync } from "fflate";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
+import { revealComposerTools } from "./helpers/session";
+import { seedMarketPacks } from "./helpers/packs";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
 test.skip(process.env.MESH_TALK_VARIANT === "lite", "Default build only");
+
+test("a missing bundled ZIP does not hide an installed sticker pack", async ({
+  page,
+}) => {
+  await page.route("**/builtin-packs/nature.zip", (route) =>
+    route.fulfill({ status: 404, body: "missing" }),
+  );
+  await seedMarketPacks(page, ["noto-favorites"]);
+  await enterChat(page);
+  await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  await expect(
+    page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await page
+    .getByTestId("pack-manager-theme")
+    .getByRole("button", { name: "Remove Barcelona" })
+    .click();
+  await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
+  await page.unroute("**/builtin-packs/nature.zip");
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(page.getByTestId("theme-nature")).toBeVisible();
+  await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
+});
 
 test("default build preinstalls a theme and keeps its removal after restart", async ({
   page,
@@ -99,6 +133,38 @@ test("installs a verified marketplace download", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: "Football stars", exact: true }),
   ).toBeVisible();
+});
+
+test("can retry the marketplace after a temporary catalog failure", async ({
+  page,
+}) => {
+  let requests = 0;
+  let recover = false;
+  const catalog = JSON.parse(
+    readFileSync(resolve("../site/market/catalog.json"), "utf8"),
+  ) as { id: string }[];
+  await page.route("**/market/catalog.json", (route) => {
+    requests += 1;
+    return route.fulfill({
+      status: recover ? 200 : 503,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*" },
+      body: JSON.stringify(catalog.filter((item) => item.id === "players")),
+    });
+  });
+  await enterChat(page);
+  await page.getByTestId("open-profile").click();
+  await page.getByRole("button", { name: "Change your photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  const manager = page.getByTestId("pack-manager-avatar");
+  const retry = manager.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  recover = true;
+  await retry.click();
+  await expect(
+    manager.getByRole("button", { name: "Reinstall", exact: true }),
+  ).toBeVisible();
+  expect(requests).toBeGreaterThanOrEqual(2);
 });
 
 test("keeps the existing marketplace usable before versioned catalog deployment", async ({

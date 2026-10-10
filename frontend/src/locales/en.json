@@ -601,6 +601,7 @@
     "noAvatars": "No avatar libraries installed. Install one below to choose a preset.",
     "noThemes": "No personal themes installed. Install one below to personalize the app.",
     "marketUnavailable": "Marketplace is unavailable right now.",
+    "retry": "Retry",
     "downloadFailed": "Could not download this pack.",
     "checksumFailed": "Downloaded pack failed its checksum.",
     "wrongType": "This ZIP is for a different library type.",

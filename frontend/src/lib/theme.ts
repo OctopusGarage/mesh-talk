@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { installedTheme } from "@/store/packs";
+import type { ThemePack } from "@/lib/pack";
 
 // Base modes use the default Ink & Signal look. Football and nature themes apply
 // their own palette via `data-palette`; nature also selects a separate wallpaper.
@@ -11,7 +12,8 @@ export const ALL_THEMES: Theme[] = ["dark", "light", "oled"];
 
 const KEY = "mesh-talk-theme";
 const WALLPAPER_KEY = "mesh-talk-wallpaper";
-const PACK_WALLPAPER_KEY = "mesh-talk-pack-wallpaper";
+const PACK_WALLPAPERS_KEY = "mesh-talk-pack-wallpapers";
+const LEGACY_PACK_WALLPAPER_KEY = "mesh-talk-pack-wallpaper";
 let themeTransitionTimer: number | undefined;
 
 function readWallpaper(): boolean {
@@ -31,15 +33,51 @@ function read(): Theme {
   return v && /^[a-z0-9][a-z0-9._-]{2,79}$/.test(v) ? v : "dark";
 }
 
-function readPackWallpaper(): string {
-  return typeof localStorage === "undefined"
-    ? ""
-    : (localStorage.getItem(PACK_WALLPAPER_KEY) ?? "");
+function readPackWallpapers(activeTheme: string): Record<string, string> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const saved = localStorage.getItem(PACK_WALLPAPERS_KEY);
+    if (saved) {
+      const parsed: unknown = JSON.parse(saved);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return Object.fromEntries(
+          Object.entries(parsed).filter(
+            ([packId, wallpaperId]) =>
+              /^[a-z0-9][a-z0-9._-]{2,79}$/.test(packId) &&
+              typeof wallpaperId === "string" &&
+              /^[a-z0-9-]+$/.test(wallpaperId),
+          ),
+        );
+      }
+    }
+  } catch {
+    // A damaged preference must not prevent the theme picker from loading.
+  }
+  const legacy = localStorage.getItem(LEGACY_PACK_WALLPAPER_KEY);
+  if (!legacy || ALL_THEMES.includes(activeTheme)) return {};
+  const selections = { [activeTheme]: legacy };
+  localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selections));
+  localStorage.removeItem(LEGACY_PACK_WALLPAPER_KEY);
+  return selections;
+}
+
+export function selectedPackWallpaper(
+  pack: ThemePack,
+  selections: Record<string, string>,
+): NonNullable<ThemePack["wallpapers"]>[number] | undefined {
+  return (
+    pack.wallpapers?.find((item) => item.id === selections[pack.id]) ??
+    pack.wallpapers?.[0]
+  );
 }
 
 let activeTokens: string[] = [];
 
-function apply(t: Theme, animate: boolean) {
+function apply(
+  t: Theme,
+  animate: boolean,
+  wallpaperSelections: Record<string, string>,
+) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
 
@@ -71,11 +109,8 @@ function apply(t: Theme, animate: boolean) {
       root.style.setProperty(`--${token}`, value);
       activeTokens.push(token);
     }
-    const selected = pack.wallpapers?.find(
-      (item) => item.id === readPackWallpaper(),
-    );
     const wallpaper =
-      selected?.url ?? pack.wallpapers?.[0]?.url ?? pack.wallpaper;
+      selectedPackWallpaper(pack, wallpaperSelections)?.url ?? pack.wallpaper;
     if (wallpaper)
       root.style.setProperty("--pack-wallpaper-url", `url("${wallpaper}")`);
     root.setAttribute("data-pack-theme", "");
@@ -93,13 +128,14 @@ function apply(t: Theme, animate: boolean) {
 
 const initial = read();
 const initialWallpaper = readWallpaper();
-apply(initial, false); // before first paint — no animation
+const initialPackWallpapers = readPackWallpapers(initial);
+apply(initial, false, initialPackWallpapers); // before first paint — no animation
 applyWallpaper(initialWallpaper);
 
 interface ThemeState {
   theme: Theme;
   wallpaperEnabled: boolean;
-  packWallpaperId: string;
+  packWallpaperIds: Record<string, string>;
   /** Quick light↔dark toggle (the sidebar icon button); from any brand/oled it lands on dark. */
   toggle: () => void;
   /** Set an explicit theme (the Settings picker). */
@@ -109,22 +145,26 @@ interface ThemeState {
   refresh: () => void;
 }
 
-function persist(t: Theme, animate: boolean) {
+function persist(
+  t: Theme,
+  animate: boolean,
+  wallpaperSelections: Record<string, string>,
+) {
   if (typeof localStorage !== "undefined") localStorage.setItem(KEY, t);
-  apply(t, animate);
+  apply(t, animate, wallpaperSelections);
 }
 
 export const useTheme = create<ThemeState>((set, get) => ({
   theme: initial,
   wallpaperEnabled: initialWallpaper,
-  packWallpaperId: readPackWallpaper(),
+  packWallpaperIds: initialPackWallpapers,
   toggle: () => {
     const next: Theme = get().theme === "light" ? "dark" : "light";
-    persist(next, true);
+    persist(next, true, get().packWallpaperIds);
     set({ theme: next });
   },
   set: (next: Theme) => {
-    persist(next, true);
+    persist(next, true, get().packWallpaperIds);
     set({ theme: next });
   },
   setWallpaperEnabled: (enabled: boolean) => {
@@ -137,18 +177,19 @@ export const useTheme = create<ThemeState>((set, get) => ({
   setPackWallpaper: (id: string) => {
     const pack = installedTheme(get().theme);
     const wallpaper = pack?.wallpapers?.find((item) => item.id === id);
-    if (!wallpaper) return;
+    if (!pack || !wallpaper) return;
+    const selections = { ...get().packWallpaperIds, [pack.id]: wallpaper.id };
     if (typeof localStorage !== "undefined") {
-      localStorage.setItem(PACK_WALLPAPER_KEY, wallpaper.id);
+      localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selections));
     }
-    apply(get().theme, true);
-    set({ packWallpaperId: wallpaper.id });
+    apply(get().theme, true, selections);
+    set({ packWallpaperIds: selections });
   },
   refresh: () => {
     const current = get().theme;
     if (!ALL_THEMES.includes(current) && !installedTheme(current)) {
-      persist("dark", false);
+      persist("dark", false, get().packWallpaperIds);
       set({ theme: "dark" });
-    } else apply(current, false);
+    } else apply(current, false, get().packWallpaperIds);
   },
 }));

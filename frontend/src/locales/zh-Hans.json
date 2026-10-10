@@ -601,6 +601,7 @@
     "noAvatars": "尚未安装头像资源库。请在下方安装后选择头像。",
     "noThemes": "尚未安装个性主题。请在下方安装。",
     "marketUnavailable": "资源市场暂时无法访问。",
+    "retry": "重试",
     "downloadFailed": "无法下载资源包。",
     "checksumFailed": "下载的资源包未通过校验。",
     "wrongType": "此 ZIP 属于其他资源库类型。",
