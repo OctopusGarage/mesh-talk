@@ -123,7 +123,10 @@ test("failed load disables privacy controls and offers retry", async ({
     (window as unknown as { privacyLoadFails: boolean }).privacyLoadFails =
       false;
   });
-  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await page
+    .getByRole("region", { name: "Invisible mode" })
+    .getByRole("button", { name: "Retry", exact: true })
+    .click();
   await expect(page.getByTestId("invisible-switch")).toBeEnabled();
 });
 
