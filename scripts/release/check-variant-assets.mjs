@@ -15,9 +15,16 @@ if (variant === "lite") {
   const catalog = JSON.parse(
     readFileSync(resolve(root, "site/market/catalog.json"), "utf8"),
   );
-  const bundled = catalog.filter(
-    ({ kind, preinstall }) => preinstall ?? kind !== "sticker",
+  const lock = JSON.parse(
+    readFileSync(resolve(root, "frontend/bundled-packs.lock.json"), "utf8"),
   );
+  const bundled = lock.map((pin) => {
+    const entry = catalog.find(({ id }) => id === pin.id);
+    assert.ok(entry, `missing catalog entry: ${pin.id}`);
+    assert.equal(entry.version, pin.version);
+    assert.equal(entry.sha256, pin.sha256);
+    return entry;
+  });
   const expected = bundled.map(({ id }) => `${id}.zip`).sort();
   assert.deepEqual(readdirSync(packDirectory).sort(), expected);
   for (const { id, sha256 } of bundled) {

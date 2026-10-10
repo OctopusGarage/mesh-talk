@@ -1,15 +1,12 @@
 {
   "name": "mesh-talk-frontend",
   "version": "0.3.0",
-  "description": "Frontend for Mesh-Talk — a serverless, end-to-end-encrypted LAN messenger",
+  "description": "Frontend for Mesh-Talk \u2014 a serverless, end-to-end-encrypted LAN messenger",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "build:lite": "vite build --mode lite",
-    "build:studio": "vite build --config vite.studio.config.ts",
-    "pack:build": "node --experimental-strip-types scripts/pack.mjs build",
-    "pack:check": "node --experimental-strip-types scripts/pack.mjs check",
     "preview": "vite preview",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

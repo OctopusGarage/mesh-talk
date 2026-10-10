@@ -4,10 +4,17 @@
     "name": "Football stars",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "personal",
     "description": "Football player portraits",
-    "file": "packs/players.zip",
+    "file": "packs/players/1.0.0/72755fb5ed856964d33435400311b84f00f69760caadd4da0dc5d6fa4026f0eb.zip",
+    "bytes": 195473,
+    "preview": "previews/players.webp",
+    "previewSha256": "7a83a931437c9a13d3780b59a42281984354d5b95db11e6bda3099f156519c72",
     "sha256": "72755fb5ed856964d33435400311b84f00f69760caadd4da0dc5d6fa4026f0eb"
   },
   {
@@ -15,10 +22,17 @@
     "name": "NBA stars",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "personal",
     "description": "Basketball player portraits",
-    "file": "packs/nba-players.zip",
+    "file": "packs/nba-players/1.0.0/ae762965b2f0cdf9dba53023e278bff641a5983f8825c1dac24647a282f0e795.zip",
+    "bytes": 518615,
+    "preview": "previews/nba-players.webp",
+    "previewSha256": "62360ab4f360e45154a2737f27bcef292022883b153dde47b0759cf5df4005ab",
     "sha256": "ae762965b2f0cdf9dba53023e278bff641a5983f8825c1dac24647a282f0e795"
   },
   {
@@ -26,10 +40,17 @@
     "name": "Sports stars",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "personal",
     "description": "Athletes from different sports",
-    "file": "packs/sports.zip",
+    "file": "packs/sports/1.0.0/972cb82fe589fea545e6c6259308c1ee163b78fbead94018df647c5beaa65623.zip",
+    "bytes": 192232,
+    "preview": "previews/sports.jpg",
+    "previewSha256": "8196eb12b800ac76cda92b01779ba20aeccd5cb17ff3e5533efcd5b36b43bf2d",
     "sha256": "972cb82fe589fea545e6c6259308c1ee163b78fbead94018df647c5beaa65623"
   },
   {
@@ -37,10 +58,17 @@
     "name": "Famous people",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "personal",
     "description": "Portraits of notable people",
-    "file": "packs/famous.zip",
+    "file": "packs/famous/1.0.0/0f3dabab98290f7a2a94a715bbe05c444f73920e684677d7099848db6afa0455.zip",
+    "bytes": 316353,
+    "preview": "previews/famous.jpg",
+    "previewSha256": "1c0ac44c50582613974b80c504573611a01850d57bb537673b869a9faf34e74a",
     "sha256": "0f3dabab98290f7a2a94a715bbe05c444f73920e684677d7099848db6afa0455"
   },
   {
@@ -48,10 +76,17 @@
     "name": "Cat Acrylic",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "personal",
     "description": "Fifty acrylic cat portraits",
-    "file": "packs/cat-acrylic-avatars.zip",
+    "file": "packs/cat-acrylic-avatars/1.0.0/ca3a3b6c1586205bd91bae326f1f69ce2814d491d082634665aa235a7c8934a3.zip",
+    "bytes": 389201,
+    "preview": "previews/cat-acrylic-avatars.webp",
+    "previewSha256": "c5dac8d3ec27cebde5a895853a01af88c6bc242111c51aa1ee53c7395914f716",
     "sha256": "ca3a3b6c1586205bd91bae326f1f69ce2814d491d082634665aa235a7c8934a3"
   },
   {
@@ -59,10 +94,17 @@
     "name": "City paintings",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "group",
     "description": "Painted city landmarks",
-    "file": "packs/cities.zip",
+    "file": "packs/cities/1.0.0/375b144cb7ad3392390bac52429c5e54c4e2dc93bc5883ec0a0bfbdedccfd0c1.zip",
+    "bytes": 1385013,
+    "preview": "previews/cities.jpg",
+    "previewSha256": "556009778f58fa253dfab369d266f62329fa365dde1695640eab1d3922d04ac3",
     "sha256": "375b144cb7ad3392390bac52429c5e54c4e2dc93bc5883ec0a0bfbdedccfd0c1"
   },
   {
@@ -70,10 +112,17 @@
     "name": "Football clubs",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "group",
     "description": "Football club emblems",
-    "file": "packs/clubs.zip",
+    "file": "packs/clubs/1.0.0/529ce25f6a4a9735eb22db1df687baff468e87cc68c9db351a1c066fd4ae7838.zip",
+    "bytes": 797471,
+    "preview": "previews/clubs.png",
+    "previewSha256": "fb175dfcd0d6febc5086f4e2772cf19ddd728a7adbf3f42ec3d987480e583d2e",
     "sha256": "529ce25f6a4a9735eb22db1df687baff468e87cc68c9db351a1c066fd4ae7838"
   },
   {
@@ -81,10 +130,17 @@
     "name": "NBA teams",
     "version": "1.0.0",
     "kind": "avatar",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "category": "group",
     "description": "Basketball team emblems",
-    "file": "packs/nba-teams.zip",
+    "file": "packs/nba-teams/1.0.0/9780e16912ba219058171bc1c9b233116dc3cab86f599bc4338ffadf31dc4f36.zip",
+    "bytes": 298339,
+    "preview": "previews/nba-teams.webp",
+    "previewSha256": "2ba224deb505832a193b38e5586cc15f90aba26befca324819ae5f0e1222f3ee",
     "sha256": "9780e16912ba219058171bc1c9b233116dc3cab86f599bc4338ffadf31dc4f36"
   },
   {
@@ -92,9 +148,16 @@
     "name": "Argentina",
     "version": "1.0.0",
     "kind": "theme",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "description": "Sky blue and white with a stadium wallpaper",
-    "file": "packs/argentina.zip",
+    "file": "packs/argentina/1.0.0/1333a1e861bbef692e7e15fabfe69f6c2e0e455b2ab021474c4d23a08e93f16e.zip",
+    "bytes": 119626,
+    "preview": "previews/argentina.webp",
+    "previewSha256": "f64e776f5571e788080895f0a59003d4d133b33c1ec3d878af902e78eb24d00e",
     "sha256": "1333a1e861bbef692e7e15fabfe69f6c2e0e455b2ab021474c4d23a08e93f16e"
   },
   {
@@ -102,9 +165,16 @@
     "name": "Barcelona",
     "version": "1.0.0",
     "kind": "theme",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "description": "Deep blue and garnet with a stadium wallpaper",
-    "file": "packs/barcelona.zip",
+    "file": "packs/barcelona/1.0.0/6972947102cecd14b2e19f7174e0ee724a6c118822c0c9a3884ef84a0a65db31.zip",
+    "bytes": 102468,
+    "preview": "previews/barcelona.webp",
+    "previewSha256": "58684f6ab61bb90cfae364fa5cdd46e78c53d2b60a66583ab4424b845a5a5162",
     "sha256": "6972947102cecd14b2e19f7174e0ee724a6c118822c0c9a3884ef84a0a65db31"
   },
   {
@@ -112,9 +182,16 @@
     "name": "Messi",
     "version": "1.0.0",
     "kind": "theme",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "description": "Bright blue palette with a football wallpaper",
-    "file": "packs/messi.zip",
+    "file": "packs/messi/1.0.0/ae18ad1d5960e436337b6efb7a9265e03312d313228021256fc8cfc13491750f.zip",
+    "bytes": 226264,
+    "preview": "previews/messi.jpg",
+    "previewSha256": "bb7099218b46837b288d8faf340f1ae9cfa7e256a790a2b2960004546212b99d",
     "sha256": "ae18ad1d5960e436337b6efb7a9265e03312d313228021256fc8cfc13491750f"
   },
   {
@@ -122,9 +199,16 @@
     "name": "Nature",
     "version": "1.0.0",
     "kind": "theme",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "description": "Forest green palette and fifty landscape wallpapers",
-    "file": "packs/nature.zip",
+    "file": "packs/nature/1.0.0/aac84e963785b892e411ea1c7603ba04d3770a114caa1b80017f87779256a5d8.zip",
+    "bytes": 4350542,
+    "preview": "previews/nature.webp",
+    "previewSha256": "5defd3796c211050bcf37ae0af446424b12fb8b25169a8e5af4c83de32cdfe61",
     "sha256": "aac84e963785b892e411ea1c7603ba04d3770a114caa1b80017f87779256a5d8"
   },
   {
@@ -132,9 +216,16 @@
     "name": "Cat Acrylic",
     "version": "1.0.0",
     "kind": "theme",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "description": "Warm paper and blue ink with forty-five cat paintings",
-    "file": "packs/cat-acrylic.zip",
+    "file": "packs/cat-acrylic/1.0.0/bca23f634025025b483778a1cb7f1e9be92aeccde862bfc72aa5a88ec205faf9.zip",
+    "bytes": 1121353,
+    "preview": "previews/cat-acrylic.webp",
+    "previewSha256": "bbfa9f97fbb3ce63cd6bfbd307d5708783a172ff9b6cf2a8452f004743cacaa3",
     "sha256": "bca23f634025025b483778a1cb7f1e9be92aeccde862bfc72aa5a88ec205faf9"
   },
   {
@@ -142,9 +233,16 @@
     "name": "Noto Favorites",
     "version": "1.0.0",
     "kind": "sticker",
-    "preinstall": false,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "description": "Eight animated emoji stickers from Google Noto",
-    "file": "packs/noto-favorites.zip",
+    "file": "packs/noto-favorites/1.0.0/f5f2506720fe90d182b294360261c6679517bd5a56becf547a6ee6cb9c2ac1ad.zip",
+    "bytes": 1368221,
+    "preview": "previews/noto-favorites.webp",
+    "previewSha256": "c7724a8a95d3bd47ab2eac53b9c4cd9e82b949b367252924c44ca7c6c35c13fc",
     "sha256": "f5f2506720fe90d182b294360261c6679517bd5a56becf547a6ee6cb9c2ac1ad"
   },
   {
@@ -152,9 +250,16 @@
     "name": "Cat Stickers",
     "version": "1.0.0",
     "kind": "sticker",
-    "preinstall": true,
+    "format": 1,
+    "apps": [
+      "mesh-talk"
+    ],
+    "rightsStatus": "pending",
     "description": "Forty-five expressive cat stickers",
-    "file": "packs/cats.zip",
+    "file": "packs/cats/1.0.0/6ba0f66d1767b59bf8a969d0a341916d62177d1b9f8f4dbe828e3059b6ce8d3d.zip",
+    "bytes": 422519,
+    "preview": "previews/cats.webp",
+    "previewSha256": "91ac2f5159770a83fa2ee6b6791ce211a0b6f06d10bcbb8a15e839d445b0eb55",
     "sha256": "6ba0f66d1767b59bf8a969d0a341916d62177d1b9f8f4dbe828e3059b6ce8d3d"
   }
 ]

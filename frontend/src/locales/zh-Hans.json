@@ -606,6 +606,7 @@
     "checksumFailed": "下载的资源包未通过校验。",
     "wrongType": "此 ZIP 属于其他资源库类型。",
     "listingMismatch": "下载的资源包与市场条目不一致。",
+    "rightsPending": "图片使用权待审核",
     "idConflict": "其他类型的资源库已使用这个资源包 ID。"
   }
 }

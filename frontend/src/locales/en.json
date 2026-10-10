@@ -606,6 +606,7 @@
     "checksumFailed": "Downloaded pack failed its checksum.",
     "wrongType": "This ZIP is for a different library type.",
     "listingMismatch": "The downloaded pack does not match its marketplace listing.",
+    "rightsPending": "Artwork rights pending review",
     "idConflict": "A different library type already uses this pack ID."
   }
 }

@@ -143,14 +143,14 @@ test("installs a verified marketplace download", async ({ page }) => {
   ) as { id: string }[];
   const player = catalog.find((item) => item.id === "players");
   if (!player) throw new Error("Missing players catalog entry");
-  await page.route("**/market/catalog.json", (route) =>
+  await page.route("**/marketplace/catalog.json", (route) =>
     route.fulfill({
       contentType: "application/json",
       headers: { "access-control-allow-origin": "*" },
-      body: JSON.stringify([player]),
+      body: JSON.stringify({ schemaVersion: 1, packs: [player] }),
     }),
   );
-  await page.route("**/market/packs/players.zip", (route) =>
+  await page.route("**/marketplace/packs/players/*/*.zip", (route) =>
     route.fulfill({
       contentType: "application/zip",
       headers: { "access-control-allow-origin": "*" },
@@ -180,13 +180,16 @@ test("can retry the marketplace after a temporary catalog failure", async ({
   const catalog = JSON.parse(
     readFileSync(resolve("../site/market/catalog.json"), "utf8"),
   ) as { id: string }[];
-  await page.route("**/market/catalog.json", (route) => {
+  await page.route("**/marketplace/catalog.json", (route) => {
     requests += 1;
     return route.fulfill({
       status: recover ? 200 : 503,
       contentType: "application/json",
       headers: { "access-control-allow-origin": "*" },
-      body: JSON.stringify(catalog.filter((item) => item.id === "players")),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        packs: catalog.filter((item) => item.id === "players"),
+      }),
     });
   });
   await enterChat(page);
@@ -204,28 +207,22 @@ test("can retry the marketplace after a temporary catalog failure", async ({
   expect(requests).toBeGreaterThanOrEqual(2);
 });
 
-test("keeps the existing marketplace usable before versioned catalog deployment", async ({
+test("rejects a catalog entry with an external download URL", async ({
   page,
 }) => {
   const catalog = JSON.parse(
     readFileSync(resolve("../site/market/catalog.json"), "utf8"),
-  ) as { id: string; version?: string }[];
+  ) as { id: string; file: string }[];
   const player = catalog.find((item) => item.id === "players");
   if (!player) throw new Error("Missing players catalog entry");
-  const legacy = { ...player };
-  delete legacy.version;
-  await page.route("**/market/catalog.json", (route) =>
+  await page.route("**/marketplace/catalog.json", (route) =>
     route.fulfill({
       contentType: "application/json",
       headers: { "access-control-allow-origin": "*" },
-      body: JSON.stringify([legacy]),
-    }),
-  );
-  await page.route("**/market/packs/players.zip", (route) =>
-    route.fulfill({
-      contentType: "application/zip",
-      headers: { "access-control-allow-origin": "*" },
-      body: readFileSync(resolve("../site/market/packs/players.zip")),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        packs: [{ ...player, file: "https://example.com/players.zip" }],
+      }),
     }),
   );
   await enterChat(page);
@@ -233,12 +230,10 @@ test("keeps the existing marketplace usable before versioned catalog deployment"
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   const manager = page.getByTestId("pack-manager-avatar");
-  await expect(manager.getByRole("button", { name: "Replace" })).toBeVisible();
-  await manager.getByRole("button", { name: "Remove Football stars" }).click();
-  await manager.getByRole("button", { name: "Install", exact: true }).click();
+  await expect(manager.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Football", exact: true }),
-  ).toBeVisible();
+    manager.getByRole("button", { name: "Install", exact: true }),
+  ).toHaveCount(0);
 });
 
 test("rejects a marketplace ZIP whose contents differ from its listing", async ({
@@ -249,14 +244,17 @@ test("rejects a marketplace ZIP whose contents differ from its listing", async (
   ) as { id: string; name: string }[];
   const player = catalog.find((item) => item.id === "players");
   if (!player) throw new Error("Missing players catalog entry");
-  await page.route("**/market/catalog.json", (route) =>
+  await page.route("**/marketplace/catalog.json", (route) =>
     route.fulfill({
       contentType: "application/json",
       headers: { "access-control-allow-origin": "*" },
-      body: JSON.stringify([{ ...player, name: "A different listing" }]),
+      body: JSON.stringify({
+        schemaVersion: 1,
+        packs: [{ ...player, name: "A different listing" }],
+      }),
     }),
   );
-  await page.route("**/market/packs/players.zip", (route) =>
+  await page.route("**/marketplace/packs/players/*/*.zip", (route) =>
     route.fulfill({
       contentType: "application/zip",
       headers: { "access-control-allow-origin": "*" },

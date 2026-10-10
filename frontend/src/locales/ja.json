@@ -606,6 +606,7 @@
     "checksumFailed": "ダウンロードしたパックの検証に失敗しました。",
     "wrongType": "このZIPは別の種類のライブラリです。",
     "listingMismatch": "ダウンロードしたパックはマーケットの掲載内容と一致しません。",
+    "rightsPending": "画像の権利を確認中",
     "idConflict": "別の種類のライブラリがこのパックIDを使用しています。"
   }
 }

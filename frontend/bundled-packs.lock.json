@@ -1,0 +1,72 @@
+[
+  {
+    "id": "players",
+    "version": "1.0.0",
+    "sha256": "72755fb5ed856964d33435400311b84f00f69760caadd4da0dc5d6fa4026f0eb"
+  },
+  {
+    "id": "nba-players",
+    "version": "1.0.0",
+    "sha256": "ae762965b2f0cdf9dba53023e278bff641a5983f8825c1dac24647a282f0e795"
+  },
+  {
+    "id": "sports",
+    "version": "1.0.0",
+    "sha256": "972cb82fe589fea545e6c6259308c1ee163b78fbead94018df647c5beaa65623"
+  },
+  {
+    "id": "famous",
+    "version": "1.0.0",
+    "sha256": "0f3dabab98290f7a2a94a715bbe05c444f73920e684677d7099848db6afa0455"
+  },
+  {
+    "id": "cat-acrylic-avatars",
+    "version": "1.0.0",
+    "sha256": "ca3a3b6c1586205bd91bae326f1f69ce2814d491d082634665aa235a7c8934a3"
+  },
+  {
+    "id": "cities",
+    "version": "1.0.0",
+    "sha256": "375b144cb7ad3392390bac52429c5e54c4e2dc93bc5883ec0a0bfbdedccfd0c1"
+  },
+  {
+    "id": "clubs",
+    "version": "1.0.0",
+    "sha256": "529ce25f6a4a9735eb22db1df687baff468e87cc68c9db351a1c066fd4ae7838"
+  },
+  {
+    "id": "nba-teams",
+    "version": "1.0.0",
+    "sha256": "9780e16912ba219058171bc1c9b233116dc3cab86f599bc4338ffadf31dc4f36"
+  },
+  {
+    "id": "argentina",
+    "version": "1.0.0",
+    "sha256": "1333a1e861bbef692e7e15fabfe69f6c2e0e455b2ab021474c4d23a08e93f16e"
+  },
+  {
+    "id": "barcelona",
+    "version": "1.0.0",
+    "sha256": "6972947102cecd14b2e19f7174e0ee724a6c118822c0c9a3884ef84a0a65db31"
+  },
+  {
+    "id": "messi",
+    "version": "1.0.0",
+    "sha256": "ae18ad1d5960e436337b6efb7a9265e03312d313228021256fc8cfc13491750f"
+  },
+  {
+    "id": "nature",
+    "version": "1.0.0",
+    "sha256": "aac84e963785b892e411ea1c7603ba04d3770a114caa1b80017f87779256a5d8"
+  },
+  {
+    "id": "cat-acrylic",
+    "version": "1.0.0",
+    "sha256": "bca23f634025025b483778a1cb7f1e9be92aeccde862bfc72aa5a88ec205faf9"
+  },
+  {
+    "id": "cats",
+    "version": "1.0.0",
+    "sha256": "6ba0f66d1767b59bf8a969d0a341916d62177d1b9f8f4dbe828e3059b6ce8d3d"
+  }
+]

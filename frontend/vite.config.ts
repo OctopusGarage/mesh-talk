@@ -12,16 +12,25 @@ export default defineConfig(({ command, mode }) => {
     readFileSync(new URL("catalog.json", market), "utf8"),
   ) as {
     id: string;
+    version: string;
     kind: "avatar" | "theme" | "sticker";
-    preinstall?: boolean;
-    file: string;
     sha256: string;
   }[];
+  const lock = JSON.parse(
+    readFileSync(new URL("bundled-packs.lock.json", import.meta.url), "utf8"),
+  ) as { id: string; version: string; sha256: string }[];
   const bundled = lite
     ? []
-    : catalog.filter(
-        ({ kind, preinstall }) => preinstall ?? kind !== "sticker",
-      );
+    : lock.map((pin) => {
+        const entry = catalog.find(({ id }) => id === pin.id);
+        if (
+          !entry ||
+          entry.version !== pin.version ||
+          entry.sha256 !== pin.sha256
+        )
+          throw new Error(`Bundled pack lock mismatch: ${pin.id}`);
+        return entry;
+      });
   return {
     define: {
       "import.meta.env.VITE_BUNDLED_PACK_IDS": JSON.stringify(
@@ -40,13 +49,17 @@ export default defineConfig(({ command, mode }) => {
             );
             if (!entry) return next();
             response.setHeader("Content-Type", "application/zip");
-            response.end(readFileSync(new URL(entry.file, market)));
+            response.end(
+              readFileSync(new URL(`packs/${entry.id}.zip`, market)),
+            );
           });
         },
         buildStart() {
           if (command !== "build") return;
           for (const entry of bundled) {
-            const source = readFileSync(new URL(entry.file, market));
+            const source = readFileSync(
+              new URL(`packs/${entry.id}.zip`, market),
+            );
             const hash = createHash("sha256").update(source).digest("hex");
             if (hash !== entry.sha256)
               throw new Error(`Bundled pack checksum mismatch: ${entry.id}`);
