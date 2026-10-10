@@ -41,6 +41,28 @@ test("open the sticker panel and send an animated sticker", async ({
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
 });
 
+test("the default edition installs the cat sticker collection", async ({
+  page,
+}) => {
+  test.skip(process.env.MESH_TALK_VARIANT === "lite", "Default edition only");
+  await enterBobDm(page);
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  await page.getByTestId("sticker-pack-cats").click();
+  const panel = page.getByTestId("sticker-panel");
+  await expect(
+    panel.locator('[data-testid^="sticker-option-pack:cats:"]'),
+  ).toHaveCount(45);
+  const option = page.getByTestId("sticker-option-pack:cats:cat-01-01");
+  await expect(option.locator("img")).toBeVisible();
+  await option.click();
+  await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
+    "alt",
+    "Cool cat",
+  );
+});
+
 test("install and remove a sticker ZIP with fallback for sent messages", async ({
   page,
 }) => {
@@ -54,6 +76,7 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
     .locator('input[type="file"]')
     .setInputFiles(resolve("../site/market/packs/noto-favorites.zip"));
   await expect(manager.getByText("Noto Favorites")).toBeVisible();
+  await page.getByTestId("sticker-pack-noto-favorites").click();
   await page.getByTestId("sticker-option-pack:noto-favorites:1f602").click();
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "src",
@@ -104,6 +127,7 @@ test("installs a sticker from the verified marketplace catalog", async ({
   await page.getByText("Manage sticker packs").click();
   const manager = page.getByTestId("pack-manager-sticker");
   await manager.getByRole("button", { name: "Install", exact: true }).click();
+  await page.getByTestId("sticker-pack-noto-favorites").click();
   await expect(
     page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
   ).toBeVisible();

@@ -33,7 +33,7 @@ test("personal avatar gallery offers all Cat Acrylic portraits", async ({
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();
-  await page.getByRole("button", { name: "Cat Acrylic" }).click();
+  await page.getByRole("button", { name: "Cat Acrylic", exact: true }).click();
   const gallery = page.getByTestId("avatar-gallery");
   await expect(gallery.locator("button")).toHaveCount(50);
   await gallery.getByRole("button", { name: "Cat 01" }).click();

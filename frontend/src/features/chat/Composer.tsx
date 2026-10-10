@@ -221,6 +221,9 @@ export function Composer({
     () => [...STICKERS, ...installedStickers(installedPacks)],
     [installedPacks],
   );
+  const stickerLibraries = installedPacks.filter(
+    (pack) => pack.kind === "sticker",
+  );
   const motionOK = useMotionOK();
   const [text, setText] = useState(initialDraft);
   const [sendRejected, setSendRejected] = useState(false);
@@ -230,6 +233,12 @@ export function Composer({
   const [expressionTab, setExpressionTab] = useState<
     "emoji" | "stickers" | null
   >(null);
+  const [stickerPack, setStickerPack] = useState("noto");
+  const activeStickerPack = stickerLibraries.some(
+    (pack) => pack.id === stickerPack,
+  )
+    ? stickerPack
+    : "noto";
   const [showTools, setShowTools] = useState(false);
   const [panelPointerMotion, setPanelPointerMotion] = useState(false);
   const panelMotion = { pointer: panelPointerMotion, reduced: !motionOK };
@@ -583,30 +592,67 @@ export function Composer({
                   data-testid="sticker-panel"
                   className="overflow-y-auto p-2"
                 >
-                  <div className="grid grid-cols-5 gap-1">
-                    {stickers.map((s) => (
+                  <div
+                    className="mb-2 flex gap-1 overflow-x-auto border-b pb-2"
+                    aria-label={t("composer.stickerPacks")}
+                  >
+                    {[
+                      { id: "noto", name: t("composer.stickerPackEmoji") },
+                      ...stickerLibraries.map((pack) => ({
+                        id: pack.id,
+                        name:
+                          pack.id === "cats" && pack.name === "Cat Stickers"
+                            ? t("composer.stickerPackCats")
+                            : pack.name,
+                      })),
+                    ].map((pack) => (
                       <button
-                        key={s.id}
+                        key={pack.id}
                         type="button"
-                        data-testid={`sticker-option-${s.id}`}
-                        onClick={() => {
-                          onSendSticker(s.id, s.emoji);
-                          setPanelPointerMotion(false);
-                          setExpressionTab(null);
-                        }}
-                        className="rounded-lg p-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        title={s.label ?? s.emoji}
-                        aria-label={t("composer.sendSticker", {
-                          emoji: s.label ?? s.emoji,
-                        })}
+                        data-testid={`sticker-pack-${pack.id}`}
+                        aria-pressed={activeStickerPack === pack.id}
+                        onClick={() => setStickerPack(pack.id)}
+                        className={cn(
+                          "shrink-0 rounded-md px-2 py-1.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          activeStickerPack === pack.id
+                            ? "bg-accent text-foreground"
+                            : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
+                        )}
                       >
-                        <StickerThumb
-                          src={s.url}
-                          alt={s.label ?? s.emoji}
-                          fallback={s.emoji}
-                        />
+                        {pack.name}
                       </button>
                     ))}
+                  </div>
+                  <div className="grid grid-cols-5 gap-1">
+                    {stickers
+                      .filter((sticker) =>
+                        activeStickerPack === "noto"
+                          ? !sticker.id.startsWith("pack:")
+                          : sticker.id.startsWith(`pack:${activeStickerPack}:`),
+                      )
+                      .map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          data-testid={`sticker-option-${s.id}`}
+                          onClick={() => {
+                            onSendSticker(s.id, s.emoji);
+                            setPanelPointerMotion(false);
+                            setExpressionTab(null);
+                          }}
+                          className="rounded-lg p-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          title={s.label ?? s.emoji}
+                          aria-label={t("composer.sendSticker", {
+                            emoji: s.label ?? s.emoji,
+                          })}
+                        >
+                          <StickerThumb
+                            src={s.url}
+                            alt={s.label ?? s.emoji}
+                            fallback={s.emoji}
+                          />
+                        </button>
+                      ))}
                   </div>
                   <details className="mt-2 border-t border-border pt-2 text-xs">
                     <summary className="cursor-pointer text-primary">

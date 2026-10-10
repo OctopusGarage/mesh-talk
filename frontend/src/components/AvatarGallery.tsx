@@ -20,6 +20,10 @@ const bundledLabels: Record<string, { name: string; key: string }> = {
   "nba-players": { name: "NBA stars", key: "avatar.tabNbaStars" },
   sports: { name: "Sports stars", key: "avatar.tabSportsStars" },
   famous: { name: "Famous people", key: "avatar.tabFamousPeople" },
+  "cat-acrylic-avatars": {
+    name: "Cat Acrylic",
+    key: "avatar.tabCatAcrylic",
+  },
   cities: { name: "City paintings", key: "avatar.tabCities" },
   clubs: { name: "Football clubs", key: "avatar.tabFootballClubs" },
   "nba-teams": { name: "NBA teams", key: "avatar.tabNbaTeams" },

@@ -21,6 +21,7 @@ test("a missing bundled ZIP does not hide an installed sticker pack", async ({
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
+  await page.getByTestId("sticker-pack-noto-favorites").click();
   await expect(
     page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
   ).toBeVisible();

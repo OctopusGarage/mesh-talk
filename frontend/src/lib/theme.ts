@@ -15,6 +15,7 @@ const WALLPAPER_KEY = "mesh-talk-wallpaper";
 const PACK_WALLPAPERS_KEY = "mesh-talk-pack-wallpapers";
 const LEGACY_PACK_WALLPAPER_KEY = "mesh-talk-pack-wallpaper";
 const LEGACY_NATURE_WALLPAPER_KEY = "mesh-talk-nature-wallpaper";
+const LEGACY_CAT_ACRYLIC_WALLPAPER_KEY = "mesh-talk-cat-acrylic-wallpaper";
 let themeTransitionTimer: number | undefined;
 
 function readWallpaper(): boolean {
@@ -57,6 +58,9 @@ function readPackWallpapers(activeTheme: string): Record<string, string> {
   }
   const legacy = localStorage.getItem(LEGACY_PACK_WALLPAPER_KEY);
   const legacyNature = localStorage.getItem(LEGACY_NATURE_WALLPAPER_KEY);
+  const legacyCatAcrylic = localStorage.getItem(
+    LEGACY_CAT_ACRYLIC_WALLPAPER_KEY,
+  );
   let migrated = false;
   if (
     legacy &&
@@ -75,6 +79,13 @@ function readPackWallpapers(activeTheme: string): Record<string, string> {
       migrated = true;
     }
     localStorage.removeItem(LEGACY_NATURE_WALLPAPER_KEY);
+  }
+  if (legacyCatAcrylic && /^[a-z0-9-]+$/.test(legacyCatAcrylic)) {
+    if (!selections["cat-acrylic"]) {
+      selections["cat-acrylic"] = legacyCatAcrylic;
+      migrated = true;
+    }
+    localStorage.removeItem(LEGACY_CAT_ACRYLIC_WALLPAPER_KEY);
   }
   if (migrated)
     localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selections));

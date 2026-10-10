@@ -19,8 +19,9 @@ export async function seedMarketPacks(page: Page, ids: string[]) {
           ) as {
             id: string;
             kind: string;
+            preinstall?: boolean;
           }[]
-        ).filter((pack) => pack.kind !== "sticker");
+        ).filter((pack) => pack.preinstall ?? pack.kind !== "sticker");
   const bundledRequests = bundled.map(({ id }) =>
     page.waitForEvent("requestfinished", {
       predicate: (request) =>

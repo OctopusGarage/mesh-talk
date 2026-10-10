@@ -249,12 +249,14 @@ test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async 
   await expect(selected).toHaveAttribute("aria-pressed", "true");
   await expect.poll(() => palette(page)).toBe("cat-acrylic");
   await expect
-    .poll(() =>
-      page
+    .poll(async () => {
+      const image = await selected.locator("img").getAttribute("src");
+      const background = await page
         .getByTestId("chat-shell")
-        .evaluate((el) => getComputedStyle(el).backgroundImage),
-    )
-    .toContain("cat-45");
+        .evaluate((el) => getComputedStyle(el).backgroundImage);
+      return Boolean(image && background.includes(image));
+    })
+    .toBe(true);
 
   await page.reload();
   await login(page);
@@ -264,6 +266,24 @@ test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async 
     "true",
   );
   await expect(selected).toHaveAttribute("aria-pressed", "true");
+});
+
+test("upgrading preserves the old Cat Acrylic wallpaper choice", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("mesh-talk-theme", "cat-acrylic");
+    localStorage.setItem("mesh-talk-cat-acrylic-wallpaper", "cat-45");
+  });
+  await login(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(page.getByTestId("theme-cat-acrylic")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    page.getByTestId("cat-acrylic-wallpaper-cat-45"),
+  ).toHaveAttribute("aria-pressed", "true");
 });
 
 test("upgrading preserves the old Nature wallpaper choice", async ({

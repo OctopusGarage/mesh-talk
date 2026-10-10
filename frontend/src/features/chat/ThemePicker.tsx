@@ -118,11 +118,19 @@ export function ThemePicker() {
             data-testid={
               current.id === "nature"
                 ? "nature-wallpaper-picker"
-                : "pack-wallpaper-picker"
+                : current.id === "cat-acrylic"
+                  ? "cat-acrylic-wallpaper-picker"
+                  : "pack-wallpaper-picker"
             }
           >
             <p className="mb-2 text-xs font-medium text-muted-foreground">
-              {t("settings.natureWallpapers")}
+              {t(
+                current.id === "nature"
+                  ? "settings.natureWallpapers"
+                  : current.id === "cat-acrylic"
+                    ? "settings.catAcrylicWallpapers"
+                    : "settings.wallpaper",
+              )}
             </p>
             <div className="grid max-h-64 grid-cols-3 gap-2 overflow-y-auto rounded-lg border border-border bg-card p-2 sm:grid-cols-4">
               {current.wallpapers.map((wallpaper) => (
