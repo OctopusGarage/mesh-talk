@@ -420,10 +420,10 @@ export const test = base.extend({
 
       if (dataMode === "site") {
         const player = (name: string) =>
-          `/src/assets/avatars/players/${encodeURIComponent(name)}.webp`;
+          `/site-capture/avatars/players/${encodeURIComponent(name)}.webp`;
         avatars[SELF.account] = player("Cesc Fàbregas");
         avatars[CHANNEL.channel_id] =
-          "/src/assets/avatars/clubs/02-barcelona.svg";
+          "/site-capture/avatars/clubs/02-barcelona.svg";
         receivedAvatars[BOB.account_id] = player("Lionel Messi");
         receivedAvatars[CAROL.account_id] = player("Neymar");
       }
