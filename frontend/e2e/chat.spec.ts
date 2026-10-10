@@ -186,9 +186,22 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(
       page.getByRole("log").getByText("latest-after-long-message"),
     ).toBeInViewport();
+    await expect
+      .poll(() =>
+        log.evaluate((element) => element.scrollHeight - element.clientHeight),
+      )
+      .toBeGreaterThan(48);
     await log.evaluate((element) => {
       element.scrollTop = 0;
     });
+    await expect
+      .poll(() =>
+        log.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      )
+      .toBeGreaterThan(48);
     const jump = page.getByRole("button", { name: "Jump to latest messages" });
     await expect(jump).toBeVisible();
     await jump.click();
