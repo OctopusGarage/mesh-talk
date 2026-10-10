@@ -54,6 +54,7 @@ export default defineConfig({
   ],
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    env: { MESH_TALK_E2E: "1" },
     url: baseURL,
     reuseExistingServer: false,
     timeout: 120_000,
