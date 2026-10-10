@@ -1,13 +1,10 @@
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { mkdir } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test, expect } from "./tauri-mock";
 import { seedMarketPacks } from "./helpers/packs";
-import {
-  enterChat,
-  BOB,
-  CHANNEL,
-} from "./helpers/session";
+import { enterChat, BOB, CHANNEL } from "./helpers/session";
 
 test.use({
   viewport: { width: 1280, height: 800 },
@@ -35,9 +32,44 @@ async function waitForThemePaint(page: import("@playwright/test").Page) {
 test("capture current desktop surfaces for the site and README", async ({
   page,
 }) => {
+  test.setTimeout(90_000);
   await mkdir(output, { recursive: true });
-  await seedMarketPacks(page, ["messi", "barcelona", "argentina", "players", "clubs"]);
-  await page.addInitScript(() => localStorage.setItem("mesh-talk-theme", "messi"));
+  const avatarFiles: Record<string, string> = {
+    "players/Cesc Fàbregas.webp": resolve(
+      "../marketplace/assets/avatars/players/Cesc Fàbregas.webp",
+    ),
+    "players/Lionel Messi.webp": resolve(
+      "../marketplace/assets/avatars/players/Lionel Messi.webp",
+    ),
+    "players/Neymar.webp": resolve(
+      "../marketplace/assets/avatars/players/Neymar.webp",
+    ),
+    "clubs/02-barcelona.svg": resolve(
+      "../marketplace/assets/avatars/clubs/02-barcelona.svg",
+    ),
+  };
+  await page.route("**/site-capture/avatars/**", (route) => {
+    const pathname = decodeURIComponent(
+      new URL(route.request().url()).pathname,
+    );
+    const name = pathname.slice("/site-capture/avatars/".length);
+    const file = avatarFiles[name];
+    if (!file) return route.fulfill({ status: 404, body: "Unknown avatar" });
+    return route.fulfill({
+      body: readFileSync(file),
+      contentType: file.endsWith(".svg") ? "image/svg+xml" : "image/webp",
+    });
+  });
+  await seedMarketPacks(page, [
+    "messi",
+    "barcelona",
+    "argentina",
+    "players",
+    "clubs",
+  ]);
+  await page.addInitScript(() =>
+    localStorage.setItem("mesh-talk-theme", "messi"),
+  );
   await enterChat(page, "Cesc Fàbregas", "/?data=site");
 
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
@@ -53,6 +85,17 @@ test("capture current desktop surfaces for the site and README", async ({
       [...document.images].map((img) => img.decode().catch(() => {})),
     );
   });
+  const avatarImages = await page.evaluate(() => {
+    const images = [...document.images].filter((image) =>
+      image.src.includes("/avatars/"),
+    );
+    return {
+      count: images.length,
+      broken: images.filter((image) => image.naturalWidth === 0).length,
+    };
+  });
+  expect(avatarImages.count).toBeGreaterThan(0);
+  expect(avatarImages.broken).toBe(0);
   await page.screenshot({ path: resolve(output, "hero-messi.png") });
 
   await page.getByTestId("sidebar-overflow").click();
@@ -67,9 +110,7 @@ test("capture current desktop surfaces for the site and README", async ({
     await waitForThemePaint(page);
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
-    await page
-      .getByTestId("sidebar-nav-settings")
-      .evaluate((button) => (button as HTMLElement).blur());
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
     await page.mouse.move(1000, 110);
     await page.screenshot({ path: resolve(output, `hero-${theme}.png`) });
   }
