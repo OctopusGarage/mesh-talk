@@ -605,6 +605,7 @@
     "downloadFailed": "No se pudo descargar el paquete.",
     "checksumFailed": "El paquete descargado no pasó la verificación.",
     "wrongType": "Este ZIP es de otro tipo de biblioteca.",
-    "listingMismatch": "El paquete descargado no coincide con su ficha en la tienda."
+    "listingMismatch": "El paquete descargado no coincide con su ficha en la tienda.",
+    "idConflict": "Otro tipo de biblioteca ya usa este ID de paquete."
   }
 }

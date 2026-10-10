@@ -15,6 +15,16 @@ import type { AvatarPack } from "@/lib/pack";
 
 export type AvatarGalleryCategory = "personal" | "group";
 
+const bundledLabels: Record<string, { name: string; key: string }> = {
+  players: { name: "Football stars", key: "avatar.tabFootballStars" },
+  "nba-players": { name: "NBA stars", key: "avatar.tabNbaStars" },
+  sports: { name: "Sports stars", key: "avatar.tabSportsStars" },
+  famous: { name: "Famous people", key: "avatar.tabFamousPeople" },
+  cities: { name: "City paintings", key: "avatar.tabCities" },
+  clubs: { name: "Football clubs", key: "avatar.tabFootballClubs" },
+  "nba-teams": { name: "NBA teams", key: "avatar.tabNbaTeams" },
+};
+
 /**
  * A grid of installed avatar libraries with tab navigation for people or channels.
  *
@@ -84,7 +94,9 @@ export function AvatarGallery({
                     : "text-muted-foreground hover:bg-popover/70 hover:text-foreground"
                 }`}
               >
-                {tab.name}
+                {bundledLabels[tab.id]?.name === tab.name
+                  ? t(bundledLabels[tab.id].key)
+                  : tab.name}
               </button>
             ))}
           </nav>

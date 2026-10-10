@@ -3,7 +3,7 @@ import { Download, FolderOpen, Trash2 } from "lucide-react";
 import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
-import { usePacks } from "@/store/packs";
+import { PackIdConflictError, usePacks } from "@/store/packs";
 import { useTheme } from "@/lib/theme";
 import { MAX_PACK_ZIP_BYTES } from "@/lib/pack";
 
@@ -106,6 +106,12 @@ export function PackManager({
   const [catalogRetry, setCatalogRetry] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const errorMessage = (cause: unknown) =>
+    cause instanceof PackIdConflictError
+      ? t("packs.idConflict")
+      : cause instanceof Error
+        ? cause.message
+        : String(cause);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -152,7 +158,7 @@ export function PackManager({
         throw new Error("Pack ZIP is too large");
       await installBytes(new Uint8Array(await file.arrayBuffer()));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     } finally {
       setBusy(null);
       if (fileRef.current) fileRef.current.value = "";
@@ -169,7 +175,7 @@ export function PackManager({
         throw new Error(t("packs.checksumFailed"));
       await installBytes(bytes, item);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     } finally {
       setBusy(null);
     }

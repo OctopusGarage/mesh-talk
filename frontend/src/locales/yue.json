@@ -605,6 +605,7 @@
     "downloadFailed": "下載唔到資源包。",
     "checksumFailed": "下載嘅資源包驗證失敗。",
     "wrongType": "呢個 ZIP 係另一種資源庫。",
-    "listingMismatch": "下載嘅資源包同市集條目唔一致。"
+    "listingMismatch": "下載嘅資源包同市集條目唔一致。",
+    "idConflict": "另一種資源庫已經用咗呢個資源包 ID。"
   }
 }

@@ -32,6 +32,7 @@ export interface StickerPack extends PackBase {
 export type CustomizationPack = AvatarPack | ThemePack | StickerPack;
 
 export const MAX_PACK_ZIP_BYTES = 12 * 1024 * 1024;
+const MAX_PACK_ENTRIES = 256;
 const MAX_UNPACKED = 24 * 1024 * 1024;
 const MAX_IMAGE = 3 * 1024 * 1024;
 const TOKEN_NAMES = new Set([
@@ -164,6 +165,7 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
     filter: (entry) => {
       if (seen.has(entry.name)) throw new Error("Duplicate ZIP entry");
       seen.add(entry.name);
+      if (seen.size > MAX_PACK_ENTRIES) throw new Error("Too many ZIP entries");
       total += entry.originalSize;
       if (
         entry.name.startsWith("/") ||

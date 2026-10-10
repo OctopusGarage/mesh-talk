@@ -605,6 +605,7 @@
     "downloadFailed": "Could not download this pack.",
     "checksumFailed": "Downloaded pack failed its checksum.",
     "wrongType": "This ZIP is for a different library type.",
-    "listingMismatch": "The downloaded pack does not match its marketplace listing."
+    "listingMismatch": "The downloaded pack does not match its marketplace listing.",
+    "idConflict": "A different library type already uses this pack ID."
   }
 }

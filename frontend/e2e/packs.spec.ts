@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
-import { strToU8, zipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 import { revealComposerTools } from "./helpers/session";
@@ -73,27 +73,63 @@ test("default build preinstalls a theme and keeps its removal after restart", as
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
 });
 
+test("installing a group pack cannot replace a personal pack with the same ID", async ({
+  page,
+}) => {
+  const files = unzipSync(
+    readFileSync(resolve("../site/market/packs/clubs.zip")),
+  );
+  const manifest = JSON.parse(strFromU8(files["manifest.json"])) as Record<
+    string,
+    unknown
+  >;
+  files["manifest.json"] = strToU8(
+    JSON.stringify({
+      ...manifest,
+      id: "players",
+    }),
+  );
+  await enterChat(page);
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  const manager = page.getByTestId("pack-manager-avatar");
+  await manager.locator('input[type="file"]').setInputFiles({
+    name: "players.zip",
+    mimeType: "application/zip",
+    buffer: Buffer.from(zipSync(files)),
+  });
+  await expect(manager.getByRole("alert")).toContainText("pack ID");
+  await enterChat(page);
+  await page.getByTestId("open-profile").click();
+  await page.getByRole("button", { name: "Change your photo" }).click();
+  await page.getByText(/Choose from gallery/).click();
+  await expect(
+    page.getByRole("button", { name: "Football", exact: true }),
+  ).toBeVisible();
+});
+
 test("installs a channel avatar library from ZIP", async ({ page }) => {
   await enterChat(page);
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
   await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(
-    page.getByRole("button", { name: "Football clubs", exact: true }),
+    page.getByRole("button", { name: "Clubs", exact: true }),
   ).toBeVisible();
   await page
     .getByTestId("pack-manager-avatar")
     .getByRole("button", { name: "Remove Football clubs" })
     .click();
   await expect(
-    page.getByRole("button", { name: "Football clubs", exact: true }),
+    page.getByRole("button", { name: "Clubs", exact: true }),
   ).toHaveCount(0);
   await page
     .getByTestId("pack-manager-avatar")
     .locator('input[type="file"]')
     .setInputFiles(resolve("../site/market/packs/clubs.zip"));
   await expect(
-    page.getByRole("button", { name: "Football clubs", exact: true }),
+    page.getByRole("button", { name: "Clubs", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByTestId("avatar-gallery").locator("button"),
@@ -131,7 +167,7 @@ test("installs a verified marketplace download", async ({ page }) => {
   await manager.getByRole("button", { name: "Remove Football stars" }).click();
   await manager.getByRole("button", { name: "Install", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "Football stars", exact: true }),
+    page.getByRole("button", { name: "Football", exact: true }),
   ).toBeVisible();
 });
 
@@ -184,6 +220,13 @@ test("keeps the existing marketplace usable before versioned catalog deployment"
       body: JSON.stringify([legacy]),
     }),
   );
+  await page.route("**/market/packs/players.zip", (route) =>
+    route.fulfill({
+      contentType: "application/zip",
+      headers: { "access-control-allow-origin": "*" },
+      body: readFileSync(resolve("../site/market/packs/players.zip")),
+    }),
+  );
   await enterChat(page);
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
@@ -193,7 +236,7 @@ test("keeps the existing marketplace usable before versioned catalog deployment"
   await manager.getByRole("button", { name: "Remove Football stars" }).click();
   await manager.getByRole("button", { name: "Install", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "Football stars", exact: true }),
+    page.getByRole("button", { name: "Football", exact: true }),
   ).toBeVisible();
 });
 
@@ -230,7 +273,7 @@ test("rejects a marketplace ZIP whose contents differ from its listing", async (
     "does not match its marketplace listing",
   );
   await expect(
-    page.getByRole("button", { name: "Football stars", exact: true }),
+    page.getByRole("button", { name: "Football", exact: true }),
   ).toHaveCount(0);
 });
 

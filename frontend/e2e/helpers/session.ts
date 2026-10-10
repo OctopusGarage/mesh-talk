@@ -46,7 +46,8 @@ export async function revealComposerTools(page: Page) {
 }
 
 export async function seedThemeBeforeLoad(page: Page, theme: string) {
-  if (!["light", "dark", "oled"].includes(theme)) await seedMarketPacks(page, [theme]);
+  if (!["light", "dark", "oled"].includes(theme))
+    await seedMarketPacks(page, [theme]);
   await page.addInitScript((nextTheme) => {
     localStorage.setItem("mesh-talk-theme", nextTheme);
   }, theme);

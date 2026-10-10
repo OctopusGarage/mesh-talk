@@ -30,6 +30,6 @@ test("lite starts without avatar and theme libraries but accepts ZIPs", async ({
     .locator('input[type="file"]')
     .setInputFiles(resolve("../site/market/packs/clubs.zip"));
   await expect(
-    page.getByRole("button", { name: "Football clubs", exact: true }),
+    page.getByRole("button", { name: "Clubs", exact: true }),
   ).toBeVisible();
 });

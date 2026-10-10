@@ -123,6 +123,32 @@ describe("customization pack", () => {
     expect(() => parsePack(bytes)).toThrow(/duplicate ZIP entry/i);
   });
 
+  it("rejects a ZIP with too many tiny entries", () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 260 }, (_, index) => [
+        `images/unused-${index}.png`,
+        new Uint8Array(),
+      ]),
+    );
+    expect(() =>
+      parsePack(
+        archive(
+          {
+            format: 1,
+            id: "test.faces",
+            version: "1.0.0",
+            name: "Faces",
+            kind: "avatar",
+            category: "personal",
+            fit: "cover",
+            avatars: [{ label: "Ada", file: "images/ada.png" }],
+          },
+          { ...files, "images/ada.png": png },
+        ),
+      ),
+    ).toThrow(/too many ZIP entries/i);
+  });
+
   it("rejects unsafe theme token values", () => {
     expect(() =>
       parsePack(
