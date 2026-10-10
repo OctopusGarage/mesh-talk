@@ -203,6 +203,14 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
   if (files["credits.json"]) JSON.parse(strFromU8(files["credits.json"]));
   const raw = object(JSON.parse(strFromU8(manifestBytes)));
   if (raw.format !== 1) throw new Error("Unsupported pack format");
+  const referencedImages = new Set(referencedPackImages(raw));
+  if (
+    Object.keys(files).some(
+      (name) => name.startsWith("images/") && !referencedImages.has(name),
+    )
+  ) {
+    throw new Error("Unreferenced image in pack");
+  }
   if (
     typeof raw.id !== "string" ||
     !/^[a-z0-9][a-z0-9._-]{2,79}$/.test(raw.id)
@@ -297,8 +305,10 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
       kind: "theme",
       base: raw.base,
       colors: colors as Record<string, string>,
-      ...(raw.wallpaper ? { wallpaper: image(files, raw.wallpaper) } : {}),
-      ...(raw.crest ? { crest: image(files, raw.crest) } : {}),
+      ...(raw.wallpaper !== undefined
+        ? { wallpaper: image(files, raw.wallpaper) }
+        : {}),
+      ...(raw.crest !== undefined ? { crest: image(files, raw.crest) } : {}),
       ...(wallpapers ? { wallpapers } : {}),
     };
   }

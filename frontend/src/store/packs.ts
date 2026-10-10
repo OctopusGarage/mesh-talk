@@ -59,6 +59,7 @@ async function seedBundledPacks(): Promise<void> {
         if (!response.ok) throw new Error(`Could not load bundled pack: ${id}`);
         const pack = parsePack(new Uint8Array(await response.arrayBuffer()));
         if (pack.id !== id) throw new Error(`Bundled pack ID mismatch: ${id}`);
+        await verifyPackImages(pack);
         await new Promise<void>((resolve, reject) => {
           const tx = db.transaction([STORE_NAME, META_NAME], "readwrite");
           const store = tx.objectStore(STORE_NAME);
