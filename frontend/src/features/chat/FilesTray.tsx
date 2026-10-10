@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Download, FolderOpen, Search, X } from "lucide-react";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Download, ExternalLink, FolderOpen, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -67,11 +67,14 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   const [downloadDir, setDownloadDir] = useState("");
   const [folderLoaded, setFolderLoaded] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
+  const [folderOpenError, setFolderOpenError] = useState<string | null>(null);
+  const [openingDir, setOpeningDir] = useState(false);
   const folderRequest = useRef(0);
   const loadDir = useCallback(async () => {
     const request = ++folderRequest.current;
     setFolderLoaded(false);
     setFolderError(null);
+    setFolderOpenError(null);
     try {
       const settings = await settingsApi.get();
       if (request !== folderRequest.current) return;
@@ -102,11 +105,33 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
           setDownloadDir(dir);
           setFolderLoaded(true);
           setFolderError(null);
+          setFolderOpenError(null);
         }
       }
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));
+    }
+  };
+
+  const openDownloadDir = async () => {
+    const lease = captureChatOwnership();
+    if (!lease.current() || !folderLoaded || folderError || openingDir) return;
+    setOpeningDir(true);
+    setFolderOpenError(null);
+    try {
+      const dir = downloadDir || (await chat.defaultDownloadDir());
+      if (!lease.current()) return;
+      if (!dir) {
+        setFolderOpenError(t("files.folderUnknown"));
+        return;
+      }
+      await openPath(dir);
+    } catch (e) {
+      if (lease.current())
+        setFolderOpenError(t("files.couldntOpen", { error: errorMessage(e) }));
+    } finally {
+      setOpeningDir(false);
     }
   };
 
@@ -261,6 +286,18 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                   : t("common.loading")}
             </span>
           </button>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            data-testid="files-open-folder"
+            disabled={!folderLoaded || !!folderError || openingDir}
+            onClick={() => void openDownloadDir()}
+            className="h-9 shrink-0 gap-1.5"
+          >
+            <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            {t("files.openFolder")}
+          </Button>
         </div>
         {folderError && (
           <div
@@ -276,6 +313,15 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
             >
               {t("contactVisibility.retry")}
             </button>
+          </div>
+        )}
+        {folderOpenError && (
+          <div
+            role="alert"
+            data-testid="files-open-folder-error"
+            className="border-b px-6 py-2 text-xs text-destructive"
+          >
+            {folderOpenError}
           </div>
         )}
         {files.length === 0 ? (

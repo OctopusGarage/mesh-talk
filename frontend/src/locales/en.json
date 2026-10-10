@@ -317,6 +317,7 @@
     "alreadyDownloaded": "Already downloaded — use Reveal to find it.",
     "couldntOpen": "Couldn't open: {{error}}",
     "chooseFolder": "Choose default download folder",
+    "openFolder": "Open folder",
     "noDefaultFolder": "Saving to your system Downloads folder",
     "reveal": "Reveal",
     "saveAs": "Save as…",
