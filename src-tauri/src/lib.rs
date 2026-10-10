@@ -344,6 +344,7 @@ pub fn run_tauri_configured(
             crate::chat_commands::send_file_dm,
             crate::chat_commands::send_file_channel,
             crate::chat_commands::save_file,
+            crate::chat_commands::file_statuses,
             crate::chat_commands::save_file_to_dir,
             crate::chat_commands::default_download_dir,
             crate::chat_commands::safety_number,

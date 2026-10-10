@@ -36,9 +36,12 @@ import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
+import { useFileStatus, useFileAvailability } from "@/store/fileAvailability";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
+import { ReceiveProgress } from "./ReceiveProgress";
+import { TransferBar } from "./TransferBar";
 
 /** A file/media message body: inline media for images/small videos, else a file card with
  * a Save action. Reuses the shared MediaPreview (lazy bytes + revoked blob URLs). */
@@ -46,31 +49,50 @@ function FileBubble({
   file,
   mine,
   metadataPending,
+  sendKey,
 }: {
   file: NonNullable<ChatMessage["file"]>;
   mine: boolean;
   metadataPending?: boolean;
+  sendKey?: string;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
   const savedPath = useSavedDownloads()[file.fileConv];
+  const status = useFileStatus(
+    savedPath ? undefined : file.fileConv || undefined,
+  );
+  const available = !!savedPath || !!status?.ready;
+  const [saving, setSaving] = useState(false);
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
-    if (!lease.current() || metadataPending || !file.fileConv) return;
+    if (
+      !lease.current() ||
+      metadataPending ||
+      !file.fileConv ||
+      !available ||
+      saving
+    )
+      return;
     try {
+      setSaving(true);
       const defaultPath = await defaultSavePath(file.name);
       if (!lease.current()) return;
       const dest = await save({
         defaultPath,
       });
       if (lease.current() && typeof dest === "string") {
+        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
+          return;
         await chat.saveFile(file.fileConv, dest);
         if (lease.current()) rememberSavedDownload(file.fileConv, dest);
       }
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -92,6 +114,7 @@ function FileBubble({
   // below, so it stays visible and savable instead of rendering an empty bubble.
   if (
     !metadataPending &&
+    available &&
     file.fileConv &&
     file.media &&
     withinInlineCap(file.name, file.size)
@@ -124,15 +147,23 @@ function FileBubble({
         <button
           type="button"
           onClick={() => void (savedPath ? reveal() : saveAs())}
-          disabled={metadataPending || !file.fileConv}
+          disabled={
+            metadataPending ||
+            !file.fileConv ||
+            (!savedPath && (!available || saving))
+          }
           title={
-            savedPath
-              ? t("files.savedTo", { path: savedPath })
-              : t("common.save")
+            metadataPending
+              ? t("transfer.sending")
+              : !available
+                ? t("transfer.waiting")
+                : savedPath
+                  ? t("files.savedTo", { path: savedPath })
+                  : t("common.save")
           }
           aria-label={savedPath ? t("files.reveal") : t("common.save")}
           className={cn(
-            "rounded-md p-1 transition-colors",
+            "rounded-md p-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
             mine
               ? "text-primary-foreground/80 hover:bg-primary-foreground/15"
               : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -145,6 +176,8 @@ function FileBubble({
           )}
         </button>
       </div>
+      {metadataPending && <TransferBar transferKey={sendKey} />}
+      {!metadataPending && !savedPath && <ReceiveProgress status={status} />}
       {savedPath && (
         <div className="mt-1 truncate text-[11px] opacity-70" title={savedPath}>
           {t("files.savedTo", { path: savedPath })}
@@ -440,6 +473,7 @@ export function MessageBubble({
                     file={m.file!}
                     mine={mine}
                     metadataPending={m.metadataPending}
+                    sendKey={m.clientId}
                   />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">

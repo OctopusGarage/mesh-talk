@@ -1,6 +1,7 @@
 import { chat } from "@/lib/api";
 import { errorMessage, sendFailReason } from "@/lib/error";
 import { captureChatOwner } from "./ownership";
+import { useTransfers } from "./transfers";
 import {
   boundedConversationMap,
   convKey,
@@ -38,10 +39,15 @@ function nextClientId(): string {
   return `c${clientIdCounter}`;
 }
 
-function sendFileFor(c: Conversation, path: string, media: boolean) {
+function sendFileFor(
+  c: Conversation,
+  path: string,
+  media: boolean,
+  progressKey: string,
+) {
   return c.kind === "account"
     ? chat.sendFileToAccount(c.id, path, media)
-    : chat.sendFileChannel(c.id, path, media);
+    : chat.sendFileChannel(c.id, path, media, progressKey);
 }
 function sendStickerFor(c: Conversation, stickerId: string, fallback: string) {
   return chat.sendSticker(c.id, stickerId, fallback, c.kind === "channel");
@@ -314,6 +320,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
           c.id,
           payload.path,
           payload.media,
+          clientId,
         );
         accepted = {
           ...message,
@@ -331,7 +338,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
         await chat.sendChannelMessage(c.id, payload.text, payload.replyTo);
       else if (payload.kind === "sticker")
         await sendStickerFor(c, payload.stickerId, payload.fallback);
-      else await sendFileFor(c, payload.path, payload.media);
+      else await sendFileFor(c, payload.path, payload.media, clientId);
       if (!lease.current()) return;
       update(null); // Legacy void never claims acceptance/receipt for a placeholder.
     }
@@ -340,6 +347,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
     else if (accepted?.id) await get().refreshStatuses(c);
   } catch (e) {
     if (!lease.current()) return;
+    if (payload.kind === "file") useTransfers.getState().clear(clientId);
     // Once a stable ID was accepted, hydration/projection failure is NOT a retryable send.
     if (get().intents[clientId]?.message.id) return;
     update({

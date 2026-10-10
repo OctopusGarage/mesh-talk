@@ -206,6 +206,9 @@
     "reactionRemove": "移除你嘅 {{emoji}} 表情回應"
   },
   "transfer": {
+    "receiving": "收緊檔案…",
+    "waiting": "等緊檔案…",
+    "receivingProgress": "收緊檔案：{{percent}}%",
     "sending": "正在傳送檔案…",
     "saving": "正在儲存檔案…"
   },

@@ -10,6 +10,43 @@ fn file_kind(media: bool) -> mesh_talk_core::file::FileKind {
     }
 }
 
+#[derive(serde::Serialize)]
+pub struct FileStatus {
+    file_conv: String,
+    done: u32,
+    total: u32,
+    ready: bool,
+}
+
+/// One bounded snapshot for all visible attachments. The recipient's background chunk
+/// sync does not emit IPC progress events, so the UI polls this cheap metadata endpoint.
+#[tauri::command]
+pub async fn file_statuses(
+    state: tauri::State<'_, NodeState>,
+    file_convs: Vec<String>,
+) -> Result<Vec<FileStatus>, CommandError> {
+    if file_convs.len() > 500 {
+        return Err(CommandError::Validation("too many file statuses".into()));
+    }
+    let ids = file_convs
+        .into_iter()
+        .map(|file_conv| parse_channel_id(&file_conv).map(|id| (file_conv, id)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let node = state.node_handle().await?;
+    Ok(ids
+        .into_iter()
+        .map(|(file_conv, id)| {
+            let progress = node.file_progress(id);
+            FileStatus {
+                file_conv,
+                done: progress.map_or(0, |p| p.done),
+                total: progress.map_or(0, |p| p.total),
+                ready: node.file_ready_to_save(id),
+            }
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn send_file_dm(
     app: tauri::AppHandle,
@@ -19,9 +56,7 @@ pub async fn send_file_dm(
     media: bool,
 ) -> Result<String, CommandError> {
     let node = state.node_handle().await?;
-    // The per-file conv id isn't known until staging completes, but progress events key
-    // on it — so the UI keys outgoing progress by the recipient until the id is returned
-    // (it relabels on the resolved promise). Use the path-derived label up front.
+    // The legacy DM command has no optimistic message key; retain its recipient key.
     let mut prog = crate::events::ProgressThrottle::new(app, recipient.clone(), "send");
     let id = node
         .send_file_dm_progress(
@@ -64,10 +99,15 @@ pub async fn send_file_channel(
     channel_id: String,
     path: String,
     media: bool,
+    progress_key: Option<String>,
 ) -> Result<String, CommandError> {
     let id = parse_channel_id(&channel_id)?;
     let node = state.node_handle().await?;
-    let mut prog = crate::events::ProgressThrottle::new(app, channel_id.clone(), "send");
+    let mut prog = crate::events::ProgressThrottle::new(
+        app,
+        progress_key.unwrap_or_else(|| channel_id.clone()),
+        "send",
+    );
     let file_conv = node
         .send_file_channel_progress(
             id,

@@ -34,6 +34,18 @@ test("received media recovers when bytes become available with stable fileConv",
       args: Record<string, unknown>,
     ) => {
       const d = w.__mediaDiagnostic;
+      if (cmd === "file_statuses") {
+        return (args.fileConvs as string[]).map((file_conv) =>
+          file_conv === d.identity
+            ? {
+                file_conv,
+                done: d.available ? 4 : 2,
+                total: 4,
+                ready: d.available,
+              }
+            : { file_conv, done: 1, total: 1, ready: true },
+        );
+      }
       if (
         (cmd === "read_media" || cmd === "read_file") &&
         args.fileConv === d.identity
@@ -81,22 +93,13 @@ test("received media recovers when bytes become available with stable fileConv",
   });
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (window as unknown as MediaWindow).__mediaDiagnostic.calls.filter(
-            (c) => c.cmd === "read_file",
-          ).length,
-      ),
-    )
-    .toBeGreaterThanOrEqual(1);
+  await expect(
+    page.getByRole("progressbar", { name: "Receiving file…" }),
+  ).toHaveAttribute("aria-valuenow", "50");
   const initialCalls = await page.evaluate(
     () => (window as unknown as MediaWindow).__mediaDiagnostic.calls,
   );
-  expect(initialCalls.some((c) => c.cmd === "read_media")).toBe(true);
-  expect(initialCalls.some((c) => c.cmd === "read_file")).toBe(true);
-  expect(initialCalls.every((c) => c.rejected && !c.available)).toBe(true);
+  expect(initialCalls).toEqual([]);
   await expect(page.getByTestId("file-image")).toHaveCount(0);
   // Validate the bytes decode BEFORE making them available; no React state/event/navigation changes.
   expect(

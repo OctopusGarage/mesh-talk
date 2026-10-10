@@ -234,10 +234,17 @@ export interface FileReceivedEvent {
 }
 
 export interface FileProgressEvent {
-  file_conv: string; // hex per-file conv, OR the send target label until the id resolves
+  file_conv: string; // per-file id for saves, optimistic message key for sends
   direction: "send" | "save";
   done: number;
   total: number;
+}
+
+export interface FileStatus {
+  file_conv: string;
+  done: number;
+  total: number;
+  ready: boolean;
 }
 
 export interface ProfileReceivedEvent {

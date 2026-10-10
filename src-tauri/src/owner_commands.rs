@@ -209,16 +209,23 @@ pub struct AcceptedFile {
 }
 
 #[tauri::command]
-pub async fn owner_enqueue_file(
+pub async fn owner_enqueue_file<R: tauri::Runtime>(
     owner: String,
     account: String,
     path: String,
     media: bool,
+    progress_key: Option<String>,
+    handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<AcceptedFile, CommandError> {
     let admission = OwnerAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
+    let mut progress = crate::events::ProgressThrottle::new(
+        handle,
+        progress_key.unwrap_or_else(|| account.clone()),
+        "send",
+    );
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
@@ -235,7 +242,8 @@ pub async fn owner_enqueue_file(
                         &account,
                         std::path::Path::new(&path),
                         kind,
-                        move |_| {
+                        move |p| {
+                            progress.emit(p.done, p.total);
                             #[cfg(test)]
                             {
                                 let hook = progress_hook.lock().unwrap().take();
@@ -1026,6 +1034,8 @@ mod tests {
                 target,
                 path.to_string_lossy().into_owned(),
                 false,
+                None,
+                handle.clone(),
                 handle.state::<AppState>(),
                 handle.state::<NodeState>(),
             )

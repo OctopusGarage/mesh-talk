@@ -207,7 +207,10 @@
   },
   "transfer": {
     "sending": "Sending file…",
-    "saving": "Saving file…"
+    "saving": "Saving file…",
+    "receiving": "Receiving file…",
+    "waiting": "Waiting for file…",
+    "receivingProgress": "Receiving file: {{percent}}%"
   },
   "composer": {
     "replyingTo": "Replying to",

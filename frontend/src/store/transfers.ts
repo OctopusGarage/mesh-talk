@@ -9,7 +9,7 @@ export interface Transfer {
 }
 
 interface TransfersState {
-  // Keyed by `fileConv` (or the send target label until the per-file id resolves).
+  // Keyed by per-file id for saves, or optimistic message key for sends.
   transfers: Record<string, Transfer>;
   applyProgress: (e: FileProgressEvent) => void;
   clear: (key: string) => void;

@@ -207,7 +207,10 @@
   },
   "transfer": {
     "sending": "ファイルを送信中…",
-    "saving": "ファイルを保存中…"
+    "saving": "ファイルを保存中…",
+    "receiving": "ファイルを受信中…",
+    "waiting": "ファイルを待機中…",
+    "receivingProgress": "ファイルを受信中: {{percent}}%"
   },
   "composer": {
     "replyingTo": "返信先",

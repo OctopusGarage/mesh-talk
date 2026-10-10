@@ -206,6 +206,9 @@
     "reactionRemove": "Quitar tu reacción {{emoji}}"
   },
   "transfer": {
+    "receiving": "Recibiendo archivo…",
+    "waiting": "Esperando archivo…",
+    "receivingProgress": "Recibiendo archivo: {{percent}}%",
     "sending": "Enviando archivo…",
     "saving": "Guardando archivo…"
   },

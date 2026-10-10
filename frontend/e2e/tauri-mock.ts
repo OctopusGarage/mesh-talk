@@ -702,6 +702,13 @@ export const test = base.extend({
           safety_number: () => safetyNumber(),
 
           // files
+          file_statuses: (a) =>
+            (a.fileConvs as string[]).map((file_conv) => ({
+              file_conv,
+              done: 1,
+              total: 1,
+              ready: true,
+            })),
           save_file: ok,
           save_file_to_dir: () => "/home/tester/Downloads/file.bin",
           read_file: () => new ArrayBuffer(0),

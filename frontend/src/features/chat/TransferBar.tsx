@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useTransfer } from "@/store/transfers";
 
 /** A refined slim progress treatment for an in-flight file transfer keyed by
- *  `transferKey` (the per-file conv id for a save, or the conversation target for a
+ *  `transferKey` (the per-file conv id for a save, or the optimistic message key for a
  *  send). Renders nothing when there is no active transfer for the key. Reads ONLY the
  *  transfers store, so its ~10/s updates don't re-render the surrounding message list. */
 export function TransferBar({

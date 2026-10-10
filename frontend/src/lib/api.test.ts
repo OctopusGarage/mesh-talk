@@ -169,6 +169,27 @@ describe("chat command mapping", () => {
       dest: "/tmp/out",
     });
   });
+  it("maps per-file sender keys and batch receive status to the Tauri IPC contract", async () => {
+    await chat.enqueueFile("owner", "account", "/tmp/a.bin", false, "c1");
+    expect(invoke).toHaveBeenLastCalledWith("owner_enqueue_file", {
+      owner: "owner",
+      account: "account",
+      path: "/tmp/a.bin",
+      media: false,
+      progressKey: "c1",
+    });
+    await chat.sendFileChannel("channel", "/tmp/b.bin", true, "c2");
+    expect(invoke).toHaveBeenLastCalledWith("send_file_channel", {
+      channelId: "channel",
+      path: "/tmp/b.bin",
+      media: true,
+      progressKey: "c2",
+    });
+    await chat.fileStatuses(["file-a", "file-b"]);
+    expect(invoke).toHaveBeenLastCalledWith("file_statuses", {
+      fileConvs: ["file-a", "file-b"],
+    });
+  });
   it("link_device maps peer/code", async () => {
     await chat.linkDevice("peer1", "CODE");
     expect(invoke).toHaveBeenCalledWith("link_device", {
