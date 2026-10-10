@@ -218,6 +218,7 @@
     "send": "傳送",
     "notQueued": "訊息未能加入傳送佇列。請檢查連線或待傳送訊息，再試一次。",
     "attach": "附加檔案",
+    "attachDirectory": "附加資料夾",
     "image": "傳送圖片",
     "emoji": "表情符號",
     "insertEmoji": "插入 {{emoji}}",

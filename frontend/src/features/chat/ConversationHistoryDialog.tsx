@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import {
+  open as openDialog,
+  save as saveDialog,
+} from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   FileX,
@@ -24,6 +27,10 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IdentityGlyph } from "@/components/identity";
 import { chat } from "@/lib/api";
+import {
+  attachmentLabel,
+  isDirectoryAttachment,
+} from "@/lib/directoryAttachment";
 import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import {
   useFileAvailability,
@@ -206,10 +213,14 @@ export function ConversationHistoryDialog({
     )
       return;
     try {
-      const dest = await saveDialog({ defaultPath: file.name });
+      const dest = isDirectoryAttachment(file.mime)
+        ? await openDialog({ directory: true })
+        : await saveDialog({ defaultPath: file.name });
       if (lease.current() && typeof dest === "string") {
-        await chat.saveFile(file.fileConv, dest);
-        if (lease.current()) rememberSavedDownload(file.fileConv, dest);
+        const path = isDirectoryAttachment(file.mime)
+          ? await chat.saveFileToDir(file.fileConv, dest)
+          : (await chat.saveFile(file.fileConv, dest), dest);
+        if (lease.current()) rememberSavedDownload(file.fileConv, path);
       }
     } catch (e) {
       if (lease.current()) setError(errorMessage(e));
@@ -340,8 +351,11 @@ export function ConversationHistoryDialog({
                           </div>
                         ) : m.file ? (
                           <span className="inline-flex items-center gap-1.5">
-                            {fileGlyph(m.file.name)}
-                            <Highlighted text={m.file.name} term={query} />
+                            {fileGlyph(m.file.name, m.file.mime)}
+                            <Highlighted
+                              text={attachmentLabel(m.file.name, m.file.mime)}
+                              term={query}
+                            />
                           </span>
                         ) : (
                           <Highlighted text={m.text} term={query} />
@@ -400,10 +414,10 @@ export function ConversationHistoryDialog({
                           data-testid="history-file-item"
                           className="flex items-center gap-2 rounded-lg px-2.5 py-2 hover:bg-accent/50"
                         >
-                          {fileGlyph(m.file.name)}
+                          {fileGlyph(m.file.name, m.file.mime)}
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-sm">
-                              {m.file.name}
+                              {attachmentLabel(m.file.name, m.file.mime)}
                             </div>
                             <div className="flex items-center gap-2 text-xs text-muted-foreground">
                               <span className="font-mono">

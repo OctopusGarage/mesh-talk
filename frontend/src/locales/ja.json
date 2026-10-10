@@ -218,6 +218,7 @@
     "send": "送信",
     "notQueued": "メッセージを送信待ちにできませんでした。接続と保留中の送信を確認して、もう一度お試しください。",
     "attach": "ファイルを添付",
+    "attachDirectory": "フォルダーを添付",
     "image": "画像を送信",
     "emoji": "絵文字",
     "insertEmoji": "{{emoji}} を挿入",

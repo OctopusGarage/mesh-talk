@@ -218,6 +218,7 @@
     "send": "Send",
     "notQueued": "Message not queued. Check the connection or pending sends, then try again.",
     "attach": "Attach a file",
+    "attachDirectory": "Attach a folder",
     "image": "Send a picture",
     "emoji": "Emoji",
     "insertEmoji": "Insert {{emoji}}",

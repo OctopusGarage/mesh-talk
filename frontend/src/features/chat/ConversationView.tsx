@@ -939,6 +939,23 @@ export function ConversationView() {
               );
           }
         }}
+        onAttachDirectory={async () => {
+          const current = captureComposer();
+          if (!current()) return;
+          try {
+            const path = await openFileDialog({
+              directory: true,
+              multiple: false,
+            });
+            if (current() && typeof path === "string")
+              await sendFile(path, false);
+          } catch (e) {
+            if (current())
+              setError(
+                t("composer.couldntOpenFile", { error: errorMessage(e) }),
+              );
+          }
+        }}
         onImage={async () => {
           const current = captureComposer();
           if (!current()) return;

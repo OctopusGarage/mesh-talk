@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Copy,
@@ -28,6 +28,10 @@ import {
 import { cn } from "@/lib/utils";
 import { chat } from "@/lib/api";
 import { defaultSavePath } from "@/lib/download";
+import {
+  attachmentLabel,
+  isDirectoryAttachment,
+} from "@/lib/directoryAttachment";
 import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { formatTime, humanSize, shortId } from "@/lib/format";
@@ -64,6 +68,7 @@ function FileBubble({
   );
   const available = !!savedPath || !!status?.ready;
   const [saving, setSaving] = useState(false);
+  const directory = isDirectoryAttachment(file.mime);
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -79,14 +84,16 @@ function FileBubble({
       setSaving(true);
       const defaultPath = await defaultSavePath(file.name);
       if (!lease.current()) return;
-      const dest = await save({
-        defaultPath,
-      });
+      const dest = directory
+        ? await openDialog({ directory: true })
+        : await save({ defaultPath });
       if (lease.current() && typeof dest === "string") {
         if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
           return;
-        await chat.saveFile(file.fileConv, dest);
-        if (lease.current()) rememberSavedDownload(file.fileConv, dest);
+        const path = directory
+          ? await chat.saveFileToDir(file.fileConv, dest)
+          : (await chat.saveFile(file.fileConv, dest), dest);
+        if (lease.current()) rememberSavedDownload(file.fileConv, path);
       }
     } catch (e) {
       if (lease.current())
@@ -135,9 +142,11 @@ function FileBubble({
   return (
     <div className="min-w-[12rem] max-w-xs">
       <div className="flex items-center gap-2">
-        {fileGlyph(file.name)}
+        {fileGlyph(file.name, file.mime)}
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm">{file.name}</div>
+          <div className="truncate text-sm">
+            {attachmentLabel(file.name, file.mime)}
+          </div>
           <div className="font-mono text-[11px] tabular-nums opacity-70">
             {metadataPending
               ? t("message.delivery.metadataPending")

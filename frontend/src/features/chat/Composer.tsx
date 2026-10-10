@@ -5,6 +5,7 @@ import {
   X,
   CornerUpLeft,
   Paperclip,
+  FolderUp,
   Smile,
   Sticker as StickerIcon,
   Camera,
@@ -178,6 +179,7 @@ export function Composer({
   initialDraft = "",
   onDraftChange,
   onAttach,
+  onAttachDirectory,
   onPasteFiles,
   onScreenshot,
   placeholder,
@@ -193,6 +195,7 @@ export function Composer({
   initialDraft?: string;
   onDraftChange?: (text: string) => void;
   onAttach?: () => void;
+  onAttachDirectory?: () => void;
   /** Send copied files after the user presses Enter or Send. */
   onPasteFiles?: (files: File[]) => Promise<void>;
   /** Capture a screenshot and send it (hideWindow = hide the app first). */
@@ -713,6 +716,19 @@ export function Composer({
               onClick={onAttach}
             >
               <Paperclip className="h-4 w-4" />
+            </Button>
+          )}
+          {onAttachDirectory && (
+            <Button
+              variant="ghost"
+              size="icon"
+              data-testid="composer-attach-directory"
+              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
+              title={t("composer.attachDirectory")}
+              aria-label={t("composer.attachDirectory")}
+              onClick={onAttachDirectory}
+            >
+              <FolderUp className="h-4 w-4" />
             </Button>
           )}
           {onImage && (

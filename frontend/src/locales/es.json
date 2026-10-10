@@ -218,6 +218,7 @@
     "send": "Enviar",
     "notQueued": "El mensaje no se puso en cola. Comprueba la conexión o los envíos pendientes e inténtalo de nuevo.",
     "attach": "Adjuntar un archivo",
+    "attachDirectory": "Adjuntar una carpeta",
     "image": "Enviar una imagen",
     "emoji": "Emoji",
     "insertEmoji": "Insertar {{emoji}}",

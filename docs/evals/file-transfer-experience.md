@@ -80,3 +80,36 @@ The full `./scripts/check-health.sh` gate passed on the final code: 278 frontend
 unit tests, 229 browser scenarios passed with one intentional site-capture skip,
 713 core and 90 Tauri unit tests, the remaining workspace tests, formatting,
 typecheck, lint, dependency and secret scans, security audits, and both builds.
+
+## Directory attachments — 2026-10-10
+
+The folder picker and native drop path now accept directories. The sender packs
+regular files and empty subdirectories into a bounded tar payload and sends it through
+the existing encrypted file transfer. The manifest retains MFM3 framing and carries a
+dedicated directory MIME marker; older MFM3-capable clients can download the `.tar` file using their
+existing Save action. New clients show a folder icon and save into a chosen download
+directory, extracting only after whole-file verification. Extraction rejects traversal,
+links, special entries, too many entries, and expansion beyond the transfer size. It
+stages privately and renames the completed folder into place.
+
+The read-only model review (`target/ai-eval/directory-transfer-review.md`) found a
+retry-loss path: pruning archive chunks before extraction succeeds could make a failed
+save permanent. The save path now defers completion and pruning until after extraction,
+rename, and directory synchronization. The loopback test models an aborted extraction
+after archive verification and retries the folder save. A follow-up review
+(`target/ai-eval/directory-transfer-followup.md`) confirmed the retry fix and found
+that names legal on Unix could prevent saving on Windows. Extraction now sanitizes
+each path component, maps the original directory tree to collision-safe local names,
+and tests illegal characters, reserved device names, and collisions. A final read-only
+review (`target/ai-eval/directory-transfer-final.md`) caught superscript device
+names and Unix backslashes that Windows interprets as separators. The sanitizer
+now covers the documented superscript variants; the sender normalizes archive
+components and resolves sibling collisions before packaging. The closure review
+(`target/ai-eval/directory-transfer-closure.md`) found no remaining high or medium
+issue in those paths; executable tests remain the verification evidence.
+
+Evidence: the core pack/extract tests cover nested and empty folders, path rejection,
+and link rejection; the two-node TCP test covers real encrypted folder transfer,
+extraction, and the legacy tar save path. `directory-transfer.spec.ts` covers folder
+picker wiring and recipient readiness gating. The browser test uses mocked Tauri IPC;
+the Rust test exercises two real nodes over loopback.

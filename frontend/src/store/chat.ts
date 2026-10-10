@@ -86,6 +86,7 @@ export interface IncomingFile {
   fromName: string;
   name: string;
   size: number;
+  mime: string;
   fileConv: string;
   /** Inline media (media button) vs generic attachment (attach button), by sender intent. */
   media: boolean;
@@ -911,6 +912,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
               fromName,
               name: e.name,
               size: e.size,
+              mime: e.mime,
               fileConv: e.file_conv,
               media: e.media,
             },

@@ -17,6 +17,10 @@ import { Input } from "@/components/ui/input";
 import { IdentityGlyph } from "@/components/identity";
 import { chat, settings as settingsApi } from "@/lib/api";
 import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
+import {
+  attachmentLabel,
+  isDirectoryAttachment,
+} from "@/lib/directoryAttachment";
 import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
@@ -138,7 +142,11 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   // Save into the effective download folder with no prompt: the folder the user chose, else
   // the OS Downloads folder (the common default). Only falls back to a Save-as dialog if no
   // folder is resolvable at all.
-  const saveToDefault = async (fileConv: string, name: string) => {
+  const saveToDefault = async (
+    fileConv: string,
+    name: string,
+    mime: string,
+  ) => {
     const lease = captureChatOwnership();
     if (
       !lease.current() ||
@@ -155,10 +163,14 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
         if (lease.current()) rememberSavedDownload(fileConv, path);
         return;
       }
-      const dest = await save({ defaultPath: name });
+      const dest = isDirectoryAttachment(mime)
+        ? await openDialog({ directory: true })
+        : await save({ defaultPath: name });
       if (lease.current() && typeof dest === "string") {
-        await chat.saveFile(fileConv, dest);
-        if (lease.current()) rememberSavedDownload(fileConv, dest);
+        const path = isDirectoryAttachment(mime)
+          ? await chat.saveFileToDir(fileConv, dest)
+          : (await chat.saveFile(fileConv, dest), dest);
+        if (lease.current()) rememberSavedDownload(fileConv, path);
       }
     } catch (e) {
       if (lease.current()) handleSaveError(e);
@@ -168,7 +180,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   };
 
   // Always-prompt "Save as…" override; the dialog opens at the Downloads folder.
-  const saveAs = async (fileConv: string, name: string) => {
+  const saveAs = async (fileConv: string, name: string, mime: string) => {
     const lease = captureChatOwnership();
     if (
       !lease.current() ||
@@ -180,10 +192,14 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       setSavingFile(fileConv);
       const defaultPath = await defaultSavePath(name);
       if (!lease.current()) return;
-      const dest = await save({ defaultPath });
+      const dest = isDirectoryAttachment(mime)
+        ? await openDialog({ directory: true })
+        : await save({ defaultPath });
       if (lease.current() && typeof dest === "string") {
-        await chat.saveFile(fileConv, dest);
-        if (lease.current()) rememberSavedDownload(fileConv, dest);
+        const path = isDirectoryAttachment(mime)
+          ? await chat.saveFileToDir(fileConv, dest)
+          : (await chat.saveFile(fileConv, dest), dest);
+        if (lease.current()) rememberSavedDownload(fileConv, path);
       }
     } catch (e) {
       if (lease.current()) handleSaveError(e);
@@ -343,9 +359,11 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                 className="rounded-lg px-2 py-3 hover:bg-accent/50"
               >
                 <div className="flex items-center gap-2">
-                  {fileGlyph(f.name)}
+                  {fileGlyph(f.name, f.mime)}
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{f.name}</div>
+                    <div className="truncate text-sm font-medium">
+                      {attachmentLabel(f.name, f.mime)}
+                    </div>
                     <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                       <IdentityGlyph
                         seed={f.fromName}
@@ -390,7 +408,9 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                       disabled={
                         !statuses[f.fileConv]?.ready || savingFile !== null
                       }
-                      onClick={() => void saveToDefault(f.fileConv, f.name)}
+                      onClick={() =>
+                        void saveToDefault(f.fileConv, f.name, f.mime)
+                      }
                     >
                       {t("common.save")}
                     </Button>
@@ -411,7 +431,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                     disabled={
                       !statuses[f.fileConv]?.ready || savingFile !== null
                     }
-                    onClick={() => void saveAs(f.fileConv, f.name)}
+                    onClick={() => void saveAs(f.fileConv, f.name, f.mime)}
                     className="mt-1 pl-6 text-xs text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {t("files.saveAs")}

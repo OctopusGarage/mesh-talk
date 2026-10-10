@@ -10,8 +10,10 @@ import {
   FileText,
   FileVideo,
   File as FileIcon,
+  Folder,
 } from "lucide-react";
 import { chat } from "@/lib/api";
+import { isDirectoryAttachment } from "@/lib/directoryAttachment";
 import { useAuth } from "@/store/auth";
 import { useChat, captureChatOwnership } from "@/store/chat";
 
@@ -87,9 +89,10 @@ export function withinInlineCap(name: string, size: number): boolean {
 }
 
 /** Pick an on-brand file glyph from the extension. */
-export function fileGlyph(name: string) {
+export function fileGlyph(name: string, mime?: string) {
   const ext = name.toLowerCase().split(".").pop() ?? "";
   const cls = "h-4 w-4 shrink-0 text-signal";
+  if (mime && isDirectoryAttachment(mime)) return <Folder className={cls} />;
   if (IMAGE_EXT.test(name)) return <FileImage className={cls} />;
   if (/^(mp4|mov|mkv|webm|avi|m4v|ogv)$/.test(ext))
     return <FileVideo className={cls} />;

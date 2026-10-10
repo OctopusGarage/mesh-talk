@@ -218,6 +218,7 @@
     "send": "发送",
     "notQueued": "消息未加入发送队列。请检查连接或待发送消息后重试。",
     "attach": "附加文件",
+    "attachDirectory": "附加文件夹",
     "image": "发送图片",
     "emoji": "表情",
     "insertEmoji": "插入 {{emoji}}",

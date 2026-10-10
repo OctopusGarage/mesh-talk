@@ -51,6 +51,7 @@ clap = { workspace = true }
 # these. Used for sync-cost telemetry so we can evaluate reconciliation scaling on real data.
 log = { workspace = true }
 tempfile = { workspace = true }
+tar = "0.4.46"
 
 # Unix-only: a `kill(pid, 0)` liveness probe so the CLI's data-dir lockfile can detect a
 # lock left by a crashed/killed node and reclaim it. Already in the build graph transitively
