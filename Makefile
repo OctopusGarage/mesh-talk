@@ -1,11 +1,12 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run check
+.PHONY: dev build test e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run check
 
 dev: install-deps frontend-install
 	@echo "Development environment configured!"
 	./scripts/setup-hooks.sh
+	./scripts/install-auto-clean-macos.sh
 
 build:
 	cd src-tauri && cargo build --release
@@ -37,6 +38,9 @@ clean-target-cache:
 
 clean-target-cache-dry-run:
 	./scripts/clean-target-cache.sh --dry-run
+
+auto-clean-targets-dry-run:
+	./scripts/auto-clean-targets.sh --dry-run
 
 # Frontend commands
 .PHONY: frontend-dev frontend-build
@@ -98,6 +102,7 @@ help:
 	@echo "  make clean            Clean build artifacts"
 	@echo "  make clean-target-cache      Prune stale Cargo target cache"
 	@echo "  make clean-target-cache-dry-run Preview target cache pruning"
+	@echo "  make auto-clean-targets-dry-run Preview dormant Mesh Talk target removal"
 	@echo "  make check            Run all quality checks"
 	@echo "  make lint             Run linting tools"
 	@echo "  make fix              Automatically fix code issues"
