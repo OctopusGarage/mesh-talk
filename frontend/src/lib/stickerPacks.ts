@@ -1,19 +1,22 @@
-// Sticker IDs are sent over the wire, so asset filenames must remain stable.
-// Noto IDs encode an emoji; cat IDs have explicit emoji fallbacks for older builds.
+import type { CustomizationPack } from "@/lib/pack";
 
-export type StickerPackId = "noto" | "cats";
+// Built-in animated stickers: Google's Noto Animated Emoji (open-source), bundled as
+// downscaled animated WebP. The manifest is built automatically from the bundled assets
+// via `import.meta.glob` — each file is named by its emoji codepoint(s) joined with `_`
+// (e.g. `1f602.webp`, `2764_fe0f.webp`), so the sticker id and its fallback emoji char
+// are both derived from the filename. Drop a `.webp` in the folder and it appears.
 
 export interface Sticker {
+  /** Stable id sent over the wire — the codepoint string, e.g. "1f602" / "2764_fe0f". */
   id: string;
+  /** Bundled animated-WebP URL (hashed by Vite). */
   url: string;
+  /** The emoji char this sticker depicts — the fallback shown if a peer lacks the file. */
   emoji: string;
-  label: string;
-  pack: StickerPackId;
+  label?: string;
 }
 
-export const STICKER_PACKS: StickerPackId[] = ["noto", "cats"];
-
-/** "1f602" → 😂, "2764_fe0f" → ❤️. */
+/** "1f602" → 😂, "2764_fe0f" → ❤️ (joins the codepoints; invalid parts are dropped). */
 function emojiFromId(id: string): string {
   try {
     const cps = id.split("_").map((h) => parseInt(h, 16));
@@ -28,66 +31,8 @@ function idFromPath(path: string): string {
   return (path.split("/").pop() ?? "").replace(/\.[^.]+$/, "");
 }
 
-// Row-major order within each of the five source sheets.
-const CAT_DETAILS: readonly (readonly (readonly [string, string])[])[] = [
-  [
-    ["Cool cat", "😎"],
-    ["Confused tabby", "🤔"],
-    ["Shocked cat", "😱"],
-    ["Crying cat", "😭"],
-    ["Side-eye tabby", "😒"],
-    ["Deadpan cat", "🙄"],
-    ["Silly cat", "😛"],
-    ["Cat hug", "💕"],
-    ["Rocket cat", "🚀"],
-  ],
-  [
-    ["Late-night typing", "😵‍💫"],
-    ["Too-small box", "📦"],
-    ["Fish victory", "🐟"],
-    ["Noodle argument", "😡"],
-    ["Cookie heist", "🍪"],
-    ["Sick day", "🤒"],
-    ["Zoomies", "💨"],
-    ["Video call", "💻"],
-    ["Plant accident", "🙈"],
-  ],
-  [
-    ["Mouse nap", "😴"],
-    ["Box spy", "👀"],
-    ["Couch flop", "😮‍💨"],
-    ["Robot vacuum inspector", "🤖"],
-    ["Cat tree melt", "🫠"],
-    ["Feather insult", "😾"],
-    ["Blanket burrito", "🥶"],
-    ["Snack tug-of-war", "🍟"],
-    ["Keyboard burnout", "😵"],
-  ],
-  [
-    ["Laundry king", "👑"],
-    ["Birdwatching", "🐦"],
-    ["Water paw", "💧"],
-    ["Empty bowl", "😑"],
-    ["Bag escape", "🛍️"],
-    ["Mirror crisis", "🪞"],
-    ["Yoga cat", "🧘"],
-    ["Plant guard", "🌿"],
-    ["Interrupted grooming", "😳"],
-  ],
-  [
-    ["Chair boss", "😎"],
-    ["Curtain spy", "👀"],
-    ["Book block", "📖"],
-    ["Door protest", "🚪"],
-    ["Pencil drop", "✏️"],
-    ["Sock mystery", "🧦"],
-    ["Alarm slap", "⏰"],
-    ["Sink sovereign", "🛁"],
-    ["Crooked crown", "👑"],
-  ],
-];
-
-const noto = Object.entries(
+/** All bundled animated stickers, sorted by id for a stable picker order. */
+export const STICKERS: Sticker[] = Object.entries(
   import.meta.glob("../assets/stickers/noto/*.webp", {
     eager: true,
     query: "?url",
@@ -95,42 +40,47 @@ const noto = Object.entries(
   }) as Record<string, string>,
 )
   .sort(([a], [b]) => a.localeCompare(b))
-  .map(([path, url]): Sticker => {
+  .map(([path, url]) => {
     const id = idFromPath(path);
-    const emoji = emojiFromId(id);
-    return { id, url, emoji, label: emoji, pack: "noto" };
+    return { id, url, emoji: emojiFromId(id) };
   });
 
-const cats = Object.entries(
-  import.meta.glob("../assets/stickers/cats/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }) as Record<string, string>,
-)
-  .sort(([a], [b]) => a.localeCompare(b))
-  .map(([path, url]): Sticker => {
-    const id = idFromPath(path);
-    const match = /^cat-(0[1-5])-(0[1-9])$/.exec(id);
-    if (!match) throw new Error(`Invalid cat sticker ID: ${id}`);
-    const packNumber = Number(match[1]);
-    const itemNumber = Number(match[2]);
-    const detail = CAT_DETAILS[packNumber - 1]?.[itemNumber - 1];
-    if (!detail) throw new Error(`Missing cat sticker metadata: ${id}`);
-    const [label, emoji] = detail;
-    return {
+const BY_ID = new Map(STICKERS.map((s) => [s.id, s]));
+
+export function installedStickers(packs: CustomizationPack[]): Sticker[] {
+  return packs.flatMap((pack) =>
+    pack.kind === "sticker"
+      ? pack.stickers.map((item) => ({
+          id: `pack:${pack.id}:${item.id}`,
+          url: item.url,
+          emoji: item.fallback,
+          label: item.label,
+        }))
+      : [],
+  );
+}
+
+/** Resolve a built-in or installed sticker; unknown packs show the sent fallback. */
+export function stickerById(
+  id: string,
+  packs: CustomizationPack[] = [],
+): Sticker | undefined {
+  if (!id.startsWith("pack:")) return BY_ID.get(id);
+  const separator = id.lastIndexOf(":");
+  if (separator <= 5) return undefined;
+  const pack = packs.find(
+    (item) => item.kind === "sticker" && item.id === id.slice(5, separator),
+  );
+  if (pack?.kind !== "sticker") return undefined;
+  const sticker = pack.stickers.find(
+    (item) => item.id === id.slice(separator + 1),
+  );
+  return (
+    sticker && {
       id,
-      url,
-      emoji,
-      label,
-      pack: "cats",
-    };
-  });
-
-export const STICKERS: Sticker[] = [...noto, ...cats];
-
-const BY_ID = new Map(STICKERS.map((sticker) => [sticker.id, sticker]));
-
-export function stickerById(id: string): Sticker | undefined {
-  return BY_ID.get(id);
+      url: sticker.url,
+      emoji: sticker.fallback,
+      label: sticker.label,
+    }
+  );
 }

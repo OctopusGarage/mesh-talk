@@ -92,14 +92,75 @@ describe("customization pack", () => {
     ).toThrow(/color/i);
   });
 
+  it("loads an animated sticker pack with an explicit fallback", () => {
+    const gif = strToU8("GIF89a000000");
+    const pack = parsePack(
+      archive(
+        {
+          format: 1,
+          id: "test.stickers",
+          version: "1.0.0",
+          name: "Reactions",
+          kind: "sticker",
+          stickers: [
+            {
+              id: "wave",
+              label: "Wave",
+              fallback: "👋",
+              file: "images/wave.gif",
+            },
+          ],
+        },
+        { "images/wave.gif": gif },
+      ),
+    );
+    expect(pack.kind).toBe("sticker");
+    if (pack.kind === "sticker") {
+      expect(pack.stickers[0].fallback).toBe("👋");
+      expect(pack.stickers[0].url).toMatch(/^data:image\/gif;base64,/);
+    }
+  });
+
+  it("rejects duplicate sticker IDs", () => {
+    expect(() =>
+      parsePack(
+        archive(
+          {
+            format: 1,
+            id: "test.stickers",
+            version: "1.0.0",
+            name: "Reactions",
+            kind: "sticker",
+            stickers: [
+              {
+                id: "wave",
+                label: "Wave",
+                fallback: "👋",
+                file: "images/wave.png",
+              },
+              {
+                id: "wave",
+                label: "Wave again",
+                fallback: "👋",
+                file: "images/wave.png",
+              },
+            ],
+          },
+          { "images/wave.png": png },
+        ),
+      ),
+    ).toThrow(/duplicate sticker id/i);
+  });
+
   it("loads every published marketplace archive and matches its checksum", () => {
     const catalog = JSON.parse(
       readFileSync(
         new URL("../../../site/market/catalog.json", import.meta.url),
         "utf8",
       ),
-    ) as { id: string; file: string; sha256: string }[];
-    expect(catalog).toHaveLength(11);
+    ) as { id: string; kind: string; file: string; sha256: string }[];
+    expect(catalog).toHaveLength(12);
+    expect(catalog.filter((item) => item.kind !== "sticker")).toHaveLength(11);
     for (const item of catalog) {
       const bytes = readFileSync(
         new URL(`../../../site/market/${item.file}`, import.meta.url),

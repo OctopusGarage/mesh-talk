@@ -227,6 +227,7 @@
     "stickerPacks": "Sticker packs",
     "stickerPackEmoji": "Emoji",
     "stickerPackCats": "Cat Stickers",
+    "manageStickers": "Manage sticker packs",
     "sendSticker": "Send {{emoji}} sticker",
     "cancelReply": "Cancel reply",
     "tools": "Message tools"

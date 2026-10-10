@@ -12,10 +12,11 @@ export default defineConfig(({ command, mode }) => {
     readFileSync(new URL("catalog.json", market), "utf8"),
   ) as {
     id: string;
+    kind: "avatar" | "theme" | "sticker";
     file: string;
     sha256: string;
   }[];
-  const bundled = lite ? [] : catalog;
+  const bundled = lite ? [] : catalog.filter(({ kind }) => kind !== "sticker");
   return {
     define: {
       "import.meta.env.VITE_BUNDLED_PACK_IDS": JSON.stringify(

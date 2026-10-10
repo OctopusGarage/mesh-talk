@@ -11,7 +11,7 @@ const MARKET_BASE = "https://octopusgarage.github.io/mesh-talk/market/";
 interface CatalogEntry {
   id: string;
   name: string;
-  kind: "avatar" | "theme";
+  kind: "avatar" | "theme" | "sticker";
   category?: "personal" | "group";
   description: string;
   file: string;
@@ -29,7 +29,9 @@ function catalogEntries(value: unknown): CatalogEntry[] {
       !/^[a-z0-9][a-z0-9._-]{2,79}$/.test(entry.id) ||
       typeof entry.name !== "string" ||
       typeof entry.description !== "string" ||
-      (entry.kind !== "avatar" && entry.kind !== "theme") ||
+      (entry.kind !== "avatar" &&
+        entry.kind !== "theme" &&
+        entry.kind !== "sticker") ||
       typeof entry.file !== "string" ||
       !/^packs\/[a-z0-9._-]+\.zip$/.test(entry.file) ||
       typeof entry.sha256 !== "string" ||
@@ -80,7 +82,7 @@ export function PackManager({
   kind,
   category,
 }: {
-  kind: "avatar" | "theme";
+  kind: "avatar" | "theme" | "sticker";
   category?: "personal" | "group";
 }) {
   const { t } = useTranslation();
@@ -88,7 +90,7 @@ export function PackManager({
   const packs = usePacks((s) => s.packs).filter(
     (pack) =>
       pack.kind === kind &&
-      (pack.kind === "theme" || pack.category === category),
+      (pack.kind !== "avatar" || pack.category === category),
   );
   const install = usePacks((s) => s.install);
   const remove = usePacks((s) => s.remove);
@@ -170,7 +172,7 @@ export function PackManager({
 
   const available = catalog.filter(
     (item) =>
-      item.kind === kind && (kind === "theme" || item.category === category),
+      item.kind === kind && (kind !== "avatar" || item.category === category),
   );
   return (
     <div className="space-y-3" data-testid={`pack-manager-${kind}`}>

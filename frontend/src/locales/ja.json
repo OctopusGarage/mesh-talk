@@ -227,6 +227,7 @@
     "stickerPacks": "ステッカーパック",
     "stickerPackEmoji": "絵文字",
     "stickerPackCats": "猫ステッカー",
+    "manageStickers": "ステッカーパックを管理",
     "sendSticker": "{{emoji}} ステッカーを送信",
     "cancelReply": "返信をキャンセル",
     "tools": "メッセージツール"

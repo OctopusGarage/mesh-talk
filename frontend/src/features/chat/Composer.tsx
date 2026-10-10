@@ -16,11 +16,9 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
-import {
-  STICKERS,
-  STICKER_PACKS,
-  type StickerPackId,
-} from "@/lib/stickerPacks";
+import { STICKERS, installedStickers } from "@/lib/stickerPacks";
+import { usePacks } from "@/store/packs";
+import { PackManager } from "@/components/PackManager";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
 
@@ -218,6 +216,11 @@ export function Composer({
   onImage?: () => void;
 }) {
   const { t } = useTranslation();
+  const installedPacks = usePacks((s) => s.packs);
+  const stickers = useMemo(
+    () => [...STICKERS, ...installedStickers(installedPacks)],
+    [installedPacks],
+  );
   const motionOK = useMotionOK();
   const [text, setText] = useState(initialDraft);
   const [sendRejected, setSendRejected] = useState(false);
@@ -227,7 +230,6 @@ export function Composer({
   const [expressionTab, setExpressionTab] = useState<
     "emoji" | "stickers" | null
   >(null);
-  const [stickerPack, setStickerPack] = useState<StickerPackId>("noto");
   const [showTools, setShowTools] = useState(false);
   const [panelPointerMotion, setPanelPointerMotion] = useState(false);
   const panelMotion = { pointer: panelPointerMotion, reduced: !motionOK };
@@ -581,32 +583,8 @@ export function Composer({
                   data-testid="sticker-panel"
                   className="overflow-y-auto p-2"
                 >
-                  <div
-                    className="mb-2 grid grid-cols-2 gap-1 border-b pb-2"
-                    aria-label={t("composer.stickerPacks")}
-                  >
-                    {STICKER_PACKS.map((pack) => (
-                      <button
-                        key={pack}
-                        type="button"
-                        data-testid={`sticker-pack-${pack}`}
-                        aria-pressed={stickerPack === pack}
-                        onClick={() => setStickerPack(pack)}
-                        className={cn(
-                          "min-w-0 rounded-md px-2 py-1.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                          stickerPack === pack
-                            ? "bg-accent text-foreground"
-                            : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
-                        )}
-                      >
-                        {pack === "noto"
-                          ? t("composer.stickerPackEmoji")
-                          : t("composer.stickerPackCats")}
-                      </button>
-                    ))}
-                  </div>
                   <div className="grid grid-cols-5 gap-1">
-                    {STICKERS.filter((s) => s.pack === stickerPack).map((s) => (
+                    {stickers.map((s) => (
                       <button
                         key={s.id}
                         type="button"
@@ -617,19 +595,27 @@ export function Composer({
                           setExpressionTab(null);
                         }}
                         className="rounded-lg p-1 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        title={s.label}
+                        title={s.label ?? s.emoji}
                         aria-label={t("composer.sendSticker", {
-                          emoji: s.label,
+                          emoji: s.label ?? s.emoji,
                         })}
                       >
                         <StickerThumb
                           src={s.url}
-                          alt={s.label}
+                          alt={s.label ?? s.emoji}
                           fallback={s.emoji}
                         />
                       </button>
                     ))}
                   </div>
+                  <details className="mt-2 border-t border-border pt-2 text-xs">
+                    <summary className="cursor-pointer text-primary">
+                      {t("composer.manageStickers")}
+                    </summary>
+                    <div className="pt-3">
+                      <PackManager kind="sticker" />
+                    </div>
+                  </details>
                 </div>
               ) : null}
             </motion.div>

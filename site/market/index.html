@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Download avatar and theme libraries for Mesh-Talk."
+      content="Download avatar, theme, and sticker libraries for Mesh-Talk."
     />
     <title>Customization Market — Mesh-Talk</title>
     <style>
@@ -218,12 +218,13 @@
       <div class="eyebrow">Customize your space</div>
       <h1>Make Mesh-Talk yours.</h1>
       <p class="intro">
-        Discover optional avatar libraries and themes. Each download is a
+        Discover optional avatar, theme, and sticker libraries. Each download is a
         data-only ZIP pack: images and a manifest, with no executable code.
       </p>
       <div class="hint">
         <strong>Install in the app:</strong> Open Settings → Appearance for
-        themes, or choose a profile or channel avatar to open the gallery. You
+        themes, choose a profile or channel avatar to open the gallery, or open
+        the chat sticker picker and expand Manage sticker packs. You
         can install a pack directly from the in-app marketplace, or download a
         ZIP here and choose <strong>Install ZIP</strong>.
       </div>
@@ -234,6 +235,9 @@
           </button>
           <button type="button" data-filter="theme" aria-pressed="false">
             Themes
+          </button>
+          <button type="button" data-filter="sticker" aria-pressed="false">
+            Stickers
           </button>
           <button type="button" data-filter="personal" aria-pressed="false">
             People
@@ -288,6 +292,8 @@
           kind.textContent =
             item.kind === "theme"
               ? "Theme"
+              : item.kind === "sticker"
+                ? "Stickers"
               : item.category === "group"
                 ? "Channel avatars"
                 : "Personal avatars";

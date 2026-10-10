@@ -5,7 +5,7 @@ export interface PackBase {
   id: string;
   version: string;
   name: string;
-  kind: "avatar" | "theme";
+  kind: "avatar" | "theme" | "sticker";
 }
 
 export interface AvatarPack extends PackBase {
@@ -24,7 +24,12 @@ export interface ThemePack extends PackBase {
   wallpapers?: { id: string; title: string; url: string }[];
 }
 
-export type CustomizationPack = AvatarPack | ThemePack;
+export interface StickerPack extends PackBase {
+  kind: "sticker";
+  stickers: { id: string; label: string; fallback: string; url: string }[];
+}
+
+export type CustomizationPack = AvatarPack | ThemePack | StickerPack;
 
 export const MAX_PACK_ZIP_BYTES = 12 * 1024 * 1024;
 const MAX_UNPACKED = 24 * 1024 * 1024;
@@ -77,10 +82,12 @@ function named(value: unknown, field: string, max = 80): string {
   return value.trim();
 }
 
-function path(value: unknown): string {
+function path(value: unknown, sticker = false): string {
   if (
     typeof value !== "string" ||
-    !/^images\/[a-zA-Z0-9_./-]+\.(png|jpe?g|webp)$/.test(value) ||
+    !(sticker
+      ? /^images\/[a-zA-Z0-9_./-]+\.(png|jpe?g|webp|gif)$/.test(value)
+      : /^images\/[a-zA-Z0-9_./-]+\.(png|jpe?g|webp)$/.test(value)) ||
     value.split("/").some((part) => part === ".." || part === "." || !part)
   ) {
     throw new Error("Invalid image path");
@@ -88,8 +95,12 @@ function path(value: unknown): string {
   return value;
 }
 
-function image(files: Record<string, Uint8Array>, value: unknown): string {
-  const file = files[path(value)];
+function image(
+  files: Record<string, Uint8Array>,
+  value: unknown,
+  sticker = false,
+): string {
+  const file = files[path(value, sticker)];
   if (!file || !file.length || file.length > MAX_IMAGE)
     throw new Error("Missing or oversized image");
   const name = value as string;
@@ -97,7 +108,9 @@ function image(files: Record<string, Uint8Array>, value: unknown): string {
     ? "image/png"
     : name.endsWith(".webp")
       ? "image/webp"
-      : "image/jpeg";
+      : name.endsWith(".gif")
+        ? "image/gif"
+        : "image/jpeg";
   const valid =
     mime === "image/png"
       ? file.length >= 8 &&
@@ -105,7 +118,9 @@ function image(files: Record<string, Uint8Array>, value: unknown): string {
       : mime === "image/webp"
         ? strFromU8(file.subarray(0, 4)) === "RIFF" &&
           strFromU8(file.subarray(8, 12)) === "WEBP"
-        : file[0] === 0xff && file[1] === 0xd8 && file[2] === 0xff;
+        : mime === "image/gif"
+          ? ["GIF87a", "GIF89a"].includes(strFromU8(file.subarray(0, 6)))
+          : file[0] === 0xff && file[1] === 0xd8 && file[2] === 0xff;
   if (!valid) throw new Error("Invalid image data");
   let binary = "";
   for (let i = 0; i < file.length; i += 8192) {
@@ -227,6 +242,32 @@ export function parsePack(bytes: Uint8Array): CustomizationPack {
       ...(raw.crest ? { crest: image(files, raw.crest) } : {}),
       ...(wallpapers ? { wallpapers } : {}),
     };
+  }
+  if (raw.kind === "sticker") {
+    if (
+      !Array.isArray(raw.stickers) ||
+      !raw.stickers.length ||
+      raw.stickers.length > 100
+    )
+      throw new Error("Invalid sticker list");
+    const ids = new Set<string>();
+    const stickers = raw.stickers.map((item) => {
+      const entry = object(item);
+      const id = named(entry.id, "sticker id", 40);
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(id) || ids.has(id))
+        throw new Error("Invalid or duplicate sticker id");
+      ids.add(id);
+      const fallback = named(entry.fallback, "sticker fallback", 32);
+      if (Array.from(fallback).length > 8)
+        throw new Error("Sticker fallback is too long");
+      return {
+        id,
+        label: named(entry.label, "sticker label"),
+        fallback,
+        url: image(files, entry.file, true),
+      };
+    });
+    return { ...base, kind: "sticker", stickers };
   }
   throw new Error("Unknown pack kind");
 }

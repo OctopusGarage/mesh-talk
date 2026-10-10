@@ -227,6 +227,7 @@
     "stickerPacks": "貼紙包",
     "stickerPackEmoji": "表情",
     "stickerPackCats": "貓咪貼紙",
+    "manageStickers": "管理貼紙包",
     "sendSticker": "傳送 {{emoji}} 貼紙",
     "cancelReply": "取消回覆",
     "tools": "訊息工具"
