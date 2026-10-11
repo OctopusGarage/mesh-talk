@@ -921,7 +921,14 @@ mod tests {
                     adopt_linked_account,
                     rename_account,
                     logout,
-                    crate::owner_commands::owner_node_identity
+                    crate::owner_commands::owner_node_identity,
+                    crate::chat_commands::file_statuses,
+                    crate::chat_commands::attachment_receive_policy,
+                    crate::chat_commands::set_attachment_global_auto,
+                    crate::chat_commands::set_attachment_contact_auto,
+                    crate::chat_commands::decide_attachment,
+                    crate::chat_commands::save_file_to_dir,
+                    crate::chat_commands::read_media
                 ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
                 .unwrap();
@@ -1007,6 +1014,111 @@ mod tests {
             },
         )
         .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+    }
+
+    #[test]
+    fn attachment_ipc_enforces_bounded_queries_and_persists_receive_policy() {
+        let fixture = AuthFixture::new("attachment-ipc");
+        let account = "a".repeat(32);
+        let policy = || {
+            invoke_auth(
+                &fixture.webview,
+                "attachment_receive_policy",
+                serde_json::json!({ "account": account }),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            policy(),
+            serde_json::json!({ "global_auto": false, "contact_auto": null })
+        );
+        assert_eq!(
+            invoke_auth(
+                &fixture.webview,
+                "file_statuses",
+                serde_json::json!({ "fileConvs": [] }),
+            )
+            .unwrap(),
+            serde_json::json!([])
+        );
+        let unknown_file = "00".repeat(32);
+        assert_eq!(
+            invoke_auth(
+                &fixture.webview,
+                "file_statuses",
+                serde_json::json!({ "fileConvs": [unknown_file.clone()] }),
+            )
+            .unwrap(),
+            serde_json::json!([{
+                "file_conv": unknown_file,
+                "done": 0,
+                "total": 0,
+                "ready": false,
+                "consent": null
+            }])
+        );
+        assert!(invoke_auth(
+            &fixture.webview,
+            "file_statuses",
+            serde_json::json!({ "fileConvs": vec!["00"; 501] }),
+        )
+        .is_err());
+        invoke_auth(
+            &fixture.webview,
+            "set_attachment_global_auto",
+            serde_json::json!({ "auto": true }),
+        )
+        .unwrap();
+        assert_eq!(policy()["global_auto"], true);
+        invoke_auth(
+            &fixture.webview,
+            "set_attachment_contact_auto",
+            serde_json::json!({ "account": account, "auto": false }),
+        )
+        .unwrap();
+        assert_eq!(policy()["contact_auto"], false);
+        invoke_auth(
+            &fixture.webview,
+            "set_attachment_contact_auto",
+            serde_json::json!({ "account": account, "auto": null }),
+        )
+        .unwrap();
+        assert_eq!(policy()["contact_auto"], serde_json::Value::Null);
+        assert_eq!(
+            invoke_auth(
+                &fixture.webview,
+                "attachment_receive_policy",
+                serde_json::json!({ "account": null }),
+            )
+            .unwrap()["global_auto"],
+            true
+        );
+        assert!(invoke_auth(
+            &fixture.webview,
+            "set_attachment_contact_auto",
+            serde_json::json!({ "account": "invalid", "auto": true }),
+        )
+        .is_err());
+        for command in ["decide_attachment", "save_file_to_dir", "read_media"] {
+            let body = match command {
+                "decide_attachment" => serde_json::json!({ "fileConv": "invalid", "accept": true }),
+                "save_file_to_dir" => serde_json::json!({ "fileConv": "invalid", "dir": "/tmp" }),
+                _ => serde_json::json!({ "fileConv": "invalid" }),
+            };
+            assert!(invoke_auth(&fixture.webview, command, body).is_err());
+        }
+        assert!(invoke_auth(
+            &fixture.webview,
+            "decide_attachment",
+            serde_json::json!({ "fileConv": unknown_file, "accept": true }),
+        )
+        .is_err());
+        assert!(invoke_auth(
+            &fixture.webview,
+            "read_media",
+            serde_json::json!({ "fileConv": unknown_file }),
+        )
+        .is_err());
     }
 
     #[test]

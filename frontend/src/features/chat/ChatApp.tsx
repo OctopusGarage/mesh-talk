@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CircleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -33,6 +33,7 @@ export function ChatApp() {
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
   const clearError = useChat((s) => s.clearError);
+  const foreground = useRef(document.hasFocus());
   // Total unread across all conversations → the OS app-icon badge (dock/taskbar count).
   // A primitive sum keeps the selector stable (re-renders only when the total changes).
   const totalUnread = useChat((s) =>
@@ -48,7 +49,26 @@ export function ChatApp() {
   }, [loadSettings]);
 
   useEffect(() => {
-    if (owner) chatApi.setBadge(totalUnread, owner).catch(() => {});
+    const acknowledge = () => {
+      foreground.current = true;
+      if (owner) void chatApi.setBadge(0, owner).catch(() => {});
+    };
+    const background = () => {
+      foreground.current = false;
+    };
+    window.addEventListener("focus", acknowledge);
+    window.addEventListener("blur", background);
+    return () => {
+      window.removeEventListener("focus", acknowledge);
+      window.removeEventListener("blur", background);
+    };
+  }, [owner, generation]);
+
+  useEffect(() => {
+    if (owner)
+      void chatApi
+        .setBadge(foreground.current ? 0 : totalUnread, owner)
+        .catch(() => {});
   }, [totalUnread, owner, generation]);
 
   useEffect(() => {

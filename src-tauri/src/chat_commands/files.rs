@@ -263,29 +263,39 @@ pub async fn write_temp_file(
     ext: String,
     name: Option<String>,
 ) -> Result<String, CommandError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?;
+    let path = write_temp_file_in_cache(&cache, &bytes, &ext, name.as_deref(), ts)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn write_temp_file_in_cache(
+    cache: &std::path::Path,
+    bytes: &[u8],
+    ext: &str,
+    name: Option<&str>,
+    ts: u128,
+) -> Result<std::path::PathBuf, CommandError> {
     // Bound a pasted image to a sane size so a paste can't write an arbitrarily large temp
     // file (the file pipeline enforces its own hard limit on the subsequent send).
     const MAX_PASTE_BYTES: usize = 64 * 1024 * 1024;
     if bytes.len() > MAX_PASTE_BYTES {
         return Err(CommandError::Validation("pasted image too large".into()));
     }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let basename = temp_file_basename(&ext, name.as_deref(), ts);
+    let basename = temp_file_basename(ext, name, ts);
     // A unique per-write subdir, so keeping a REAL filename can't collide with (or overwrite)
     // another in-flight send of a same-named file — the displayed name is the basename.
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?
-        .join("pasted")
-        .join(ts.to_string());
+    let dir = cache.join("pasted").join(ts.to_string());
     std::fs::create_dir_all(&dir).map_err(|e| CommandError::Validation(e.to_string()))?;
     let path = dir.join(basename);
     std::fs::write(&path, &bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok(path)
 }
 
 /// Choose the on-disk name for a written temp file. With a real `original` filename (the
@@ -345,4 +355,28 @@ pub async fn read_media(
         .map_err(|e| format!("join error: {e}"))?
         .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasted_bytes_use_an_isolated_cache_path_and_reject_oversized_input() {
+        let cache = tempfile::tempdir().unwrap();
+        let bytes = b"image bytes";
+        let saved =
+            write_temp_file_in_cache(cache.path(), bytes, "png", Some("photo.png"), 42).unwrap();
+        assert!(saved.starts_with(cache.path()));
+        assert_eq!(saved.file_name().unwrap(), "photo.png");
+        assert_eq!(std::fs::read(saved).unwrap(), bytes);
+        assert!(write_temp_file_in_cache(
+            cache.path(),
+            &vec![0; 64 * 1024 * 1024 + 1],
+            "png",
+            None,
+            43
+        )
+        .is_err());
+    }
 }

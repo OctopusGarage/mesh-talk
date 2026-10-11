@@ -53,12 +53,38 @@ test("incoming unread count reaches the OS badge and clears on read and logout",
       return { count, owner };
     });
 
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await incoming("badge one");
-  await expect.poll(latestCount).toEqual({ count: 1, owner: "u_self" });
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __mockEmit: (event: string, payload: unknown) => void;
+    };
+    w.__mockEmit("channel-message", {
+      channel_id: "chan_team_dddd4444",
+      channel_name: "team",
+      from: "device_bob_2222",
+      text: "another unread chat",
+      reply_to: null,
+    });
+  });
+  await expect.poll(latestCount).toEqual({ count: 2, owner: "u_self" });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(latestCount).toEqual({ count: 0, owner: "u_self" });
+  await expect(
+    page.getByTestId(`conversation-row-${BOB.account}`).locator("..").getByText("1", {
+      exact: true,
+    }),
+  ).toBeVisible();
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect.poll(latestCount).toEqual({ count: 0, owner: "u_self" });
+  await expect(
+    page.getByTestId(`conversation-row-${CHANNEL.id}`).locator("..").getByText("1", {
+      exact: true,
+    }),
+  ).toBeVisible();
 
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await incoming("badge two");
   await expect.poll(latestCount).toEqual({ count: 1, owner: "u_self" });
   await page.getByTestId("sidebar-overflow").click();
