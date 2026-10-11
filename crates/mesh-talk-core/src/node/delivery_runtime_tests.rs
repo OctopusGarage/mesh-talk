@@ -2579,6 +2579,7 @@ fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
 }
 
 #[tokio::test]
+#[ignore = "large disk transfer runs separately in backend E2E"]
 async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();

@@ -20,6 +20,7 @@ test:
 # (--test-threads=1) to avoid discovery-port / CPU contention between the heavy processes.
 e2e:
 	nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli -- --ignored --test-threads=1
+	nice -n 10 cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
 
 eval-smoke:
 	./scripts/ai-eval-smoke.sh
