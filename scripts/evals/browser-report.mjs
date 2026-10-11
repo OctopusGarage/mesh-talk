@@ -35,6 +35,9 @@ export function requiredBrowserPaths(tier) {
     ["file-send-progress.spec.ts", "file sender keeps confirmed upload percent and ETA visible until recipient custody"],
     ["file-send-progress.spec.ts", "image sender keeps confirmed upload percent and ETA visible until recipient custody"],
     ["file-send-progress.spec.ts", "concurrent sends keep progress with their own file bubbles"],
+    ["directory-transfer.spec.ts", "folder picker sends its path as an attachment"],
+    ["directory-transfer.spec.ts", "received folder stays disabled until ready and extracts through save-to-dir"],
+    ["directory-transfer.spec.ts", "folder Save in chat and history uses Downloads without a directory picker"],
   );
   return paths;
 }

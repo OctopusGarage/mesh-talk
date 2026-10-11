@@ -1,4 +1,4 @@
-import { test, expect } from "./tauri-mock";
+import { test, expect } from "./helpers/portable-evidence";
 import {
   enterChat,
   openBobDm,
@@ -137,4 +137,100 @@ test("received folder stays disabled until ready and extracts through save-to-di
     )
     .toEqual({ fileConv: "fc_folder", dir: "/home/tester/Downloads" });
   await expect(tray.getByRole("button", { name: "Reveal" })).toBeVisible();
+});
+
+test("folder Save in chat and history uses Downloads without a directory picker", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate(({ account, device }) => {
+    const win = window as unknown as Window & {
+      __folderSaves: Array<{ fileConv: string; dir: string }>;
+      __mockEmit: (name: string, payload: unknown) => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = win.__TAURI_INTERNALS__.invoke;
+    win.__folderSaves = [];
+    win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "get_app_settings")
+        return {
+          ...((await original(cmd, args)) as Record<string, unknown>),
+          download_dir: "",
+        };
+      if (cmd === "default_download_dir") return "/home/tester/Downloads";
+      if (cmd === "plugin:dialog|open" || cmd === "plugin:dialog|save")
+        throw new Error("Save should use the default Downloads directory");
+      if (cmd === "save_file_to_dir") {
+        win.__folderSaves.push({
+          fileConv: String(args.fileConv),
+          dir: String(args.dir),
+        });
+        return `/home/tester/Downloads/${args.fileConv}`;
+      }
+      const result = await original(cmd, args);
+      if (cmd === "owner_account_history" && args.account === account)
+        return [
+          ...(result as unknown[]),
+          ...["chat", "history"].map((which) => ({
+            id: `folder-${which}`,
+            from_me: false,
+            who: device,
+            text: "",
+            wall_clock: Date.now(),
+            reply_to: null,
+            file: {
+              file_conv: `fc_folder_${which}`,
+              name: `${which}.tar`,
+              size: 2048,
+              mime: "application/x-mesh-talk-directory-tar",
+              media: false,
+            },
+          })),
+        ];
+      return result;
+    };
+    for (const which of ["chat", "history"])
+      win.__mockEmit("file-received", {
+        conv: account,
+        from: device,
+        name: `${which}.tar`,
+        size: 2048,
+        mime: "application/x-mesh-talk-directory-tar",
+        file_conv: `fc_folder_${which}`,
+        media: false,
+      });
+  }, BOB);
+  const bubble = page.getByTestId("message-bubble").filter({ hasText: "chat" });
+  await bubble.getByRole("button", { name: "Save" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as { __folderSaves: unknown[] }).__folderSaves,
+      ),
+    )
+    .toEqual([{ fileConv: "fc_folder_chat", dir: "/home/tester/Downloads" }]);
+  await page.getByTestId("conversation-history-trigger").click();
+  const history = page.getByTestId("conversation-history-dialog");
+  await history.getByTestId("history-tab-files").click();
+  await history
+    .getByTestId("history-file-item")
+    .filter({ hasText: "history" })
+    .getByRole("button", { name: "Save" })
+    .click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as { __folderSaves: unknown[] }).__folderSaves,
+      ),
+    )
+    .toEqual([
+      { fileConv: "fc_folder_chat", dir: "/home/tester/Downloads" },
+      { fileConv: "fc_folder_history", dir: "/home/tester/Downloads" },
+    ]);
 });

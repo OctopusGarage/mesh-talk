@@ -87,8 +87,10 @@ The folder picker and native drop path now accept directories. The sender packs
 regular files and empty subdirectories into a bounded tar payload and sends it through
 the existing encrypted file transfer. The manifest retains MFM3 framing and carries a
 dedicated directory MIME marker; older MFM3-capable clients can download the `.tar` file using their
-existing Save action. New clients show a folder icon and save into a chosen download
-directory, extracting only after whole-file verification. Extraction rejects traversal,
+existing Save action. New clients show a folder icon and save into the configured or
+system Downloads directory by default, extracting only after whole-file verification.
+The Received files tray offers Save as… when a different destination is wanted.
+Extraction rejects traversal,
 links, special entries, too many entries, and expansion beyond the transfer size. It
 stages privately and renames the completed folder into place.
 

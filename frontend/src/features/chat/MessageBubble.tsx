@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { chat } from "@/lib/api";
-import { defaultSavePath } from "@/lib/download";
+import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
 import {
   attachmentLabel,
   isDirectoryAttachment,
@@ -88,6 +88,15 @@ function FileBubble({
       return;
     try {
       setSaving(true);
+      const dir = directory ? await effectiveDownloadDir() : "";
+      if (!lease.current()) return;
+      if (dir) {
+        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
+          return;
+        const path = await chat.saveFileToDir(file.fileConv, dir);
+        if (lease.current()) rememberSavedDownload(file.fileConv, path);
+        return;
+      }
       const defaultPath = await defaultSavePath(file.name);
       if (!lease.current()) return;
       const dest = directory

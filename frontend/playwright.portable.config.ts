@@ -31,6 +31,7 @@ export default defineConfig({
     "media-recovery.spec.ts",
     "media-lifecycle.spec.ts",
     "file-send-progress.spec.ts",
+    "directory-transfer.spec.ts",
     "screenshot-portable.spec.ts",
   ],
   grepInvert: tier === "core" ? /@extended/ : undefined,
