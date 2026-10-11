@@ -33,12 +33,10 @@ export function ChatApp() {
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
   const clearError = useChat((s) => s.clearError);
-  const foreground = useRef(document.hasFocus());
-  // Total unread across all conversations → the OS app-icon badge (dock/taskbar count).
-  // A primitive sum keeps the selector stable (re-renders only when the total changes).
-  const totalUnread = useChat((s) =>
-    Object.values(s.unread).reduce((a, b) => a + b, 0),
-  );
+  const unread = useChat((s) => s.unread);
+  const latestUnread = useRef(unread);
+  latestUnread.current = unread;
+  const acknowledgedUnread = useRef<Record<string, number>>({});
 
   // Request notification authorization once at startup. On macOS the dock unread badge only
   // renders if the app is authorized for notification badges, so this is what makes the badge
@@ -50,26 +48,38 @@ export function ChatApp() {
 
   useEffect(() => {
     const acknowledge = () => {
-      foreground.current = true;
+      // Acknowledging the OS badge leaves the conversation unread markers intact.
+      // Only arrivals after this snapshot should paint a new menu bar count.
+      acknowledgedUnread.current = { ...latestUnread.current };
       if (owner) void chatApi.setBadge(0, owner).catch(() => {});
     };
-    const background = () => {
-      foreground.current = false;
-    };
+    if (document.hasFocus()) acknowledge();
     window.addEventListener("focus", acknowledge);
-    window.addEventListener("blur", background);
     return () => {
       window.removeEventListener("focus", acknowledge);
-      window.removeEventListener("blur", background);
     };
   }, [owner, generation]);
 
   useEffect(() => {
-    if (owner)
-      void chatApi
-        .setBadge(foreground.current ? 0 : totalUnread, owner)
-        .catch(() => {});
-  }, [totalUnread, owner, generation]);
+    if (!owner) return;
+    // Reading a conversation resets its unread counter. Lower the snapshot too,
+    // so the next arrival in that conversation is counted from zero.
+    for (const [conversation, value] of Object.entries(
+      acknowledgedUnread.current,
+    )) {
+      acknowledgedUnread.current[conversation] = Math.min(
+        value,
+        unread[conversation] ?? 0,
+      );
+    }
+    const count = Object.entries(unread).reduce(
+      (sum, [conversation, value]) =>
+        sum +
+        Math.max(0, value - (acknowledgedUnread.current[conversation] ?? 0)),
+      0,
+    );
+    void chatApi.setBadge(count, owner).catch(() => {});
+  }, [unread, owner, generation]);
 
   useEffect(() => {
     if (!owner) return;

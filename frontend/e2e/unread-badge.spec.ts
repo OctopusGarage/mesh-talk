@@ -71,18 +71,27 @@ test("incoming unread count reaches the OS badge and clears on read and logout",
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect.poll(latestCount).toEqual({ count: 0, owner: "u_self" });
   await expect(
-    page.getByTestId(`conversation-row-${BOB.account}`).locator("..").getByText("1", {
-      exact: true,
-    }),
+    page
+      .getByTestId(`conversation-row-${BOB.account}`)
+      .locator("..")
+      .getByText("1", {
+        exact: true,
+      }),
   ).toBeVisible();
+  await incoming("new while focused");
+  await expect.poll(latestCount).toEqual({ count: 1, owner: "u_self" });
+  await expect(
+    page
+      .getByTestId(`conversation-row-${CHANNEL.id}`)
+      .locator("..")
+      .getByText("1", {
+        exact: true,
+      }),
+  ).toBeVisible();
+  await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+  await expect.poll(latestCount).toEqual({ count: 1, owner: "u_self" });
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect.poll(latestCount).toEqual({ count: 0, owner: "u_self" });
-  await expect(
-    page.getByTestId(`conversation-row-${CHANNEL.id}`).locator("..").getByText("1", {
-      exact: true,
-    }),
-  ).toBeVisible();
-
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
   await incoming("badge two");
