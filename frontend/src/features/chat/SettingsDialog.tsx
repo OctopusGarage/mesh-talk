@@ -49,6 +49,7 @@ import {
 import { ThemePicker } from "./ThemePicker";
 import { HiddenContactsDialog } from "./HiddenContactsDialog";
 import { PrivacySettings } from "./PrivacySettings";
+import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
 import {
   scrollToSettingsSection,
   settingsCategory,
@@ -555,6 +556,7 @@ export function SettingsDialog({
             </Section>
 
             <Section id="settings-files" title={t("redesign.messagesFiles")}>
+              <AttachmentReceiveSettings enabled={open} />
               <Row
                 icon={<FolderOpen className="h-4 w-4" />}
                 title={t("settings.downloadFolder")}

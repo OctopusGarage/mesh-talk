@@ -11,8 +11,8 @@
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::sync::{
     build_request, fingerprint, handle_followup, handle_request_bounded, handle_response_bounded,
-    ApplyReport, FpRequest, FpResponse, SyncFollowup, SyncRequest, SyncResponse, SyncStore,
-    MAX_REJECTED_DETAIL,
+    ApplyReport, FileConsentStatus, FpRequest, FpResponse, SyncFollowup, SyncRequest, SyncResponse,
+    SyncStore, MAX_REJECTED_DETAIL,
 };
 use crate::transport::{SecureChannel, TransportError, MAX_PLAINTEXT};
 use bincode::Options;
@@ -69,6 +69,15 @@ enum SyncWire {
         event_id: EventId,
         stored: bool,
     },
+    FileConsentRequest {
+        file: ConversationId,
+        manifest: EventId,
+    },
+    FileConsentResponse {
+        file: ConversationId,
+        manifest: EventId,
+        status: FileConsentStatus,
+    },
 }
 
 #[cfg(test)]
@@ -88,7 +97,10 @@ pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<Conver
 pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
     matches!(
         decode(bytes),
-        Ok(SyncWire::Request(_) | SyncWire::FpRequest(_) | SyncWire::DurableHaveRequest { .. })
+        Ok(SyncWire::Request(_)
+            | SyncWire::FpRequest(_)
+            | SyncWire::DurableHaveRequest { .. }
+            | SyncWire::FileConsentRequest { .. })
     )
 }
 
@@ -194,6 +206,30 @@ where
             event_id: id,
             stored,
         } if c == conversation && id == event_id => Ok(stored),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+/// Query a recipient after the manifest is durable and before a chunk is sent.
+/// An older endpoint closes on this appended variant; the caller handles that
+/// explicit compatibility fallback on a fresh connection.
+pub(crate) async fn request_file_consent<IO>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    manifest: EventId,
+) -> Result<FileConsentStatus, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::FileConsentRequest { file, manifest })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::FileConsentResponse {
+            file: got_file,
+            manifest: got_manifest,
+            status,
+        } if got_file == file && got_manifest == manifest => Ok(status),
         _ => Err(SessionError::UnexpectedMessage),
     }
 }
@@ -497,6 +533,20 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     match decode(bytes)? {
+        SyncWire::FileConsentRequest { file, manifest } => {
+            let status = store
+                .lock()
+                .expect("store mutex not poisoned")
+                .file_consent(&file, &manifest);
+            channel
+                .send(&encode(&SyncWire::FileConsentResponse {
+                    file,
+                    manifest,
+                    status,
+                })?)
+                .await?;
+            Ok(Served::Handled(file))
+        }
         SyncWire::DurableHaveRequest {
             conversation,
             event_id,
@@ -571,7 +621,9 @@ where
         | SyncWire::ReqHave(_)
         | SyncWire::RespHave(_)
         | SyncWire::FpResponse(_) => Err(SessionError::UnexpectedMessage),
-        SyncWire::DurableHaveResponse { .. } => Err(SessionError::UnexpectedMessage),
+        SyncWire::DurableHaveResponse { .. } | SyncWire::FileConsentResponse { .. } => {
+            Err(SessionError::UnexpectedMessage)
+        }
     }
 }
 

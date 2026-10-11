@@ -641,6 +641,13 @@ struct NegativeCustodyStore<S> {
 impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
     for NegativeCustodyStore<S>
 {
+    fn file_consent(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> crate::eventlog::sync::FileConsentStatus {
+        self.inner.file_consent(file, manifest)
+    }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
         if *conversation != self.file {
             return self.inner.durable_have(conversation, id);
@@ -2714,22 +2721,22 @@ fn node_with_files(
     let (tx, rx) = mpsc::unbounded_channel();
     let (ch, _) = mpsc::unbounded_channel();
     let (file, files) = mpsc::unbounded_channel();
-    (
-        Node::open_with_account(
-            identity,
-            account,
-            roster,
-            tx,
-            ch,
-            file,
-            &dir.join("events.log"),
-            &dir.join("sent.log"),
-            "pw",
-        )
-        .unwrap(),
-        rx,
-        files,
+    let node = Node::open_with_account(
+        identity,
+        account,
+        roster,
+        tx,
+        ch,
+        file,
+        &dir.join("events.log"),
+        &dir.join("sent.log"),
+        "pw",
     )
+    .unwrap();
+    // Legacy delivery tests exercise the previous automatic-transfer contract.
+    // The consent-specific loopback test keeps the new manual default.
+    node.set_attachment_global_auto(true).unwrap();
+    (node, rx, files)
 }
 
 #[tokio::test]
@@ -3314,7 +3321,7 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
 }
 
 #[tokio::test]
-async fn file_post_office_final_custody_does_not_retire_target_resume_after_early_card_ack() {
+async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -3382,7 +3389,10 @@ async fn file_post_office_final_custody_does_not_retire_target_resume_after_earl
         .unwrap()
         .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
     a.flush_file_delivery(id).await;
-    assert!(relay.lock().unwrap().has(&final_chunk));
+    assert!(
+        !relay.lock().unwrap().has(&final_chunk),
+        "offline relay must not receive attachment chunks before recipient consent"
+    );
     assert!(
         a.delivery
             .lock()
@@ -3423,7 +3433,8 @@ async fn file_post_office_final_custody_does_not_retire_target_resume_after_earl
         super::OutgoingFileProgress {
             done: 2,
             total: 2,
-            delivered: true
+            delivered: true,
+            consent: None,
         }
     );
     assert_eq!(b.read_file(file).unwrap(), bytes);
@@ -3447,7 +3458,8 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, _) = node(bd.path(), bob, ba, &ap);
-    let bytes = vec![6; 1024];
+    let mut bytes = vec![6; 1024];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
     let path = ad.path().join("preview.png");
     std::fs::write(&path, &bytes).unwrap();
     let (id, file) = a

@@ -9,6 +9,7 @@ export interface Transfer {
   etaSeconds?: number | null;
   lastAdvancedAt?: number;
   delivered?: boolean;
+  consent?: "pending" | "accepted" | "declined";
 }
 
 interface TransfersState {
@@ -133,6 +134,7 @@ export const useTransfers = create<TransfersState>((set) => ({
         etaSeconds,
         lastAdvancedAt:
           advancing || regressed || !sameRun ? now : previous.lastAdvancedAt,
+        consent: status.consent,
       };
       return { transfers: boundTransfers(next) };
     }),

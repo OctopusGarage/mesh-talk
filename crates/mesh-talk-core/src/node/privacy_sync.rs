@@ -335,6 +335,21 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
+    fn file_consent(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> crate::eventlog::sync::FileConsentStatus {
+        use crate::eventlog::sync::FileConsentStatus;
+        match self
+            .node
+            .attachment_consent_for_peer(*file, *manifest, &self.peer)
+        {
+            super::attachment_consent::ReceiveDecision::Pending => FileConsentStatus::Pending,
+            super::attachment_consent::ReceiveDecision::Accepted => FileConsentStatus::Accepted,
+            super::attachment_consent::ReceiveDecision::Declined => FileConsentStatus::Declined,
+        }
+    }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
         if !self.visible(conversation).iter().any(|e| e.id == *id) {
             return !self.denied
@@ -369,6 +384,111 @@ impl SyncStore for GuardedSyncStore<'_> {
             .collect()
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        let known_file = {
+            self.node
+                .files
+                .lock()
+                .expect("files lock not poisoned")
+                .manifest(&event.conversation_id)
+                .is_some()
+        };
+        // A chunk-first legacy sender must not fill the recipient's log before
+        // its offer has arrived. Ordinary messages have an authenticated DM,
+        // control, or established channel scope; a fresh file conversation has
+        // none until its verified manifest has been installed.
+        if event.kind == EventKind::Message && !known_file {
+            let own = self.node.identity.public();
+            let peer = self.node.historical_author(event.author.ed25519_pub());
+            let direct = peer.as_ref().is_some_and(|proof| {
+                super::conversation::dm_conversation_id(&own, &proof.public())
+                    == event.conversation_id
+                    || super::delivery_receipt::delivery_conversation_id(&own, &proof.public())
+                        == event.conversation_id
+            });
+            let channel = self
+                .node
+                .channels
+                .lock()
+                .expect("channels lock not poisoned")
+                .state(&event.conversation_id)
+                .is_some()
+                || self
+                    .node
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .events(&event.conversation_id)
+                    .iter()
+                    .any(|entry| entry.kind == EventKind::MembershipChange);
+            let relay = self
+                .node
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned")
+                .as_ref()
+                .is_some_and(|state| state.own.post_office);
+            if !direct && !channel && !relay && event.author.ed25519_pub() != &own.ed25519_pub {
+                self.denied = true;
+                return Err(LogError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "unknown attachment conversation",
+                )));
+            }
+        }
+        // A legacy peer can skip the optional consent query and push chunks through
+        // ordinary sync. Enforce the same receive decision at the durable log gate.
+        if event.kind == EventKind::Message
+            && known_file
+            && !self
+                .node
+                .attachment_chunk_author_allowed(event.conversation_id, event.author.ed25519_pub())
+        {
+            self.denied = true;
+            return Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "attachment awaiting recipient approval",
+            )));
+        }
+        if event.kind == EventKind::Message && known_file {
+            let manifest = self
+                .node
+                .files
+                .lock()
+                .expect("files lock not poisoned")
+                .manifest(&event.conversation_id)
+                .cloned();
+            if let Some(manifest) = manifest.filter(super::media_store::automatic_inline_image) {
+                let first_chunk = self
+                    .node
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .events(&event.conversation_id)
+                    .is_empty();
+                if first_chunk && (event.seq != 1 || !event.parents.is_empty()) {
+                    self.denied = true;
+                    return Err(LogError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "automatic image must start at chunk one",
+                    )));
+                }
+                if event.seq == 1 {
+                    let valid = crate::file::open_chunk_for(&manifest, 0, &event.ciphertext)
+                        .ok()
+                        .is_some_and(|bytes| {
+                            super::media_store::raster_signature_matches(manifest.mime(), &bytes)
+                        });
+                    if !valid {
+                        self.denied = true;
+                        return Err(LogError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "automatic image has invalid image signature",
+                        )));
+                    }
+                }
+            }
+        }
         // Own-author backfill may compete with an accepted local reservation.
         // Delivery precedes privacy/log locks, matching enqueue's lock order.
         let mut delivery = if event.author.ed25519_pub() == &self.node.identity.public().ed25519_pub

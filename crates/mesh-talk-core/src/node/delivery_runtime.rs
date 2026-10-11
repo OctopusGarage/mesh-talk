@@ -112,6 +112,7 @@ enum FilePhase {
     Dial,
     Manifest,
     ManifestCustody,
+    Consent,
     InitialCustody,
     Chunks,
     FinalCustody,
@@ -747,7 +748,11 @@ impl Node {
                                 let mut book = self.files.lock().expect("files lock not poisoned");
                                 let fresh = !book.is_emitted(&entry.event_id);
                                 book.mark_emitted(entry.event_id);
-                                book.record_event(entry.event_id, manifest.clone());
+                                book.record_event(
+                                    entry.event_id,
+                                    crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
+                                    manifest.clone(),
+                                );
                                 fresh
                             };
                             self.remember_manifest_scope(
@@ -830,6 +835,23 @@ impl Node {
             .outgoing_file_acks
             .lock()
             .expect("outgoing file progress lock not poisoned");
+        let consent_answers = self
+            .outgoing_file_consents
+            .lock()
+            .expect("outgoing consent lock not poisoned");
+        let consent = if recipients.iter().any(|destination| {
+            consent_answers.get(&(id, destination.binding.event_id))
+                == Some(&crate::eventlog::sync::FileConsentStatus::Declined)
+        }) {
+            Some(super::ReceiveDecision::Declined)
+        } else if recipients.iter().any(|destination| {
+            consent_answers.get(&(id, destination.binding.event_id))
+                == Some(&crate::eventlog::sync::FileConsentStatus::Pending)
+        }) {
+            Some(super::ReceiveDecision::Pending)
+        } else {
+            None
+        };
         let total = card.chunk_count.saturating_mul(recipients.len() as u32);
         let done = recipients.iter().fold(0u32, |sum, destination| {
             let confirmed = if destination.active {
@@ -846,6 +868,7 @@ impl Node {
             done,
             total,
             delivered: recipients.iter().all(|d| !d.active),
+            consent,
         })
     }
 
@@ -1519,6 +1542,7 @@ impl Node {
             FilePhase::Dial => "file-dial",
             FilePhase::Manifest => "file-manifest-exchange",
             FilePhase::ManifestCustody => "file-manifest-custody",
+            FilePhase::Consent => "file-consent",
             FilePhase::InitialCustody => "file-initial-custody",
             FilePhase::Chunks => "file-chunk-exchange",
             FilePhase::FinalCustody => "file-final-custody",
@@ -1580,6 +1604,16 @@ impl Node {
         self.outgoing_file_acks
             .lock()
             .expect("outgoing file progress lock not poisoned")
+            .retain(|(id, destination_id), _| {
+                delivery.file_card(*id).is_some_and(|card| {
+                    card.destinations
+                        .iter()
+                        .any(|d| d.active && d.binding.event_id == *destination_id)
+                })
+            });
+        self.outgoing_file_consents
+            .lock()
+            .expect("outgoing consent lock not poisoned")
             .retain(|(id, destination_id), _| {
                 delivery.file_card(*id).is_some_and(|card| {
                     card.destinations
@@ -1677,8 +1711,35 @@ impl Node {
                 transfer.phase = if transfer.legacy {
                     FilePhase::Chunks
                 } else {
-                    FilePhase::InitialCustody
+                    FilePhase::Consent
                 };
+            }
+            FilePhase::Consent => {
+                match super::session::request_file_consent(
+                    channel,
+                    file.file_conversation,
+                    binding.event_id,
+                )
+                .await
+                {
+                    Ok(status) => {
+                        self.outgoing_file_consents
+                            .lock()
+                            .expect("outgoing consent lock not poisoned")
+                            .insert((file.id, binding.event_id), status);
+                        if status == crate::eventlog::sync::FileConsentStatus::Accepted {
+                            transfer.phase = FilePhase::InitialCustody;
+                        }
+                    }
+                    Err(_) => {
+                        // Pre-consent clients do not understand the appended query.
+                        // Their old automatic transfer path remains available.
+                        transfer.channel = None;
+                        transfer.legacy = true;
+                        transfer.sync = super::session::SyncProgress::default();
+                        transfer.phase = FilePhase::Dial;
+                    }
+                }
             }
             FilePhase::InitialCustody => {
                 if super::session::request_durable_have(
@@ -1760,6 +1821,16 @@ impl Node {
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);
         for relay in [false, true].into_iter().filter(|relay| *relay || direct) {
+            if relay
+                && self
+                    .outgoing_file_consents
+                    .lock()
+                    .expect("outgoing consent lock not poisoned")
+                    .get(&(file.id, binding.event_id))
+                    != Some(&crate::eventlog::sync::FileConsentStatus::Accepted)
+            {
+                continue;
+            }
             let peer = if relay {
                 let roster = self.roster.lock().expect("roster lock not poisoned");
                 super::postbox::elected_post_office(&roster)
@@ -1801,6 +1872,39 @@ impl Node {
                 }
                 if !current() || (relay && !self.relay_allowed(&peer.public)) {
                     return false;
+                }
+                if !relay {
+                    match super::session::request_file_consent(
+                        &mut channel,
+                        file.file_conversation,
+                        binding.event_id,
+                    )
+                    .await
+                    {
+                        Ok(status) => {
+                            self.outgoing_file_consents
+                                .lock()
+                                .expect("outgoing consent lock not poisoned")
+                                .insert((file.id, binding.event_id), status);
+                            if status != crate::eventlog::sync::FileConsentStatus::Accepted {
+                                return false;
+                            }
+                        }
+                        Err(_) => {
+                            // Reconnect before speaking the original chunk protocol.
+                            let Ok(reconnected) = self.privacy_dial(peer.addr, &peer.public).await
+                            else {
+                                return false;
+                            };
+                            channel = reconnected;
+                            if super::session::request_round(&mut channel, &store, manifest_conv)
+                                .await
+                                .is_err()
+                            {
+                                return false;
+                            }
+                        }
+                    }
                 }
                 let Some(final_chunk) = file.final_chunk else {
                     return false;

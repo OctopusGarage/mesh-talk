@@ -24,11 +24,15 @@ export function TransferBar({
     direction === "prepare"
       ? t("transfer.preparing")
       : direction === "send"
-        ? tr && tr.total > 0 && tr.done >= tr.total
-          ? t("transfer.confirming")
-          : tr?.done === 0
-            ? t("transfer.awaitingRecipient")
-            : t("transfer.sending")
+        ? tr?.consent === "declined"
+          ? t("transfer.recipientDeclined")
+          : tr?.consent === "pending"
+            ? t("transfer.awaitingApproval")
+            : tr && tr.total > 0 && tr.done >= tr.total
+              ? t("transfer.confirming")
+              : tr?.done === 0
+                ? t("transfer.awaitingRecipient")
+                : t("transfer.sending")
         : t("transfer.saving");
   const eta =
     direction === "send" && tr?.etaSeconds != null

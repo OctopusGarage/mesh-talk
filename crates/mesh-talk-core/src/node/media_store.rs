@@ -47,6 +47,49 @@ pub fn manifest_is_media(m: &crate::file::AnyManifest) -> bool {
     }
 }
 
+/// The no-prompt lane is bounded and limited to raster image formats. A sender's
+/// filename/MIME is still metadata, so this does not assert that bytes decode as
+/// an image; completion verifies the signed hashes before display or export.
+pub fn automatic_inline_image(m: &crate::file::AnyManifest) -> bool {
+    manifest_is_media(m)
+        && m.size() <= 16 * 1024 * 1024
+        && matches!(
+            m.mime(),
+            "image/png"
+                | "image/jpeg"
+                | "image/gif"
+                | "image/webp"
+                | "image/bmp"
+                | "image/avif"
+                | "image/heic"
+                | "image/heif"
+        )
+}
+
+/// Reject files renamed to a raster extension before they enter the automatic
+/// receive lane. This is a format signature check, not a full image decoder.
+pub fn raster_signature_matches(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+        "image/bmp" => bytes.starts_with(b"BM"),
+        "image/avif" => {
+            bytes.get(4..12) == Some(b"ftypavif") || bytes.get(4..12) == Some(b"ftypavis")
+        }
+        "image/heic" | "image/heif" => {
+            bytes.get(4..8) == Some(b"ftyp")
+                && bytes.get(8..12).is_some_and(|brand| {
+                    [b"heic", b"heix", b"hevc", b"mif1"]
+                        .iter()
+                        .any(|known| brand == *known)
+                })
+        }
+        _ => false,
+    }
+}
+
 /// The lowercased extension of `name`, if any (no leading dot).
 fn ext_of(name: &str) -> Option<String> {
     Path::new(name)
@@ -204,6 +247,37 @@ mod tests {
         assert!(!is_media_name("report.pdf"));
         assert!(!is_media_name("archive.zip"));
         assert!(!is_media_name("noext"));
+    }
+
+    #[test]
+    fn automatic_images_exclude_active_content_and_large_offers() {
+        let mut manifest = crate::file::FileManifest {
+            name: "photo.png".into(),
+            size: 1024,
+            mime: "image/png".into(),
+            checksum: [0; 32],
+            file_key: [1; 32],
+            file_conv: conv(1),
+            chunk_count: 1,
+        };
+        assert!(automatic_inline_image(&crate::file::AnyManifest::V1(
+            manifest.clone()
+        )));
+        manifest.size = 17 * 1024 * 1024;
+        assert!(!automatic_inline_image(&crate::file::AnyManifest::V1(
+            manifest.clone()
+        )));
+        manifest.size = 1024;
+        manifest.name = "vector.svg".into();
+        manifest.mime = "image/svg+xml".into();
+        assert!(!automatic_inline_image(&crate::file::AnyManifest::V1(
+            manifest
+        )));
+        assert!(!raster_signature_matches(
+            "image/png",
+            b"MZ renamed executable"
+        ));
+        assert!(raster_signature_matches("image/png", b"\x89PNG\r\n\x1a\n"));
     }
 
     #[test]

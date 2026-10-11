@@ -478,6 +478,7 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = start(dir.path(), "alice", 0).await;
     let (bob, _) = start(dir.path(), "bob", 0).await;
+    bob.node.set_attachment_global_auto(true).unwrap();
     let aa = alice.node.signed_announce("Alice", alice.listen_tcp_port());
     let ba = bob.node.signed_announce("Bob", bob.listen_tcp_port());
     for (receiver, announcement) in [(&alice, &ba), (&bob, &aa)] {

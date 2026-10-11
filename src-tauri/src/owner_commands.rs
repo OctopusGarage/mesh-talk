@@ -299,6 +299,8 @@ pub struct OutgoingFileStatus {
     done: u32,
     total: u32,
     delivered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consent: Option<&'static str>,
 }
 
 #[tauri::command]
@@ -334,6 +336,11 @@ pub async fn owner_delivery_statuses(
                             done: progress.done,
                             total: progress.total,
                             delivered: progress.delivered,
+                            consent: progress.consent.map(|decision| match decision {
+                                mesh_talk_core::node::ReceiveDecision::Pending => "pending",
+                                mesh_talk_core::node::ReceiveDecision::Declined => "declined",
+                                mesh_talk_core::node::ReceiveDecision::Accepted => "accepted",
+                            }),
                         }
                     }),
                 })

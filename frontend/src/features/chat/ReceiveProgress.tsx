@@ -8,6 +8,16 @@ export function ReceiveProgress({
 }) {
   const { t } = useTranslation();
   if (status?.ready) return null;
+  if (status?.consent === "pending" || status?.consent === "declined")
+    return (
+      <div className="mt-2 text-[11px] opacity-75" role="status">
+        {t(
+          status.consent === "pending"
+            ? "files.approvalRequired"
+            : "files.declined",
+        )}
+      </div>
+    );
   const total = status?.total ?? 0;
   const done = status?.done ?? 0;
   const percent =

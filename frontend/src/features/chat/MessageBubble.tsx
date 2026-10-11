@@ -40,7 +40,11 @@ import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
-import { useFileStatus, useFileAvailability } from "@/store/fileAvailability";
+import {
+  useFileStatus,
+  useFileAvailability,
+  refreshFileAvailability,
+} from "@/store/fileAvailability";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
@@ -73,6 +77,8 @@ function FileBubble({
   const available = !!savedPath || !!status?.ready;
   const [saving, setSaving] = useState(false);
   const directory = isDirectoryAttachment(file.mime);
+  const approvalNeeded =
+    !mine && (status?.consent === "pending" || status?.consent === "declined");
   const uploadKey =
     mine && !metadataPending && !isChannel ? messageId || undefined : undefined;
 
@@ -126,6 +132,18 @@ function FileBubble({
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntOpen", { error: errorMessage(e) }));
+    }
+  };
+
+  const decide = async (accept: boolean) => {
+    const lease = captureChatOwnership();
+    if (!lease.current() || !file.fileConv) return;
+    try {
+      await chat.decideAttachment(file.fileConv, accept);
+      if (lease.current()) await refreshFileAvailability([file.fileConv]);
+    } catch (error) {
+      if (lease.current())
+        setError(t("files.approvalFailed", { error: errorMessage(error) }));
     }
   };
 
@@ -217,6 +235,28 @@ function FileBubble({
       )}
       {!mine && !metadataPending && !savedPath && (
         <ReceiveProgress status={status} />
+      )}
+      {approvalNeeded && !savedPath && (
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => void decide(true)}
+            className="rounded-md bg-primary px-2.5 py-1 text-xs text-primary-foreground"
+            aria-label={t("files.approve")}
+          >
+            {t("files.approve")}
+          </button>
+          {status?.consent === "pending" && (
+            <button
+              type="button"
+              onClick={() => void decide(false)}
+              className="rounded-md border px-2.5 py-1 text-xs"
+              aria-label={t("files.decline")}
+            >
+              {t("files.decline")}
+            </button>
+          )}
+        </div>
       )}
       {savedPath && (
         <div className="mt-1 truncate text-[11px] opacity-70" title={savedPath}>

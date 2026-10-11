@@ -244,6 +244,7 @@ export interface OutgoingFileStatus {
   done: number;
   total: number;
   delivered: boolean;
+  consent?: "pending" | "accepted" | "declined";
 }
 
 export interface FileStatus {
@@ -251,6 +252,12 @@ export interface FileStatus {
   done: number;
   total: number;
   ready: boolean;
+  consent?: "pending" | "accepted" | "declined" | null;
+}
+
+export interface AttachmentReceivePolicy {
+  global_auto: boolean;
+  contact_auto: boolean | null;
 }
 
 export interface ProfileReceivedEvent {

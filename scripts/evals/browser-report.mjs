@@ -38,6 +38,9 @@ export function requiredBrowserPaths(tier) {
     ["directory-transfer.spec.ts", "folder picker sends its path as an attachment"],
     ["directory-transfer.spec.ts", "received folder stays disabled until ready and extracts through save-to-dir"],
     ["directory-transfer.spec.ts", "folder Save in chat and history uses Downloads without a directory picker"],
+    ["attachment-approval.spec.ts", "incoming folder waits for approval and can be declined or received"],
+    ["attachment-approval.spec.ts", "global and per-contact automatic receive controls persist their selection"],
+    ["attachment-approval.spec.ts", "video media requires approval and appears in Received files"],
   );
   return paths;
 }

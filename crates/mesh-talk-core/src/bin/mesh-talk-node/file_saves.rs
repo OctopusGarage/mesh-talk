@@ -1,7 +1,7 @@
 //! Bounded CLI autosaves: a durable file card can precede its immutable chunks.
 use mesh_talk_core::{
     eventlog::ConversationId,
-    node::{FileProgress, Node, ReceivedFile},
+    node::{FileProgress, Node, ReceiveDecision, ReceivedFile},
 };
 use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::mpsc, task::JoinSet};
@@ -81,6 +81,8 @@ pub(super) async fn run(
                 let Some(file) = file else { break; };
                 if queue.enqueue(file.clone()).is_err() {
                     emit(&format!("file from {}: {} ({} bytes) save failed: pending save capacity exhausted", file.from, file.name, file.size));
+                } else if node.attachment_consent_status(file.file_conv) == Some(ReceiveDecision::Pending) {
+                    emit(&format!("file offer from {}: {} ({} bytes) id {} — /receive {} or /decline {}", file.from, file.name, file.size, hex::encode(file.file_conv.as_bytes()), hex::encode(file.file_conv.as_bytes()), hex::encode(file.file_conv.as_bytes())));
                 }
             }
             _ = tick.tick() => {
@@ -91,7 +93,9 @@ pub(super) async fn run(
                         let mut ready = false;
                         let states = candidates.into_iter().map(|file| {
                             let state = checking_node.file_progress(file).map(|mut progress| {
-                                if !ready && checking_node.file_ready_to_save(file) { progress.done = progress.total; ready = true; }
+                                if checking_node.attachment_consent_status(file) != Some(ReceiveDecision::Accepted) {
+                                    progress.done = 0;
+                                } else if !ready && checking_node.file_ready_to_save(file) { progress.done = progress.total; ready = true; }
                                 progress
                             });
                             (file, state)

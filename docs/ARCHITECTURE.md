@@ -218,6 +218,23 @@ with collision-safe mapping, and renames the completed folder into the chosen
 download directory. Nested and empty directories are preserved. Chunk reclamation
 waits until the extracted folder is durable so failed extraction remains retryable.
 
+Incoming file, folder and video manifests are offers. The node stores a manual-by-default
+receive policy in an encrypted, account-local sidecar; an explicit file decision overrides
+the global policy and the sender-account override. Raster images sent as media are
+automatic up to 16 MiB; SVG and larger images require approval. The recipient checks
+the first decrypted chunk against the claimed raster signature before durably ingesting it,
+while text and stickers remain ordinary message events. A current sender publishes the
+manifest first, then asks the exact authenticated recipient device for consent before
+synchronizing chunk events. The receiver independently rejects unsolicited chunks at its
+durable sync gate, including chunk-first delivery from older senders. A channel sender
+publishes the manifest and members pull chunks only after their own consent; automatic
+images retain eager distribution. Decisions bind the signed manifest event and survive
+restart; approved partial files are requeued on startup. Offline recipients leave
+the sender's chunks local until they reconnect and approve, so the sender must be
+available later to finish delivery. The CLI exposes `/receive` and `/decline` for
+manual decisions. Pre-consent peers retain the legacy direct-transfer fallback,
+while the new receiver still applies its local gate.
+
 File progress counts currently held chunks; historical completion does not
 pretend that exported bytes remain on this node. The CLI keeps bounded pending
 and recent-save queues and runs readiness checks and one export at a time on the

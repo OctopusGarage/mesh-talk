@@ -94,6 +94,33 @@ Extraction rejects traversal,
 links, special entries, too many entries, and expansion beyond the transfer size. It
 stages privately and renames the completed folder into place.
 
+Attachment approval is manual by default for files, folders and videos. The recipient
+can Receive or Decline an offer in chat or the Received files tray, enable automatic
+receive globally, or override the policy for one contact from the conversation header.
+Raster images sent as media up to 16 MiB, stickers and text continue automatically;
+SVG and larger images require approval. Automatic images must also pass a format
+signature check on the first decrypted chunk before durable ingest. A recipient decision
+is stored before a positive consent response is returned to a sender. The sender's
+progress labels show waiting for approval or a declined offer, and no chunk percentage
+advances before consent. Legacy senders can still submit an offer, but a current
+recipient refuses unsolicited chunks until approval; old recipients use the existing
+direct-transfer path. Channel file/folder offers wait for members to pull after approval.
+Approved partial files resume pulling after restart. The sender must be reachable
+after an offline recipient approves because approval precedes chunk transfer. The CLI
+prints an offer ID and accepts `/receive <file-id>` or `/decline <file-id>`.
+
+Read-only AI reviews (`target/ai-eval/attachment-consent-review.md`,
+`attachment-consent-followup.md`, `attachment-consent-closure.md`) found
+offer-binding, sender-author, restart-resume, relay-drain, account-switch, and
+automatic-image admission gaps. The implementation now binds equivalent offers
+to one sender and decision, requeues approved partial files on restart, skips
+unapproved relay chunks, refreshes settings on identity change, and rejects
+oversized, SVG, and malformed raster offers from the automatic path. The final
+targeted review (`target/ai-eval/attachment-consent-final.md`) found the two
+remaining duplicate-offer and sequence-2 bypass findings closed. These reviews
+were source inspection; the loopback, CLI, browser, and health suites provide
+the executable verification.
+
 The read-only model review (`target/ai-eval/directory-transfer-review.md`) found a
 retry-loss path: pruning archive chunks before extraction succeeds could make a failed
 save permanent. The save path now defers completion and pruning until after extraction,

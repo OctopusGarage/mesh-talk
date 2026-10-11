@@ -225,6 +225,8 @@ pub struct Node {
     /// missed push would strand the file at 0 chunks). Cleared once a file completes; not
     /// seeded from saved files (whose chunks are pruned), so we never re-pull a saved file.
     pub(in crate::node) pending_files: Mutex<HashSet<ConversationId>>,
+    /// Encrypted, account-local attachment receive preferences and exact offer decisions.
+    pub(in crate::node) attachment_consent: Mutex<super::attachment_consent::AttachmentConsent>,
     /// Durable chat-media store under `<account_dir>/media`: the plaintext bytes of
     /// image/screenshot/video messages, copied here on send + receive-complete so the
     /// inline preview loads from a durable source that survives chunk prune + restart.
@@ -236,6 +238,9 @@ pub struct Node {
     pub(in crate::node) delivery: Mutex<super::delivery_store::DeliveryStore>,
     /// Transient recipient Have counts for active outgoing file destinations.
     pub(in crate::node) outgoing_file_acks: Mutex<HashMap<(EventId, EventId), u32>>,
+    /// Last authenticated recipient answer for each outgoing manifest destination.
+    pub(in crate::node) outgoing_file_consents:
+        Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_control_ids:
@@ -352,6 +357,7 @@ impl Node {
             recv_files_res,
             profiles_res,
             recalls_res,
+            consent_res,
         ) = std::thread::scope(|s| {
             let h_log = s.spawn(|| PersistentEventLog::open(log_path, password));
             let h_sent = s.spawn(|| SentLog::open(sent_path, password));
@@ -372,6 +378,12 @@ impl Node {
             // messages we recalled — and it must survive restart (unlike own reactions).
             let h_recalls = s
                 .spawn(|| crate::node::recall::RecallLog::open(&dir.join("recalls.log"), password));
+            let h_consent = s.spawn(|| {
+                super::attachment_consent::AttachmentConsent::open(
+                    &dir.join("attachment-consent.log"),
+                    password,
+                )
+            });
             (
                 h_log.join(),
                 h_sent.join(),
@@ -381,6 +393,7 @@ impl Node {
                 h_files.join(),
                 h_profiles.join(),
                 h_recalls.join(),
+                h_consent.join(),
             )
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
@@ -393,6 +406,7 @@ impl Node {
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
         let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
         delivery.bind_profile(
@@ -467,7 +481,11 @@ impl Node {
                 if let Some(manifest) =
                     super::files::eligible_manifest_row(&entry, log.get(&entry.event_id), existing)
                 {
-                    files.record_event(entry.event_id, manifest);
+                    files.record_event(
+                        entry.event_id,
+                        log.get(&entry.event_id).unwrap().author,
+                        manifest,
+                    );
                     files.mark_emitted(entry.event_id);
                 }
             }
@@ -479,7 +497,7 @@ impl Node {
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
-        Ok(Arc::new(Self {
+        let node = Arc::new(Self {
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
@@ -516,10 +534,12 @@ impl Node {
             file_incoming,
             files: Mutex::new(files),
             pending_files: Mutex::new(HashSet::new()),
+            attachment_consent: Mutex::new(attachment_consent),
             media,
             dm_ratchet: Mutex::new(dm_ratchet),
             delivery: Mutex::new(delivery),
             outgoing_file_acks: Mutex::new(HashMap::new()),
+            outgoing_file_consents: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
             delivery_status_notify: tokio::sync::Notify::new(),
             delivery_control_ids: Mutex::new(delivery_control_ids),
@@ -528,7 +548,9 @@ impl Node {
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(HashMap::new()),
-        }))
+        });
+        node.queue_approved_incomplete_files();
+        Ok(node)
     }
 
     /// This node's own user-id fingerprint.

@@ -170,7 +170,7 @@ impl FileManifestV3 {
 
 /// A decoded manifest of any version. The node layer matches on this so v1/v2 history
 /// still opens while new files use v3 (which carries the sender's intent).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnyManifest {
     V1(FileManifest),
     V2(FileManifestV2),

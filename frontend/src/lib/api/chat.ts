@@ -177,6 +177,17 @@ export const chat = {
     invoke<void>("save_file", { fileConv, dest }),
   fileStatuses: (fileConvs: string[]) =>
     invoke<FileStatus[]>("file_statuses", { fileConvs }),
+  attachmentReceivePolicy: (account?: string) =>
+    invoke<import("../types").AttachmentReceivePolicy>(
+      "attachment_receive_policy",
+      { account: account ?? null },
+    ),
+  setAttachmentGlobalAuto: (auto: boolean) =>
+    invoke<void>("set_attachment_global_auto", { auto }),
+  setAttachmentContactAuto: (account: string, auto: boolean | null) =>
+    invoke<void>("set_attachment_contact_auto", { account, auto }),
+  decideAttachment: (fileConv: string, accept: boolean) =>
+    invoke<void>("decide_attachment", { fileConv, accept }),
   saveFileToDir: (fileConv: string, dir: string) =>
     invoke<string>("save_file_to_dir", { fileConv, dir }),
   /** The platform's standard Downloads folder (macOS ~/Downloads, Windows Downloads, Linux

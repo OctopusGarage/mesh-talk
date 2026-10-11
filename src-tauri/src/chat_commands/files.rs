@@ -16,6 +16,7 @@ pub struct FileStatus {
     done: u32,
     total: u32,
     ready: bool,
+    consent: Option<&'static str>,
 }
 
 /// One bounded snapshot for all visible attachments. The recipient's background chunk
@@ -37,14 +38,86 @@ pub async fn file_statuses(
         .into_iter()
         .map(|(file_conv, id)| {
             let progress = node.file_progress(id);
+            let consent = node.attachment_consent_status(id);
             FileStatus {
                 file_conv,
                 done: progress.map_or(0, |p| p.done),
                 total: progress.map_or(0, |p| p.total),
-                ready: node.file_ready_to_save(id),
+                ready: node.file_ready_to_save(id)
+                    && !matches!(
+                        consent,
+                        Some(
+                            mesh_talk_core::node::ReceiveDecision::Pending
+                                | mesh_talk_core::node::ReceiveDecision::Declined
+                        )
+                    ),
+                consent: consent.map(|status| match status {
+                    mesh_talk_core::node::ReceiveDecision::Pending => "pending",
+                    mesh_talk_core::node::ReceiveDecision::Accepted => "accepted",
+                    mesh_talk_core::node::ReceiveDecision::Declined => "declined",
+                }),
             }
         })
         .collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct AttachmentReceivePolicy {
+    global_auto: bool,
+    contact_auto: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn attachment_receive_policy(
+    state: tauri::State<'_, NodeState>,
+    account: Option<String>,
+) -> Result<AttachmentReceivePolicy, CommandError> {
+    let node = state.node_handle().await?;
+    Ok(AttachmentReceivePolicy {
+        global_auto: node.attachment_global_auto(),
+        contact_auto: account
+            .as_deref()
+            .and_then(|id| node.attachment_contact_auto(id)),
+    })
+}
+
+#[tauri::command]
+pub async fn set_attachment_global_auto(
+    state: tauri::State<'_, NodeState>,
+    auto: bool,
+) -> Result<(), CommandError> {
+    state
+        .node_handle()
+        .await?
+        .set_attachment_global_auto(auto)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_attachment_contact_auto(
+    state: tauri::State<'_, NodeState>,
+    account: String,
+    auto: Option<bool>,
+) -> Result<(), CommandError> {
+    state
+        .node_handle()
+        .await?
+        .set_attachment_contact_auto(&account, auto)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn decide_attachment(
+    state: tauri::State<'_, NodeState>,
+    file_conv: String,
+    accept: bool,
+) -> Result<(), CommandError> {
+    let id = parse_channel_id(&file_conv)?;
+    state
+        .node_handle()
+        .await?
+        .decide_attachment(id, accept)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]

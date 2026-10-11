@@ -36,6 +36,7 @@ import { MembersDialog } from "./MembersDialog";
 import { VerifyContactDialog } from "./VerifyContactDialog";
 import { CallButtons } from "./CallDialog";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
+import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
 import { TransferBar } from "./TransferBar";
 import { DiagnosticsDialog } from "./DiagnosticsDialog";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
@@ -698,6 +699,7 @@ export function ConversationView() {
         ) : (
           active.kind === "account" && (
             <>
+              <AttachmentReceiveSettings key={active.id} account={active.id} />
               <CallButtons accountId={active.id} name={headerName} />
               <VerifyContactDialog accountId={active.id} name={headerName} />
             </>

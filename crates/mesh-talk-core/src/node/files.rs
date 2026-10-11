@@ -118,6 +118,7 @@ pub struct OutgoingFileProgress {
     pub done: u32,
     pub total: u32,
     pub delivered: bool,
+    pub consent: Option<crate::node::ReceiveDecision>,
 }
 
 impl Node {
@@ -142,7 +143,7 @@ impl Node {
                     let existing = decoded.as_ref().and_then(|m| book.manifest(&m.file_conv()));
                     if let Some(manifest) = eligible_manifest_row(&entry, original, existing) {
                         rows.push((manifest.file_conv(), entry.event_id));
-                        book.record_event(entry.event_id, manifest);
+                        book.record_event(entry.event_id, original.unwrap().author, manifest);
                         book.mark_emitted(entry.event_id);
                     }
                 }
@@ -481,7 +482,11 @@ impl Node {
         if self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
-            book.record_event(id, AnyManifest::V3(manifest.clone()));
+            book.record_event(
+                id,
+                Author::from_ed25519(self.identity.public().ed25519_pub),
+                AnyManifest::V3(manifest.clone()),
+            );
         }
         Ok(id)
     }
@@ -532,8 +537,14 @@ impl Node {
         self.persist_my_senders(channel);
         let seq = self.append_event(channel, EventKind::FileManifest, sealed)?;
         self.record_sent_manifest(channel, channel, seq, &manifest)?;
-        self.distribute_channel(file_conv, &members).await;
+        // A file/folder manifest is an offer. Members pull its chunks only after
+        // their own receive policy permits it; pushing the chunk conversation here
+        // would transmit the bytes before they could approve. Inline media keeps
+        // the existing automatic transfer behavior.
         self.distribute_channel(channel, &members).await;
+        if crate::node::media_store::automatic_inline_image(&AnyManifest::V3(manifest.clone())) {
+            self.distribute_channel(file_conv, &members).await;
+        }
         Ok(file_conv)
     }
 
@@ -752,7 +763,11 @@ impl Node {
             .map_err(NodeError::Log)?;
         let mut files = self.files.lock().expect("files mutex not poisoned");
         files.mark_emitted(event_id);
-        files.record_event(event_id, AnyManifest::V3(manifest.clone()));
+        files.record_event(
+            event_id,
+            Author::from_ed25519(self.identity.public().ed25519_pub),
+            AnyManifest::V3(manifest.clone()),
+        );
         Ok(())
     }
 

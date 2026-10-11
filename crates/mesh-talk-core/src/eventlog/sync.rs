@@ -121,6 +121,11 @@ pub struct ApplyReport {
 /// The data operations sync needs from an event store. Implemented by both the
 /// in-memory [`EventLog`] and the durable `PersistentEventLog`.
 pub trait SyncStore {
+    /// The authenticated peer may transfer chunks of this exact offered file.
+    /// Stores without an attachment policy fail closed for this optional query.
+    fn file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> FileConsentStatus {
+        FileConsentStatus::Pending
+    }
     /// Optional custody qualification. Memory/legacy stores cannot promise
     /// durability; durable hosts synchronize and check current visibility.
     fn durable_have(&self, _conversation: &ConversationId, _id: &EventId) -> bool {
@@ -145,6 +150,13 @@ pub trait SyncStore {
     ) -> Vec<Event>;
     /// Validate and store a received event (the store's normal append gate).
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum FileConsentStatus {
+    Pending,
+    Accepted,
+    Declined,
 }
 
 // NOTE: this impl is structurally identical to `impl SyncStore for

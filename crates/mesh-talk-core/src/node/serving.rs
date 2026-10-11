@@ -245,6 +245,14 @@ impl Node {
             let Some(manifest) = super::files::validated_manifest(&plaintext) else {
                 continue;
             };
+            if !self
+                .files
+                .lock()
+                .expect("files lock not poisoned")
+                .accepts(event.author, &manifest)
+            {
+                continue;
+            }
             let received = ReceivedFile {
                 conv,
                 from: event.author.user_id(),
@@ -316,7 +324,7 @@ impl Node {
             {
                 let mut files = self.files.lock().expect("files mutex not poisoned");
                 files.mark_emitted(event.id);
-                files.record_event(event.id, manifest);
+                files.record_event(event.id, event.author, manifest);
             }
             surfaced.push(received);
         }
@@ -325,7 +333,10 @@ impl Node {
             // from peers (the sender's one-shot push may have raced our discovery, and on a
             // PO-less LAN nothing else fetches them). Cleared once the file completes.
             let fc = rf.file_conv;
-            if matches!(self.file_progress(fc), Some(p) if p.done < p.total) {
+            if self.attachment_consent_status(fc)
+                == Some(super::attachment_consent::ReceiveDecision::Accepted)
+                && matches!(self.file_progress(fc), Some(p) if p.done < p.total)
+            {
                 self.pending_files
                     .lock()
                     .expect("pending_files mutex not poisoned")
@@ -363,6 +374,15 @@ impl Node {
                 .collect()
         };
         for fc in pending {
+            if self.attachment_consent_status(fc)
+                != Some(super::attachment_consent::ReceiveDecision::Accepted)
+            {
+                self.pending_files
+                    .lock()
+                    .expect("pending_files mutex not poisoned")
+                    .remove(&fc);
+                continue;
+            }
             // Already complete (e.g. the push did land, or a prior tick finished it)? Persist
             // media (no-op for attachments / already-stored) and drop it from the pending set.
             if matches!(self.file_progress(fc), Some(p) if p.done >= p.total) {
@@ -477,8 +497,18 @@ impl Node {
             book.file_convs()
         };
         for fc in file_convs {
+            if self.attachment_consent_status(fc)
+                != Some(super::attachment_consent::ReceiveDecision::Accepted)
+            {
+                continue;
+            }
             if request_round(&mut channel, &store, fc).await.is_err() {
-                return;
+                // A bad legacy file conversation must not stall later approved files.
+                let Ok(reconnected) = self.privacy_dial(po.addr, &po.public).await else {
+                    return;
+                };
+                channel = reconnected;
+                continue;
             }
             // Drained all chunks for a media file from the PO? Persist it durably + prune.
             self.persist_media_if_complete(fc);
