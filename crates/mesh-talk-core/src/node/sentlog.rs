@@ -7,8 +7,8 @@
 //! AES-256-GCM records); this store layers [`SentEntry`] records and a
 //! per-conversation in-memory index on top.
 
-use crate::eventlog::event::ConversationId;
 use crate::eventlog::LogError;
+use crate::eventlog::event::ConversationId;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

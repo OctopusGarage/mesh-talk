@@ -11,8 +11,8 @@
 //! the OLD chain — so they cannot decrypt the post-restart messages. Persisting our
 //! OLD chains lets us resume them, which is exactly what receivers can still follow.
 
-use crate::eventlog::event::ConversationId;
 use crate::eventlog::LogError;
+use crate::eventlog::event::ConversationId;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

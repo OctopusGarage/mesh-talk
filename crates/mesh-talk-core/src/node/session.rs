@@ -10,11 +10,11 @@
 
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::sync::{
-    build_request, fingerprint, handle_followup, handle_request_bounded,
-    handle_response_bounded_burst, ApplyReport, FileConsentStatus, FpRequest, FpResponse,
-    SyncFollowup, SyncRequest, SyncResponse, SyncStore, MAX_REJECTED_DETAIL,
+    ApplyReport, FileConsentStatus, FpRequest, FpResponse, MAX_REJECTED_DETAIL, SyncFollowup,
+    SyncRequest, SyncResponse, SyncStore, build_request, fingerprint, handle_followup,
+    handle_request_bounded, handle_response_bounded_burst,
 };
-use crate::transport::{SecureChannel, TransportError, MAX_PLAINTEXT};
+use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -813,9 +813,11 @@ mod tests {
             serve_one(&mut channel, &Mutex::new(log)).await.unwrap();
         });
         let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
-        assert!(!request_durable_have(&mut channel, conv(), id)
-            .await
-            .unwrap());
+        assert!(
+            !request_durable_have(&mut channel, conv(), id)
+                .await
+                .unwrap()
+        );
         server.await.unwrap();
     }
 
@@ -885,9 +887,11 @@ mod tests {
         request_round(&mut channel, &Mutex::new(log), conv())
             .await
             .unwrap();
-        assert!(request_durable_have(&mut channel, conv(), id)
-            .await
-            .is_err());
+        assert!(
+            request_durable_have(&mut channel, conv(), id)
+                .await
+                .is_err()
+        );
         server.await.unwrap();
     }
 

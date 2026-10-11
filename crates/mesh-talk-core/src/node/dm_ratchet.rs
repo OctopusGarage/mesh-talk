@@ -7,7 +7,7 @@
 use crate::eventlog::LogError;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::ratchet_sessions::RatchetSessions;
-use crate::ratchet::{init_alice, init_bob, Header};
+use crate::ratchet::{Header, init_alice, init_bob};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;

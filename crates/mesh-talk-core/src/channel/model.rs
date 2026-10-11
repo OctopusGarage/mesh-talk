@@ -7,7 +7,7 @@
 
 use crate::channel::crypto::ChannelError;
 use crate::channel::sender_key::{
-    open_message as sk_open, seal_message as sk_seal, SenderChain, SenderKey, SenderKeyDistribution,
+    SenderChain, SenderKey, SenderKeyDistribution, open_message as sk_open, seal_message as sk_seal,
 };
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;

@@ -21,10 +21,10 @@
 
 use crate::eventlog::LogError;
 use crate::storage::encryption::{
-    decrypt_data, encrypt_data, generate_salt, EncryptionKey, NONCE_SIZE, SALT_SIZE,
+    EncryptionKey, NONCE_SIZE, SALT_SIZE, decrypt_data, encrypt_data, generate_salt,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::marker::PhantomData;
@@ -389,12 +389,13 @@ mod tests {
         log.rewrite(&[rec(2, b"replacement")]).unwrap();
         log.file.seek(SeekFrom::Start(0)).unwrap();
         log.append_durable(&rec(3, b"appended")).unwrap();
-        assert!(log
-            .append_with(&rec(4, b"partial"), true, |file, bytes| {
+        assert!(
+            log.append_with(&rec(4, b"partial"), true, |file, bytes| {
                 file.write_all(&bytes[..7])?;
                 Err(std::io::Error::other("partial write"))
             })
-            .is_err());
+            .is_err()
+        );
         assert!(!log.poisoned);
         log.append_durable(&rec(5, b"after rollback")).unwrap();
         drop(log);
@@ -415,12 +416,13 @@ mod tests {
         let path = dir.path().join("t.log");
         let (mut log, _) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
         log.append_durable(&rec(1, b"before")).unwrap();
-        assert!(log
-            .append_with(&rec(2, b"failed"), true, |file, buf| {
+        assert!(
+            log.append_with(&rec(2, b"failed"), true, |file, buf| {
                 file.write_all(&buf[..7])?;
                 Err(std::io::Error::other("injected partial write"))
             })
-            .is_err());
+            .is_err()
+        );
         log.append_durable(&rec(3, b"after")).unwrap();
         let (_, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
         assert_eq!(records, vec![rec(1, b"before"), rec(3, b"after")]);

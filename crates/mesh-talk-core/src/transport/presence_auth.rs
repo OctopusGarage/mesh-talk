@@ -1,12 +1,12 @@
 //! Optional session-bound account proof appended to the unchanged legacy auth prefix.
 use super::{
-    auth::{build_auth, verify_auth, AuthMessage},
-    TransportError, MAX_PLAINTEXT,
+    MAX_PLAINTEXT, TransportError,
+    auth::{AuthMessage, build_auth, verify_auth},
 };
 use crate::{
     discovery::{
-        announce::{decode, encode},
         Announce,
+        announce::{decode, encode},
     },
     identity::device::{DeviceIdentity, PublicIdentity},
 };
@@ -160,7 +160,7 @@ mod tests {
     use super::*;
     use crate::{
         identity::account::Account,
-        transport::auth::{build_auth, AuthMessage},
+        transport::auth::{AuthMessage, build_auth},
     };
 
     fn signed_extension(
@@ -204,12 +204,14 @@ mod tests {
             let bytes = signed_extension(&id, &[42; 32], &bad);
             assert!(verify(&bytes, &[42; 32], &id.public().x25519_pub).is_err());
         }
-        assert!(verify(
-            &signed_extension(&id, &[42; 32], &good),
-            &[42; 32],
-            &id.public().x25519_pub
-        )
-        .is_ok());
+        assert!(
+            verify(
+                &signed_extension(&id, &[42; 32], &good),
+                &[42; 32],
+                &id.public().x25519_pub
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -228,10 +230,12 @@ mod tests {
         let verified = verify(&bytes, &hash, &id.public().x25519_pub).unwrap();
         assert_eq!(verified.public_identity(), &id.public());
         assert_eq!(verified.announcement(), Some(&announce));
-        assert!(verify(&legacy, &hash, &id.public().x25519_pub)
-            .unwrap()
-            .announcement()
-            .is_none());
+        assert!(
+            verify(&legacy, &hash, &id.public().x25519_pub)
+                .unwrap()
+                .announcement()
+                .is_none()
+        );
     }
 
     #[test]
@@ -256,17 +260,19 @@ mod tests {
         ] {
             assert!(build(&id, &[42; 32], Some(&invalid)).is_err());
         }
-        assert!(build(
-            &id,
-            &[42; 32],
-            Some(&Announce::new_with_account(
+        assert!(
+            build(
                 &id,
-                &account,
-                "a".repeat(1024),
-                1234
-            ))
-        )
-        .is_ok());
+                &[42; 32],
+                Some(&Announce::new_with_account(
+                    &id,
+                    &account,
+                    "a".repeat(1024),
+                    1234
+                ))
+            )
+            .is_ok()
+        );
     }
 
     #[test]

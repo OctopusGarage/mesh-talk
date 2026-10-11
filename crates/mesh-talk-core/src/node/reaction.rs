@@ -127,9 +127,11 @@ mod tests {
         ]);
         let thumbs = views.iter().find(|v| v.emoji == "👍").unwrap();
         assert_eq!(thumbs.who, vec!["alice".to_string(), "bob".to_string()]);
-        assert!(views
-            .iter()
-            .any(|v| v.emoji == "🎉" && v.who == vec!["bob".to_string()]));
+        assert!(
+            views
+                .iter()
+                .any(|v| v.emoji == "🎉" && v.who == vec!["bob".to_string()])
+        );
     }
 
     #[test]

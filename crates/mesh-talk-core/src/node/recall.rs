@@ -10,13 +10,13 @@
 //! only honoured when that account is the target message's author; channel recalls are
 //! honoured only when the `Delete` event's author equals the target event's author.
 
-use super::node::{now_millis, Node};
+use super::node::{Node, now_millis};
 use super::queries::decode_account_entry;
-use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::LogError;
+use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
+use crate::node::NodeError;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 use crate::node::dm_envelope::RecallEnvelope;
-use crate::node::NodeError;
 use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
 use serde::{Deserialize, Serialize};

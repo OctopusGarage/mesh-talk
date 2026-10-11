@@ -28,11 +28,13 @@ mod tests {
         // Fixed public limits, independent of the implementation constant.
         bytes.resize(2_097_152, b' ');
         std::fs::write(&path, &bytes).unwrap();
-        assert!(store
-            .get(Some("alice"), "alice")
-            .unwrap()
-            .contacts
-            .is_empty());
+        assert!(
+            store
+                .get(Some("alice"), "alice")
+                .unwrap()
+                .contacts
+                .is_empty()
+        );
         bytes.push(b' ');
         std::fs::write(&path, &bytes).unwrap();
         assert!(store.get(Some("alice"), "alice").is_err());
@@ -104,16 +106,22 @@ mod tests {
             assert!(store.get(Some(owner), owner).is_err());
         }
         for account in ["../bad", "AAAA", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"] {
-            assert!(store
-                .update(Some("alice"), "alice", account, true, "name", Some(ME))
-                .is_err());
+            assert!(
+                store
+                    .update(Some("alice"), "alice", account, true, "name", Some(ME))
+                    .is_err()
+            );
         }
-        assert!(store
-            .update(Some("alice"), "alice", ME, true, "me", Some(ME))
-            .is_err());
-        assert!(store
-            .update(Some("alice"), "alice", A, true, "name", None)
-            .is_err());
+        assert!(
+            store
+                .update(Some("alice"), "alice", ME, true, "me", Some(ME))
+                .is_err()
+        );
+        assert!(
+            store
+                .update(Some("alice"), "alice", A, true, "name", None)
+                .is_err()
+        );
         let snapshot = store
             .update(Some("alice"), "alice", A, true, &"x".repeat(257), Some(ME))
             .unwrap();
@@ -129,16 +137,20 @@ mod tests {
         let path = parent.join("hidden-contacts.json");
         std::fs::write(&path, b"invalid json").unwrap();
         assert!(store.get(Some("alice"), "alice").is_err());
-        assert!(store
-            .update(Some("alice"), "alice", A, true, "name", Some(ME))
-            .is_err());
+        assert!(
+            store
+                .update(Some("alice"), "alice", A, true, "name", Some(ME))
+                .is_err()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"invalid json");
         let blocked = dir.path().join("blocked");
         std::fs::write(&blocked, b"untouched").unwrap();
         let blocked_store = HiddenContactsState::new(blocked.clone());
-        assert!(blocked_store
-            .update(Some("alice"), "alice", A, true, "name", Some(ME))
-            .is_err());
+        assert!(
+            blocked_store
+                .update(Some("alice"), "alice", A, true, "name", Some(ME))
+                .is_err()
+        );
         assert_eq!(std::fs::read(blocked).unwrap(), b"untouched");
     }
 
@@ -187,9 +199,11 @@ mod tests {
         ] {
             let bytes = serde_json::to_vec(&value).unwrap();
             std::fs::write(&path, &bytes).unwrap();
-            assert!(store
-                .update(Some("alice"), "alice", B, false, "", None)
-                .is_err());
+            assert!(
+                store
+                    .update(Some("alice"), "alice", B, false, "", None)
+                    .is_err()
+            );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
         let snapshot = HiddenContactsSnapshot {
@@ -202,9 +216,11 @@ mod tests {
                 .collect(),
         };
         store.save(&snapshot).unwrap();
-        assert!(store
-            .update(Some("alice"), "alice", A, true, "name", Some(ME))
-            .is_err());
+        assert!(
+            store
+                .update(Some("alice"), "alice", A, true, "name", Some(ME))
+                .is_err()
+        );
         assert_eq!(
             store.get(Some("alice"), "alice").unwrap().contacts.len(),
             MAX_CONTACTS
@@ -297,9 +313,11 @@ mod tests {
         store
             .transaction(&session, "alice", || {
                 started_tx.send(()).unwrap();
-                assert!(done_rx
-                    .recv_timeout(std::time::Duration::from_millis(50))
-                    .is_err());
+                assert!(
+                    done_rx
+                        .recv_timeout(std::time::Duration::from_millis(50))
+                        .is_err()
+                );
                 store.load("alice")
             })
             .unwrap();
@@ -310,14 +328,18 @@ mod tests {
     fn mismatched_runtime_namespace_cannot_hide_contact() {
         let dir = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(dir.path().to_owned());
-        assert!(store
-            .update_for_session(&session(), "alice", A, true, "name", Some(("bob", ME)))
-            .is_err());
-        assert!(store
-            .get(Some("alice"), "alice")
-            .unwrap()
-            .contacts
-            .is_empty());
+        assert!(
+            store
+                .update_for_session(&session(), "alice", A, true, "name", Some(("bob", ME)))
+                .is_err()
+        );
+        assert!(
+            store
+                .get(Some("alice"), "alice")
+                .unwrap()
+                .contacts
+                .is_empty()
+        );
     }
     #[test]
     fn queued_mutation_reauthorizes_after_logout() {
@@ -354,14 +376,18 @@ mod tests {
         store
             .update_for_session(&session, "alice", A, true, "name", Some(("alice", ME)))
             .unwrap();
-        assert!(store
-            .update_for_session(&session, "alice", ME, true, "self", Some(("alice", ME)))
-            .is_err());
-        assert!(store
-            .update_for_session(&session, "alice", A, false, "", None)
-            .unwrap()
-            .contacts
-            .is_empty());
+        assert!(
+            store
+                .update_for_session(&session, "alice", ME, true, "self", Some(("alice", ME)))
+                .is_err()
+        );
+        assert!(
+            store
+                .update_for_session(&session, "alice", A, false, "", None)
+                .unwrap()
+                .contacts
+                .is_empty()
+        );
     }
     #[test]
     fn live_identity_is_read_only_inside_authorized_transaction() {
@@ -370,22 +396,26 @@ mod tests {
         let session = session();
         session.clear();
         let called = std::cell::Cell::new(false);
-        assert!(store
-            .update_with_identity(&session, "alice", A, true, "name", || {
-                called.set(true);
-                (Some(("alice".to_owned(), ME.to_owned())), ())
-            })
-            .is_err());
+        assert!(
+            store
+                .update_with_identity(&session, "alice", A, true, "name", || {
+                    called.set(true);
+                    (Some(("alice".to_owned(), ME.to_owned())), ())
+                })
+                .is_err()
+        );
         assert!(!called.get());
         let live_session = self::session();
-        assert!(store
-            .update_with_identity(&live_session, "alice", A, true, "name", || {
-                assert!(store.lock.try_lock().is_err());
-                // The node's current crypto identity may have changed through adoption
-                // since the frontend prepared the request. Consult it in this lock.
-                (Some(("alice".to_owned(), A.to_owned())), ())
-            })
-            .is_err());
+        assert!(
+            store
+                .update_with_identity(&live_session, "alice", A, true, "name", || {
+                    assert!(store.lock.try_lock().is_err());
+                    // The node's current crypto identity may have changed through adoption
+                    // since the frontend prepared the request. Consult it in this lock.
+                    (Some(("alice".to_owned(), A.to_owned())), ())
+                })
+                .is_err()
+        );
         assert!(!store.path("alice").exists());
     }
 
@@ -409,11 +439,13 @@ mod tests {
             .update(Some("alice"), "alice", A, true, "\r\n\t  ", Some(ME))
             .unwrap();
         assert_eq!(snapshot.contacts[0].name, &A[..8]);
-        assert!(store
-            .update(Some("alice"), "alice", A, false, &"\n".repeat(3000), None)
-            .unwrap()
-            .contacts
-            .is_empty());
+        assert!(
+            store
+                .update(Some("alice"), "alice", A, false, &"\n".repeat(3000), None)
+                .unwrap()
+                .contacts
+                .is_empty()
+        );
     }
 
     #[test]
@@ -461,11 +493,13 @@ mod tests {
             )
             .map(|body| body.deserialize::<HiddenContactsSnapshot>().unwrap())
         };
-        assert!(invoke(
-            "get_hidden_contacts",
-            serde_json::json!({ "owner": "alice" })
-        )
-        .is_err());
+        assert!(
+            invoke(
+                "get_hidden_contacts",
+                serde_json::json!({ "owner": "alice" })
+            )
+            .is_err()
+        );
         let signed_in = session().get().unwrap();
         app_state
             .session()
@@ -478,11 +512,13 @@ mod tests {
         assert_eq!(snapshot.owner, "alice");
         assert!(snapshot.contacts.is_empty());
         assert!(invoke("get_hidden_contacts", serde_json::json!({ "owner": "bob" })).is_err());
-        assert!(invoke(
-            "get_hidden_contacts",
-            serde_json::json!({ "ownerId": "alice" })
-        )
-        .is_err());
+        assert!(
+            invoke(
+                "get_hidden_contacts",
+                serde_json::json!({ "ownerId": "alice" })
+            )
+            .is_err()
+        );
         assert!(invoke(
             "set_contact_hidden",
             serde_json::json!({ "owner": "alice", "accountId": A, "hidden": true, "name": "name" })
@@ -541,19 +577,23 @@ mod tests {
             .0
             .blocking_lock()
             .take();
-        assert!(invoke(
-            "set_contact_hidden",
-            serde_json::json!({ "owner": "alice", "account": A, "hidden": false, "name": "" })
-        )
-        .unwrap()
-        .contacts
-        .is_empty());
+        assert!(
+            invoke(
+                "set_contact_hidden",
+                serde_json::json!({ "owner": "alice", "account": A, "hidden": false, "name": "" })
+            )
+            .unwrap()
+            .contacts
+            .is_empty()
+        );
         app_state.session().clear();
-        assert!(invoke(
-            "set_contact_hidden",
-            serde_json::json!({ "owner": "alice", "account": A, "hidden": false, "name": "" })
-        )
-        .is_err());
+        assert!(
+            invoke(
+                "set_contact_hidden",
+                serde_json::json!({ "owner": "alice", "account": A, "hidden": false, "name": "" })
+            )
+            .is_err()
+        );
     }
 }
 use serde::{Deserialize, Serialize};

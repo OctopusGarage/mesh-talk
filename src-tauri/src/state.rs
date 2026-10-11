@@ -160,10 +160,12 @@ mod session_generation_tests {
         replacement.display_name = "Bob".into();
         session.set("b".into(), replacement, "b-password".into());
         // Models the existing command's delayed persistence result after replacement.
-        assert!(session
-            .matching(&lease, |info| info.user.display_name =
-                "Alice renamed".into())
-            .is_err());
+        assert!(
+            session
+                .matching(&lease, |info| info.user.display_name =
+                    "Alice renamed".into())
+                .is_err()
+        );
         assert_ne!(session.generation(), admitted_generation);
         assert_eq!(session.get().unwrap().user.display_name, "Bob");
     }

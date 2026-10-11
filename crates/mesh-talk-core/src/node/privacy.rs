@@ -2,7 +2,7 @@
 //! public admission for a verified account ID is
 //! `!snapshot.invisible || policy.allows(account_id)`.
 use crate::storage::encryption::{
-    decrypt_data, encrypt_data, generate_salt, EncryptionKey, NONCE_SIZE, SALT_SIZE,
+    EncryptionKey, NONCE_SIZE, SALT_SIZE, decrypt_data, encrypt_data, generate_salt,
 };
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -331,9 +331,10 @@ mod tests {
             })
             .collect();
         p.commit(full).unwrap();
-        assert!(p
-            .grant(&format!("{:032x}", 1024), "", PermissionSource::Manual)
-            .is_err());
+        assert!(
+            p.grant(&format!("{:032x}", 1024), "", PermissionSource::Manual)
+                .is_err()
+        );
         p.grant(&"0".repeat(32), "updated", PermissionSource::Manual)
             .unwrap();
     }
@@ -518,13 +519,14 @@ mod tests {
         let encoded = codec().serialize(&candidate).unwrap();
         assert!(encoded.len() as u64 <= MAX_BYTES);
         assert!((HEADER + encoded.len() + 16) as u64 > MAX_BYTES);
-        assert!(p
-            .grant(
+        assert!(
+            p.grant(
                 &format!("{:032x}", 971),
                 &"😀".repeat(241),
                 PermissionSource::Manual
             )
-            .is_err());
+            .is_err()
+        );
         assert_eq!(p.snapshot(), before);
         assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(PrivacyPolicy::open(&path, "pw").unwrap().snapshot(), before);
@@ -560,7 +562,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn private_permissions_and_symlinks_rejected() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::{PermissionsExt, symlink};
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("privacy");
         let mut p = PrivacyPolicy::open(&path, "pw").unwrap();

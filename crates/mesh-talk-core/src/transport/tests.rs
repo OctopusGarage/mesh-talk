@@ -1,7 +1,7 @@
 //! Module-level transport tests, including a real-TCP integration test.
 
 use crate::identity::device::DeviceIdentity;
-use crate::transport::{SecureChannel, NOISE_PARAMS};
+use crate::transport::{NOISE_PARAMS, SecureChannel};
 use tokio::net::{TcpListener, TcpStream};
 
 #[test]

@@ -6,7 +6,7 @@
 
 use crate::identity::device::DeviceIdentity;
 use crate::storage::encryption::{
-    decrypt_data, encrypt_data, generate_salt, EncryptionKey, NONCE_SIZE, SALT_SIZE,
+    EncryptionKey, NONCE_SIZE, SALT_SIZE, decrypt_data, encrypt_data, generate_salt,
 };
 use crate::storage::errors::StorageError;
 use serde::{Deserialize, Serialize};

@@ -6,8 +6,8 @@
 //! AES-256-GCM records); this store layers [`ReceivedEntry`] records, a
 //! per-conversation index, and an event-id dedup set on top.
 
-use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::LogError;
+use crate::eventlog::event::{ConversationId, EventId};
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

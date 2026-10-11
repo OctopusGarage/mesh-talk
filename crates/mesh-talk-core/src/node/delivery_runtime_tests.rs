@@ -1,5 +1,5 @@
 use super::*;
-use crate::discovery::{roster::Roster, Announce};
+use crate::discovery::{Announce, roster::Roster};
 use crate::eventlog::{ConversationId, EventId};
 use crate::identity::{account::Account, device::DeviceIdentity};
 use std::{
@@ -123,24 +123,27 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
     let staged = progress.load(Ordering::SeqCst);
     let log_empty = node.log.lock().unwrap().conversations().is_empty();
     assert!(matches!(result, Err(NodeError::Authorization(_))));
-    assert!(node
-        .delivery
-        .lock()
-        .unwrap()
-        .pending_transactions()
-        .is_empty());
-    assert!(node
-        .delivery
-        .lock()
-        .unwrap()
-        .next_destination(None)
-        .is_none());
-    assert!(node
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_none());
+    assert!(
+        node.delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+    assert!(
+        node.delivery
+            .lock()
+            .unwrap()
+            .next_destination(None)
+            .is_none()
+    );
+    assert!(
+        node.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_none()
+    );
     assert!(node.account_history(&remote.account_id(), 10).is_empty());
     assert!(node.sentlog.lock().unwrap().conversations().is_empty());
     drop(node);
@@ -181,12 +184,14 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
     );
     assert!(log_empty && reopened.log.lock().unwrap().conversations().is_empty());
     assert!(reopened.files.lock().unwrap().file_convs().is_empty());
-    assert!(reopened
-        .delivery
-        .lock()
-        .unwrap()
-        .pending_transactions()
-        .is_empty());
+    assert!(
+        reopened
+            .delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -328,13 +333,10 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
         .lock()
         .unwrap()
         .update(&new_proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    assert!(super::delivery_receipt::open_receipt(
-        &a.identity,
-        &a.account_id(),
-        &new_proof,
-        &receipt
-    )
-    .is_none());
+    assert!(
+        super::delivery_receipt::open_receipt(&a.identity, &a.account_id(), &new_proof, &receipt)
+            .is_none()
+    );
     assert!(a.log.lock().unwrap().has(&receipt.id));
     assert!(b.log.lock().unwrap().has(&receipt.id));
     assert_eq!(
@@ -344,17 +346,19 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
             .event_ids(&control),
         vec![receipt.id]
     );
-    assert!(b
-        .sync_store(&ap.public())
-        .lock()
-        .unwrap()
-        .event_ids(&control)
-        .is_empty());
-    assert!(!b
-        .sync_store(&ap.public())
-        .lock()
-        .unwrap()
-        .durable_have(&control, &receipt.id));
+    assert!(
+        b.sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .event_ids(&control)
+            .is_empty()
+    );
+    assert!(
+        !b.sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .durable_have(&control, &receipt.id)
+    );
     let (aio, bio) = tokio::io::duplex(65536);
     let responder = b.clone();
     let server = tokio::spawn(async move {
@@ -387,11 +391,12 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
         Err(super::session::SessionError::NoProgress)
     ));
     assert!(handled < 9, "sync must stop before the diagnostic cutoff");
-    assert!(!b
-        .sync_store(&ap.public())
-        .lock()
-        .unwrap()
-        .durable_have(&control, &receipt.id));
+    assert!(
+        !b.sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .durable_have(&control, &receipt.id)
+    );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
 }
@@ -514,12 +519,13 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_none());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -582,8 +588,8 @@ async fn private_file_chunks_resume_immutably_after_early_card_ack_and_sender_re
 }
 
 #[tokio::test]
-async fn private_file_restart_progresses_when_protocol_stages_fit_but_total_exceeds_operation_budget(
-) {
+async fn private_file_restart_progresses_when_protocol_stages_fit_but_total_exceeds_operation_budget()
+ {
     private_file_restart(FilePeerDelay::Aggregate).await;
 }
 
@@ -812,12 +818,13 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
         "terminal failure removes the last slot, so only normal cadence may readmit it"
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_some());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_some()
+    );
     assert_eq!(
         a.sync_store(&bp.public()).lock().unwrap().event_ids(&file),
         ids
@@ -1061,12 +1068,13 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         b.read_file(file).is_err(),
         "card delivery is independent of complete download"
     );
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_some());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_some()
+    );
     drop(a);
     let al = TcpListener::bind(("127.0.0.1", ap.tcp_port)).await.unwrap();
     let bl = TcpListener::bind(("127.0.0.1", bp.tcp_port)).await.unwrap();
@@ -1086,10 +1094,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     if count == 1 {
         assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
     } else {
-        assert!(a
-            .account_history(&b.account_id(), 100)
-            .iter()
-            .any(|entry| entry.id == id));
+        assert!(
+            a.account_history(&b.account_id(), 100)
+                .iter()
+                .any(|entry| entry.id == id)
+        );
     }
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert_eq!(
@@ -1292,11 +1301,12 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .collect::<Vec<_>>(),
             *ids
         );
-        assert!(b
-            .sync_store(&ap.public())
-            .lock()
-            .unwrap()
-            .durable_have(file, ids.last().unwrap()));
+        assert!(
+            b.sync_store(&ap.public())
+                .lock()
+                .unwrap()
+                .durable_have(file, ids.last().unwrap())
+        );
     }
     if delay == FilePeerDelay::PartialChunk {
         assert!(
@@ -1326,17 +1336,19 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     if count == 1 {
         assert_eq!(a.account_history(&b.account_id(), 10)[0].id, id);
     } else {
-        assert!(a
-            .account_history(&b.account_id(), 100)
-            .iter()
-            .any(|entry| entry.id == id));
+        assert!(
+            a.account_history(&b.account_id(), 100)
+                .iter()
+                .any(|entry| entry.id == id)
+        );
     }
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_none());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_none()
+    );
     assert!(a.delivery.lock().unwrap().file_card(id).is_some());
     case.finish();
 }
@@ -1524,12 +1536,13 @@ fn erased_static_manifest_reopen(adopt: bool) {
         "static manifest must stay locally erased"
     );
     assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
-    assert!(b
-        .files
-        .lock()
-        .unwrap()
-        .manifest(&manifest.file_conv)
-        .is_none());
+    assert!(
+        b.files
+            .lock()
+            .unwrap()
+            .manifest(&manifest.file_conv)
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -2243,15 +2256,16 @@ fn file_book_rebuild_does_not_restore_outgoing_card_scope_from_mismatched_row() 
     )
     .unwrap();
     assert!(a.files.lock().unwrap().manifest(&file).is_none());
-    assert!(!a
-        .privacy
-        .state
-        .read()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .file_scopes
-        .contains_key(&file));
+    assert!(
+        !a.privacy
+            .state
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .file_scopes
+            .contains_key(&file)
+    );
 }
 
 #[test]
@@ -2296,9 +2310,10 @@ fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
     files.record_durable(&row).unwrap();
     *b.received_files.lock().unwrap() = files;
     std::fs::create_dir(sidecar.join("files.compact-tmp")).unwrap();
-    assert!(b
-        .delete_account_message(&ap.account_id().unwrap(), event.id)
-        .is_err());
+    assert!(
+        b.delete_account_message(&ap.account_id().unwrap(), event.id)
+            .is_err()
+    );
     assert!(b.account_history(&ap.account_id().unwrap(), 10).is_empty());
     assert!(
         b.files
@@ -2376,16 +2391,18 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
         .unwrap();
     b.reseed_live_file_book(&store);
     *b.delivery.lock().unwrap() = store;
-    assert!(b
-        .delete_account_message(&ap.account_id().unwrap(), id)
-        .is_err());
+    assert!(
+        b.delete_account_message(&ap.account_id().unwrap(), id)
+            .is_err()
+    );
     assert_eq!(b.account_history(&ap.account_id().unwrap(), 10)[0].id, id);
-    assert!(b
-        .files
-        .lock()
-        .unwrap()
-        .manifest(&manifest.file_conv)
-        .is_some());
+    assert!(
+        b.files
+            .lock()
+            .unwrap()
+            .manifest(&manifest.file_conv)
+            .is_some()
+    );
     assert_eq!(b.received_files.lock().unwrap().entries(&host).len(), 1);
 }
 
@@ -2477,12 +2494,13 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         );
         assert!(scopes.iter().any(|scope| scope.event == originals[1].id));
     }
-    assert!(b
-        .files
-        .lock()
-        .unwrap()
-        .manifest(&manifest.file_conv)
-        .is_some());
+    assert!(
+        b.files
+            .lock()
+            .unwrap()
+            .manifest(&manifest.file_conv)
+            .is_some()
+    );
     assert_eq!(b.delivery.lock().unwrap().retry_receipts(10).len(), 1);
     drop(b);
     let (b, _) = node(
@@ -2508,19 +2526,21 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         b.account_history(&ca.account_id(), 10)[0].id,
         originals[1].id
     );
-    assert!(b
-        .files
-        .lock()
-        .unwrap()
-        .manifest(&manifest.file_conv)
-        .is_some());
+    assert!(
+        b.files
+            .lock()
+            .unwrap()
+            .manifest(&manifest.file_conv)
+            .is_some()
+    );
     assert_eq!(b.prune_older_than(101).unwrap(), 1);
-    assert!(b
-        .files
-        .lock()
-        .unwrap()
-        .manifest(&manifest.file_conv)
-        .is_none());
+    assert!(
+        b.files
+            .lock()
+            .unwrap()
+            .manifest(&manifest.file_conv)
+            .is_none()
+    );
     assert!(b.delivery.lock().unwrap().retry_receipts(10).is_empty());
 }
 
@@ -2580,18 +2600,20 @@ fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
     };
     let before = a.log.lock().unwrap().conversations();
     assert!(super::files::compact_manifest_needed(&a.identity, &prospective).unwrap());
-    assert!(super::files::compact_manifest_needed(
-        &a.identity,
-        &crate::file::FileManifestV3 {
-            v2: crate::file::FileManifestV2 {
-                size: 1024,
-                chunk_count: 1,
-                ..prospective.v2.clone()
-            },
-            ..prospective.clone()
-        }
-    )
-    .is_ok_and(|compact| !compact));
+    assert!(
+        super::files::compact_manifest_needed(
+            &a.identity,
+            &crate::file::FileManifestV3 {
+                v2: crate::file::FileManifestV2 {
+                    size: 1024,
+                    chunk_count: 1,
+                    ..prospective.v2.clone()
+                },
+                ..prospective.clone()
+            }
+        )
+        .is_ok_and(|compact| !compact)
+    );
     assert_eq!(a.log.lock().unwrap().conversations(), before);
 }
 
@@ -2642,7 +2664,7 @@ fn pending_accepted_intent_precedes_own_author_sync_backfill() {
 
 fn pending_accepted_intent_precedes_own_event(backfill: bool) {
     use super::delivery_store::{DeliveryDestination, DeliveryTransaction, OutgoingDelivery};
-    use crate::eventlog::{sync::SyncStore, Event, EventKind};
+    use crate::eventlog::{Event, EventKind, sync::SyncStore};
     {
         let dir = tempfile::tempdir().unwrap();
         let alice = DeviceIdentity::generate();
@@ -2695,25 +2717,27 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
             })
             .unwrap();
         if backfill {
-            assert!(a
-                .sync_store(&bob.public())
-                .lock()
-                .unwrap()
-                .ingest(competing)
-                .is_err());
+            assert!(
+                a.sync_store(&bob.public())
+                    .lock()
+                    .unwrap()
+                    .ingest(competing)
+                    .is_err()
+            );
         } else {
             assert_eq!(a.append_event(conv, EventKind::React, vec![2]).unwrap(), 2);
         }
         let mut delivery = a.delivery.lock().unwrap();
         a.recover_delivery(&mut delivery).unwrap();
         assert!(delivery.message(original.id).is_some());
-        assert!(a
-            .log
-            .lock()
-            .unwrap()
-            .events(&conv)
-            .iter()
-            .any(|e| e.id == original.id));
+        assert!(
+            a.log
+                .lock()
+                .unwrap()
+                .events(&conv)
+                .iter()
+                .any(|e| e.id == original.id)
+        );
     }
 }
 
@@ -2838,7 +2862,7 @@ async fn automatic_receipt_reuses_exact_ack_after_relay_eviction() {
 
 #[tokio::test]
 async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only() {
-    use crate::eventlog::{sync::SyncStore, Event, EventKind};
+    use crate::eventlog::{Event, EventKind, sync::SyncStore};
     let dir = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
@@ -2892,19 +2916,21 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
         EventKind::Message,
         payload.seal(&bob).unwrap(),
     );
-    assert!(p
-        .sync_store(&alice.public())
-        .lock()
-        .unwrap()
-        .ingest(ack.clone())
-        .is_err());
+    assert!(
+        p.sync_store(&alice.public())
+            .lock()
+            .unwrap()
+            .ingest(ack.clone())
+            .is_err()
+    );
     p.set_allowed(&ba.account_id(), true).await.unwrap();
-    assert!(p
-        .sync_store(&alice.public())
-        .lock()
-        .unwrap()
-        .ingest(ack.clone())
-        .is_ok());
+    assert!(
+        p.sync_store(&alice.public())
+            .lock()
+            .unwrap()
+            .ingest(ack.clone())
+            .is_ok()
+    );
     assert_eq!(
         p.sync_store(&bob.public())
             .lock()
@@ -2912,11 +2938,12 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .event_ids(&control),
         vec![ack.id]
     );
-    assert!(p
-        .sync_store(&alice.public())
-        .lock()
-        .unwrap()
-        .durable_have(&control, &ack.id));
+    assert!(
+        p.sync_store(&alice.public())
+            .lock()
+            .unwrap()
+            .durable_have(&control, &ack.id)
+    );
     let outsider = DeviceIdentity::generate();
     let forged = Event::new(
         &outsider,
@@ -2928,24 +2955,27 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
         EventKind::Message,
         ack.ciphertext.clone(),
     );
-    assert!(p
-        .sync_store(&alice.public())
-        .lock()
-        .unwrap()
-        .ingest(forged)
-        .is_err());
+    assert!(
+        p.sync_store(&alice.public())
+            .lock()
+            .unwrap()
+            .ingest(forged)
+            .is_err()
+    );
     p.set_allowed(&ba.account_id(), false).await.unwrap();
-    assert!(p
-        .sync_store(&alice.public())
-        .lock()
-        .unwrap()
-        .event_ids(&control)
-        .is_empty());
-    assert!(!p
-        .sync_store(&alice.public())
-        .lock()
-        .unwrap()
-        .durable_have(&control, &ack.id));
+    assert!(
+        p.sync_store(&alice.public())
+            .lock()
+            .unwrap()
+            .event_ids(&control)
+            .is_empty()
+    );
+    assert!(
+        !p.sync_store(&alice.public())
+            .lock()
+            .unwrap()
+            .durable_have(&control, &ack.id)
+    );
 }
 
 #[tokio::test]
@@ -3104,12 +3134,13 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                     channel.send(b"snapshotted ACK").await,
                     Err(crate::transport::TransportError::AdmissionDenied)
                 ));
-                assert!(b
-                    .sync_store(&ap.public())
-                    .lock()
-                    .unwrap()
-                    .event_ids(&control)
-                    .is_empty());
+                assert!(
+                    b.sync_store(&ap.public())
+                        .lock()
+                        .unwrap()
+                        .event_ids(&control)
+                        .is_empty()
+                );
                 drop(b);
                 let (b, _) = node(
                     bd.path(),
@@ -3124,21 +3155,23 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                     Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
                 )
                 .unwrap();
-                assert!(b
-                    .sync_store(&ap.public())
-                    .lock()
-                    .unwrap()
-                    .event_ids(&control)
-                    .is_empty());
-            } else {
-                if private {
-                    b.set_allowed(&own, false).await.unwrap();
-                    assert!(b
-                        .sync_store(&ap.public())
+                assert!(
+                    b.sync_store(&ap.public())
                         .lock()
                         .unwrap()
                         .event_ids(&control)
-                        .is_empty());
+                        .is_empty()
+                );
+            } else {
+                if private {
+                    b.set_allowed(&own, false).await.unwrap();
+                    assert!(
+                        b.sync_store(&ap.public())
+                            .lock()
+                            .unwrap()
+                            .event_ids(&control)
+                            .is_empty()
+                    );
                     b.set_allowed(&own, true).await.unwrap();
                 }
                 let newaccount = Account::generate();
@@ -3154,17 +3187,19 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                     &b.user_id(),
                 );
                 b.initiate_contact(&newaccount.account_id()).await.unwrap();
-                assert!(b
-                    .sync_store(&ap.public())
-                    .lock()
-                    .unwrap()
-                    .event_ids(&control)
-                    .is_empty());
-                assert!(!b
-                    .sync_store(&ap.public())
-                    .lock()
-                    .unwrap()
-                    .durable_have(&control, &receipt.destination.event.id));
+                assert!(
+                    b.sync_store(&ap.public())
+                        .lock()
+                        .unwrap()
+                        .event_ids(&control)
+                        .is_empty()
+                );
+                assert!(
+                    !b.sync_store(&ap.public())
+                        .lock()
+                        .unwrap()
+                        .durable_have(&control, &receipt.destination.event.id)
+                );
                 let substituted = Announce::new_with_account(
                     &DeviceIdentity::from_secret_bytes(akeys.0, [77; 32]),
                     &newaccount,
@@ -3177,12 +3212,13 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                     &b.user_id(),
                 );
                 assert!(b.initiate_contact(&newaccount.account_id()).await.is_err());
-                assert!(b
-                    .sync_store(&substituted.public())
-                    .lock()
-                    .unwrap()
-                    .event_ids(&control)
-                    .is_empty());
+                assert!(
+                    b.sync_store(&substituted.public())
+                        .lock()
+                        .unwrap()
+                        .event_ids(&control)
+                        .is_empty()
+                );
             }
         }
     }
@@ -3355,10 +3391,11 @@ async fn durable_raw_send_offline_is_accepted() {
         Account::generate(),
         &proof,
     );
-    assert!(a
-        .send_dm(&bob.public().user_id(), b"offline intent")
-        .await
-        .is_ok());
+    assert!(
+        a.send_dm(&bob.public().user_id(), b"offline intent")
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -3589,12 +3626,13 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     assert_eq!(b.file_progress(file).unwrap().done, 0);
     assert!(b.file_ready_to_save(file));
     assert!(b.log.lock().unwrap().events(&file).is_empty());
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_some());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_some()
+    );
     at.abort();
     bt.abort();
     let _ = at.await;
@@ -3627,12 +3665,13 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     a.flush_file_delivery(id).await;
     bt.abort();
     let _ = bt.await;
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_none());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_none()
+    );
     assert!(
         b.log.lock().unwrap().events(&file).is_empty(),
         "completed/pruned media must not be retransmitted and retained merely to satisfy exact final custody"
@@ -3695,8 +3734,8 @@ async fn completed_file_fixture(
 }
 
 #[tokio::test]
-async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_keeps_source_fanout(
-) {
+async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_keeps_source_fanout()
+ {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let (a, b, ap, _, id, file, final_chunk, bytes) =
@@ -3729,12 +3768,13 @@ async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_
     a.flush_file_delivery(id).await;
     task.abort();
     let _ = task.await;
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_none());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_none()
+    );
     assert!(b.log.lock().unwrap().events(&file).is_empty());
     assert_eq!(b.file_progress(file).unwrap().done, 0);
     assert!(!b.file_ready_to_save(file));
@@ -4096,12 +4136,13 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
     a.flush_file_delivery(id).await;
     task.abort();
     let _ = task.await;
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_none());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_none()
+    );
     assert!(b.log.lock().unwrap().events(&file).is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     let rebound = Announce::new_with_account(&a.identity, &Account::generate(), "Alice", 9);
@@ -4151,9 +4192,10 @@ async fn untracked_channel_media_local_export_verifies_retained_row_and_managed_
     let cached = a.media.path(file).unwrap();
     std::fs::write(&cached, b"wrong bytes").unwrap();
     assert!(a.file_ready_to_save(file)); // A present eligible copy is attempted, then verified by save.
-    assert!(a
-        .save_file(file, &dir.path().join("bad-export.png"))
-        .is_err());
+    assert!(
+        a.save_file(file, &dir.path().join("bad-export.png"))
+            .is_err()
+    );
     std::fs::remove_file(cached).unwrap();
     assert!(!a.file_ready_to_save(file));
 }
@@ -4349,14 +4391,16 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     let conv = super::conversation::dm_conversation_id(&a.identity.public(), &bob.public());
     let versions = a.log.lock().unwrap().version_vector(&conv);
-    assert!(a
-        .append_event(conv, crate::eventlog::EventKind::React, vec![2])
-        .is_err());
+    assert!(
+        a.append_event(conv, crate::eventlog::EventKind::React, vec![2])
+            .is_err()
+    );
     assert_eq!(a.log.lock().unwrap().version_vector(&conv), versions);
-    assert!(a
-        .enqueue_to_account(&target, b"must wait", None)
-        .await
-        .is_err());
+    assert!(
+        a.enqueue_to_account(&target, b"must wait", None)
+            .await
+            .is_err()
+    );
     assert_eq!(
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
@@ -4399,10 +4443,11 @@ async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
         &proof,
     );
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
-    assert!(a
-        .enqueue_to_account(&ba.account_id(), &vec![7; 256 * 1024], None)
-        .await
-        .is_err());
+    assert!(
+        a.enqueue_to_account(&ba.account_id(), &vec![7; 256 * 1024], None)
+            .await
+            .is_err()
+    );
     assert_eq!(
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
@@ -4428,20 +4473,22 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
     let new_account = Account::generate();
     let blocked_keystore = dir.path().join("blocked.keystore");
     std::fs::create_dir(&blocked_keystore).unwrap();
-    assert!(a
-        .persist_account_adoption(&new_account.account_id(), || {
+    assert!(
+        a.persist_account_adoption(&new_account.account_id(), || {
             crate::identity::account_keystore::save(&blocked_keystore, "pw", &new_account)
                 .map_err(|e| NodeError::Channel(e.to_string()))
         })
-        .is_err());
+        .is_err()
+    );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert_eq!(a.delivery.lock().unwrap().retry_messages(10).len(), 1);
     a.persist_account_adoption(&new_account.account_id(), || Ok(()))
         .unwrap();
-    assert!(a
-        .enqueue_to_account(&ba.account_id(), b"old runtime must stop", None)
-        .await
-        .is_err());
+    assert!(
+        a.enqueue_to_account(&ba.account_id(), b"old runtime must stop", None)
+            .await
+            .is_err()
+    );
     drop(a);
     let (adopted, _) = node(
         dir.path(),
@@ -4450,17 +4497,19 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
         &proof,
     );
     assert_eq!(adopted.delivery_status(id), None);
-    assert!(adopted
-        .delivery
-        .lock()
-        .unwrap()
-        .retry_messages(10)
-        .is_empty());
+    assert!(
+        adopted
+            .delivery
+            .lock()
+            .unwrap()
+            .retry_messages(10)
+            .is_empty()
+    );
 }
 
 #[tokio::test]
-async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_nonempty_rebind_rejects(
-) {
+async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_nonempty_rebind_rejects()
+ {
     let dir = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
     let secret = alice.secret_bytes();
@@ -4475,17 +4524,18 @@ async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_none
         .await
         .unwrap();
     let new_account = Account::generate();
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .bind_profile(
-            &dir.path().join("events.log"),
-            "pw",
-            &a.identity.public(),
-            &new_account.account_id()
-        )
-        .is_err());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .bind_profile(
+                &dir.path().join("events.log"),
+                "pw",
+                &a.identity.public(),
+                &new_account.account_id()
+            )
+            .is_err()
+    );
     a.delivery
         .lock()
         .unwrap()
@@ -4501,17 +4551,18 @@ async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_none
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert_eq!(a.delivery.lock().unwrap().retry_messages(8).len(), 1);
     assert_eq!(a.account_history(&ba.account_id(), 8)[0].id, id);
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .bind_profile(
-            &dir.path().join("events.log"),
-            "pw",
-            &a.identity.public(),
-            &new_account.account_id()
-        )
-        .is_err());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .bind_profile(
+                &dir.path().join("events.log"),
+                "pw",
+                &a.identity.public(),
+                &new_account.account_id()
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -4544,22 +4595,26 @@ fn same_directory_delivery_logs_are_isolated_and_foreign_owner_fails_closed() {
     let mut reopened =
         super::delivery_store::DeliveryStore::open_for_log(&dir.path().join("a.log"), "pw")
             .unwrap();
-    assert!(reopened
-        .bind_profile(
-            &dir.path().join("a.log"),
-            "pw",
-            &b.public(),
-            &"a".repeat(32)
-        )
-        .is_err());
-    assert!(reopened
-        .bind_profile(
-            &dir.path().join("a.log"),
-            "pw",
-            &a.public(),
-            &"a".repeat(32)
-        )
-        .is_ok());
+    assert!(
+        reopened
+            .bind_profile(
+                &dir.path().join("a.log"),
+                "pw",
+                &b.public(),
+                &"a".repeat(32)
+            )
+            .is_err()
+    );
+    assert!(
+        reopened
+            .bind_profile(
+                &dir.path().join("a.log"),
+                "pw",
+                &a.public(),
+                &"a".repeat(32)
+            )
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -4842,12 +4897,13 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
     assert!(files.try_recv().is_err());
     assert!(b.log.lock().unwrap().events(&file).is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
-    assert!(a
-        .delivery
-        .lock()
-        .unwrap()
-        .next_file_destination(None)
-        .is_some());
+    assert!(
+        a.delivery
+            .lock()
+            .unwrap()
+            .next_file_destination(None)
+            .is_some()
+    );
     bt.abort();
     let _ = bt.await;
 }

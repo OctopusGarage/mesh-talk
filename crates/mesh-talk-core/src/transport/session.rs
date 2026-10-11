@@ -1,7 +1,7 @@
 //! A Noise transport-mode session: encrypts/decrypts individual messages
 //! once the handshake has completed. One [`Session`] per peer connection.
 
-use crate::transport::{TransportError, MAX_PLAINTEXT};
+use crate::transport::{MAX_PLAINTEXT, TransportError};
 
 /// Encrypts and decrypts messages over an established Noise channel.
 pub struct Session {

@@ -4,7 +4,7 @@ use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
-use crate::node::session::{request_round, serve_one, serve_wire_bytes, Served, SessionError};
+use crate::node::session::{Served, SessionError, request_round, serve_one, serve_wire_bytes};
 use crate::transport::SecureChannel;
 use std::sync::Arc;
 use std::time::Duration;

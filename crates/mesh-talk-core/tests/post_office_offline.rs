@@ -12,7 +12,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use mesh_talk_core::eventlog::{persist::PersistentEventLog, EventKind};
+use mesh_talk_core::eventlog::{EventKind, persist::PersistentEventLog};
 
 /// A spawned `mesh-talk-node` (normal or `--post-office`) with a line view of stdout.
 struct CliNode {

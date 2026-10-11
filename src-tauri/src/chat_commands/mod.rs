@@ -15,7 +15,7 @@ mod platform;
 mod state;
 
 #[cfg(test)]
-use diagnostics::{presence_from_seen, PRESENCE_TTL_SECS};
+use diagnostics::{PRESENCE_TTL_SECS, presence_from_seen};
 #[cfg(test)]
 use files::temp_file_basename;
 

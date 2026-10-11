@@ -1,15 +1,15 @@
 //! Serialized durable privacy decisions and authenticated disclosure boundaries.
 use super::peer_directory::PeerDirectory;
 use super::*;
-use crate::discovery::{visibility::DiscoveryVisibility, Announce};
+use crate::discovery::{Announce, visibility::DiscoveryVisibility};
 use crate::identity::device::PublicIdentity;
 use crate::transport::{SecureChannel, TransportError, VerifiedPeer};
 use std::{
     io,
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use tokio::net::TcpStream;

@@ -4,7 +4,7 @@ use super::*;
 use mesh_talk_core::node::{NodeRuntime, ReceivedDm};
 use std::net::UdpSocket;
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 fn start(root: &Path, owner: &str, name: &str, port: u16) -> (NodeRuntime, Receiver<ReceivedDm>) {
@@ -183,13 +183,15 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     .unwrap();
     assert_eq!(hidden.contacts.len(), 1);
     assert_eq!(hidden.contacts[0].account_id, bob_account);
-    assert!(nodes
-        .0
-        .blocking_lock()
-        .as_ref()
-        .unwrap()
-        .peer_public(bob.user_id())
-        .is_some());
+    assert!(
+        nodes
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .peer_public(bob.user_id())
+            .is_some()
+    );
     let peers_after_hide: Vec<_> = nodes
         .0
         .blocking_lock()
@@ -306,18 +308,22 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     let mut other = alice_user.clone();
     other.user_id = "other-local-user".into();
     session.set("other-token".into(), other, "fixture-password".into());
-    assert!(invoke(
-        "get_hidden_contacts",
-        serde_json::json!({ "owner": "alice" })
-    )
-    .is_err());
-    assert!(invoke(
-        "get_hidden_contacts",
-        serde_json::json!({ "owner": "other-local-user" })
-    )
-    .unwrap()
-    .contacts
-    .is_empty());
+    assert!(
+        invoke(
+            "get_hidden_contacts",
+            serde_json::json!({ "owner": "alice" })
+        )
+        .is_err()
+    );
+    assert!(
+        invoke(
+            "get_hidden_contacts",
+            serde_json::json!({ "owner": "other-local-user" })
+        )
+        .unwrap()
+        .contacts
+        .is_empty()
+    );
     assert_eq!(
         HiddenContactsState::new(root.path().to_owned())
             .get(Some("alice"), "alice")
@@ -339,9 +345,11 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     )
     .unwrap();
     assert!(restored.contacts.is_empty());
-    assert!(HiddenContactsState::new(root.path().to_owned())
-        .get(Some("alice"), "alice")
-        .unwrap()
-        .contacts
-        .is_empty());
+    assert!(
+        HiddenContactsState::new(root.path().to_owned())
+            .get(Some("alice"), "alice")
+            .unwrap()
+            .contacts
+            .is_empty()
+    );
 }

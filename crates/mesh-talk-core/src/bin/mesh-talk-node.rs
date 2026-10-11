@@ -11,7 +11,7 @@ use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
 use mesh_talk_core::node::run_relay_accept_loop;
 use mesh_talk_core::node::{
-    discovery_socket, spawn_discovery, Node, ReceivedDm, DEFAULT_DISCOVERY_PORT,
+    DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket, spawn_discovery,
 };
 use mesh_talk_core::postoffice::PostOffice;
 use std::sync::{Arc, Mutex};
@@ -696,10 +696,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(send_account_command(&runtime.handle(), "invalid")
-            .await
-            .unwrap_err()
-            .contains("usage:"));
+        assert!(
+            send_account_command(&runtime.handle(), "invalid")
+                .await
+                .unwrap_err()
+                .contains("usage:")
+        );
         assert!(
             send_account_command(&runtime.handle(), &format!("{} hello", "a".repeat(32)))
                 .await
@@ -781,10 +783,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(received.text, b"native account delivery");
-        assert!(recipient
-            .account_history(sender.account_id(), 20)
-            .iter()
-            .any(|entry| entry.text == b"native account delivery"));
+        assert!(
+            recipient
+                .account_history(sender.account_id(), 20)
+                .iter()
+                .any(|entry| entry.text == b"native account delivery")
+        );
     }
 
     fn peer(name: &str) -> PeerRecord {

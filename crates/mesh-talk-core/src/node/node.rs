@@ -8,9 +8,9 @@
 
 use crate::channel::sender_key::SenderKey;
 use crate::discovery::roster::{Roster, UserId};
+use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::persist::PersistentEventLog;
-use crate::eventlog::LogError;
 use crate::identity::account::Account;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::channel::{ChannelBook, ReceivedChannelMessage};

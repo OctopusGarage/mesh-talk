@@ -4,7 +4,7 @@
 //! `on_dm` callback, so this is unit-testable without a GUI.
 
 use crate::discovery::service::{
-    shared_announce, spawn_discovery_with_visibility, swap_announce, SharedAnnounce,
+    SharedAnnounce, shared_announce, spawn_discovery_with_visibility, swap_announce,
 };
 use crate::discovery::{Announce, PeerRecord, Roster};
 use crate::eventlog::LogError;
@@ -17,7 +17,7 @@ use crate::transport::net::discovery_socket;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 /// How often the desktop node drains held DMs from the elected post office.

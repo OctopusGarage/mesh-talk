@@ -187,26 +187,34 @@ mod tests {
         )
         .unwrap();
         assert!(changed.policy.invisible);
-        assert!(invoke(
-            "set_invisible",
-            serde_json::json!({"owner":"other", "invisible":false})
-        )
-        .is_err());
-        assert!(invoke(
-            "set_privacy_allowed",
-            serde_json::json!({"owner":"alice", "account":"invalid", "allowed":true})
-        )
-        .is_err());
-        assert!(invoke(
-            "set_privacy_allowed",
-            serde_json::json!({"owner":"alice", "account":"b".repeat(32), "allowed":true})
-        )
-        .is_err());
-        assert!(invoke(
-            "initiate_privacy_contact",
-            serde_json::json!({"owner":"alice", "account":"b".repeat(32)})
-        )
-        .is_err());
+        assert!(
+            invoke(
+                "set_invisible",
+                serde_json::json!({"owner":"other", "invisible":false})
+            )
+            .is_err()
+        );
+        assert!(
+            invoke(
+                "set_privacy_allowed",
+                serde_json::json!({"owner":"alice", "account":"invalid", "allowed":true})
+            )
+            .is_err()
+        );
+        assert!(
+            invoke(
+                "set_privacy_allowed",
+                serde_json::json!({"owner":"alice", "account":"b".repeat(32), "allowed":true})
+            )
+            .is_err()
+        );
+        assert!(
+            invoke(
+                "initiate_privacy_contact",
+                serde_json::json!({"owner":"alice", "account":"b".repeat(32)})
+            )
+            .is_err()
+        );
         assert!(invoke("get_privacy", serde_json::json!({"ownerId":"alice"})).is_err());
         // Poll until the operation waits for the runtime lifecycle lock, then
         // log out. A previously authorized queued write must not become durable.
@@ -227,11 +235,13 @@ mod tests {
             drop(guard);
             assert!(queued.await.is_err());
         });
-        assert!(invoke(
-            "set_invisible",
-            serde_json::json!({"owner":"alice", "invisible":false})
-        )
-        .is_err());
+        assert!(
+            invoke(
+                "set_invisible",
+                serde_json::json!({"owner":"alice", "invisible":false})
+            )
+            .is_err()
+        );
         assert!(
             node.0
                 .blocking_lock()

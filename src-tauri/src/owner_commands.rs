@@ -770,11 +770,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(statuses.as_array().unwrap().len(), 3);
-        assert!(statuses
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["status"] == "awaiting"));
+        assert!(
+            statuses
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["status"] == "awaiting")
+        );
         let file_status = statuses
             .as_array()
             .unwrap()
@@ -823,12 +825,14 @@ mod tests {
         assert_eq!(input["kind"], "invalid-input");
         assert!(fixture.invoke("owner_enqueue_text", serde_json::json!({"owner":"bob", "account":account, "text":"reject", "replyTo":null})).is_err());
         fixture.app_state.session().clear();
-        assert!(fixture
-            .invoke(
-                "owner_delivery_statuses",
-                serde_json::json!({"owner":"alice", "account":account, "ids":ids})
-            )
-            .is_err());
+        assert!(
+            fixture
+                .invoke(
+                    "owner_delivery_statuses",
+                    serde_json::json!({"owner":"alice", "account":account, "ids":ids})
+                )
+                .is_err()
+        );
     }
 
     #[test]

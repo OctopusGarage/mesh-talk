@@ -15,9 +15,9 @@
 //! so a peer that violates the Lamport invariant cannot corrupt the receiver —
 //! at worst its events are rejected with `MissingParents`.
 
+use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId};
 use crate::eventlog::store::{AppendOutcome, EventLog};
-use crate::eventlog::LogError;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1046,8 +1046,8 @@ mod tests {
         };
         let (report, followup) = handle_response(&mut requester, &response);
         assert_eq!(report.applied, 1); // `a` ingested
-                                       // Even though the requester now holds `a`, the followup must not echo it
-                                       // back (it is in the responder's `have`).
+        // Even though the requester now holds `a`, the followup must not echo it
+        // back (it is in the responder's `have`).
         assert!(followup.events.is_empty());
     }
 

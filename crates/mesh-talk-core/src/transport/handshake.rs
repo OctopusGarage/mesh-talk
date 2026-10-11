@@ -3,7 +3,7 @@
 //! authenticated X25519 static key and the channel-binding handshake hash.
 
 use crate::transport::session::Session;
-use crate::transport::{TransportError, MAX_FRAME, NOISE_PARAMS};
+use crate::transport::{MAX_FRAME, NOISE_PARAMS, TransportError};
 
 /// One side of an in-progress Noise XX handshake.
 pub struct Handshake {

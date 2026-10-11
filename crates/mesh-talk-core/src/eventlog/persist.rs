@@ -19,10 +19,10 @@
 //! any altered event is rejected, and the sync engine re-fetches missing events
 //! from peers. A dropped or reordered local record is therefore self-healing.
 
+use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::store::{AppendOutcome, EventLog};
 use crate::eventlog::sync::SyncStore;
-use crate::eventlog::LogError;
 use crate::storage::record_log::EncryptedRecordLog;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -327,7 +327,7 @@ impl SyncStore for PersistentEventLog {
 mod tests {
     use super::*;
     use crate::eventlog::event::{ConversationId, EventKind};
-    use crate::eventlog::sync::{reconcile, SyncStore};
+    use crate::eventlog::sync::{SyncStore, reconcile};
     use crate::identity::device::DeviceIdentity;
 
     fn mk(id: &DeviceIdentity, seq: u64, lamport: u64, payload: &[u8]) -> Event {

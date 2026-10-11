@@ -3,7 +3,7 @@ use super::privacy_runtime::PrivacyState;
 use super::*;
 use crate::{
     eventlog::{
-        sync::SyncStore, AppendOutcome, ConversationId, Event, EventId, EventKind, LogError,
+        AppendOutcome, ConversationId, Event, EventId, EventKind, LogError, sync::SyncStore,
     },
     identity::device::PublicIdentity,
 };

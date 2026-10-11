@@ -9,7 +9,7 @@ use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
 use crate::node::conversation::dm_conversation_id;
-use crate::node::profile::{ProfilePayload, MAX_AVATAR_BYTES};
+use crate::node::profile::{MAX_AVATAR_BYTES, ProfilePayload};
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -9,11 +9,11 @@
 //! (always-on) peer is the post office: the one with the lowest identity
 //! fingerprint. Full election with standbys and uptime detection is Phase 1.
 
+use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId};
 use crate::eventlog::persist::PersistentEventLog;
 use crate::eventlog::store::AppendOutcome;
 use crate::eventlog::sync::SyncStore;
-use crate::eventlog::LogError;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -305,12 +305,14 @@ mod tests {
         let plaintext =
             crate::dm::open(&bob, &alice.public().x25519_pub, &received.ciphertext).unwrap();
         assert_eq!(plaintext, b"meet at 5");
-        assert!(crate::dm::open(
-            &po_identity_copy,
-            &alice.public().x25519_pub,
-            &received.ciphertext
-        )
-        .is_err());
+        assert!(
+            crate::dm::open(
+                &po_identity_copy,
+                &alice.public().x25519_pub,
+                &received.ciphertext
+            )
+            .is_err()
+        );
     }
 
     #[test]

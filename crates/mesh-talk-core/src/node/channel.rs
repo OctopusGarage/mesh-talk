@@ -312,7 +312,7 @@ impl ChannelBook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::{new_channel_id, ChannelMeta, ChannelState};
+    use crate::channel::{ChannelMeta, ChannelState, new_channel_id};
     use crate::eventlog::event::{Event, EventKind};
     use crate::eventlog::store::EventLog;
     use crate::eventlog::sync::reconcile;
@@ -649,10 +649,12 @@ mod tests {
         let mut bob_log = EventLog::default();
         reconcile(&mut bob_log, &mut alice_log, channel);
         let mut bob_book = ChannelBook::new();
-        assert!(bob_book
-            .process(&bob, channel, &collect(&bob_log, &channel))
-            .iter()
-            .any(|m| m.text == b"before removal"));
+        assert!(
+            bob_book
+                .process(&bob, channel, &collect(&bob_log, &channel))
+                .iter()
+                .any(|m| m.text == b"before removal")
+        );
 
         // Alice removes Bob → epoch 1, re-keying ONLY to the remaining member (herself).
         let meta1 = ChannelMeta {
@@ -900,10 +902,12 @@ mod tests {
             "ownership-hijack snapshot must be ignored"
         );
         assert_eq!(state.owner(), alice.public().user_id());
-        assert!(state
-            .members()
-            .iter()
-            .any(|m| m.user_id() == alice.public().user_id()));
+        assert!(
+            state
+                .members()
+                .iter()
+                .any(|m| m.user_id() == alice.public().user_id())
+        );
     }
 
     #[test]

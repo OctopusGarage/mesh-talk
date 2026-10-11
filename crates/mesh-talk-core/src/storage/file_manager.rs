@@ -1,4 +1,4 @@
-use crate::storage::encryption::{decrypt_data, encrypt_data, generate_salt, EncryptionKey};
+use crate::storage::encryption::{EncryptionKey, decrypt_data, encrypt_data, generate_salt};
 use crate::storage::errors::StorageError;
 use crate::storage::serialization::{deserialize_data, serialize_data};
 use serde::{Deserialize, Serialize};

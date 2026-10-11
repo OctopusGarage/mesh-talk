@@ -2,8 +2,8 @@
 //! (integrity, signature, canonical form, causal completeness, equivocation)
 //! and answers ordering/heads/version queries. Pure data structure — no I/O.
 
-use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::LogError;
+use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Result of an append: a genuinely new event, or an already-present duplicate.

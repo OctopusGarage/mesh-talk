@@ -1,5 +1,5 @@
 //! Local verified completion survives reclamation, without extending the wire protocol.
-use super::{delivery_store::FileCard, Node};
+use super::{Node, delivery_store::FileCard};
 use crate::{
     eventlog::{ConversationId, EventId, EventKind},
     identity::device::PublicIdentity,

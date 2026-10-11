@@ -192,9 +192,11 @@ mod tests {
         assert_eq!(decoded.text, "😂".as_bytes());
         // A plain text message stays MTB1 (no sticker, byte-compatible with v0.1.0).
         assert!(s.encode().starts_with(b"MTB2"));
-        assert!(MessageBody::new(b"hi".to_vec(), None)
-            .encode()
-            .starts_with(b"MTB1"));
+        assert!(
+            MessageBody::new(b"hi".to_vec(), None)
+                .encode()
+                .starts_with(b"MTB1")
+        );
     }
 
     #[test]

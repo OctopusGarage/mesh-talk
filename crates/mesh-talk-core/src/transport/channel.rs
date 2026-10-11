@@ -11,7 +11,7 @@ use crate::transport::auth::build_auth;
 use crate::transport::handshake::{Handshake, HandshakeOutput};
 use crate::transport::presence_auth;
 use crate::transport::session::Session;
-use crate::transport::{TransportError, VerifiedPeer, MAX_FRAME};
+use crate::transport::{MAX_FRAME, TransportError, VerifiedPeer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// An established, authenticated, encrypted channel to one peer.

@@ -56,8 +56,8 @@ pub(crate) mod wire;
 
 pub use crate::discovery::service::spawn_discovery;
 pub use crate::transport::net::{
-    bind_dual_stack_listener, discovery_socket, ipv4_interface_addrs, DEFAULT_DISCOVERY_PORT,
-    DISCOVERY_MULTICAST_GROUP,
+    DEFAULT_DISCOVERY_PORT, DISCOVERY_MULTICAST_GROUP, bind_dual_stack_listener, discovery_socket,
+    ipv4_interface_addrs,
 };
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
@@ -75,8 +75,8 @@ pub use node::{
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
 pub use postbox::{elected_post_office, run_relay_accept_loop};
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
-pub use profile::{ProfilePayload, MAX_AVATAR_BYTES};
+pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;
-pub use reaction::{aggregate, ReactionPayload, ReactionView};
+pub use reaction::{ReactionPayload, ReactionView, aggregate};
 pub use received_log::{ReceivedEntry, ReceivedLog};
 pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents};

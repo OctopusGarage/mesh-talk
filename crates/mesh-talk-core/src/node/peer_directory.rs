@@ -1,6 +1,6 @@
 //! Verified historical device/account proofs, without IP addresses or endpoint freshness.
 use crate::storage::encryption::{
-    decrypt_data, encrypt_data, generate_salt, EncryptionKey, NONCE_SIZE, SALT_SIZE,
+    EncryptionKey, NONCE_SIZE, SALT_SIZE, decrypt_data, encrypt_data, generate_salt,
 };
 use crate::{discovery::Announce, identity::device::PublicIdentity};
 use bincode::Options;
@@ -253,14 +253,16 @@ mod tests {
         let keys = device.secret_bytes();
         let different_x =
             DeviceIdentity::from_secret_bytes(keys.0, DeviceIdentity::generate().secret_bytes().1);
-        assert!(proofs
-            .record_explicit_account(&Announce::new_with_account(
-                &different_x,
-                &new,
-                "Device",
-                1234
-            ))
-            .is_err());
+        assert!(
+            proofs
+                .record_explicit_account(&Announce::new_with_account(
+                    &different_x,
+                    &new,
+                    "Device",
+                    1234
+                ))
+                .is_err()
+        );
         proofs.record_explicit_account(&updated).unwrap();
         assert_eq!(proofs.account_for(&device.public()), Some(new.account_id()));
         assert!(
@@ -270,7 +272,7 @@ mod tests {
     }
 
     fn write_snapshot(path: &Path, records: &[Announce], trailing: bool) {
-        use crate::storage::encryption::{encrypt_data, generate_salt, EncryptionKey};
+        use crate::storage::encryption::{EncryptionKey, encrypt_data, generate_salt};
         use bincode::Options;
         let mut plaintext = bincode::DefaultOptions::new()
             .with_fixint_encoding()
@@ -458,9 +460,11 @@ mod tests {
         );
         directory.record(&announce).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
-        assert!(!bytes
-            .windows(announce.name.len())
-            .any(|s| s == announce.name.as_bytes()));
+        assert!(
+            !bytes
+                .windows(announce.name.len())
+                .any(|s| s == announce.name.as_bytes())
+        );
         assert!(PeerDirectory::open(&path, "wrong").is_err());
         *bytes.last_mut().unwrap() ^= 1;
         std::fs::write(&path, bytes).unwrap();
@@ -473,7 +477,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn private_permissions_and_symlink_rejection() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::{PermissionsExt, symlink};
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("peers");
         let mut directory = PeerDirectory::open(&path, "pw").unwrap();
@@ -485,14 +489,16 @@ mod tests {
         std::fs::rename(&path, &target).unwrap();
         symlink(&target, &path).unwrap();
         assert!(PeerDirectory::open(&path, "pw").is_err());
-        assert!(directory
-            .record(&Announce::new_with_account(
-                &DeviceIdentity::generate(),
-                &Account::generate(),
-                "Alice",
-                1234
-            ))
-            .is_err());
+        assert!(
+            directory
+                .record(&Announce::new_with_account(
+                    &DeviceIdentity::generate(),
+                    &Account::generate(),
+                    "Alice",
+                    1234
+                ))
+                .is_err()
+        );
         assert!(directory.announcements().is_empty());
     }
 

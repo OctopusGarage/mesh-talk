@@ -395,8 +395,8 @@ fn portal_file_path(uri: &str) -> Result<std::path::PathBuf, CommandError> {
 
 #[cfg(target_os = "linux")]
 async fn capture_png() -> Result<Vec<u8>, CommandError> {
-    use ashpd::desktop::screenshot::{AvailableTargets, Screenshot, ScreenshotProxy};
     use ashpd::desktop::ResponseError;
+    use ashpd::desktop::screenshot::{AvailableTargets, Screenshot, ScreenshotProxy};
 
     let proxy = ScreenshotProxy::new()
         .await

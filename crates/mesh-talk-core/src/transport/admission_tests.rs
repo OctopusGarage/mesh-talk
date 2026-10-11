@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use tokio::io::DuplexStream;
@@ -27,9 +27,11 @@ async fn queued_send_rechecks_generation_after_policy_write_gate() {
     let policy_write = gate.write().await;
     let send = channel.send(b"prepared before revoke");
     tokio::pin!(send);
-    assert!(tokio::time::timeout(Duration::from_millis(20), &mut send)
-        .await
-        .is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut send)
+            .await
+            .is_err()
+    );
     generation.store(1, Ordering::SeqCst);
     drop(policy_write);
     assert!(matches!(
@@ -98,10 +100,12 @@ async fn static_pin_rejects_before_sending_noise_message_three() {
         .unwrap(),
         Err(TransportError::UnexpectedPeer)
     ));
-    assert!(!tokio::time::timeout(DEADLINE, server)
-        .await
-        .unwrap()
-        .unwrap());
+    assert!(
+        !tokio::time::timeout(DEADLINE, server)
+            .await
+            .unwrap()
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -122,10 +126,12 @@ async fn matching_static_key_does_not_bypass_full_identity_pin() {
         .unwrap(),
         Err(TransportError::UnexpectedPeer)
     ));
-    assert!(tokio::time::timeout(DEADLINE, server)
-        .await
-        .unwrap()
-        .unwrap());
+    assert!(
+        tokio::time::timeout(DEADLINE, server)
+            .await
+            .unwrap()
+            .unwrap()
+    );
 }
 
 #[tokio::test]

@@ -2,9 +2,9 @@
 //! loop (record peers). The datagram handler is pure so it can be unit-tested;
 //! the loops are thin wrappers over a `tokio` UDP socket.
 
-use crate::discovery::announce::{decode, encode, Announce};
-use crate::discovery::roster::{Roster, UpdateOutcome};
 use crate::discovery::DiscoveryVisibility;
+use crate::discovery::announce::{Announce, decode, encode};
+use crate::discovery::roster::{Roster, UpdateOutcome};
 use crate::transport::net::{ipv4_interface_addrs, join_discovery_group_all_ifaces};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -479,11 +479,13 @@ mod tests {
             handle_datagram(&roster, &bytes, source(), "self"),
             UpdateOutcome::New
         );
-        assert!(roster
-            .lock()
-            .unwrap()
-            .get(&alice.public().user_id())
-            .is_some());
+        assert!(
+            roster
+                .lock()
+                .unwrap()
+                .get(&alice.public().user_id())
+                .is_some()
+        );
     }
 
     #[test]

@@ -36,9 +36,9 @@ pub(in crate::node) fn same_file_transfer(
 }
 use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::file::{
+    AnyManifest, CHUNK_SIZE, FileKey, FileKind, FileManifestV2, FileManifestV3, FileManifestV4,
     chunk_count_for, chunk_hash, file_checksum, generate_file_nonce, open_chunk_for,
-    reassemble_and_verify, seal_chunk_indexed, AnyManifest, FileKey, FileKind, FileManifestV2,
-    FileManifestV3, FileManifestV4, CHUNK_SIZE,
+    reassemble_and_verify, seal_chunk_indexed,
 };
 use crate::node::conversation::dm_conversation_id;
 use sha2::{Digest, Sha256};
