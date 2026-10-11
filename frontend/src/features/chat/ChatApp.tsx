@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CircleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -33,10 +33,9 @@ export function ChatApp() {
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
   const clearError = useChat((s) => s.clearError);
-  const unread = useChat((s) => s.unread);
-  const latestUnread = useRef(unread);
-  latestUnread.current = unread;
-  const acknowledgedUnread = useRef<Record<string, number>>({});
+  const totalUnread = useChat((s) =>
+    Object.values(s.unread).reduce((sum, count) => sum + count, 0),
+  );
 
   // Request notification authorization once at startup. On macOS the dock unread badge only
   // renders if the app is authorized for notification badges, so this is what makes the badge
@@ -47,39 +46,15 @@ export function ChatApp() {
   }, [loadSettings]);
 
   useEffect(() => {
-    const acknowledge = () => {
-      // Acknowledging the OS badge leaves the conversation unread markers intact.
-      // Only arrivals after this snapshot should paint a new menu bar count.
-      acknowledgedUnread.current = { ...latestUnread.current };
-      if (owner) void chatApi.setBadge(0, owner).catch(() => {});
-    };
-    if (document.hasFocus()) acknowledge();
-    window.addEventListener("focus", acknowledge);
-    return () => {
-      window.removeEventListener("focus", acknowledge);
-    };
-  }, [owner, generation]);
-
-  useEffect(() => {
     if (!owner) return;
-    // Reading a conversation resets its unread counter. Lower the snapshot too,
-    // so the next arrival in that conversation is counted from zero.
-    for (const [conversation, value] of Object.entries(
-      acknowledgedUnread.current,
-    )) {
-      acknowledgedUnread.current[conversation] = Math.min(
-        value,
-        unread[conversation] ?? 0,
-      );
-    }
-    const count = Object.entries(unread).reduce(
-      (sum, [conversation, value]) =>
-        sum +
-        Math.max(0, value - (acknowledgedUnread.current[conversation] ?? 0)),
-      0,
-    );
-    void chatApi.setBadge(count, owner).catch(() => {});
-  }, [unread, owner, generation]);
+    const syncBadge = () => {
+      void chatApi.setBadge(totalUnread, owner).catch(() => {});
+    };
+    syncBadge();
+    // macOS can clear its Dock badge on activation. Restore the sidebar total.
+    window.addEventListener("focus", syncBadge);
+    return () => window.removeEventListener("focus", syncBadge);
+  }, [totalUnread, owner, generation]);
 
   useEffect(() => {
     if (!owner) return;

@@ -46,7 +46,7 @@ pub(crate) fn clear_badge_after_logout<R: tauri::Runtime>(
     });
 }
 
-pub(crate) fn paint_badge<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, count: u32) {
+fn paint_badge<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, count: u32) {
     let label = if count == 0 {
         None
     } else {

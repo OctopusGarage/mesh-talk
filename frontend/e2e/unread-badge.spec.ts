@@ -69,7 +69,7 @@ test("incoming unread count reaches the OS badge and clears on read and logout",
   });
   await expect.poll(latestCount).toEqual({ count: 2, owner: "u_self" });
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect.poll(latestCount).toEqual({ count: 0, owner: "u_self" });
+  await expect.poll(latestCount).toEqual({ count: 2, owner: "u_self" });
   await expect(
     page
       .getByTestId(`conversation-row-${BOB.account}`)
@@ -79,7 +79,7 @@ test("incoming unread count reaches the OS badge and clears on read and logout",
       }),
   ).toBeVisible();
   await incoming("new while focused");
-  await expect.poll(latestCount).toEqual({ count: 1, owner: "u_self" });
+  await expect.poll(latestCount).toEqual({ count: 3, owner: "u_self" });
   await expect(
     page
       .getByTestId(`conversation-row-${CHANNEL.id}`)
@@ -89,7 +89,7 @@ test("incoming unread count reaches the OS badge and clears on read and logout",
       }),
   ).toBeVisible();
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-  await expect.poll(latestCount).toEqual({ count: 1, owner: "u_self" });
+  await expect.poll(latestCount).toEqual({ count: 2, owner: "u_self" });
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect.poll(latestCount).toEqual({ count: 0, owner: "u_self" });
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();

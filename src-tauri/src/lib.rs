@@ -274,11 +274,6 @@ pub fn run_tauri_configured(
         // Close-to-tray: if "minimize to tray" is on, hide instead of exiting so the
         // node runtime stays alive and keeps receiving. Quit (tray menu) is the real exit.
         .on_window_event(|window, event| {
-            if let WindowEvent::Focused(true) = event {
-                if window.label() == "main" {
-                    crate::chat_commands::paint_badge(window.app_handle(), 0);
-                }
-            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     let hide = window
