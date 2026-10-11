@@ -1,48 +1,8 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-
-const assetRoot = fileURLToPath(new URL("./src/assets/", import.meta.url));
-const catalogId = "virtual:mesh-asset-catalog";
-const catalogDirs = [
-  "avatars/clubs",
-  "avatars/players",
-  "avatars/nba-teams",
-  "avatars/cities",
-  "avatars/nba-players",
-  "avatars/sports",
-  "avatars/famous",
-  "avatars/cat-acrylic",
-  "stickers/noto",
-  "stickers/cats",
-  "themes/nature",
-  "themes/cat-acrylic",
-];
-
-function assetCatalog() {
-  return {
-    name: "mesh-asset-catalog",
-    resolveId(id: string) {
-      if (id === catalogId) return `\0${catalogId}`;
-    },
-    load(id: string) {
-      if (id !== `\0${catalogId}`) return;
-      const entries = Object.fromEntries(
-        catalogDirs.map((dir) => [
-          dir,
-          readdirSync(join(assetRoot, dir)).filter((name) =>
-            /\.(?:svg|webp|jpg)$/.test(name),
-          ),
-        ]),
-      );
-      return `export default ${JSON.stringify(entries)};`;
-    },
-  };
-}
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
