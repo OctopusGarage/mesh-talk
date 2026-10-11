@@ -3915,6 +3915,33 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
         .expect("bob received the file within 5s")
         .expect("file stream open");
     assert_eq!(got.name, "hello.txt");
+
+    // Exercise the large-file wire path with a small fixture: the only format
+    // difference is the omitted hash list, so a huge test file is unnecessary.
+    let (mut compact, compact_conv) = alice_node
+        .stage_file(&file, crate::file::FileKind::File, |_| {})
+        .unwrap();
+    compact.v2.chunk_hashes.clear();
+    let peer = alice_node.routing_peer(&bob_uid).unwrap();
+    let host = dm_conversation_id(&alice_node.identity.public(), &peer.public);
+    let card = alice_node
+        .accept_staged_manifest(&[peer], host, None, &compact)
+        .unwrap();
+    let saved = dir.path().join("compact-copy.txt");
+    alice_node
+        .save_directory_archive(compact_conv, &saved)
+        .unwrap();
+    assert_eq!(std::fs::read(saved).unwrap(), b"account file payload");
+    alice_node.flush_delivery(card).await;
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), b_f_r.recv())
+        .await
+        .expect("bob received the compact manifest within 5s")
+        .expect("file stream open");
+    assert_eq!(received.file_conv, compact_conv);
+    assert!(matches!(
+        bob_node.files.lock().unwrap().manifest(&compact_conv),
+        Some(crate::file::AnyManifest::V4(_))
+    ));
 }
 
 #[tokio::test]

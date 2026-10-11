@@ -9,7 +9,11 @@
 //!   still parse; the large-file path no longer produces it.
 //! * **v2 [`FileManifestV2`]** — magic+version framed (`MFM2`), adds `chunk_size`, a
 //!   per-file nonce salt, and per-chunk SHA-256 hashes so chunks verify on arrival and
-//!   resume independently. This is what `send_file_*` writes today.
+//!   resume independently.
+//! * **v3 [`FileManifestV3`]** — adds the sender's media/attachment intent. Current
+//!   senders use this format when its hash list fits a transport frame.
+//! * **v4 [`FileManifestV4`]** — compact large-file format with indexed AEAD and a
+//!   whole-file checksum. Omits the per-chunk hash list to fit a transport frame.
 //!
 //! [`decode_manifest`] sniffs the framing and returns whichever it can, failing
 //! gracefully (no panic) on garbage or an unknown version.
@@ -168,6 +172,37 @@ impl FileManifestV3 {
     }
 }
 
+/// Compact large-file announcement. Indexed AEAD authenticates each chunk; the
+/// whole-file checksum is checked before saving. Small files retain MFM3 hashes so
+/// deployed clients can continue receiving them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileManifestV4 {
+    pub v3: FileManifestV3,
+}
+
+impl FileManifestV4 {
+    pub fn encode(&self) -> Vec<u8> {
+        let body = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize(self)
+            .expect("file manifest v4 serializes");
+        let mut out = Vec::with_capacity(4 + body.len());
+        out.extend_from_slice(b"MFM4");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let body = bytes.strip_prefix(b"MFM4")?;
+        let decoded: Self = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .deserialize(body)
+            .ok()?;
+        decoded.v3.v2.chunk_hashes.is_empty().then_some(decoded)
+    }
+}
+
 /// A decoded manifest of any version. The node layer matches on this so v1/v2 history
 /// still opens while new files use v3 (which carries the sender's intent).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,12 +210,16 @@ pub enum AnyManifest {
     V1(FileManifest),
     V2(FileManifestV2),
     V3(FileManifestV3),
+    V4(FileManifestV4),
 }
 
 /// Decode a manifest of either version, sniffing the `MFM2` magic. Fails gracefully
 /// (returns `None`) on garbage rather than panicking — old single-blob formats that
 /// don't parse simply don't interoperate.
 pub fn decode_manifest(bytes: &[u8]) -> Option<AnyManifest> {
+    if let Some(v4) = FileManifestV4::decode(bytes) {
+        return Some(AnyManifest::V4(v4));
+    }
     if let Some(v3) = FileManifestV3::decode(bytes) {
         return Some(AnyManifest::V3(v3));
     }
@@ -196,6 +235,7 @@ impl AnyManifest {
             AnyManifest::V1(m) => &m.name,
             AnyManifest::V2(m) => &m.name,
             AnyManifest::V3(m) => &m.v2.name,
+            AnyManifest::V4(m) => &m.v3.v2.name,
         }
     }
     pub fn size(&self) -> u64 {
@@ -203,6 +243,7 @@ impl AnyManifest {
             AnyManifest::V1(m) => m.size,
             AnyManifest::V2(m) => m.size,
             AnyManifest::V3(m) => m.v2.size,
+            AnyManifest::V4(m) => m.v3.v2.size,
         }
     }
     pub fn mime(&self) -> &str {
@@ -210,6 +251,7 @@ impl AnyManifest {
             AnyManifest::V1(m) => &m.mime,
             AnyManifest::V2(m) => &m.mime,
             AnyManifest::V3(m) => &m.v2.mime,
+            AnyManifest::V4(m) => &m.v3.v2.mime,
         }
     }
     pub fn file_conv(&self) -> ConversationId {
@@ -217,6 +259,7 @@ impl AnyManifest {
             AnyManifest::V1(m) => m.file_conv,
             AnyManifest::V2(m) => m.file_conv,
             AnyManifest::V3(m) => m.v2.file_conv,
+            AnyManifest::V4(m) => m.v3.v2.file_conv,
         }
     }
     pub fn chunk_count(&self) -> u32 {
@@ -224,6 +267,7 @@ impl AnyManifest {
             AnyManifest::V1(m) => m.chunk_count,
             AnyManifest::V2(m) => m.chunk_count,
             AnyManifest::V3(m) => m.v2.chunk_count,
+            AnyManifest::V4(m) => m.v3.v2.chunk_count,
         }
     }
     pub fn checksum(&self) -> [u8; 32] {
@@ -231,6 +275,7 @@ impl AnyManifest {
             AnyManifest::V1(m) => m.checksum,
             AnyManifest::V2(m) => m.checksum,
             AnyManifest::V3(m) => m.v2.checksum,
+            AnyManifest::V4(m) => m.v3.v2.checksum,
         }
     }
     /// The sender's intent, if the manifest carries it (v3+). `None` for legacy v1/v2
@@ -239,6 +284,7 @@ impl AnyManifest {
         match self {
             AnyManifest::V1(_) | AnyManifest::V2(_) => None,
             AnyManifest::V3(m) => Some(m.kind),
+            AnyManifest::V4(m) => Some(m.v3.kind),
         }
     }
 }
@@ -255,6 +301,25 @@ pub fn open_chunk_for(
         AnyManifest::V1(m) => open_chunk(&m.key(), ciphertext),
         AnyManifest::V2(m) => open_chunk_v2(m, index, ciphertext),
         AnyManifest::V3(m) => open_chunk_v2(&m.v2, index, ciphertext),
+        AnyManifest::V4(m) => {
+            let v2 = &m.v3.v2;
+            if index >= v2.chunk_count {
+                return Err(FileError::Malformed("chunk index exceeds manifest".into()));
+            }
+            let plaintext = open_chunk_indexed(&v2.key(), &v2.file_nonce, index, ciphertext)?;
+            let offset = u64::from(index) * u64::from(v2.chunk_size);
+            let expected = v2
+                .size
+                .checked_sub(offset)
+                .ok_or_else(|| FileError::Malformed("chunk index exceeds file size".into()))?
+                .min(u64::from(v2.chunk_size));
+            if plaintext.len() as u64 != expected {
+                return Err(FileError::Malformed(
+                    "chunk length differs from manifest".into(),
+                ));
+            }
+            Ok(plaintext)
+        }
     }
 }
 
@@ -349,6 +414,41 @@ mod tests {
             chunk_hashes,
         };
         (manifest, chunks)
+    }
+
+    #[test]
+    fn compact_manifest_opens_indexed_chunks_and_rejects_wrong_lengths() {
+        let data = vec![42u8; CHUNK_SIZE + 17];
+        let (mut v2, chunks) = seal_file_v2(&data);
+        v2.chunk_hashes.clear();
+        let compact = FileManifestV4 {
+            v3: FileManifestV3 {
+                v2,
+                kind: FileKind::File,
+            },
+        };
+        let bytes = compact.encode();
+        assert!(bytes.starts_with(b"MFM4"));
+        let decoded = decode_manifest(&bytes).unwrap();
+        assert_eq!(decoded, AnyManifest::V4(compact.clone()));
+        let opened = chunks
+            .iter()
+            .enumerate()
+            .flat_map(|(index, chunk)| open_chunk_for(&decoded, index as u32, chunk).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(file_checksum(&opened), compact.v3.v2.checksum);
+        assert_eq!(opened, data);
+        assert!(open_chunk_for(&decoded, 2, &chunks[0]).is_err());
+
+        let mut wrong_size = compact;
+        wrong_size.v3.v2.size += 1;
+        assert!(open_chunk_for(&AnyManifest::V4(wrong_size), 1, &chunks[1]).is_err());
+
+        let mut fake_compact = decoded;
+        if let AnyManifest::V4(ref mut manifest) = fake_compact {
+            manifest.v3.v2.chunk_hashes.push([0; 32]);
+            assert!(FileManifestV4::decode(&manifest.encode()).is_none());
+        }
     }
 
     #[test]

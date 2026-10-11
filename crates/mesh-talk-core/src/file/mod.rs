@@ -13,5 +13,5 @@ pub use crypto::{
 };
 pub use manifest::{
     decode_manifest, open_chunk_for, reassemble_and_verify, AnyManifest, FileKind, FileManifest,
-    FileManifestV2, FileManifestV3,
+    FileManifestV2, FileManifestV3, FileManifestV4,
 };

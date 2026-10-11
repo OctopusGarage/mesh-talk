@@ -208,3 +208,38 @@ test("concurrent sends keep progress with their own file bubbles", async ({
       request.release();
   });
 });
+
+test("a failed folder send removes preparing progress and offers retry", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate(() => {
+    const w = window as unknown as Window & {
+      __mockFailNext: (command: string, message: string) => void;
+      __TAURI_INTERNALS__: {
+        invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = (cmd, args) =>
+      cmd === "plugin:dialog|open"
+        ? Promise.resolve("/tmp/impressionist_paintings")
+        : invoke(cmd, args);
+    w.__mockFailNext(
+      "owner_enqueue_file",
+      "invalid input: file manifest exceeds transport frame",
+    );
+  });
+  await revealComposerTools(page);
+  await page.getByTestId("composer-attach").click();
+  const bubble = page.getByTestId("message-bubble").last();
+  await expect(bubble.getByText("Failed to send")).toBeVisible();
+  await expect(bubble.getByRole("progressbar")).toHaveCount(0);
+  await expect(bubble.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText(
+    "This attachment has too much metadata to send",
+  );
+  await bubble.getByRole("button", { name: "Retry" }).click();
+  await expect(bubble.getByText("Failed to send")).toHaveCount(0);
+});

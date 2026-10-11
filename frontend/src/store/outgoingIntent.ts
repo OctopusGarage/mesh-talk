@@ -385,6 +385,10 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
       failReason: sendFailReason(e),
     });
     if (payload.kind === "file")
-      guarded({ error: `Couldn't send file: ${errorMessage(e)}` });
+      guarded({
+        error: /file manifest exceeds transport frame/i.test(errorMessage(e))
+          ? "This attachment has too much metadata to send. Try a shorter name or a smaller folder."
+          : `Couldn't send file: ${errorMessage(e)}`,
+      });
   }
 }

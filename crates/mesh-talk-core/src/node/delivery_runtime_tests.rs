@@ -2535,7 +2535,7 @@ async fn offline_file_card_has_durable_awaiting_id_and_no_text_history_row() {
 }
 
 #[test]
-fn oversized_manifest_is_rejected_before_staging_ciphertext_chunks() {
+fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
     let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
@@ -2545,19 +2545,68 @@ fn oversized_manifest_is_rejected_before_staging_ciphertext_chunks() {
         Account::generate(),
         &bp,
     );
-    let path = dir.path().join("oversized.txt");
-    std::fs::File::create(&path)
-        .unwrap()
-        .set_len(4 * 1024 * 1024 * 1024)
-        .unwrap();
+    let size = 4 * 1024 * 1024 * 1024;
+    let prospective = crate::file::FileManifestV3 {
+        v2: crate::file::FileManifestV2 {
+            name: "large-folder.tar".into(),
+            size,
+            mime: crate::file::directory::MIME.into(),
+            checksum: [0; 32],
+            file_key: [0; 32],
+            file_nonce: [0; 8],
+            file_conv: ConversationId::new([0; 32]),
+            chunk_size: crate::file::CHUNK_SIZE as u32,
+            chunk_count: crate::file::chunk_count_for(size),
+            chunk_hashes: vec![],
+        },
+        kind: crate::file::FileKind::File,
+    };
     let before = a.log.lock().unwrap().conversations();
-    let result = a.stage_file(&path, crate::file::FileKind::File, |_| {
-        panic!("transport-impossible manifests must fail before the first chunk");
-    });
-    assert!(
-        matches!(result, Err(NodeError::InvalidInput(ref error)) if error.contains("transport frame"))
-    );
+    assert!(super::files::compact_manifest_needed(&a.identity, &prospective).unwrap());
+    assert!(super::files::compact_manifest_needed(
+        &a.identity,
+        &crate::file::FileManifestV3 {
+            v2: crate::file::FileManifestV2 {
+                size: 1024,
+                chunk_count: 1,
+                ..prospective.v2.clone()
+            },
+            ..prospective.clone()
+        }
+    )
+    .is_ok_and(|compact| !compact));
     assert_eq!(a.log.lock().unwrap().conversations(), before);
+}
+
+#[tokio::test]
+async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let bob = DeviceIdentity::generate();
+    let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
+    let (alice, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &bp,
+    );
+    let folder = dir.path().join("paintings");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::File::create(folder.join("large.bin"))
+        .unwrap()
+        .set_len(100 * 1024 * 1024)
+        .unwrap();
+
+    let (_, file_conv) = alice
+        .enqueue_file_dm(&bob.user_id(), &folder, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let files = alice.files.lock().unwrap();
+    let Some(crate::file::AnyManifest::V4(manifest)) = files.manifest(&file_conv) else {
+        panic!("large folder must use the compact manifest");
+    };
+    assert_eq!(manifest.v3.v2.name, "paintings.tar");
+    assert_eq!(manifest.v3.v2.mime, crate::file::directory::MIME);
+    assert!(manifest.v3.v2.chunk_count > 2_000);
 }
 
 #[test]

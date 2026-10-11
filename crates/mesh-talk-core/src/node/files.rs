@@ -1,5 +1,5 @@
 //! File transfer: chunked send (DM/account/channel) and save, streamed to/from disk
-//! so neither side ever buffers the whole file. Files become a v2 (`MFM2`) manifest
+//! so staging does not buffer the whole file. Files become an MFM3 or compact MFM4 manifest
 //! plus one chunk event per `CHUNK_SIZE` piece in a dedicated per-file conversation;
 //! the chunk events ride the normal bounded sync, which already re-requests only the
 //! events a peer is missing — so transfer RESUMES across reconnects for free.
@@ -28,14 +28,17 @@ pub(in crate::node) fn same_file_transfer(
         (AnyManifest::V3(left), AnyManifest::V3(right)) => {
             v2(left.v2.clone()) == v2(right.v2.clone())
         }
+        (AnyManifest::V4(left), AnyManifest::V4(right)) => {
+            v2(left.v3.v2.clone()) == v2(right.v3.v2.clone())
+        }
         _ => false,
     }
 }
-use crate::eventlog::event::{Author, ConversationId, EventKind};
+use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::file::{
     chunk_count_for, chunk_hash, file_checksum, generate_file_nonce, open_chunk_for,
     reassemble_and_verify, seal_chunk_indexed, AnyManifest, FileKey, FileKind, FileManifestV2,
-    FileManifestV3, CHUNK_SIZE,
+    FileManifestV3, FileManifestV4, CHUNK_SIZE,
 };
 use crate::node::conversation::dm_conversation_id;
 use sha2::{Digest, Sha256};
@@ -52,7 +55,9 @@ pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
         .with_fixint_encoding()
         .with_limit(crate::transport::MAX_PLAINTEXT as u64)
         .reject_trailing_bytes();
-    let manifest = if let Some(body) = bytes.strip_prefix(b"MFM3") {
+    let manifest = if let Some(body) = bytes.strip_prefix(b"MFM4") {
+        AnyManifest::V4(decode.deserialize::<FileManifestV4>(body).ok()?)
+    } else if let Some(body) = bytes.strip_prefix(b"MFM3") {
         AnyManifest::V3(decode.deserialize::<FileManifestV3>(body).ok()?)
     } else if let Some(body) = bytes.strip_prefix(b"MFM2") {
         AnyManifest::V2(decode.deserialize::<FileManifestV2>(body).ok()?)
@@ -76,9 +81,87 @@ pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
         {
             return None
         }
+        AnyManifest::V4(m)
+            if m.v3.v2.chunk_size == 0
+                || m.v3.v2.chunk_size as usize > CHUNK_SIZE
+                || u64::from(m.v3.v2.chunk_count)
+                    != m.v3.v2.size.div_ceil(u64::from(m.v3.v2.chunk_size)).max(1)
+                || !m.v3.v2.chunk_hashes.is_empty() =>
+        {
+            return None
+        }
         _ => {}
     }
     Some(manifest)
+}
+
+fn outgoing_manifest(manifest: &FileManifestV3) -> AnyManifest {
+    if manifest.v2.chunk_hashes.is_empty() {
+        AnyManifest::V4(FileManifestV4 {
+            v3: manifest.clone(),
+        })
+    } else {
+        AnyManifest::V3(manifest.clone())
+    }
+}
+
+fn outgoing_manifest_bytes(manifest: &FileManifestV3) -> Vec<u8> {
+    if manifest.v2.chunk_hashes.is_empty() {
+        FileManifestV4 {
+            v3: manifest.clone(),
+        }
+        .encode()
+    } else {
+        manifest.encode()
+    }
+}
+
+/// Select MFM3 whenever it fits for deployed peers; MFM4 keeps the same indexed
+/// ciphertext and whole-file checksum without a frame-sized list of chunk hashes.
+pub(in crate::node) fn compact_manifest_needed(
+    identity: &crate::identity::device::DeviceIdentity,
+    prospective: &FileManifestV3,
+) -> Result<bool, NodeError> {
+    let sealed_overhead = bincode::serialized_size(&crate::dm::SealedEnvelope {
+        ephemeral_pub: [0; 32],
+        ciphertext: vec![0; 16],
+    })
+    .map_err(|_| NodeError::File("manifest encoding failed".into()))?;
+    let fits_frame = |size: u64| {
+        if size > crate::transport::MAX_PLAINTEXT as u64 {
+            return false;
+        }
+        let event = crate::eventlog::Event::new(
+            identity,
+            ConversationId::new([0; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::FileManifest,
+            vec![0; size as usize],
+        );
+        super::session::event_fits_frame(&event)
+    };
+    let legacy_size = (prospective.encode().len() as u64)
+        .saturating_add(u64::from(prospective.v2.chunk_count) * 32)
+        .saturating_add(sealed_overhead);
+    if fits_frame(legacy_size) {
+        return Ok(false);
+    }
+    let compact_size = FileManifestV4 {
+        v3: prospective.clone(),
+    }
+    .encode()
+    .len() as u64
+        + sealed_overhead;
+    if fits_frame(compact_size) {
+        Ok(true)
+    } else {
+        Err(NodeError::InvalidInput(
+            "file manifest exceeds transport frame".into(),
+        ))
+    }
 }
 
 /// A durable plaintext row is a local metadata cache, not authority without its
@@ -422,7 +505,7 @@ impl Node {
         let own = self.identity.public();
         let author = Author::from_ed25519(own.ed25519_pub);
         let clock = super::node::now_millis();
-        let plaintext = manifest.encode();
+        let plaintext = outgoing_manifest_bytes(manifest);
         let mut destinations = Vec::with_capacity(peers.len());
         {
             let log = self.log.lock().expect("log lock not poisoned");
@@ -485,7 +568,7 @@ impl Node {
             book.record_event(
                 id,
                 Author::from_ed25519(self.identity.public().ed25519_pub),
-                AnyManifest::V3(manifest.clone()),
+                outgoing_manifest(manifest),
             );
         }
         Ok(id)
@@ -530,7 +613,7 @@ impl Node {
                 .state_mut(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
             state
-                .seal_sender_message(&manifest.encode())
+                .seal_sender_message(&outgoing_manifest_bytes(&manifest))
                 .map_err(|e| NodeError::File(format!("manifest sealing failed: {e}")))?
         };
         // Persist our advanced sending chain (see `send_channel_message_reply`).
@@ -542,7 +625,7 @@ impl Node {
         // would transmit the bytes before they could approve. Inline media keeps
         // the existing automatic transfer behavior.
         self.distribute_channel(channel, &members).await;
-        if crate::node::media_store::automatic_inline_image(&AnyManifest::V3(manifest.clone())) {
+        if crate::node::media_store::automatic_inline_image(&outgoing_manifest(&manifest)) {
             self.distribute_channel(file_conv, &members).await;
         }
         Ok(file_conv)
@@ -631,34 +714,7 @@ impl Node {
             },
             kind,
         };
-        let sealed_overhead = bincode::serialized_size(&crate::dm::SealedEnvelope {
-            ephemeral_pub: [0; 32],
-            ciphertext: vec![0; 16],
-        })
-        .map_err(|_| NodeError::File("manifest encoding failed".into()))?;
-        let wire_size = (prospective.encode().len() as u64)
-            .saturating_add(u64::from(prospective.v2.chunk_count) * 32)
-            .saturating_add(sealed_overhead);
-        if wire_size > crate::transport::MAX_PLAINTEXT as u64 {
-            return Err(NodeError::InvalidInput(
-                "file manifest exceeds transport frame".into(),
-            ));
-        }
-        let prospective_event = crate::eventlog::Event::new(
-            &self.identity,
-            ConversationId::new([0; 32]),
-            1,
-            vec![],
-            1,
-            0,
-            EventKind::FileManifest,
-            vec![0; wire_size as usize],
-        );
-        if !super::session::event_fits_frame(&prospective_event) {
-            return Err(NodeError::InvalidInput(
-                "file manifest exceeds transport frame".into(),
-            ));
-        }
+        let compact = compact_manifest_needed(&self.identity, &prospective)?;
 
         let key = FileKey::generate();
         let file_nonce = generate_file_nonce();
@@ -668,7 +724,11 @@ impl Node {
         let file = std::fs::File::open(path).map_err(|e| NodeError::File(format!("open: {e}")))?;
         let mut reader = BufReader::new(file);
         let mut whole = Sha256::new();
-        let mut chunk_hashes: Vec<[u8; 32]> = Vec::with_capacity(chunk_count as usize);
+        let mut chunk_hashes: Vec<[u8; 32]> = if compact {
+            Vec::new()
+        } else {
+            Vec::with_capacity(chunk_count as usize)
+        };
         let mut buf = vec![0u8; CHUNK_SIZE];
 
         for index in 0..chunk_count {
@@ -676,7 +736,9 @@ impl Node {
                 .map_err(|e| NodeError::File(format!("read: {e}")))?;
             let plain = &buf[..n];
             whole.update(plain);
-            chunk_hashes.push(chunk_hash(plain));
+            if !compact {
+                chunk_hashes.push(chunk_hash(plain));
+            }
             let sealed = seal_chunk_indexed(&key, &file_nonce, index, plain)
                 .map_err(|e| NodeError::File(format!("chunk seal: {e}")))?;
             self.append_event(file_conv, EventKind::Message, sealed)?;
@@ -749,7 +811,7 @@ impl Node {
         };
         self.remember_sent_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id)
             .map_err(NodeError::Log)?;
-        let plaintext = manifest.encode();
+        let plaintext = outgoing_manifest_bytes(manifest);
         self.received_files
             .lock()
             .expect("received_files mutex not poisoned")
@@ -766,7 +828,7 @@ impl Node {
         files.record_event(
             event_id,
             Author::from_ed25519(self.identity.public().ed25519_pub),
-            AnyManifest::V3(manifest.clone()),
+            outgoing_manifest(manifest),
         );
         Ok(())
     }
@@ -901,7 +963,7 @@ impl Node {
         match &manifest {
             AnyManifest::V1(m) => reassemble_and_verify(m, &chunks)
                 .map_err(|e| NodeError::File(format!("reassemble: {e}"))),
-            AnyManifest::V2(_) | AnyManifest::V3(_) => {
+            AnyManifest::V2(_) | AnyManifest::V3(_) | AnyManifest::V4(_) => {
                 let mut out = Vec::new();
                 for (i, ct) in chunks.iter().enumerate() {
                     let plain = open_chunk_for(&manifest, i as u32, ct)
@@ -1004,8 +1066,8 @@ impl Node {
             .ok_or_else(|| NodeError::File("unknown file".into()))?;
         let total = manifest.chunk_count();
         let candidates = self.completion_candidates(file_conv);
-        let chunks = self.collect_chunks(file_conv);
-        if chunks.len() as u32 != total {
+        let chunk_ids = self.chunk_ids(file_conv);
+        if chunk_ids.len() as u32 != total {
             if let Some(source) = self.managed_media_for_export(file_conv, &manifest) {
                 let part = part_path(dest);
                 let mut guard = PartFileGuard::new(part.clone());
@@ -1051,7 +1113,7 @@ impl Node {
             }
             return Err(NodeError::File(format!(
                 "file incomplete: {}/{} chunks",
-                chunks.len(),
+                chunk_ids.len(),
                 total
             )));
         }
@@ -1059,6 +1121,10 @@ impl Node {
         // v1 has no per-chunk hash / deterministic nonce: reassemble in memory (these
         // are the old <=8 MB single-blob-era files) and write.
         if let AnyManifest::V1(m) = &manifest {
+            let chunks = chunk_ids
+                .iter()
+                .map(|id| self.chunk_ciphertext(*id))
+                .collect::<Result<Vec<_>, _>>()?;
             let data = reassemble_and_verify(m, &chunks)
                 .map_err(|e| NodeError::File(format!("reassemble: {e}")))?;
             std::fs::write(dest, data).map_err(|e| NodeError::File(format!("write: {e}")))?;
@@ -1078,8 +1144,9 @@ impl Node {
             let f = std::fs::File::create(&part)
                 .map_err(|e| NodeError::File(format!("create part: {e}")))?;
             let mut writer = std::io::BufWriter::new(f);
-            for (i, ct) in chunks.iter().enumerate() {
-                let plain = open_chunk_for(&manifest, i as u32, ct)
+            for (i, id) in chunk_ids.iter().enumerate() {
+                let ct = self.chunk_ciphertext(*id)?;
+                let plain = open_chunk_for(&manifest, i as u32, &ct)
                     .map_err(|e| NodeError::File(format!("open chunk {i}: {e}")))?;
                 size = size.saturating_add(plain.len() as u64);
                 if size > manifest.size() {
@@ -1131,6 +1198,25 @@ impl Node {
             .filter(|e| e.kind == EventKind::Message)
             .map(|e| e.ciphertext.clone())
             .collect()
+    }
+
+    fn chunk_ids(&self, file_conv: ConversationId) -> Vec<EventId> {
+        let log = self.log.lock().expect("log mutex not poisoned");
+        log.events(&file_conv)
+            .into_iter()
+            .filter(|event| event.kind == EventKind::Message)
+            .map(|event| event.id)
+            .collect()
+    }
+
+    fn chunk_ciphertext(&self, id: EventId) -> Result<Vec<u8>, NodeError> {
+        self.log
+            .lock()
+            .expect("log mutex not poisoned")
+            .get(&id)
+            .filter(|event| event.kind == EventKind::Message)
+            .map(|event| event.ciphertext.clone())
+            .ok_or_else(|| NodeError::File("file chunk is no longer available".into()))
     }
 }
 

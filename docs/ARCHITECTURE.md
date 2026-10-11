@@ -202,14 +202,17 @@ file work. Chunk ciphertext stays in the event log rather than being duplicated
 in the journal, and staging
 synchronizes the whole log at acceptance rather than synchronizing every chunk.
 Existing manifests and new message/sticker events must fit both bounded single-
-event sync frames before acceptance. MFM3 hash-list size is preflighted before
-staging; files whose manifests cannot fit are rejected despite the nominal 4 GiB
-file-size ceiling. Empty files retain their existing one-empty-chunk encoding.
+event sync frames before acceptance. MFM3 with per-chunk hashes remains the sender
+format while it fits; larger files use compact MFM4, which retains indexed AEAD
+per chunk and a whole-file SHA-256 checksum without the frame-sized hash list.
+The receiver validates the declared chunk geometry and verifies the whole file
+before exposing a save. Older clients continue receiving MFM3-sized files but
+must upgrade to receive MFM4 offers. Empty files retain their one-empty-chunk encoding.
 
 Directory attachments are packed into a tar payload and sent through this same
-encrypted, chunked MFM3 file path. A dedicated MIME marker identifies folders to
-current clients; existing MFM3-capable clients still receive a normal `.tar`
-attachment. The
+encrypted, chunked MFM3/MFM4 file path. A dedicated MIME marker identifies folders to
+current clients; existing MFM3-capable clients still receive smaller folders as a normal
+`.tar` attachment. The
 sender bounds depth, entry count, path length and archive size and rejects links
 and special files. The recipient first verifies the whole transfer, then extracts
 only regular files and directories into a private staging directory, rejects

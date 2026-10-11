@@ -57,6 +57,7 @@ function FileBubble({
   file,
   mine,
   metadataPending,
+  failed,
   sendKey,
   messageId,
   isChannel,
@@ -64,6 +65,7 @@ function FileBubble({
   file: NonNullable<ChatMessage["file"]>;
   mine: boolean;
   metadataPending?: boolean;
+  failed?: boolean;
   sendKey?: string;
   messageId?: string | null;
   isChannel: boolean;
@@ -188,7 +190,11 @@ function FileBubble({
           </div>
           <div className="font-mono text-[11px] tabular-nums opacity-70">
             {metadataPending
-              ? t("message.delivery.metadataPending")
+              ? t(
+                  failed
+                    ? "message.fail.unknown"
+                    : "message.delivery.metadataPending",
+                )
               : humanSize(file.size)}
           </div>
         </div>
@@ -224,7 +230,7 @@ function FileBubble({
           )}
         </button>
       </div>
-      {metadataPending && mine && (
+      {metadataPending && mine && !failed && (
         <TransferBar transferKey={sendKey} waitingDirection="prepare" />
       )}
       {uploadKey && (
@@ -553,6 +559,7 @@ export function MessageBubble({
                     file={m.file!}
                     mine={mine}
                     metadataPending={m.metadataPending}
+                    failed={m.failed}
                     sendKey={m.clientId}
                     messageId={m.id}
                     isChannel={isChannel}
@@ -666,7 +673,9 @@ export function MessageBubble({
               mine && "flex-row-reverse",
             )}
           >
-            <span>{t(`message.fail.${m.failReason ?? "unknown"}`)}</span>
+            {!(m.file && m.metadataPending) && (
+              <span>{t(`message.fail.${m.failReason ?? "unknown"}`)}</span>
+            )}
             <button
               type="button"
               onClick={() => m.clientId && onRetry(m.clientId)}

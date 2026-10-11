@@ -9,7 +9,7 @@ export default defineConfig({
   testDir: "./e2e",
   // A cold Vite transform on Windows can consume most of Playwright's 30s
   // default before the first page becomes interactive.
-  timeout: process.platform === "win32" ? 60_000 : 30_000,
+  timeout: process.platform === "win32" ? 90_000 : 30_000,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
