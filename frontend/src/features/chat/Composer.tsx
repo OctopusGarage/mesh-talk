@@ -22,6 +22,8 @@ import { PackManager } from "@/components/PackManager";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
 
+const BUILTIN_STICKER_PACK = "builtin:noto";
+
 // A small curated palette — enough for everyday chat without pulling in a heavy emoji library.
 const EMOJIS = [
   "😀",
@@ -233,12 +235,12 @@ export function Composer({
   const [expressionTab, setExpressionTab] = useState<
     "emoji" | "stickers" | null
   >(null);
-  const [stickerPack, setStickerPack] = useState("noto");
+  const [stickerPack, setStickerPack] = useState(BUILTIN_STICKER_PACK);
   const activeStickerPack = stickerLibraries.some(
     (pack) => pack.id === stickerPack,
   )
     ? stickerPack
-    : "noto";
+    : BUILTIN_STICKER_PACK;
   const [showTools, setShowTools] = useState(false);
   const [panelPointerMotion, setPanelPointerMotion] = useState(false);
   const panelMotion = { pointer: panelPointerMotion, reduced: !motionOK };
@@ -597,7 +599,10 @@ export function Composer({
                     aria-label={t("composer.stickerPacks")}
                   >
                     {[
-                      { id: "noto", name: t("composer.stickerPackEmoji") },
+                      {
+                        id: BUILTIN_STICKER_PACK,
+                        name: t("composer.stickerPackEmoji"),
+                      },
                       ...stickerLibraries.map((pack) => ({
                         id: pack.id,
                         name:
@@ -626,7 +631,7 @@ export function Composer({
                   <div className="grid grid-cols-5 gap-1">
                     {stickers
                       .filter((sticker) =>
-                        activeStickerPack === "noto"
+                        activeStickerPack === BUILTIN_STICKER_PACK
                           ? !sticker.id.startsWith("pack:")
                           : sticker.id.startsWith(`pack:${activeStickerPack}:`),
                       )

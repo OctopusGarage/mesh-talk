@@ -1,6 +1,7 @@
 import { test, expect } from "./tauri-mock";
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
+import { strToU8, unzipSync, zipSync } from "fflate";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
 
@@ -97,6 +98,35 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
   await expect(page.getByTestId("message-sticker-fallback").last()).toHaveText(
     "😂",
   );
+});
+
+test("a custom noto pack has its own sticker tab", async ({ page }) => {
+  const files = unzipSync(
+    readFileSync(resolve("../site/market/packs/noto-favorites.zip")),
+  );
+  const manifest = JSON.parse(new TextDecoder().decode(files["manifest.json"]));
+  manifest.id = "noto";
+  manifest.name = "Custom Noto";
+  files["manifest.json"] = strToU8(JSON.stringify(manifest));
+  await enterBobDm(page);
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  await page.getByText("Manage sticker packs").click();
+  await page
+    .getByTestId("pack-manager-sticker")
+    .locator('input[type="file"]')
+    .setInputFiles({
+      name: "noto.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from(zipSync(files)),
+    });
+  await page.getByTestId("sticker-pack-noto").click();
+  await expect(
+    page.getByTestId("sticker-option-pack:noto:1f602"),
+  ).toBeVisible();
+  await page.getByTestId("sticker-pack-builtin:noto").click();
+  await expect(page.getByTestId("sticker-option-1f602")).toBeVisible();
 });
 
 test("installs a sticker from the verified marketplace catalog", async ({
