@@ -1,6 +1,31 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB, CHANNEL } from "./helpers/session";
 
+async function observeBadge(page: import("@playwright/test").Page) {
+  await page.evaluate(() => {
+    const w = window as unknown as Window & {
+      __badgeCounts: number[];
+      __TAURI_INTERNALS__: {
+        invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+    w.__badgeCounts = [];
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = (cmd, args) => {
+      if (cmd === "set_badge") w.__badgeCounts.push(args.count as number);
+      return invoke(cmd, args);
+    };
+  });
+}
+
+function latestBadgeCount(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    const counts = (window as unknown as { __badgeCounts: number[] })
+      .__badgeCounts;
+    return counts[counts.length - 1] ?? 0;
+  });
+}
+
 test("incoming unread count reaches the OS badge and clears on read and logout", async ({
   page,
 }) => {
@@ -168,4 +193,99 @@ test("an open chat remains unread while Mesh-Talk is in the background", async (
     window.dispatchEvent(new Event("focus"));
   });
   await expect.poll(count).toBe(0);
+});
+
+test("background channel messages and files clear only when that chat is viewed", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+  await observeBadge(page);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => false,
+    });
+    const emit = (
+      window as unknown as { __mockEmit: (event: string, value: unknown) => void }
+    ).__mockEmit;
+    emit("channel-message", {
+      channel_id: "chan_team_dddd4444",
+      channel_name: "team",
+      from: "device_bob_2222",
+      text: "channel message in background",
+      reply_to: null,
+    });
+    emit("file-received", {
+      conv: "chan_team_dddd4444",
+      from: "device_bob_2222",
+      name: "report.pdf",
+      size: 2048,
+      mime: "application/pdf",
+      file_conv: "fc_unread_channel",
+      media: false,
+    });
+    emit("dm-received", {
+      from: "device_bob_2222",
+      from_name: "bob",
+      text: "different chat",
+      reply_to: null,
+    });
+  });
+  await expect.poll(() => latestBadgeCount(page)).toBe(3);
+  await expect(
+    page
+      .getByTestId(`conversation-row-${CHANNEL.id}`)
+      .locator("..")
+      .getByText("2", { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => true,
+    });
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});
+
+test("foreground delivery is read only in the conversation being viewed", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await observeBadge(page);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => true,
+    });
+    const emit = (
+      window as unknown as { __mockEmit: (event: string, value: unknown) => void }
+    ).__mockEmit;
+    emit("dm-received", {
+      from: "device_bob_2222",
+      from_name: "bob",
+      text: "visible message",
+      reply_to: null,
+    });
+    emit("channel-message", {
+      channel_id: "chan_team_dddd4444",
+      channel_name: "team",
+      from: "device_bob_2222",
+      text: "unseen channel message",
+      reply_to: null,
+    });
+  });
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await expect(
+    page
+      .getByTestId(`conversation-row-${CHANNEL.id}`)
+      .locator("..")
+      .getByText("1", { exact: true }),
+  ).toBeVisible();
+  await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
 });
