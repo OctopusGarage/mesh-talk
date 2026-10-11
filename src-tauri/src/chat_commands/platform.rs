@@ -2,7 +2,7 @@ use crate::commands::CommandError;
 use serde::Serialize;
 use tauri::Manager;
 
-/// Set the OS app-icon unread badge: the macOS dock number or Linux launcher count.
+/// Set the OS app-icon unread badge and the macOS menu bar count.
 /// `count` is the total unread messages; 0 (or None) clears the badge. Best-effort — a
 /// platform without stable count-badge support (notably Windows) intentionally no-ops.
 #[tauri::command]
@@ -17,6 +17,7 @@ pub async fn set_badge(app: tauri::AppHandle, count: u32) -> Result<(), CommandE
     // main thread to actually update the dock/taskbar badge.
     let handle = app.clone();
     app.run_on_main_thread(move || {
+        crate::tray::set_unread_count(&handle, count);
         #[cfg(target_os = "macos")]
         {
             let _ = &handle;
