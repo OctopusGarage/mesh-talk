@@ -225,7 +225,7 @@ export interface ChannelMessageEvent {
 
 export interface FileReceivedEvent {
   conv: string;
-  is_channel?: boolean; // native event scope; older fixtures omit it
+  is_channel: boolean; // emitted by the same installed native app, not over the network
   from: string;
   name: string;
   size: number;

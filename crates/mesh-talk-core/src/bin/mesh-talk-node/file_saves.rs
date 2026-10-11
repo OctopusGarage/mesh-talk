@@ -148,6 +148,7 @@ mod tests {
     fn file(n: u8) -> ReceivedFile {
         ReceivedFile {
             conv: ConversationId::new([1; 32]),
+            is_channel: false,
             from: "peer".into(),
             name: "fixture.txt".into(),
             size: 1,

@@ -30,6 +30,11 @@ export const test = base.extend({
       const dataMode = new URLSearchParams(window.location.search).get("data");
       // --- Identity ---------------------------------------------------------
       const SELF = { device: "device_self_0001", account: "acc_self_aaaa1111" };
+      (window as unknown as Record<string, unknown>).__mockReplaceIdentity = (
+        accountId: string,
+      ) => {
+        SELF.account = accountId;
+      };
 
       // --- Scenario: roster (one account DM + one channel) ------------------
       // Bob: a multi-device account, online, with a known device fingerprint we can verify.
@@ -81,6 +86,25 @@ export const test = base.extend({
         () => {
           peers[0].user_id = "device_bob_rotated_9999";
         };
+
+      (window as unknown as Record<string, unknown>).__mockAddPeer = (
+        userId: string,
+        accountId: string,
+        name: string,
+      ) => {
+        peers.push({
+          user_id: userId,
+          account_id: accountId,
+          name,
+          addr: "192.168.1.40:47100",
+          post_office: false,
+        });
+        accounts.push({
+          account_id: accountId,
+          device_count: 1,
+          names: [name],
+        });
+      };
 
       const accounts = [
         {
@@ -609,8 +633,12 @@ export const test = base.extend({
 
           // roster
           list_peers: () => peers.map((peer) => ({ ...peer })),
-          list_accounts: () => accounts,
-          list_channels: () => channels,
+          list_accounts: () =>
+            accounts.map((account) => ({
+              ...account,
+              names: [...account.names],
+            })),
+          list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
           channel_members: () => ({
@@ -711,20 +739,38 @@ export const test = base.extend({
               done: 1,
               total: 1,
               ready: true,
-              consent: attachmentDecisions[file_conv] === undefined ? "accepted" : attachmentDecisions[file_conv] ? "accepted" : "declined",
+              consent:
+                attachmentDecisions[file_conv] === undefined
+                  ? "accepted"
+                  : attachmentDecisions[file_conv]
+                    ? "accepted"
+                    : "declined",
             })),
           attachment_receive_policy: (a) => ({
             global_auto: attachmentGlobalAuto,
-            contact_auto: a.account && Object.prototype.hasOwnProperty.call(attachmentContactAuto, String(a.account))
-              ? attachmentContactAuto[String(a.account)] : null,
+            contact_auto:
+              a.account &&
+              Object.prototype.hasOwnProperty.call(
+                attachmentContactAuto,
+                String(a.account),
+              )
+                ? attachmentContactAuto[String(a.account)]
+                : null,
           }),
-          set_attachment_global_auto: (a) => { attachmentGlobalAuto = Boolean(a.auto); return null; },
+          set_attachment_global_auto: (a) => {
+            attachmentGlobalAuto = Boolean(a.auto);
+            return null;
+          },
           set_attachment_contact_auto: (a) => {
-            if (a.auto === null) delete attachmentContactAuto[String(a.account)];
+            if (a.auto === null)
+              delete attachmentContactAuto[String(a.account)];
             else attachmentContactAuto[String(a.account)] = Boolean(a.auto);
             return null;
           },
-          decide_attachment: (a) => { attachmentDecisions[String(a.fileConv)] = Boolean(a.accept); return null; },
+          decide_attachment: (a) => {
+            attachmentDecisions[String(a.fileConv)] = Boolean(a.accept);
+            return null;
+          },
           save_file: ok,
           save_file_to_dir: () => "/home/tester/Downloads/file.bin",
           read_file: () => new ArrayBuffer(0),

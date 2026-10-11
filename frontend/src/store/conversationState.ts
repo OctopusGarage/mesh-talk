@@ -331,6 +331,7 @@ export function invalidateConversationIdentity(): Partial<ChatState> {
     active: null,
     unread: {},
     unreadOwner: "",
+    pendingUnknownUnread: {},
     messages: {},
     searchTarget: null,
     reactions: {},

@@ -1391,6 +1391,39 @@ describe("incoming events", () => {
     stop();
   });
 
+  it("does not carry unread state through a failed identity lookup into another account", async () => {
+    let account = "myacct";
+    let failNext = false;
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd !== "owner_node_identity") return Promise.resolve([]);
+      if (failNext) {
+        failNext = false;
+        return Promise.reject(new Error("node restarting"));
+      }
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: account,
+      });
+    });
+    const stop = useChat.getState().start();
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    useChat.setState({
+      active: { kind: "account", id: "old-peer", name: "Old peer" },
+      unread: { "account:old-peer": 3 },
+    });
+    failNext = true;
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().ready).toBe(false);
+    account = "replacement-account";
+    useChat.getState().retryBoot();
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    expect(useChat.getState().unread).toEqual({});
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().identityEpoch).toBe(1);
+    stop();
+  });
+
   it("drops captured old-run events and old cleanup cannot stop a newer run", async () => {
     invoke.mockImplementation((cmd: string) =>
       cmd === "owner_node_identity"
@@ -1410,6 +1443,7 @@ describe("incoming events", () => {
     const run = useChat.getState().runEpoch;
     oldEvents.onFile({
       from: "stranger",
+      is_channel: false,
       file_conv: "old",
       name: "old",
       size: 1,
@@ -1517,6 +1551,7 @@ describe("incoming events", () => {
       });
       captured.current!.onFile({
         conv: "acctA",
+        is_channel: false,
         from: "dev1",
         name: "a.pdf",
         size: 10,
@@ -1535,7 +1570,7 @@ describe("incoming events", () => {
     }
   });
 
-  it("does not bump unread for a DM from an undiscovered peer", async () => {
+  it("counts a DM after its sender appears in the peer roster", async () => {
     const stop = await boot();
     captured.current!.onDm({
       from: "ghost",
@@ -1544,6 +1579,28 @@ describe("incoming events", () => {
       reply_to: null,
     });
     expect(useChat.getState().unread["account:ghost"]).toBeUndefined();
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (cmd === "list_peers")
+        return Promise.resolve([
+          peer,
+          {
+            user_id: "ghost",
+            account_id: "new-account",
+            name: "New contact",
+            addr: "1.2.3.4:7001",
+            post_office: false,
+          },
+        ]);
+      return Promise.resolve([]);
+    });
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().unread["account:new-account"]).toBe(1);
     stop();
   });
 
@@ -1581,6 +1638,7 @@ describe("incoming events", () => {
     const stop = await boot();
     const f = {
       conv: "x",
+      is_channel: false,
       from: "dev1",
       name: "a.pdf",
       size: 10,

@@ -133,11 +133,16 @@ async function pollUntilReady(
       set((state) => {
         const sameScope =
           state.unreadOwner === owner && state.myAccountId === acct;
+        const replacedScope = state.unreadOwner !== "" && !sameScope;
         const unread = sameScope ? state.unread : { ...persistedUnread };
-        if (!sameScope)
+        if (!sameScope && !replacedScope)
           for (const [key, count] of Object.entries(state.unread))
             unread[key] = (unread[key] ?? 0) + count;
         return {
+          ...(replacedScope ? invalidateConversationIdentity() : {}),
+          identityEpoch: replacedScope
+            ? state.identityEpoch + 1
+            : state.identityEpoch,
           myId: identity.device_id,
           myAccountId: acct,
           unread,
@@ -205,6 +210,7 @@ export interface ChatState {
   reactions: Record<string, ReactionInfo[]>;
   unread: Record<string, number>;
   unreadOwner: string;
+  pendingUnknownUnread: Record<string, number>;
   // Conversation keys in open-recency order (most-recent-last); drives cache eviction.
   // Not read by any component selector — purely internal LRU bookkeeping.
   cacheOrder: string[];
@@ -280,6 +286,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   reactions: {},
   unread: {},
   unreadOwner: "",
+  pendingUnknownUnread: {},
   cacheOrder: [],
   members: [],
   channelOwner: "",
@@ -423,6 +430,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       reactions: {},
       unread: {},
       unreadOwner: "",
+      pendingUnknownUnread: {},
       cacheOrder: [],
       members: [],
       channelOwner: "",
@@ -543,14 +551,29 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       // Polling returns fresh arrays even when discovery has not changed. Preserve
       // the previous references so sidebar subscribers do not redraw every tick.
       const previous = get();
-      if (
+      const rosterChanged =
         JSON.stringify([
           previous.peers,
           previous.accounts,
           previous.channels,
-        ]) !== JSON.stringify([peers, accounts, channels])
-      )
-        set({ peers, accounts, channels });
+        ]) !== JSON.stringify([peers, accounts, channels]);
+      const resolved = peers.filter(
+        (peer) =>
+          peer.account_id && previous.pendingUnknownUnread[peer.user_id],
+      );
+      if (rosterChanged || resolved.length) {
+        const unread = { ...previous.unread };
+        const pendingUnknownUnread = { ...previous.pendingUnknownUnread };
+        for (const peer of resolved) {
+          const key = `account:${peer.account_id}`;
+          unread[key] = (unread[key] ?? 0) + pendingUnknownUnread[peer.user_id];
+          delete pendingUnknownUnread[peer.user_id];
+        }
+        set({
+          ...(rosterChanged ? { peers, accounts, channels } : {}),
+          ...(resolved.length ? { unread, pendingUnknownUnread } : {}),
+        });
+      }
       // Cache each channel's members for the composite group avatar (best-effort per
       // channel; a single failure just leaves that channel's montage on its fallback).
       const memberEntries = await Promise.all(
@@ -899,6 +922,17 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // Unknown sender (not yet discovered). Throttle: a burst from an undiscovered account
     // would otherwise fire one roster refresh (3 invokes) per message. The 4s interval
     // poll also covers this.
+    set((state) => {
+      const pending = state.pendingUnknownUnread;
+      if (!pending[e.from] && Object.keys(pending).length >= 256) return {};
+      return {
+        pendingUnknownUnread: {
+          ...pending,
+          [e.from]: Math.min(1_000_000, (pending[e.from] ?? 0) + 1),
+        },
+      };
+    });
+    void notifyInbound(e.from_name || "New message", e.text, false);
     const now = Date.now();
     if (now - lastUnknownSenderRefresh > 2000) {
       lastUnknownSenderRefresh = now;
@@ -961,8 +995,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   // `conv` is the channel id; a DM file is filed (on both sides) under the sender's ACCOUNT
   // conversation, matching get_handleDm. If that conversation is active, reload it so the
   // new bubble appears; otherwise bump its unread badge.
-  const isChannelFile =
-    e.is_channel ?? get().channels.some((c) => c.channel_id === e.conv);
+  const isChannelFile = e.is_channel;
   let key: string | null = null;
   if (isChannelFile) {
     key = convKey({ kind: "channel", id: e.conv, name: "" });

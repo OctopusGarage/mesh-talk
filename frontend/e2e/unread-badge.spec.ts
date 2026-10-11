@@ -6,7 +6,10 @@ async function observeBadge(page: import("@playwright/test").Page) {
     const w = window as unknown as Window & {
       __badgeCounts: number[];
       __TAURI_INTERNALS__: {
-        invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
       };
     };
     w.__badgeCounts = [];
@@ -153,7 +156,10 @@ test("an open chat remains unread while Mesh-Talk is in the background", async (
     const w = window as unknown as Window & {
       __badgeCounts: number[];
       __TAURI_INTERNALS__: {
-        invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
       };
       __mockEmit: (event: string, payload: unknown) => void;
     };
@@ -171,13 +177,11 @@ test("an open chat remains unread while Mesh-Talk is in the background", async (
     });
   });
   const count = () =>
-    page.evaluate(
-      () => {
-        const counts = (window as unknown as { __badgeCounts: number[] })
-          .__badgeCounts;
-        return counts[counts.length - 1] ?? 0;
-      },
-    );
+    page.evaluate(() => {
+      const counts = (window as unknown as { __badgeCounts: number[] })
+        .__badgeCounts;
+      return counts[counts.length - 1] ?? 0;
+    });
   await expect.poll(count).toBe(1);
   await expect(
     page
@@ -207,7 +211,9 @@ test("background channel messages and files clear only when that chat is viewed"
       value: () => false,
     });
     const emit = (
-      window as unknown as { __mockEmit: (event: string, value: unknown) => void }
+      window as unknown as {
+        __mockEmit: (event: string, value: unknown) => void;
+      }
     ).__mockEmit;
     emit("channel-message", {
       channel_id: "chan_team_dddd4444",
@@ -218,6 +224,7 @@ test("background channel messages and files clear only when that chat is viewed"
     });
     emit("file-received", {
       conv: "chan_team_dddd4444",
+      is_channel: true,
       from: "device_bob_2222",
       name: "report.pdf",
       size: 2048,
@@ -263,7 +270,9 @@ test("foreground delivery is read only in the conversation being viewed", async 
       value: () => true,
     });
     const emit = (
-      window as unknown as { __mockEmit: (event: string, value: unknown) => void }
+      window as unknown as {
+        __mockEmit: (event: string, value: unknown) => void;
+      }
     ).__mockEmit;
     emit("dm-received", {
       from: "device_bob_2222",
@@ -324,4 +333,64 @@ test("unread messages survive reopening the same account and clear after reading
   await expect.poll(() => latestBadgeCount(page)).toBe(1);
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});
+
+test("an early message gains an unread badge when its sender appears in discovery", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await observeBadge(page);
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __mockEmit: (event: string, payload: unknown) => void;
+      __mockAddPeer: (userId: string, accountId: string, name: string) => void;
+    };
+    w.__mockEmit("dm-received", {
+      from: "device_new_9999",
+      from_name: "New contact",
+      text: "arrived before discovery",
+      reply_to: null,
+    });
+    w.__mockAddPeer("device_new_9999", "acc_new_9999", "New contact");
+  });
+  await expect(page.getByTestId("conversation-row-acc_new_9999")).toBeVisible();
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await page.getByTestId("conversation-row-acc_new_9999").click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});
+
+test("a replacement account does not inherit unread after identity lookup fails", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await observeBadge(page);
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __mockEmit: (event: string, payload: unknown) => void;
+      __mockFailNext: (command: string, message?: string) => void;
+      __mockReplaceIdentity: (accountId: string) => void;
+    };
+    w.__mockEmit("dm-received", {
+      from: "device_bob_2222",
+      from_name: "bob",
+      text: "old account unread",
+      reply_to: null,
+    });
+    w.__mockFailNext("owner_node_identity", "node restarting");
+  });
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await page.evaluate(() =>
+    (
+      window as unknown as {
+        __mockReplaceIdentity: (accountId: string) => void;
+      }
+    ).__mockReplaceIdentity("acc_replacement_9999"),
+  );
+  await expect.poll(() => latestBadgeCount(page), { timeout: 10_000 }).toBe(0);
+  await expect(
+    page
+      .getByTestId(`conversation-row-${BOB.account}`)
+      .locator("..")
+      .getByText("1", { exact: true }),
+  ).toHaveCount(0);
 });

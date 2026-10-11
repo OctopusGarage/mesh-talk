@@ -46,6 +46,8 @@ export function requiredBrowserPaths(tier) {
     ["unread-badge.spec.ts", "background channel messages and files clear only when that chat is viewed"],
     ["unread-badge.spec.ts", "foreground delivery is read only in the conversation being viewed"],
     ["unread-badge.spec.ts", "unread messages survive reopening the same account and clear after reading"],
+    ["unread-badge.spec.ts", "an early message gains an unread badge when its sender appears in discovery"],
+    ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
   );
   return paths;
 }
