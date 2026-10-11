@@ -294,7 +294,7 @@ fn write_temp_file_in_cache(
     let dir = cache.join("pasted").join(ts.to_string());
     std::fs::create_dir_all(&dir).map_err(|e| CommandError::Validation(e.to_string()))?;
     let path = dir.join(basename);
-    std::fs::write(&path, &bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
+    std::fs::write(&path, bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
     Ok(path)
 }
 
