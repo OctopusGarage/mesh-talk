@@ -2591,10 +2591,13 @@ async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() 
     );
     let folder = dir.path().join("paintings");
     std::fs::create_dir(&folder).unwrap();
-    std::fs::File::create(folder.join("large.bin"))
-        .unwrap()
-        .set_len(100 * 1024 * 1024)
-        .unwrap();
+    // Write actual data: sparse files can be encoded differently by tar on CI.
+    let mut source = std::fs::File::create(folder.join("large.bin")).unwrap();
+    let block = vec![0xA5; 1024 * 1024];
+    for _ in 0..110 {
+        std::io::Write::write_all(&mut source, &block).unwrap();
+    }
+    drop(source);
 
     let (_, file_conv) = alice
         .enqueue_file_dm(&bob.user_id(), &folder, crate::file::FileKind::File)

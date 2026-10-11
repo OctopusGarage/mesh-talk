@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
@@ -36,6 +36,9 @@ export function ChatApp() {
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
   const clearError = useChat((s) => s.clearError);
+  const fileSendError =
+    error?.startsWith("Couldn't send file: ") ||
+    error?.startsWith("This attachment ");
   const unread = useChat((s) => s.unread);
   const pendingUnknownUnread = useChat((s) => s.pendingUnknownUnread);
   const totalUnread =
@@ -137,10 +140,16 @@ export function ChatApp() {
             />
             <span className="min-w-0 flex-1">
               <strong className="block font-semibold">
-                {t("redesign.actionFailed")}
+                {t(
+                  fileSendError
+                    ? "message.fail.unknown"
+                    : "redesign.actionFailed",
+                )}
               </strong>
-              <span className="mt-0.5 block text-muted-foreground">
-                {error}
+              <span className="mt-0.5 block break-words text-muted-foreground">
+                {fileSendError
+                  ? error.replace(/^Couldn't send file: /, "")
+                  : error}
               </span>
             </span>
             <button
@@ -149,7 +158,7 @@ export function ChatApp() {
               aria-label={t("conversation.dismissError")}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
             >
-              ×
+              <X className="h-4 w-4" aria-hidden="true" />
             </button>
           </motion.div>
         )}

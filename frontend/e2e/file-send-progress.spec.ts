@@ -218,7 +218,10 @@ test("a failed folder send removes preparing progress and offers retry", async (
     const w = window as unknown as Window & {
       __mockFailNext: (command: string, message: string) => void;
       __TAURI_INTERNALS__: {
-        invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
       };
     };
     const invoke = w.__TAURI_INTERNALS__.invoke;
@@ -239,6 +242,10 @@ test("a failed folder send removes preparing progress and offers retry", async (
   await expect(bubble.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(page.getByRole("alert")).toContainText(
     "This attachment has too much metadata to send",
+  );
+  await expect(page.getByRole("alert")).toContainText("Failed to send");
+  await expect(page.getByRole("alert")).not.toContainText(
+    "Action needs attention",
   );
   await bubble.getByRole("button", { name: "Retry" }).click();
   await expect(bubble.getByText("Failed to send")).toHaveCount(0);
