@@ -37,6 +37,7 @@ export default defineConfig(({ command, mode }) => {
         bundled.map(({ id }) => id).join(","),
       ),
     },
+    publicDir: "src/assets",
     plugins: [
       react(),
       {

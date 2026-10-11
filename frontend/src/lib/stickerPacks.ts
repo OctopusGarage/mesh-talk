@@ -1,15 +1,15 @@
 import type { CustomizationPack } from "@/lib/pack";
 
 // Built-in animated stickers: Google's Noto Animated Emoji (open-source), bundled as
-// downscaled animated WebP. The manifest is built automatically from the bundled assets
-// via `import.meta.glob` — each file is named by its emoji codepoint(s) joined with `_`
+// downscaled animated WebP. Vite discovers filenames at build time and serves the
+// images as static assets; each file is named by its emoji codepoint(s) joined with `_`
 // (e.g. `1f602.webp`, `2764_fe0f.webp`), so the sticker id and its fallback emoji char
 // are both derived from the filename. Drop a `.webp` in the folder and it appears.
 
 export interface Sticker {
   /** Stable id sent over the wire — the codepoint string, e.g. "1f602" / "2764_fe0f". */
   id: string;
-  /** Bundled animated-WebP URL (hashed by Vite). */
+  /** Bundled animated-WebP URL. */
   url: string;
   /** The emoji char this sticker depicts — the fallback shown if a peer lacks the file. */
   emoji: string;
@@ -32,17 +32,18 @@ function idFromPath(path: string): string {
 }
 
 /** All bundled animated stickers, sorted by id for a stable picker order. */
-export const STICKERS: Sticker[] = Object.entries(
-  import.meta.glob("../assets/stickers/noto/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }) as Record<string, string>,
+export const STICKERS: Sticker[] = Object.keys(
+  import.meta.glob("../assets/stickers/noto/*.webp"),
 )
-  .sort(([a], [b]) => a.localeCompare(b))
-  .map(([path, url]) => {
-    const id = idFromPath(path);
-    return { id, url, emoji: emojiFromId(id) };
+  .sort()
+  .map((path) => {
+    const name = path.split("/").pop() ?? "";
+    const id = idFromPath(name);
+    return {
+      id,
+      url: `/stickers/noto/${encodeURIComponent(name)}`,
+      emoji: emojiFromId(id),
+    };
   });
 
 const BY_ID = new Map(STICKERS.map((s) => [s.id, s]));
