@@ -116,6 +116,25 @@ it("restores the reading position after switching away and back", async () => {
   await nextAnimationFrame();
   expect(scroller.scrollTop).toBe(120);
   expect(viewport.showJump).toBe(true);
+
+  // A late virtual-list measurement must not replace the restored position.
+  await act(async () => viewport.atBottomStateChange(true));
+  expect(viewport.showJump).toBe(true);
+  scroller.scrollTop = 700;
+  await act(async () => {
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>);
+  });
+  expect(scroller.scrollTop).toBe(120);
+  viewport.stopRestoring();
+  scroller.scrollTop = 240;
+  await act(async () => {
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>);
+  });
+  expect(scroller.scrollTop).toBe(240);
 });
 
 it("navigates to an exact search result and reports a later miss", async () => {

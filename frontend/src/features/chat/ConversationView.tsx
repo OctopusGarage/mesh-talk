@@ -793,6 +793,10 @@ export function ConversationView() {
             atBottomStateChange={viewport.atBottomStateChange}
             rangeChanged={({ startIndex }) => viewport.rangeChanged(startIndex)}
             onScroll={viewport.onScroll}
+            onWheel={viewport.stopRestoring}
+            onTouchStart={viewport.stopRestoring}
+            onPointerDown={viewport.stopRestoring}
+            onKeyDown={viewport.stopRestoring}
             // A little tolerance so "at bottom" isn't lost to sub-pixel rounding.
             atBottomThreshold={48}
             increaseViewportBy={400}

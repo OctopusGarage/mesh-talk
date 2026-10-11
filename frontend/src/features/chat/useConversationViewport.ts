@@ -64,7 +64,8 @@ export function useConversationViewport(
         atBottom.current.set(key, bottom);
         setShowJump(!bottom);
       }
-      restoringScroll.current = null;
+      // Virtuoso may adjust its scroll position again after measuring rows.
+      // Keep the saved offset until the reader starts a new interaction.
     };
     frame = requestAnimationFrame(restore);
     return () => cancelAnimationFrame(frame);
@@ -88,6 +89,7 @@ export function useConversationViewport(
     setSearchMiss(false);
     setHighlightedKey(messageRowKey(messages[index], index));
     const frame = requestAnimationFrame(() => {
+      if (restoringScroll.current === key) restoringScroll.current = null;
       virtuosoRef.current?.scrollToIndex({
         index,
         align: "center",
@@ -111,6 +113,9 @@ export function useConversationViewport(
     showJump,
     scrollerRef(element: HTMLElement | Window | null) {
       scrollerRef.current = element instanceof HTMLElement ? element : null;
+    },
+    stopRestoring() {
+      if (restoringScroll.current === key) restoringScroll.current = null;
     },
     // Exact pixel restoration runs after the list has measured its rows. Starting
     // Virtuoso at the saved row as well can issue a later scroll that overwrites it.
@@ -137,7 +142,20 @@ export function useConversationViewport(
         scrollPositions.current.set(key, startIndex);
     },
     onScroll(event: React.UIEvent<HTMLElement>) {
-      if (restoringScroll.current === key) return;
+      if (restoringScroll.current === key) {
+        const top = exactScrollPositions.current.get(key);
+        if (top !== undefined) {
+          const scroller = event.currentTarget;
+          const maxTop = Math.max(
+            0,
+            scroller.scrollHeight - scroller.clientHeight,
+          );
+          const target = Math.min(top, maxTop);
+          if (Math.abs(scroller.scrollTop - target) > 1)
+            scroller.scrollTop = target;
+        }
+        return;
+      }
       const scroller = event.currentTarget;
       if (
         scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
@@ -154,6 +172,7 @@ export function useConversationViewport(
         );
     },
     jumpToLatest() {
+      if (restoringScroll.current === key) restoringScroll.current = null;
       jumpToLatest(() => virtuosoRef.current);
     },
   };
