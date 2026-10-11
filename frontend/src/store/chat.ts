@@ -213,6 +213,7 @@ export interface ChatState {
   setError: (msg: string) => void;
   refreshRoster: () => Promise<void>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
+  markActiveRead: () => void;
   reload: () => Promise<void>;
   refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
@@ -577,6 +578,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }
   },
 
+  markActiveRead: () => {
+    const active = get().active;
+    if (!active || !isConversationVisible()) return;
+    const key = convKey(active);
+    if (get().unread[key])
+      rawSet((state) => ({ unread: { ...state.unread, [key]: 0 } }));
+  },
+
   reload: () => reloadConversation(rawSet, get),
   refreshStatuses: (conversation) =>
     refreshDeliveryStatuses(rawSet, get, conversation),
@@ -853,6 +862,14 @@ function bump(set: Set, key: string, active: boolean) {
   }
 }
 
+function isConversationVisible(): boolean {
+  return (
+    typeof document !== "undefined" &&
+    document.visibilityState === "visible" &&
+    document.hasFocus()
+  );
+}
+
 let lastUnknownSenderRefresh = 0;
 
 function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
@@ -878,7 +895,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   const key = convKey(conv);
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
-  bump(set, key, isActive);
+  bump(set, key, isActive && isConversationVisible());
   void notifyInbound(conv.name || "New message", e.text, isActive);
 }
 
@@ -891,7 +908,7 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
   const key = convKey(conv);
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
-  bump(set, key, isActive);
+  bump(set, key, isActive && isConversationVisible());
   void notifyInbound(e.channel_name, e.text, isActive);
 }
 
@@ -935,5 +952,5 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   if (!key) return;
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
-  bump(set, key, isActive);
+  bump(set, key, isActive && isConversationVisible());
 }

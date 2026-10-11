@@ -36,6 +36,7 @@ export function ChatApp() {
   const totalUnread = useChat((s) =>
     Object.values(s.unread).reduce((sum, count) => sum + count, 0),
   );
+  const markActiveRead = useChat((s) => s.markActiveRead);
 
   // Request notification authorization once at startup. On macOS the dock unread badge only
   // renders if the app is authorized for notification badges, so this is what makes the badge
@@ -52,9 +53,17 @@ export function ChatApp() {
     };
     syncBadge();
     // macOS can clear its Dock badge on activation. Restore the sidebar total.
-    window.addEventListener("focus", syncBadge);
-    return () => window.removeEventListener("focus", syncBadge);
-  }, [totalUnread, owner, generation]);
+    const onFocus = () => {
+      markActiveRead();
+      const count = Object.values(useChat.getState().unread).reduce(
+        (sum, value) => sum + value,
+        0,
+      );
+      void chatApi.setBadge(count, owner).catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [totalUnread, owner, generation, markActiveRead]);
 
   useEffect(() => {
     if (!owner) return;

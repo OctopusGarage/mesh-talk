@@ -1484,6 +1484,40 @@ describe("incoming events", () => {
     stop();
   });
 
+  it("keeps messages and files in the open chat unread while unfocused", async () => {
+    const stop = await boot();
+    const view = { visibilityState: "visible", hasFocus: () => false };
+    vi.stubGlobal("document", view);
+    try {
+      useChat.setState({
+        active: { kind: "account", id: "acctA", name: "Alice" },
+      });
+      captured.current!.onDm({
+        from: "dev1",
+        from_name: "Alice",
+        text: "hi",
+        reply_to: null,
+      });
+      captured.current!.onFile({
+        conv: "acctA",
+        from: "dev1",
+        name: "a.pdf",
+        size: 10,
+        mime: "application/pdf",
+        file_conv: "fc-background",
+      });
+      expect(useChat.getState().unread["account:acctA"]).toBe(2);
+      useChat.getState().markActiveRead();
+      expect(useChat.getState().unread["account:acctA"]).toBe(2);
+      view.hasFocus = () => true;
+      useChat.getState().markActiveRead();
+      expect(useChat.getState().unread["account:acctA"]).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      stop();
+    }
+  });
+
   it("does not bump unread for a DM from an undiscovered peer", async () => {
     const stop = await boot();
     captured.current!.onDm({

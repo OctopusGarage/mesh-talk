@@ -114,3 +114,58 @@ test("incoming unread count reaches the OS badge and clears on read and logout",
   expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
   expect(new Set(revisions).size).toBe(revisions.length);
 });
+
+test("an open chat remains unread while Mesh-Talk is in the background", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => false,
+    });
+    const w = window as unknown as Window & {
+      __badgeCounts: number[];
+      __TAURI_INTERNALS__: {
+        invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+      };
+      __mockEmit: (event: string, payload: unknown) => void;
+    };
+    w.__badgeCounts = [];
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = (cmd, args) => {
+      if (cmd === "set_badge") w.__badgeCounts.push(args.count as number);
+      return invoke(cmd, args);
+    };
+    w.__mockEmit("dm-received", {
+      from: "device_bob_2222",
+      from_name: "bob",
+      text: "arrived while app was behind another window",
+      reply_to: null,
+    });
+  });
+  const count = () =>
+    page.evaluate(
+      () => {
+        const counts = (window as unknown as { __badgeCounts: number[] })
+          .__badgeCounts;
+        return counts[counts.length - 1] ?? 0;
+      },
+    );
+  await expect.poll(count).toBe(1);
+  await expect(
+    page
+      .getByTestId(`conversation-row-${BOB.account}`)
+      .locator("..")
+      .getByText("1", { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => true,
+    });
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect.poll(count).toBe(0);
+});
