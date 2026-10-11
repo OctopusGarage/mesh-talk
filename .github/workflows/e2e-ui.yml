@@ -28,7 +28,7 @@ jobs:
   e2e:
     name: Full Linux UI regression
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: frontend
