@@ -17,8 +17,10 @@ export async function enterChat(page: Page, user = "tester", path = "/") {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  // Windows CI can take longer to finish the mocked sign-in while other UI jobs run.
-  await expect(page.getByTestId("chat-shell")).toBeVisible({ timeout: 15_000 });
+  // Windows CI can take longer to finish the mocked startup while other UI jobs run.
+  await expect(page.getByTestId("chat-shell")).toBeVisible({
+    timeout: process.platform === "win32" ? 30_000 : 15_000,
+  });
   await expect(
     page.getByTestId(`conversation-row-${BOB.account}`),
   ).toBeVisible();

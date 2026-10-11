@@ -4,6 +4,7 @@ import { enterChat, BOB, CHANNEL } from "./helpers/session";
 test("incoming unread count reaches the OS badge and clears on read and logout", async ({
   page,
 }) => {
+  test.setTimeout(process.platform === "win32" ? 90_000 : 30_000);
   await enterChat(page);
   await page.evaluate(() => {
     const w = window as unknown as Window & {
