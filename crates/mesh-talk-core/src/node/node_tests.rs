@@ -2429,6 +2429,11 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
             .any(|v| v.emoji == "👍" && v.who.contains(&bob_uid)),
         "bob sees his own reaction"
     );
+    assert_eq!(
+        bob_node.reactions(conv),
+        bob_views,
+        "cached reaction view is stable"
+    );
 
     // Give the distribution a moment, then check Alice.
     let mut ok = false;

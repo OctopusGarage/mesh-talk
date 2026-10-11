@@ -169,12 +169,13 @@ fn current_ssid() -> Option<String> {
     for line in text.lines() {
         let l = line.trim();
         // Match "SSID                   : Name" but not "BSSID".
-        if l.starts_with("SSID") && !l.starts_with("BSSID") {
-            if let Some((_, v)) = l.split_once(':') {
-                let v = v.trim();
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
+        if l.starts_with("SSID")
+            && !l.starts_with("BSSID")
+            && let Some((_, v)) = l.split_once(':')
+        {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
             }
         }
     }
