@@ -613,13 +613,20 @@ describe("open", () => {
       return Promise.resolve(undefined);
     });
     useChat.setState({ unread: { "account:a1": 3 } });
-    await useChat.getState().open({ kind: "account", id: "a1", name: "A" });
-
-    const s = useChat.getState();
-    expect(s.active).toEqual({ kind: "account", id: "a1", name: "A" });
-    expect(s.messages["account:a1"]).toHaveLength(1);
-    expect(s.messages["account:a1"][0].text).toBe("hello");
-    expect(s.unread["account:a1"]).toBe(0);
+    vi.stubGlobal("document", {
+      visibilityState: "visible",
+      hasFocus: () => true,
+    });
+    try {
+      await useChat.getState().open({ kind: "account", id: "a1", name: "A" });
+      const s = useChat.getState();
+      expect(s.active).toEqual({ kind: "account", id: "a1", name: "A" });
+      expect(s.messages["account:a1"]).toHaveLength(1);
+      expect(s.messages["account:a1"][0].text).toBe("hello");
+      expect(s.unread["account:a1"]).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -1559,6 +1566,12 @@ describe("incoming events", () => {
         file_conv: "fc-background",
       });
       expect(useChat.getState().unread["account:acctA"]).toBe(2);
+      await useChat.getState().open({
+        kind: "account",
+        id: "acctA",
+        name: "Alice",
+      });
+      expect(useChat.getState().unread["account:acctA"]).toBe(2);
       useChat.getState().markActiveRead();
       expect(useChat.getState().unread["account:acctA"]).toBe(2);
       view.hasFocus = () => true;
@@ -1591,6 +1604,44 @@ describe("incoming events", () => {
           peer,
           {
             user_id: "ghost",
+            account_id: "new-account",
+            name: "New contact",
+            addr: "1.2.3.4:7001",
+            post_office: false,
+          },
+        ]);
+      return Promise.resolve([]);
+    });
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().unread["account:new-account"]).toBe(1);
+    stop();
+  });
+
+  it("counts a DM file after its sender appears in the peer roster", async () => {
+    const stop = await boot();
+    captured.current!.onFile({
+      conv: "new-account",
+      is_channel: false,
+      from: "ghost-file",
+      name: "report.pdf",
+      size: 10,
+      mime: "application/pdf",
+      file_conv: "fc-early-file",
+      media: false,
+    });
+    expect(useChat.getState().pendingUnknownUnread["ghost-file"]).toBe(1);
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (cmd === "list_peers")
+        return Promise.resolve([
+          peer,
+          {
+            user_id: "ghost-file",
             account_id: "new-account",
             name: "New contact",
             addr: "1.2.3.4:7001",
@@ -1648,6 +1699,7 @@ describe("incoming events", () => {
     captured.current!.onFile(f);
     captured.current!.onFile(f);
     expect(useChat.getState().incomingFiles).toHaveLength(1);
+    expect(useChat.getState().unread["account:acctA"]).toBe(1);
     expect(useChat.getState().incomingFiles[0].fromName).toBe("Alice");
     stop();
   });

@@ -226,6 +226,7 @@ export function openConversationState(
   conversation: Conversation,
   target: SearchTarget | undefined,
   request: number,
+  visible: boolean,
 ): Partial<ChatState> {
   const key = convKey(conversation);
   const order = [...state.cacheOrder.filter((item) => item !== key), key];
@@ -236,7 +237,7 @@ export function openConversationState(
     searchTarget: target ? { ...target, key, request } : null,
     historyError: null,
     activeRequest: request,
-    unread: { ...state.unread, [key]: 0 },
+    unread: visible ? { ...state.unread, [key]: 0 } : state.unread,
     members: [],
     channelOwner: "",
     messages: trimmed.messages,

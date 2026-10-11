@@ -1,5 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { loadUnread, saveUnread } from "./unreadStorage";
+import {
+  loadPendingUnread,
+  loadUnread,
+  savePendingUnread,
+  saveUnread,
+} from "./unreadStorage";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -24,4 +29,17 @@ it("restores only valid unread counts for the same host and mesh account", () =>
 
   values.set("mesh-talk-unread-v1:host-a:account-a", "invalid JSON");
   expect(loadUnread("host-a", "account-a")).toEqual({});
+});
+
+it("restores undiscovered sender counts only for the same account", () => {
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  });
+  savePendingUnread("host", "account-a", { "device-early": 2 });
+  expect(loadPendingUnread("host", "account-a")).toEqual({
+    "device-early": 2,
+  });
+  expect(loadPendingUnread("host", "account-b")).toEqual({});
 });

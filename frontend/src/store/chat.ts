@@ -3,7 +3,7 @@ import { chat, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import { notifyInbound } from "@/lib/notify";
-import { loadUnread } from "@/lib/unreadStorage";
+import { loadPendingUnread, loadUnread } from "@/lib/unreadStorage";
 import { useAvatars } from "@/store/avatars";
 import { useCalls } from "@/store/calls";
 import { useTransfers } from "@/store/transfers";
@@ -130,14 +130,26 @@ async function pollUntilReady(
         throw new Error("Node identity is not ready for this owner");
       const acct = identity.account_id;
       const persistedUnread = loadUnread(owner, acct);
+      const persistedPendingUnread = loadPendingUnread(owner, acct);
       set((state) => {
         const sameScope =
           state.unreadOwner === owner && state.myAccountId === acct;
         const replacedScope = state.unreadOwner !== "" && !sameScope;
         const unread = sameScope ? state.unread : { ...persistedUnread };
+        const pendingUnknownUnread = sameScope
+          ? state.pendingUnknownUnread
+          : { ...persistedPendingUnread };
         if (!sameScope && !replacedScope)
           for (const [key, count] of Object.entries(state.unread))
             unread[key] = (unread[key] ?? 0) + count;
+        if (!sameScope && !replacedScope)
+          for (const [sender, count] of Object.entries(
+            state.pendingUnknownUnread,
+          ))
+            pendingUnknownUnread[sender] = Math.min(
+              1_000_000,
+              (pendingUnknownUnread[sender] ?? 0) + count,
+            );
         return {
           ...(replacedScope ? invalidateConversationIdentity() : {}),
           identityEpoch: replacedScope
@@ -146,6 +158,7 @@ async function pollUntilReady(
           myId: identity.device_id,
           myAccountId: acct,
           unread,
+          pendingUnknownUnread,
           unreadOwner: owner,
           ready: true,
         };
@@ -606,7 +619,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const request = get().activeRequest + 1;
-    set((state) => openConversationState(state, c, target, request));
+    set((state) =>
+      openConversationState(state, c, target, request, isConversationVisible()),
+    );
     await get().reload();
     if (!lease.current() || get().activeRequest !== request) return;
     if (c.kind === "channel") {
@@ -914,6 +929,19 @@ function isConversationVisible(): boolean {
 
 let lastUnknownSenderRefresh = 0;
 
+function queueUnknownUnread(set: Set, sender: string) {
+  set((state) => {
+    const pending = state.pendingUnknownUnread;
+    if (!pending[sender] && Object.keys(pending).length >= 256) return {};
+    return {
+      pendingUnknownUnread: {
+        ...pending,
+        [sender]: Math.min(1_000_000, (pending[sender] ?? 0) + 1),
+      },
+    };
+  });
+}
+
 function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   // Route to the sender's account conversation (multi-device aware).
   const peer = get().peers.find((p) => p.user_id === e.from);
@@ -922,16 +950,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // Unknown sender (not yet discovered). Throttle: a burst from an undiscovered account
     // would otherwise fire one roster refresh (3 invokes) per message. The 4s interval
     // poll also covers this.
-    set((state) => {
-      const pending = state.pendingUnknownUnread;
-      if (!pending[e.from] && Object.keys(pending).length >= 256) return {};
-      return {
-        pendingUnknownUnread: {
-          ...pending,
-          [e.from]: Math.min(1_000_000, (pending[e.from] ?? 0) + 1),
-        },
-      };
-    });
+    queueUnknownUnread(set, e.from);
     void notifyInbound(e.from_name || "New message", e.text, false);
     const now = Date.now();
     if (now - lastUnknownSenderRefresh > 2000) {
@@ -969,27 +988,24 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   // Surface received files in the dedicated tray (quick Save via a native dialog), and —
   // since files are now first-class conversation messages — reload the active conversation
   // so the new media bubble appears inline. De-dupe the tray by file_conv.
+  if (get().incomingFiles.some((f) => f.fileConv === e.file_conv)) return;
   const peer = get().peers.find((p) => p.user_id === e.from);
   const fromName = peer?.name || e.from;
-  set((s) =>
-    s.incomingFiles.some((f) => f.fileConv === e.file_conv)
-      ? {}
-      : {
-          // Cap the tray list so a long session in a busy channel can't grow it without
-          // bound (entries otherwise leave only on explicit save/dismiss).
-          incomingFiles: [
-            {
-              fromName,
-              name: e.name,
-              size: e.size,
-              mime: e.mime,
-              fileConv: e.file_conv,
-              media: e.media,
-            },
-            ...s.incomingFiles,
-          ].slice(0, INCOMING_FILES_CAP),
-        },
-  );
+  set((s) => ({
+    // Cap the tray list so a long session in a busy channel can't grow it without
+    // bound (entries otherwise leave only on explicit save/dismiss).
+    incomingFiles: [
+      {
+        fromName,
+        name: e.name,
+        size: e.size,
+        mime: e.mime,
+        fileConv: e.file_conv,
+        media: e.media,
+      },
+      ...s.incomingFiles,
+    ].slice(0, INCOMING_FILES_CAP),
+  }));
 
   // Route the file to its conversation so its bubble lands in the stream. A channel file's
   // `conv` is the channel id; a DM file is filed (on both sides) under the sender's ACCOUNT
@@ -1002,7 +1018,17 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   } else if (peer?.account_id) {
     key = convKey({ kind: "account", id: peer.account_id, name: "" });
   }
-  if (!key) return;
+  if (!key) {
+    if (!isChannelFile) {
+      queueUnknownUnread(set, e.from);
+      const now = Date.now();
+      if (now - lastUnknownSenderRefresh > 2000) {
+        lastUnknownSenderRefresh = now;
+        void get().refreshRoster();
+      }
+    }
+    return;
+  }
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
   bump(set, key, isActive && isConversationVisible());

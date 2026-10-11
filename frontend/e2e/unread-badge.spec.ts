@@ -335,7 +335,7 @@ test("unread messages survive reopening the same account and clear after reading
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
 });
 
-test("an early message gains an unread badge when its sender appears in discovery", async ({
+test("early messages and files gain unread badges when their sender appears in discovery", async ({
   page,
 }) => {
   await enterChat(page);
@@ -351,11 +351,67 @@ test("an early message gains an unread badge when its sender appears in discover
       text: "arrived before discovery",
       reply_to: null,
     });
+    w.__mockEmit("file-received", {
+      conv: "acc_new_9999",
+      is_channel: false,
+      from: "device_new_9999",
+      name: "early.pdf",
+      size: 512,
+      mime: "application/pdf",
+      file_conv: "fc_early_9999",
+      media: false,
+    });
     w.__mockAddPeer("device_new_9999", "acc_new_9999", "New contact");
   });
   await expect(page.getByTestId("conversation-row-acc_new_9999")).toBeVisible();
-  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await expect.poll(() => latestBadgeCount(page)).toBe(2);
   await page.getByTestId("conversation-row-acc_new_9999").click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});
+
+test("an undiscovered sender remains unread across restart until discovery", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockEmit: (event: string, payload: unknown) => void;
+      }
+    ).__mockEmit("dm-received", {
+      from: "device_late_9999",
+      from_name: "Late contact",
+      text: "before restart",
+      reply_to: null,
+    });
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem(
+          "mesh-talk-pending-unread-v1:u_self:acc_self_aaaa1111",
+        ),
+      ),
+    )
+    .toContain("device_late_9999");
+  await enterChat(page);
+  await observeBadge(page);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockAddPeer: (
+          userId: string,
+          accountId: string,
+          name: string,
+        ) => void;
+      }
+    ).__mockAddPeer("device_late_9999", "acc_late_9999", "Late contact");
+  });
+  await expect(
+    page.getByTestId("conversation-row-acc_late_9999"),
+  ).toBeVisible();
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await page.getByTestId("conversation-row-acc_late_9999").click();
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
 });
 
