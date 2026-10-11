@@ -4,7 +4,7 @@ import { test } from "node:test";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 40], ["extended", 41]]) {
+  for (const [tier, count] of [["core", 42], ["extended", 43]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
@@ -15,7 +15,7 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.equal(paths.filter(path => path[0] === "file-send-progress.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "directory-transfer.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "attachment-approval.spec.ts").length, 3);
-    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 5);
+    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 7);
     const report = complete();
     report.stats.expected = count;
     report.suites = paths.map(([file, ...titles], index) => ({ title: file, specs: [{ ...complete().suites[0].specs[0], id: `case-${index}`, title: titles.at(-1), tests: [{ ...complete().suites[0].specs[0].tests[0], results: [{ ...complete().suites[0].specs[0].tests[0].results[0], attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/case-${index}/${name}` })) }] }] }] }));
