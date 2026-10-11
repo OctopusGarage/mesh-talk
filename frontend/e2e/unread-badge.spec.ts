@@ -361,11 +361,53 @@ test("early messages and files gain unread badges when their sender appears in d
       file_conv: "fc_early_9999",
       media: false,
     });
-    w.__mockAddPeer("device_new_9999", "acc_new_9999", "New contact");
+  });
+  await expect.poll(() => latestBadgeCount(page)).toBe(2);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockAddPeer: (
+          userId: string,
+          accountId: string,
+          name: string,
+        ) => void;
+      }
+    ).__mockAddPeer("device_new_9999", "acc_new_9999", "New contact");
   });
   await expect(page.getByTestId("conversation-row-acc_new_9999")).toBeVisible();
   await expect.poll(() => latestBadgeCount(page)).toBe(2);
   await page.getByTestId("conversation-row-acc_new_9999").click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});
+
+test("history load failure leaves unread until the chat can be viewed", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await observeBadge(page);
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __mockEmit: (event: string, payload: unknown) => void;
+      __mockFailNext: (command: string, message?: string) => void;
+    };
+    w.__mockEmit("dm-received", {
+      from: "device_bob_2222",
+      from_name: "bob",
+      text: "unread while history is unavailable",
+      reply_to: null,
+    });
+    w.__mockFailNext("owner_account_history", "history unavailable");
+  });
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await expect(
+    page
+      .getByTestId(`conversation-row-${BOB.account}`)
+      .locator("..")
+      .getByText("1", { exact: true }),
+  ).toBeVisible();
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
 });
 
@@ -396,6 +438,8 @@ test("an undiscovered sender remains unread across restart until discovery", asy
     .toContain("device_late_9999");
   await enterChat(page);
   await observeBadge(page);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
   await page.evaluate(() => {
     (
       window as unknown as {

@@ -250,7 +250,7 @@ export interface ChatState {
   refreshRoster: () => Promise<void>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
-  reload: () => Promise<void>;
+  reload: () => Promise<boolean>;
   refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
   admitText: (text: string, replyTo: string | null) => boolean;
@@ -619,11 +619,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const request = get().activeRequest + 1;
-    set((state) =>
-      openConversationState(state, c, target, request, isConversationVisible()),
-    );
-    await get().reload();
+    set((state) => openConversationState(state, c, target, request));
+    const loaded = await get().reload();
     if (!lease.current() || get().activeRequest !== request) return;
+    if (loaded) get().markActiveRead();
     if (c.kind === "channel") {
       try {
         const info = await chat.channelMembers(c.id);

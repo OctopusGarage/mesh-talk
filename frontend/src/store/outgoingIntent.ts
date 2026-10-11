@@ -71,9 +71,9 @@ export async function reloadConversation(rawSet: Set, get: Get) {
   const set: Set = (partial) => {
     if (lease.current()) rawSet(partial);
   };
-  if (!lease.current()) return;
+  if (!lease.current()) return false;
   const c = get().active;
-  if (!c) return;
+  if (!c) return false;
   const key = convKey(c);
   const loadingRequest = get().loadingRequest + 1;
   const request = loadingRequest;
@@ -98,7 +98,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
         get().active &&
         convKey(get().active!) !== key)
     )
-      return;
+      return false;
     set((s) => ({
       messages: {
         ...s.messages,
@@ -127,6 +127,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
     }));
     if (lease.current() && get().active && convKey(get().active!) === key)
       await get().refreshStatuses();
+    return lease.current();
   } catch {
     if (
       get().loadingRequest === loadingRequest &&
@@ -134,6 +135,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
       convKey(get().active!) === key
     )
       set({ loading: false, historyError: key });
+    return false;
   }
 }
 

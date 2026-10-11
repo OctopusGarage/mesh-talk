@@ -388,7 +388,8 @@ while the window is visible and focused.
 `lib/unreadStorage.ts` restores opaque conversation keys and counts from the webview's
 local storage, scoped by both the signed-in host user and the mesh account.
 Messages and files from devices not yet in the local roster keep bounded pending
-counts there until discovery maps each device to its account conversation. This
+counts there until discovery maps each device to its account conversation. The
+native badge includes these pending counts during discovery. This
 metadata is stored locally without message text, is not encrypted, and does not
 sync read status to other devices. A runtime account change discards the previous
 account's in-memory selection and counters. The frontend's total drives both the

@@ -38,10 +38,9 @@ export function ChatApp() {
   const clearError = useChat((s) => s.clearError);
   const unread = useChat((s) => s.unread);
   const pendingUnknownUnread = useChat((s) => s.pendingUnknownUnread);
-  const totalUnread = Object.values(unread).reduce(
-    (sum, count) => sum + count,
-    0,
-  );
+  const totalUnread =
+    Object.values(unread).reduce((sum, count) => sum + count, 0) +
+    Object.values(pendingUnknownUnread).reduce((sum, count) => sum + count, 0);
   const markActiveRead = useChat((s) => s.markActiveRead);
 
   useEffect(() => {
@@ -68,10 +67,15 @@ export function ChatApp() {
     // macOS can clear its Dock badge on activation. Restore the sidebar total.
     const onFocus = () => {
       markActiveRead();
-      const count = Object.values(useChat.getState().unread).reduce(
-        (sum, value) => sum + value,
-        0,
-      );
+      const count =
+        Object.values(useChat.getState().unread).reduce(
+          (sum, value) => sum + value,
+          0,
+        ) +
+        Object.values(useChat.getState().pendingUnknownUnread).reduce(
+          (sum, value) => sum + value,
+          0,
+        );
       void chatApi.setBadge(count, owner).catch(() => {});
     };
     window.addEventListener("focus", onFocus);

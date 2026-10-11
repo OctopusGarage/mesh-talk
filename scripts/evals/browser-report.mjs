@@ -48,6 +48,7 @@ export function requiredBrowserPaths(tier) {
     ["unread-badge.spec.ts", "unread messages survive reopening the same account and clear after reading"],
     ["unread-badge.spec.ts", "early messages and files gain unread badges when their sender appears in discovery"],
     ["unread-badge.spec.ts", "an undiscovered sender remains unread across restart until discovery"],
+    ["unread-badge.spec.ts", "history load failure leaves unread until the chat can be viewed"],
     ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
   );
   return paths;
