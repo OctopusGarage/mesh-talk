@@ -60,6 +60,7 @@ export function ChatApp() {
 
   useEffect(() => {
     if (!owner) return;
+    let focusFrame = 0;
     const syncBadge = () => {
       void chatApi.setBadge(totalUnread, owner).catch(() => {});
     };
@@ -67,6 +68,10 @@ export function ChatApp() {
     // macOS can clear its Dock badge on activation. Restore the sidebar total.
     const onFocus = () => {
       markActiveRead();
+      // The native activation event may arrive before the webview reports focus.
+      // Try again on the next frame so the already open chat becomes read.
+      cancelAnimationFrame(focusFrame);
+      focusFrame = requestAnimationFrame(() => markActiveRead());
       const count =
         Object.values(useChat.getState().unread).reduce(
           (sum, value) => sum + value,
@@ -79,7 +84,10 @@ export function ChatApp() {
       void chatApi.setBadge(count, owner).catch(() => {});
     };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      cancelAnimationFrame(focusFrame);
+    };
   }, [totalUnread, owner, generation, markActiveRead]);
 
   useEffect(() => {

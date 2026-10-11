@@ -635,8 +635,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
 
   markActiveRead: () => {
-    const active = get().active;
-    if (!active || !isConversationVisible()) return;
+    const { active, loading, historyError } = get();
+    if (
+      !active ||
+      loading ||
+      historyError === convKey(active) ||
+      !isConversationVisible()
+    )
+      return;
     const key = convKey(active);
     if (get().unread[key])
       rawSet((state) => ({ unread: { ...state.unread, [key]: 0 } }));

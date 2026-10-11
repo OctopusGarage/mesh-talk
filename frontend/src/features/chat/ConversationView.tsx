@@ -640,7 +640,10 @@ export function ConversationView() {
     // min-w-0 lets this flex child shrink below its content's intrinsic width, so a wide
     // message/image wraps within the pane instead of pushing it past the window edge (and
     // getting clipped under the shell's overflow-hidden / behind the sidebar).
-    <main className="conversation-canvas relative flex min-w-0 flex-1 flex-col">
+    <main
+      className="conversation-canvas relative flex min-w-0 flex-1 flex-col"
+      onClickCapture={() => useChat.getState().markActiveRead()}
+    >
       <AnimatePresence>
         {dragOver && (
           <motion.div
