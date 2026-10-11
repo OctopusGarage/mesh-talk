@@ -6,6 +6,10 @@ This is the decision record to read before resuming mobile work. It records obse
 code-derived failure modes, unverified claims, and the next architecture choice. It is not a
 claim that every issue has been reproduced on a physical phone.
 
+The follow-up discussion about a native Android APK, phone controls, and a GitHub-hosted
+build is recorded in [android-apk-readiness.md](android-apk-readiness.md). Read both records:
+this PWA prototype already has a phone-width shell, but it has no Android APK project.
+
 ## Intended path and its actual dependencies
 
 ```text

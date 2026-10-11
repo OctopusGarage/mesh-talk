@@ -43,6 +43,9 @@
   across a user's devices; offline delivery via an elected post office. Wire formats are
   versioned bincode.
 - See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport.
+- Before resuming phone/PWA/APK work, read **`docs/mobile-pwa-feasibility.md`** and
+  **`docs/android-apk-readiness.md`**. They record the distinct delivery paths,
+  unresolved blockers, and real-device evidence needed for a mobile claim.
 
 ## Testing Guidelines
 - Integration coverage in `crates/mesh-talk-core/tests/` and `node/node_tests.rs`; embed

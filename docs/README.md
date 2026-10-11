@@ -16,6 +16,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
 | [`docs/mobile-pwa-feasibility.md`](mobile-pwa-feasibility.md) | **Current mobile decision record** — dynamic-IP failure, HTTPS/PWA constraints, gateway defects, evidence, and Android/PWA options. Read before resuming mobile work. |
+| [`docs/android-apk-readiness.md`](android-apk-readiness.md) | **Android APK follow-up** — native build blockers, phone interaction inventory, GitHub Actions path, and device acceptance gates. Read with the PWA feasibility record. |
 | [`docs/ARCHITECTURE-REVIEW.md`](ARCHITECTURE-REVIEW.md) | Earlier protocol and topology review; its mobile claims are superseded where the feasibility record differs. |
 | [`docs/solution.md`](solution.md) | Earlier mobile topology exploration; its pure-LAN PWA conclusions are superseded by the feasibility record. |
 | [`specifications/TODO.md`](../specifications/TODO.md) | Implementation status (feature-complete) + deliberate design notes / external constraints. |
