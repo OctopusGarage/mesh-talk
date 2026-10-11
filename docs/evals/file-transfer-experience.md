@@ -87,10 +87,47 @@ The folder picker and native drop path now accept directories. The sender packs
 regular files and empty subdirectories into a bounded tar payload and sends it through
 the existing encrypted file transfer. The manifest retains MFM3 framing and carries a
 dedicated directory MIME marker; older MFM3-capable clients can download the `.tar` file using their
-existing Save action. New clients show a folder icon and save into a chosen download
-directory, extracting only after whole-file verification. Extraction rejects traversal,
+existing Save action. New clients show a folder icon and save into the configured or
+system Downloads directory by default, extracting only after whole-file verification.
+The Received files tray offers Save as… when a different destination is wanted.
+Extraction rejects traversal,
 links, special entries, too many entries, and expansion beyond the transfer size. It
 stages privately and renames the completed folder into place.
+
+Attachment approval is manual by default for files, folders and videos. The recipient
+can Receive or Decline an offer in chat or the Received files tray, enable automatic
+receive globally, or override the policy for one contact from the conversation header.
+Raster images sent as media up to 16 MiB, stickers and text continue automatically;
+SVG and larger images require approval. Automatic images must also pass a format
+signature check on the first decrypted chunk before durable ingest. A recipient decision
+is stored before a positive consent response is returned to a sender. The sender's
+progress labels show waiting for approval or a declined offer, and no chunk percentage
+advances before consent. Legacy senders can still submit an offer, but a current
+recipient refuses unsolicited chunks until approval; old recipients use the existing
+direct-transfer path. Channel file/folder offers wait for members to pull after approval.
+Approved partial files resume pulling after restart. The sender must be reachable
+after an offline recipient approves because approval precedes chunk transfer. The CLI
+prints an offer ID and accepts `/receive <file-id>` or `/decline <file-id>`.
+
+Read-only AI reviews (`target/ai-eval/attachment-consent-review.md`,
+`attachment-consent-followup.md`, `attachment-consent-closure.md`) found
+offer-binding, sender-author, restart-resume, relay-drain, account-switch, and
+automatic-image admission gaps. The implementation now binds equivalent offers
+to one sender and decision, requeues approved partial files on restart, skips
+unapproved relay chunks, refreshes settings on identity change, and rejects
+oversized, SVG, and malformed raster offers from the automatic path. The final
+targeted review (`target/ai-eval/attachment-consent-final.md`) found the two
+remaining duplicate-offer and sequence-2 bypass findings closed. These reviews
+were source inspection; the loopback, CLI, browser, and health suites provide
+the executable verification.
+
+An alias-specific review (`target/ai-eval/attachment-alias-review.md`) then found
+that two signed senders referencing the same immutable file stream could lose an
+alias, mix chunk authors, or hide one contact's pending approval. The node now
+keeps matching manifest aliases, admits only one chunk author for a file stream,
+and keeps the manual control visible whenever any alias needs approval. A
+follow-up source review (`target/ai-eval/attachment-alias-closure.md`) found all
+three findings closed; the alias regression test checks the mixed-policy status.
 
 The read-only model review (`target/ai-eval/directory-transfer-review.md`) found a
 retry-loss path: pruning archive chunks before extraction succeeds could make a failed
@@ -113,3 +150,29 @@ and link rejection; the two-node TCP test covers real encrypted folder transfer,
 extraction, and the legacy tar save path. `directory-transfer.spec.ts` covers folder
 picker wiring and recipient readiness gating. The browser test uses mocked Tauri IPC;
 the Rust test exercises two real nodes over loopback.
+
+## Sender progress — 2026-10-11
+
+Account file, image, and directory sends now show local preparation separately from
+recipient-confirmed chunk transfer. The sender bar stays below 100% while the final
+durable custody check is pending. It shows a remaining-time estimate only after two
+advancing recipient observations, then clears on the qualified final receipt. An
+offline recipient shows a waiting state without a speculative ETA. Channel file
+distribution still uses its existing best-effort group flow and only reports local
+preparation; it has no per-member durable receipt record to support a truthful
+recipient-confirmed percentage.
+
+The read-only model review (`target/ai-eval/sender-transfer-progress-review.md`)
+identified unbounded completed-transfer state and avoidable per-round Have-set
+memory. The transfer store now caps records at 1,024 and evicts completed rows
+first; recipient Have IDs are sorted and deduplicated in place before counting
+the intersection with local chunk IDs. The review did not execute tests.
+A follow-up read-only review (`target/ai-eval/sender-transfer-progress-followup.md`)
+found no remaining high or medium issue in those two fixes.
+
+The two-node core test checks that an early file-card receipt cannot claim chunk
+completion and that the final custody receipt completes progress. The sync test
+asserts an intermediate recipient Have count. Browser cases cover account files,
+inline images, ETA, confirmation, and concurrent sends. The portable UI matrix
+runs these cases on Linux, Windows, and macOS in GitHub Actions with browser
+evidence; local macOS Chromium and WebKit runs validated all 29 core scenarios.

@@ -16,6 +16,7 @@ pub struct FileStatus {
     done: u32,
     total: u32,
     ready: bool,
+    consent: Option<&'static str>,
 }
 
 /// One bounded snapshot for all visible attachments. The recipient's background chunk
@@ -37,14 +38,86 @@ pub async fn file_statuses(
         .into_iter()
         .map(|(file_conv, id)| {
             let progress = node.file_progress(id);
+            let consent = node.attachment_consent_status(id);
             FileStatus {
                 file_conv,
                 done: progress.map_or(0, |p| p.done),
                 total: progress.map_or(0, |p| p.total),
-                ready: node.file_ready_to_save(id),
+                ready: node.file_ready_to_save(id)
+                    && !matches!(
+                        consent,
+                        Some(
+                            mesh_talk_core::node::ReceiveDecision::Pending
+                                | mesh_talk_core::node::ReceiveDecision::Declined
+                        )
+                    ),
+                consent: consent.map(|status| match status {
+                    mesh_talk_core::node::ReceiveDecision::Pending => "pending",
+                    mesh_talk_core::node::ReceiveDecision::Accepted => "accepted",
+                    mesh_talk_core::node::ReceiveDecision::Declined => "declined",
+                }),
             }
         })
         .collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct AttachmentReceivePolicy {
+    global_auto: bool,
+    contact_auto: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn attachment_receive_policy(
+    state: tauri::State<'_, NodeState>,
+    account: Option<String>,
+) -> Result<AttachmentReceivePolicy, CommandError> {
+    let node = state.node_handle().await?;
+    Ok(AttachmentReceivePolicy {
+        global_auto: node.attachment_global_auto(),
+        contact_auto: account
+            .as_deref()
+            .and_then(|id| node.attachment_contact_auto(id)),
+    })
+}
+
+#[tauri::command]
+pub async fn set_attachment_global_auto(
+    state: tauri::State<'_, NodeState>,
+    auto: bool,
+) -> Result<(), CommandError> {
+    state
+        .node_handle()
+        .await?
+        .set_attachment_global_auto(auto)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_attachment_contact_auto(
+    state: tauri::State<'_, NodeState>,
+    account: String,
+    auto: Option<bool>,
+) -> Result<(), CommandError> {
+    state
+        .node_handle()
+        .await?
+        .set_attachment_contact_auto(&account, auto)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn decide_attachment(
+    state: tauri::State<'_, NodeState>,
+    file_conv: String,
+    accept: bool,
+) -> Result<(), CommandError> {
+    let id = parse_channel_id(&file_conv)?;
+    state
+        .node_handle()
+        .await?
+        .decide_attachment(id, accept)
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -57,7 +130,7 @@ pub async fn send_file_dm(
 ) -> Result<String, CommandError> {
     let node = state.node_handle().await?;
     // The legacy DM command has no optimistic message key; retain its recipient key.
-    let mut prog = crate::events::ProgressThrottle::new(app, recipient.clone(), "send");
+    let mut prog = crate::events::ProgressThrottle::new(app, recipient.clone(), "prepare");
     let id = node
         .send_file_dm_progress(
             &recipient,
@@ -79,7 +152,7 @@ pub async fn send_file_to_account(
     media: bool,
 ) -> Result<String, CommandError> {
     let node = state.node_handle().await?;
-    let mut prog = crate::events::ProgressThrottle::new(app, account.clone(), "send");
+    let mut prog = crate::events::ProgressThrottle::new(app, account.clone(), "prepare");
     let id = node
         .send_file_to_account_progress(
             &account,
@@ -106,7 +179,7 @@ pub async fn send_file_channel(
     let mut prog = crate::events::ProgressThrottle::new(
         app,
         progress_key.unwrap_or_else(|| channel_id.clone()),
-        "send",
+        "prepare",
     );
     let file_conv = node
         .send_file_channel_progress(
@@ -190,29 +263,39 @@ pub async fn write_temp_file(
     ext: String,
     name: Option<String>,
 ) -> Result<String, CommandError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?;
+    let path = write_temp_file_in_cache(&cache, &bytes, &ext, name.as_deref(), ts)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn write_temp_file_in_cache(
+    cache: &std::path::Path,
+    bytes: &[u8],
+    ext: &str,
+    name: Option<&str>,
+    ts: u128,
+) -> Result<std::path::PathBuf, CommandError> {
     // Bound a pasted image to a sane size so a paste can't write an arbitrarily large temp
     // file (the file pipeline enforces its own hard limit on the subsequent send).
     const MAX_PASTE_BYTES: usize = 64 * 1024 * 1024;
     if bytes.len() > MAX_PASTE_BYTES {
         return Err(CommandError::Validation("pasted image too large".into()));
     }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let basename = temp_file_basename(&ext, name.as_deref(), ts);
+    let basename = temp_file_basename(ext, name, ts);
     // A unique per-write subdir, so keeping a REAL filename can't collide with (or overwrite)
     // another in-flight send of a same-named file — the displayed name is the basename.
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?
-        .join("pasted")
-        .join(ts.to_string());
+    let dir = cache.join("pasted").join(ts.to_string());
     std::fs::create_dir_all(&dir).map_err(|e| CommandError::Validation(e.to_string()))?;
     let path = dir.join(basename);
-    std::fs::write(&path, &bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
-    Ok(path.to_string_lossy().into_owned())
+    std::fs::write(&path, bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
+    Ok(path)
 }
 
 /// Choose the on-disk name for a written temp file. With a real `original` filename (the
@@ -272,4 +355,28 @@ pub async fn read_media(
         .map_err(|e| format!("join error: {e}"))?
         .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))?;
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasted_bytes_use_an_isolated_cache_path_and_reject_oversized_input() {
+        let cache = tempfile::tempdir().unwrap();
+        let bytes = b"image bytes";
+        let saved =
+            write_temp_file_in_cache(cache.path(), bytes, "png", Some("photo.png"), 42).unwrap();
+        assert!(saved.starts_with(cache.path()));
+        assert_eq!(saved.file_name().unwrap(), "photo.png");
+        assert_eq!(std::fs::read(saved).unwrap(), bytes);
+        assert!(write_temp_file_in_cache(
+            cache.path(),
+            &vec![0; 64 * 1024 * 1024 + 1],
+            "png",
+            None,
+            43
+        )
+        .is_err());
+    }
 }

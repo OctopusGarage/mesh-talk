@@ -24,12 +24,16 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  timeout: process.platform === "win32" ? 60_000 : 30_000,
+  timeout: process.platform === "win32" ? 120_000 : 30_000,
   testMatch: [
     "portable-core.spec.ts",
     "automatic-delivery.spec.ts",
     "media-recovery.spec.ts",
     "media-lifecycle.spec.ts",
+    "file-send-progress.spec.ts",
+    "directory-transfer.spec.ts",
+    "attachment-approval.spec.ts",
+    "unread-badge.spec.ts",
     "screenshot-portable.spec.ts",
   ],
   grepInvert: tier === "core" ? /@extended/ : undefined,

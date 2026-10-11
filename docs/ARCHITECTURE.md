@@ -184,6 +184,11 @@ work only after the exact target confirms the final event in the validated
 dense signed chunk chain. The worker's file scheduler owns its pending and
 active cursors, bounded transfer cache, liveness checks and retirement; journal
 scans use an immutable cursor/capacity snapshot before network work resumes.
+File chunk sync sends at most four ordinary Followup frames after each have-set
+exchange. This reduces repeated id-set scans and round trips without changing
+the wire format; an older responder already accepts each Followup independently.
+The next exchange still confirms which signed chunks reached the recipient,
+and exact final durable custody remains required before retiring source work.
 A receiver may instead confirm historical verified
 completion after saving all content and reclaiming chunks: it verifies the entire
 original-author chain, chunk AEAD/hashes and whole-file checksum, synchronizes the
@@ -202,14 +207,17 @@ file work. Chunk ciphertext stays in the event log rather than being duplicated
 in the journal, and staging
 synchronizes the whole log at acceptance rather than synchronizing every chunk.
 Existing manifests and new message/sticker events must fit both bounded single-
-event sync frames before acceptance. MFM3 hash-list size is preflighted before
-staging; files whose manifests cannot fit are rejected despite the nominal 4 GiB
-file-size ceiling. Empty files retain their existing one-empty-chunk encoding.
+event sync frames before acceptance. MFM3 with per-chunk hashes remains the sender
+format while it fits; larger files use compact MFM4, which retains indexed AEAD
+per chunk and a whole-file SHA-256 checksum without the frame-sized hash list.
+The receiver validates the declared chunk geometry and verifies the whole file
+before exposing a save. Older clients continue receiving MFM3-sized files but
+must upgrade to receive MFM4 offers. Empty files retain their one-empty-chunk encoding.
 
 Directory attachments are packed into a tar payload and sent through this same
-encrypted, chunked MFM3 file path. A dedicated MIME marker identifies folders to
-current clients; existing MFM3-capable clients still receive a normal `.tar`
-attachment. The
+encrypted, chunked MFM3/MFM4 file path. A dedicated MIME marker identifies folders to
+current clients; existing MFM3-capable clients still receive smaller folders as a normal
+`.tar` attachment. The
 sender bounds depth, entry count, path length and archive size and rejects links
 and special files. The recipient first verifies the whole transfer, then extracts
 only regular files and directories into a private staging directory, rejects
@@ -217,6 +225,28 @@ unsafe paths and oversized expansion, sanitizes cross-platform name components
 with collision-safe mapping, and renames the completed folder into the chosen
 download directory. Nested and empty directories are preserved. Chunk reclamation
 waits until the extracted folder is durable so failed extraction remains retryable.
+
+Incoming file, folder and video manifests are offers. The node stores a manual-by-default
+receive policy in an encrypted, account-local sidecar; an explicit file decision overrides
+the global policy and the sender-account override. Raster images sent as media are
+automatic up to 16 MiB; SVG and larger images require approval. The recipient checks
+the first decrypted chunk against the claimed raster signature before durably ingesting it,
+while text and stickers remain ordinary message events. A current sender publishes the
+manifest first, then asks the exact authenticated recipient device for consent before
+synchronizing chunk events. The receiver independently rejects unsolicited chunks at its
+durable sync gate, including chunk-first delivery from older senders. A channel sender
+publishes the manifest and members pull chunks only after their own consent; automatic
+images retain eager distribution. Decisions bind the signed manifest event and survive
+restart. Identical signed manifests that share the same file conversation are aliases
+of one immutable byte stream; one explicit decision covers those aliases while each
+sender's automatic policy is evaluated separately. Exact decisions are retained
+for the account lifetime, so later offers or policy changes cannot silently
+reverse an earlier decline. Approved partial files are requeued on startup.
+Offline recipients leave
+the sender's chunks local until they reconnect and approve, so the sender must be
+available later to finish delivery. The CLI exposes `/receive` and `/decline` for
+manual decisions. Pre-consent peers retain the legacy direct-transfer fallback,
+while the new receiver still applies its local gate.
 
 File progress counts currently held chunks; historical completion does not
 pretend that exported bytes remain on this node. The CLI keeps bounded pending
@@ -358,6 +388,20 @@ empty conversation pane distinguishes no peers, hidden contacts, and a failed
 contact-visibility read; Connection diagnostics distinguish loading from failure.
 The chat roster and presence snapshot poll every 2 s. Unchanged roster snapshots
 retain their existing references so a poll does not redraw conversation rows.
+
+Unread counters are local presentation state. An incoming event in the selected
+conversation remains unread while the window is unfocused or hidden; focusing that
+conversation or opening another unread conversation clears only the one viewed
+while the window is visible and focused.
+`lib/unreadStorage.ts` restores opaque conversation keys and counts from the webview's
+local storage, scoped by both the signed-in host user and the mesh account.
+Messages and files from devices not yet in the local roster keep bounded pending
+counts there until discovery maps each device to its account conversation. The
+native badge includes these pending counts during discovery. This
+metadata is stored locally without message text, is not encrypted, and does not
+sync read status to other devices. A runtime account change discards the previous
+account's in-memory selection and counters. The frontend's total drives both the
+macOS menu-bar title and the OS app-icon badge through one session-guarded command.
 
 **Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
 the signed-in local user's hidden account IDs and last-known names are stored separately

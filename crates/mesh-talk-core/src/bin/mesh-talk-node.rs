@@ -370,8 +370,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_channel_msg(&node, rest);
         } else if let Some(rest) = line.strip_prefix("/sendfile ") {
             handle_sendfile(&node, &roster, rest);
+        } else if let Some((accept, rest)) = line
+            .strip_prefix("/receive ")
+            .map(|id| (true, id))
+            .or_else(|| line.strip_prefix("/decline ").map(|id| (false, id)))
+        {
+            let result = hex::decode(rest).ok().and_then(|bytes| {
+                <[u8; 32]>::try_from(bytes.as_slice())
+                    .ok()
+                    .map(mesh_talk_core::eventlog::ConversationId::new)
+            });
+            match result {
+                Some(file) => match node.decide_attachment(file, accept) {
+                    Ok(()) => emit(if accept {
+                        "file approved"
+                    } else {
+                        "file declined"
+                    }),
+                    Err(error) => emit(&format!("file decision failed: {error}")),
+                },
+                None => emit("usage: /receive <file-id> or /decline <file-id>"),
+            }
         } else if !line.is_empty() {
-            emit("commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /quit");
+            emit("commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit");
         }
     }
     Ok(())

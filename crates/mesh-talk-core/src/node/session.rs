@@ -10,9 +10,9 @@
 
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::sync::{
-    build_request, fingerprint, handle_followup, handle_request_bounded, handle_response_bounded,
-    ApplyReport, FpRequest, FpResponse, SyncFollowup, SyncRequest, SyncResponse, SyncStore,
-    MAX_REJECTED_DETAIL,
+    build_request, fingerprint, handle_followup, handle_request_bounded,
+    handle_response_bounded_burst, ApplyReport, FileConsentStatus, FpRequest, FpResponse,
+    SyncFollowup, SyncRequest, SyncResponse, SyncStore, MAX_REJECTED_DETAIL,
 };
 use crate::transport::{SecureChannel, TransportError, MAX_PLAINTEXT};
 use bincode::Options;
@@ -21,9 +21,13 @@ use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Backstop on sync rounds for one conversation (a peer that resends
-/// non-applying events forever can't spin us indefinitely). Generous: a round
-/// transfers up to ~one frame, so this bounds a single conversation's transfer.
+/// non-applying events forever can't spin us indefinitely).
 const MAX_SYNC_ROUNDS: usize = 10_000;
+
+/// Keep file bursts short enough for the transfer scheduler's per-step deadline
+/// and to let other destinations make progress. Existing peers already accept
+/// consecutive Followup frames, so this does not change the wire format.
+pub(in crate::node) const FILE_FOLLOWUP_BURST: usize = 4;
 
 /// Bytes per event id (a 32-byte hash) — used to estimate the `have`-set bandwidth in the
 /// sync-cost telemetry below.
@@ -69,11 +73,20 @@ enum SyncWire {
         event_id: EventId,
         stored: bool,
     },
+    FileConsentRequest {
+        file: ConversationId,
+        manifest: EventId,
+    },
+    FileConsentResponse {
+        file: ConversationId,
+        manifest: EventId,
+        status: FileConsentStatus,
+    },
 }
 
 #[cfg(test)]
-pub(in crate::node) fn is_round_request(bytes: &[u8], conversation: ConversationId) -> bool {
-    round_request_conversation(bytes) == Some(conversation)
+pub(in crate::node) fn is_followup(bytes: &[u8], conversation: ConversationId) -> bool {
+    matches!(decode(bytes), Ok(SyncWire::Followup(frame)) if frame.conversation == conversation)
 }
 
 #[cfg(test)]
@@ -88,7 +101,10 @@ pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<Conver
 pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
     matches!(
         decode(bytes),
-        Ok(SyncWire::Request(_) | SyncWire::FpRequest(_) | SyncWire::DurableHaveRequest { .. })
+        Ok(SyncWire::Request(_)
+            | SyncWire::FpRequest(_)
+            | SyncWire::DurableHaveRequest { .. }
+            | SyncWire::FileConsentRequest { .. })
     )
 }
 
@@ -198,6 +214,30 @@ where
     }
 }
 
+/// Query a recipient after the manifest is durable and before a chunk is sent.
+/// An older endpoint closes on this appended variant; the caller handles that
+/// explicit compatibility fallback on a fresh connection.
+pub(crate) async fn request_file_consent<IO>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    manifest: EventId,
+) -> Result<FileConsentStatus, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::FileConsentRequest { file, manifest })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::FileConsentResponse {
+            file: got_file,
+            manifest: got_manifest,
+            status,
+        } if got_file == file && got_manifest == manifest => Ok(status),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
 /// Stream a `have` id-set as chunk frames (always ≥1 frame, so the receiver gets an
 /// explicit terminator even for an empty set). `wrap` selects `ReqHave` vs `RespHave`.
 async fn send_have<IO>(
@@ -295,6 +335,26 @@ where
     Ok(progress.total)
 }
 
+/// File conversations can send several existing Followup frames after each
+/// full have-set exchange. Ordinary conversations retain their single-frame
+/// reconciliation for predictable scheduling.
+pub(in crate::node) async fn request_file_round<S, IO>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<ApplyReport, SessionError>
+where
+    S: SyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut progress = SyncProgress::default();
+    while !progress
+        .step_burst(channel, store, conversation, FILE_FOLLOWUP_BURST)
+        .await?
+    {}
+    Ok(progress.total)
+}
+
 /// Resume only between complete protocol exchanges, never midway through
 /// a Noise frame. A caller timing out a step must discard its channel and state.
 #[derive(Default)]
@@ -305,9 +365,15 @@ pub(in crate::node) struct SyncProgress {
     total: ApplyReport,
     first_have: usize,
     pushed_total: usize,
+    /// IDs the authenticated responder reported holding in its durable log.
+    remote_have_count: Option<usize>,
 }
 
 impl SyncProgress {
+    pub(in crate::node) fn remote_have_count(&self) -> Option<usize> {
+        self.remote_have_count
+    }
+
     pub(in crate::node) async fn step<S, IO>(
         &mut self,
         channel: &mut SecureChannel<IO>,
@@ -318,6 +384,23 @@ impl SyncProgress {
         S: SyncStore,
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        self.step_burst(channel, store, conversation, 1).await
+    }
+
+    pub(in crate::node) async fn step_burst<S, IO>(
+        &mut self,
+        channel: &mut SecureChannel<IO>,
+        store: &Mutex<S>,
+        conversation: ConversationId,
+        max_followups: usize,
+    ) -> Result<bool, SessionError>
+    where
+        S: SyncStore,
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        if max_followups == 0 || max_followups > FILE_FOLLOWUP_BURST {
+            return Err(SessionError::UnexpectedMessage);
+        }
         // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
         // id-set; if the responder's matches, the logs are identical and we skip the O(N)
         // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
@@ -326,9 +409,11 @@ impl SyncProgress {
         // only skip a diff — never corrupt — so this is safe.)
         if !self.started {
             self.started = true;
-            let fp = {
+            let (fp, local_count) = {
                 let store = store.lock().expect("store mutex not poisoned");
-                fingerprint(store.event_ids(&conversation))
+                let ids = store.event_ids(&conversation);
+                let count = ids.len();
+                (fingerprint(ids), count)
             };
             channel
                 .send(&encode(&SyncWire::FpRequest(FpRequest {
@@ -338,6 +423,7 @@ impl SyncProgress {
                 .await?;
             match decode(&channel.recv().await?)? {
                 SyncWire::FpResponse(FpResponse { matched: true }) => {
+                    self.remote_have_count = Some(local_count);
                     log::debug!(
                         target: "mesh_talk::sync",
                         "sync conv={} fp_match skipped",
@@ -390,10 +476,20 @@ impl SyncProgress {
             return Err(SessionError::UnexpectedMessage);
         }
         response.have = recv_have(channel, false, conversation).await?;
+        // Count only distinct local events the authenticated peer claims to
+        // hold. Sort in place so large transfers need no second Have set.
+        response.have.sort_unstable();
+        response.have.dedup();
+        self.remote_have_count = Some(
+            have.iter()
+                .filter(|id| response.have.binary_search(id).is_ok())
+                .count(),
+        );
 
-        let (report, followup) = {
+        let (report, mut followups) = {
             let mut store = store.lock().expect("store mutex not poisoned");
-            let result = handle_response_bounded(&mut *store, &response, MAX_PLAINTEXT);
+            let result =
+                handle_response_bounded_burst(&mut *store, &response, MAX_PLAINTEXT, max_followups);
             if store.admission_denied() {
                 return Err(SessionError::UnexpectedMessage);
             }
@@ -412,13 +508,26 @@ impl SyncProgress {
         {
             return Err(SessionError::NoProgress);
         }
-        let more_to_push = !followup.events.is_empty();
-        self.pushed_total += followup.events.len();
-        self.previous_push = followup.events.iter().map(|event| event.id).collect();
-
-        channel
-            .send(&encode(&SyncWire::Followup(followup))?)
-            .await?;
+        let more_to_push = !followups.is_empty();
+        self.pushed_total += followups
+            .iter()
+            .map(|frame| frame.events.len())
+            .sum::<usize>();
+        self.previous_push = followups
+            .iter()
+            .flat_map(|frame| frame.events.iter().map(|event| event.id))
+            .collect();
+        if followups.is_empty() {
+            followups.push(SyncFollowup {
+                conversation,
+                events: Vec::new(),
+            });
+        }
+        for followup in followups {
+            channel
+                .send(&encode(&SyncWire::Followup(followup))?)
+                .await?;
+        }
 
         self.total.applied += report.applied;
         self.total.duplicates += report.duplicates;
@@ -479,6 +588,20 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     match decode(bytes)? {
+        SyncWire::FileConsentRequest { file, manifest } => {
+            let status = store
+                .lock()
+                .expect("store mutex not poisoned")
+                .file_consent(&file, &manifest);
+            channel
+                .send(&encode(&SyncWire::FileConsentResponse {
+                    file,
+                    manifest,
+                    status,
+                })?)
+                .await?;
+            Ok(Served::Handled(file))
+        }
         SyncWire::DurableHaveRequest {
             conversation,
             event_id,
@@ -553,7 +676,9 @@ where
         | SyncWire::ReqHave(_)
         | SyncWire::RespHave(_)
         | SyncWire::FpResponse(_) => Err(SessionError::UnexpectedMessage),
-        SyncWire::DurableHaveResponse { .. } => Err(SessionError::UnexpectedMessage),
+        SyncWire::DurableHaveResponse { .. } | SyncWire::FileConsentResponse { .. } => {
+            Err(SessionError::UnexpectedMessage)
+        }
     }
 }
 
@@ -1236,11 +1361,31 @@ mod tests {
         });
         let mut channel = SecureChannel::connect(aio, &alice, None).await.unwrap();
         let store = Mutex::new(log);
-        let report = request_round(&mut channel, &store, conv()).await.unwrap();
+        let mut progress = SyncProgress::default();
+        let mut saw_partial_recipient_have = false;
+        let mut complete = false;
+        for _ in 0..100 {
+            complete = progress.step(&mut channel, &store, conv()).await.unwrap();
+            if progress
+                .remote_have_count()
+                .is_some_and(|count| count > 0 && count < ids.len())
+            {
+                saw_partial_recipient_have = true;
+            }
+            if complete {
+                break;
+            }
+        }
+        assert!(complete, "bounded rounds must finish the transfer");
+        assert!(
+            saw_partial_recipient_have,
+            "recipient Have exposes intermediate progress"
+        );
+        assert_eq!(progress.remote_have_count(), Some(ids.len()));
         drop(channel);
         let (remote, handled) = server.await.unwrap();
         assert_eq!(
-            report.applied, 0,
+            progress.total.applied, 0,
             "progress comes entirely from remote acceptance"
         );
         assert!(
@@ -1251,6 +1396,40 @@ mod tests {
         for event in store.lock().unwrap().events(&conv()) {
             assert_eq!(remote.get(&event.id), Some(event));
         }
+    }
+
+    #[tokio::test]
+    async fn file_burst_reuses_one_have_exchange_for_several_legacy_followups() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let (aio, bio) = tokio::io::duplex(512 * 1024);
+        let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
+        let ids = log.event_ids(&conv());
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
+            let store = Mutex::new(EventLog::default());
+            while let Ok(Served::Handled(_)) = serve_one(&mut channel, &store).await {}
+            store.into_inner().unwrap()
+        });
+        let mut channel = SecureChannel::connect(aio, &alice, None).await.unwrap();
+        let store = Mutex::new(log);
+        let mut progress = SyncProgress::default();
+        for _ in 0..10 {
+            if progress
+                .step_burst(&mut channel, &store, conv(), FILE_FOLLOWUP_BURST)
+                .await
+                .unwrap()
+            {
+                break;
+            }
+        }
+        assert_eq!(progress.remote_have_count(), Some(ids.len()));
+        assert!(
+            progress.rounds <= 3,
+            "burst must avoid per-chunk reconciliation"
+        );
+        drop(channel);
+        assert_eq!(server.await.unwrap().event_ids(&conv()), ids);
     }
 
     #[tokio::test]

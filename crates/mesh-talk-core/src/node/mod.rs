@@ -6,6 +6,7 @@
 //! `pub(crate)` (rather than `pub`) means an external consumer's semver contract is the
 //! re-exports, not every internal type.
 
+pub(crate) mod attachment_consent;
 pub(crate) mod call;
 pub(crate) mod channel;
 pub(crate) mod channel_senders;
@@ -58,13 +59,14 @@ pub use crate::transport::net::{
     bind_dual_stack_listener, discovery_socket, ipv4_interface_addrs, DEFAULT_DISCOVERY_PORT,
     DISCOVERY_MULTICAST_GROUP,
 };
+pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
 pub use channel::ReceivedChannelMessage;
 pub use delivery_store::DeliveryStatus;
 pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
-pub use files::FileProgress;
+pub use files::{FileProgress, OutgoingFileProgress};
 pub use message::MessageBody;
 pub use node::{
     ChannelSummary, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm, ReceivedProfile,

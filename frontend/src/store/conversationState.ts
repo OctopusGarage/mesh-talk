@@ -236,7 +236,6 @@ export function openConversationState(
     searchTarget: target ? { ...target, key, request } : null,
     historyError: null,
     activeRequest: request,
-    unread: { ...state.unread, [key]: 0 },
     members: [],
     channelOwner: "",
     messages: trimmed.messages,
@@ -328,6 +327,10 @@ export function clearConversationMessages(
 export function invalidateConversationIdentity(): Partial<ChatState> {
   return {
     ready: false,
+    active: null,
+    unread: {},
+    unreadOwner: "",
+    pendingUnknownUnread: {},
     messages: {},
     searchTarget: null,
     reactions: {},

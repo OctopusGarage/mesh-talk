@@ -27,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IdentityGlyph } from "@/components/identity";
 import { chat } from "@/lib/api";
+import { effectiveDownloadDir } from "@/lib/download";
 import {
   attachmentLabel,
   isDirectoryAttachment,
@@ -213,11 +214,21 @@ export function ConversationHistoryDialog({
     )
       return;
     try {
-      const dest = isDirectoryAttachment(file.mime)
+      const directory = isDirectoryAttachment(file.mime);
+      const dir = directory ? await effectiveDownloadDir() : "";
+      if (!lease.current()) return;
+      if (dir) {
+        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
+          return;
+        const path = await chat.saveFileToDir(file.fileConv, dir);
+        if (lease.current()) rememberSavedDownload(file.fileConv, path);
+        return;
+      }
+      const dest = directory
         ? await openDialog({ directory: true })
         : await saveDialog({ defaultPath: file.name });
       if (lease.current() && typeof dest === "string") {
-        const path = isDirectoryAttachment(file.mime)
+        const path = directory
           ? await chat.saveFileToDir(file.fileConv, dest)
           : (await chat.saveFile(file.fileConv, dest), dest);
         if (lease.current()) rememberSavedDownload(file.fileConv, path);

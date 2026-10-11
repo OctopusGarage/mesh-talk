@@ -1,8 +1,4 @@
-const images = import.meta.glob<string>("../assets/themes/cat-acrylic/*.webp", {
-  eager: true,
-  query: "?url",
-  import: "default",
-});
+import { assetEntries } from "./assetCatalog";
 
 export interface CatAcrylicWallpaper {
   id: string;
@@ -10,8 +6,8 @@ export interface CatAcrylicWallpaper {
   url: string;
 }
 
-export const CAT_ACRYLIC_WALLPAPERS: CatAcrylicWallpaper[] = Object.entries(
-  images,
+export const CAT_ACRYLIC_WALLPAPERS: CatAcrylicWallpaper[] = assetEntries(
+  "themes/cat-acrylic",
 )
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([path, url]) => {

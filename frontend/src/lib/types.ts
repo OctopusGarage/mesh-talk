@@ -225,6 +225,7 @@ export interface ChannelMessageEvent {
 
 export interface FileReceivedEvent {
   conv: string;
+  is_channel: boolean; // emitted by the same installed native app, not over the network
   from: string;
   name: string;
   size: number;
@@ -235,9 +236,16 @@ export interface FileReceivedEvent {
 
 export interface FileProgressEvent {
   file_conv: string; // per-file id for saves, optimistic message key for sends
-  direction: "send" | "save";
+  direction: "prepare" | "send" | "save";
   done: number;
   total: number;
+}
+
+export interface OutgoingFileStatus {
+  done: number;
+  total: number;
+  delivered: boolean;
+  consent?: "pending" | "accepted" | "declined";
 }
 
 export interface FileStatus {
@@ -245,6 +253,12 @@ export interface FileStatus {
   done: number;
   total: number;
   ready: boolean;
+  consent?: "pending" | "accepted" | "declined" | null;
+}
+
+export interface AttachmentReceivePolicy {
+  global_auto: boolean;
+  contact_auto: boolean | null;
 }
 
 export interface ProfileReceivedEvent {

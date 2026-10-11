@@ -10,6 +10,7 @@ import { inspectTrace } from "./trace-evidence.mjs";
 const EVIDENCE = ["portable-browser-evidence", "portable-browser-screenshot", "trace"];
 export function requiredBrowserPaths(tier) {
   const paths = [
+    ["portable-core.spec.ts", "chat startup does not import each preset image as a module"],
     ["portable-core.spec.ts", "portable authentication rejects the wrong password"],
     ["portable-core.spec.ts", "portable registration sign in and sign out"],
     ["portable-core.spec.ts", "light theme persists across browser reload and sign in"],
@@ -32,6 +33,26 @@ export function requiredBrowserPaths(tier) {
     ["screenshot-portable.spec.ts", "hidden screenshot capture cancels without sending"],
     ["screenshot-portable.spec.ts", "rectangle arrow text and undo remain usable before send"],
     ["screenshot-portable.spec.ts", "unavailable capture is disabled and failed save preserves the editor"],
+    ["file-send-progress.spec.ts", "file sender keeps confirmed upload percent and ETA visible until recipient custody"],
+    ["file-send-progress.spec.ts", "image sender keeps confirmed upload percent and ETA visible until recipient custody"],
+    ["file-send-progress.spec.ts", "concurrent sends keep progress with their own file bubbles"],
+    ["file-send-progress.spec.ts", "a failed folder send removes preparing progress and offers retry"],
+    ["directory-transfer.spec.ts", "folder picker sends its path as an attachment"],
+    ["directory-transfer.spec.ts", "received folder stays disabled until ready and extracts through save-to-dir"],
+    ["directory-transfer.spec.ts", "folder Save in chat and history uses Downloads without a directory picker"],
+    ["attachment-approval.spec.ts", "incoming folder waits for approval and can be declined or received"],
+    ["attachment-approval.spec.ts", "global and per-contact automatic receive controls persist their selection"],
+    ["attachment-approval.spec.ts", "video media requires approval and appears in Received files"],
+    ["unread-badge.spec.ts", "incoming unread count reaches the OS badge and clears on read and logout"],
+    ["unread-badge.spec.ts", "an open chat remains unread while Mesh-Talk is in the background"],
+    ["unread-badge.spec.ts", "clicking an already open conversation clears unread after app activation"],
+    ["unread-badge.spec.ts", "background channel messages and files clear only when that chat is viewed"],
+    ["unread-badge.spec.ts", "foreground delivery is read only in the conversation being viewed"],
+    ["unread-badge.spec.ts", "unread messages survive reopening the same account and clear after reading"],
+    ["unread-badge.spec.ts", "early messages and files gain unread badges when their sender appears in discovery"],
+    ["unread-badge.spec.ts", "an undiscovered sender remains unread across restart until discovery"],
+    ["unread-badge.spec.ts", "history load failure leaves unread until the chat can be viewed"],
+    ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
   );
   return paths;
 }

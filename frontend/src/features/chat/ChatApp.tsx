@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
 import { CallDialog } from "./CallDialog";
 import { chat as chatApi } from "@/lib/api";
 import { ensureNotificationPermission } from "@/lib/notify";
+import { savePendingUnread, saveUnread } from "@/lib/unreadStorage";
 import { useChat } from "@/store/chat";
 import { usePresence } from "@/store/presence";
 import { useSettings } from "@/store/settings";
@@ -22,6 +23,8 @@ export function ChatApp() {
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const ready = useChat((s) => s.ready);
+  const accountId = useChat((s) => s.myAccountId);
+  const unreadOwner = useChat((s) => s.unreadOwner);
   useEffect(() => {
     if (owner) void useContactPolicy.getState().load(owner);
     return () => {
@@ -33,11 +36,22 @@ export function ChatApp() {
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
   const clearError = useChat((s) => s.clearError);
-  // Total unread across all conversations → the OS app-icon badge (dock/taskbar count).
-  // A primitive sum keeps the selector stable (re-renders only when the total changes).
-  const totalUnread = useChat((s) =>
-    Object.values(s.unread).reduce((a, b) => a + b, 0),
-  );
+  const fileSendError =
+    error?.startsWith("Couldn't send file: ") ||
+    error?.startsWith("This attachment ");
+  const unread = useChat((s) => s.unread);
+  const pendingUnknownUnread = useChat((s) => s.pendingUnknownUnread);
+  const totalUnread =
+    Object.values(unread).reduce((sum, count) => sum + count, 0) +
+    Object.values(pendingUnknownUnread).reduce((sum, count) => sum + count, 0);
+  const markActiveRead = useChat((s) => s.markActiveRead);
+
+  useEffect(() => {
+    if (owner && owner === unreadOwner && accountId && ready) {
+      saveUnread(owner, accountId, unread);
+      savePendingUnread(owner, accountId, pendingUnknownUnread);
+    }
+  }, [owner, unreadOwner, accountId, ready, unread, pendingUnknownUnread]);
 
   // Request notification authorization once at startup. On macOS the dock unread badge only
   // renders if the app is authorized for notification badges, so this is what makes the badge
@@ -48,8 +62,36 @@ export function ChatApp() {
   }, [loadSettings]);
 
   useEffect(() => {
-    chatApi.setBadge(totalUnread).catch(() => {});
-  }, [totalUnread]);
+    if (!owner) return;
+    let focusFrame = 0;
+    const syncBadge = () => {
+      void chatApi.setBadge(totalUnread, owner).catch(() => {});
+    };
+    syncBadge();
+    // macOS can clear its Dock badge on activation. Restore the sidebar total.
+    const onFocus = () => {
+      markActiveRead();
+      // The native activation event may arrive before the webview reports focus.
+      // Try again on the next frame so the already open chat becomes read.
+      cancelAnimationFrame(focusFrame);
+      focusFrame = requestAnimationFrame(() => markActiveRead());
+      const count =
+        Object.values(useChat.getState().unread).reduce(
+          (sum, value) => sum + value,
+          0,
+        ) +
+        Object.values(useChat.getState().pendingUnknownUnread).reduce(
+          (sum, value) => sum + value,
+          0,
+        );
+      void chatApi.setBadge(count, owner).catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      cancelAnimationFrame(focusFrame);
+    };
+  }, [totalUnread, owner, generation, markActiveRead]);
 
   useEffect(() => {
     if (!owner) return;
@@ -98,10 +140,16 @@ export function ChatApp() {
             />
             <span className="min-w-0 flex-1">
               <strong className="block font-semibold">
-                {t("redesign.actionFailed")}
+                {t(
+                  fileSendError
+                    ? "message.fail.unknown"
+                    : "redesign.actionFailed",
+                )}
               </strong>
-              <span className="mt-0.5 block text-muted-foreground">
-                {error}
+              <span className="mt-0.5 block break-words text-muted-foreground">
+                {fileSendError
+                  ? error.replace(/^Couldn't send file: /, "")
+                  : error}
               </span>
             </span>
             <button
@@ -110,7 +158,7 @@ export function ChatApp() {
               aria-label={t("conversation.dismissError")}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
             >
-              ×
+              <X className="h-4 w-4" aria-hidden="true" />
             </button>
           </motion.div>
         )}

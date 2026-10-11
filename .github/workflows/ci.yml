@@ -186,6 +186,12 @@ jobs:
             cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
 
+      - name: CLI channel and file coverage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: src-tauri
+        shell: bash
+        run: cargo llvm-cov --no-clean -p mesh-talk-core --test channel_and_file_cli --lcov --output-path lcov.info -- --ignored --test-threads=1
+
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
         uses: actions/upload-artifact@v7

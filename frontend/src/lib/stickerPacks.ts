@@ -1,5 +1,6 @@
 // Sticker IDs are sent over the wire, so asset filenames must remain stable.
 // Noto IDs encode an emoji; cat IDs have explicit emoji fallbacks for older builds.
+import { assetEntries } from "./assetCatalog";
 
 export type StickerPackId = "noto" | "cats";
 
@@ -87,13 +88,7 @@ const CAT_DETAILS: readonly (readonly (readonly [string, string])[])[] = [
   ],
 ];
 
-const noto = Object.entries(
-  import.meta.glob("../assets/stickers/noto/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }) as Record<string, string>,
-)
+const noto = assetEntries("stickers/noto")
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([path, url]): Sticker => {
     const id = idFromPath(path);
@@ -101,13 +96,7 @@ const noto = Object.entries(
     return { id, url, emoji, label: emoji, pack: "noto" };
   });
 
-const cats = Object.entries(
-  import.meta.glob("../assets/stickers/cats/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }) as Record<string, string>,
-)
+const cats = assetEntries("stickers/cats")
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([path, url]): Sticker => {
     const id = idFromPath(path);

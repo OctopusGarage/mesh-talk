@@ -7,6 +7,31 @@ const MENU_HIDE: &str = "hide";
 const MENU_QUIT: &str = "quit";
 pub const TRAY_ID: &str = "mesh-talk-tray";
 
+fn unread_tray_labels(count: u32) -> (String, String) {
+    if count == 0 {
+        return (String::new(), "Mesh-Talk".to_string());
+    }
+    let title = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    let noun = if count == 1 { "message" } else { "messages" };
+    (title, format!("Mesh-Talk — {count} unread {noun}"))
+}
+
+/// Keep the menu bar count in sync with the dock/launcher badge. macOS displays the
+/// title immediately beside the tray icon; its template icon stays legible in both themes.
+pub fn set_unread_count<R: tauri::Runtime>(app: &AppHandle<R>, count: u32) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let (title, tooltip) = unread_tray_labels(count);
+        // tray-icon 0.24.1 leaves the existing macOS title untouched for None.
+        // An explicit empty string clears a previously painted unread count.
+        let _ = tray.set_title(Some(title.as_str()));
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
+}
+
 /// Create the main tray icon and menu (Show / Hide / Quit).
 pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, MENU_SHOW, "Show", true, None::<&str>)?;
@@ -71,6 +96,31 @@ fn toggle_window_visibility(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    use super::unread_tray_labels;
+
+    #[test]
+    fn unread_count_is_visible_beside_the_menu_bar_icon() {
+        assert_eq!(
+            unread_tray_labels(0),
+            (String::new(), "Mesh-Talk".to_string())
+        );
+        assert_eq!(
+            unread_tray_labels(1),
+            ("1".to_string(), "Mesh-Talk — 1 unread message".to_string())
+        );
+        assert_eq!(
+            unread_tray_labels(3),
+            ("3".to_string(), "Mesh-Talk — 3 unread messages".to_string())
+        );
+        assert_eq!(
+            unread_tray_labels(135),
+            (
+                "99+".to_string(),
+                "Mesh-Talk — 135 unread messages".to_string()
+            )
+        );
+    }
+
     #[test]
     fn startup_has_no_unhandled_config_tray_icon() {
         let context: tauri::Context<tauri::Wry> = tauri::generate_context!();

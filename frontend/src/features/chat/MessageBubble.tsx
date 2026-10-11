@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { chat } from "@/lib/api";
-import { defaultSavePath } from "@/lib/download";
+import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
 import {
   attachmentLabel,
   isDirectoryAttachment,
@@ -40,7 +40,11 @@ import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import type { ReactionInfo } from "@/lib/types";
 import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
-import { useFileStatus, useFileAvailability } from "@/store/fileAvailability";
+import {
+  useFileStatus,
+  useFileAvailability,
+  refreshFileAvailability,
+} from "@/store/fileAvailability";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
@@ -53,12 +57,18 @@ function FileBubble({
   file,
   mine,
   metadataPending,
+  failed,
   sendKey,
+  messageId,
+  isChannel,
 }: {
   file: NonNullable<ChatMessage["file"]>;
   mine: boolean;
   metadataPending?: boolean;
+  failed?: boolean;
   sendKey?: string;
+  messageId?: string | null;
+  isChannel: boolean;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
@@ -69,6 +79,10 @@ function FileBubble({
   const available = !!savedPath || !!status?.ready;
   const [saving, setSaving] = useState(false);
   const directory = isDirectoryAttachment(file.mime);
+  const approvalNeeded =
+    !mine && (status?.consent === "pending" || status?.consent === "declined");
+  const uploadKey =
+    mine && !metadataPending && !isChannel ? messageId || undefined : undefined;
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -82,6 +96,15 @@ function FileBubble({
       return;
     try {
       setSaving(true);
+      const dir = directory ? await effectiveDownloadDir() : "";
+      if (!lease.current()) return;
+      if (dir) {
+        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
+          return;
+        const path = await chat.saveFileToDir(file.fileConv, dir);
+        if (lease.current()) rememberSavedDownload(file.fileConv, path);
+        return;
+      }
       const defaultPath = await defaultSavePath(file.name);
       if (!lease.current()) return;
       const dest = directory
@@ -114,6 +137,18 @@ function FileBubble({
     }
   };
 
+  const decide = async (accept: boolean) => {
+    const lease = captureChatOwnership();
+    if (!lease.current() || !file.fileConv) return;
+    try {
+      await chat.decideAttachment(file.fileConv, accept);
+      if (lease.current()) await refreshFileAvailability([file.fileConv]);
+    } catch (error) {
+      if (lease.current())
+        setError(t("files.approvalFailed", { error: errorMessage(error) }));
+    }
+  };
+
   // Media (image/video, sent via the media button) that is small enough to render inline:
   // show ONLY the preview. Its filename, size, and download live in the detail view that
   // opens on click (MediaPreview's lightbox) — the chat doesn't need that clutter under
@@ -134,6 +169,12 @@ function FileBubble({
           size={file.size}
           mime={file.mime}
         />
+        {uploadKey && (
+          <TransferBar
+            transferKey={uploadKey}
+            waitingDirection={sendKey ? "send" : undefined}
+          />
+        )}
       </div>
     );
   }
@@ -149,7 +190,11 @@ function FileBubble({
           </div>
           <div className="font-mono text-[11px] tabular-nums opacity-70">
             {metadataPending
-              ? t("message.delivery.metadataPending")
+              ? t(
+                  failed
+                    ? "message.fail.unknown"
+                    : "message.delivery.metadataPending",
+                )
               : humanSize(file.size)}
           </div>
         </div>
@@ -185,8 +230,40 @@ function FileBubble({
           )}
         </button>
       </div>
-      {metadataPending && <TransferBar transferKey={sendKey} />}
-      {!metadataPending && !savedPath && <ReceiveProgress status={status} />}
+      {metadataPending && mine && !failed && (
+        <TransferBar transferKey={sendKey} waitingDirection="prepare" />
+      )}
+      {uploadKey && (
+        <TransferBar
+          transferKey={uploadKey}
+          waitingDirection={sendKey ? "send" : undefined}
+        />
+      )}
+      {!mine && !metadataPending && !savedPath && (
+        <ReceiveProgress status={status} />
+      )}
+      {approvalNeeded && !savedPath && (
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => void decide(true)}
+            className="rounded-md bg-primary px-2.5 py-1 text-xs text-primary-foreground"
+            aria-label={t("files.approve")}
+          >
+            {t("files.approve")}
+          </button>
+          {status?.consent === "pending" && (
+            <button
+              type="button"
+              onClick={() => void decide(false)}
+              className="rounded-md border px-2.5 py-1 text-xs"
+              aria-label={t("files.decline")}
+            >
+              {t("files.decline")}
+            </button>
+          )}
+        </div>
+      )}
       {savedPath && (
         <div className="mt-1 truncate text-[11px] opacity-70" title={savedPath}>
           {t("files.savedTo", { path: savedPath })}
@@ -482,7 +559,10 @@ export function MessageBubble({
                     file={m.file!}
                     mine={mine}
                     metadataPending={m.metadataPending}
+                    failed={m.failed}
                     sendKey={m.clientId}
+                    messageId={m.id}
+                    isChannel={isChannel}
                   />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
@@ -593,7 +673,9 @@ export function MessageBubble({
               mine && "flex-row-reverse",
             )}
           >
-            <span>{t(`message.fail.${m.failReason ?? "unknown"}`)}</span>
+            {!(m.file && m.metadataPending) && (
+              <span>{t(`message.fail.${m.failReason ?? "unknown"}`)}</span>
+            )}
             <button
               type="button"
               onClick={() => m.clientId && onRetry(m.clientId)}

@@ -336,12 +336,15 @@ export async function coreScenarios(c) {
   await revealLatestNativeMessage(c, fileName);
   const classification = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e && !!e.querySelector('button') && !e.querySelector('[data-testid=file-image],[data-testid=file-video]');", [fileName]);
   assert.equal(classification, true);
+  await until("incoming attachment awaits recipient approval", () => execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e?.querySelector('button[aria-label=Receive]');", [fileName]));
+  const receiveButton = await c.command("POST", "/element", { using: "css selector", value: '[data-testid="message-bubble"] button[aria-label="Receive"]' });
+  await c.command("POST", `/element/${receiveButton["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
   await until("incoming attachment decrypted bytes available", async () => {
     const received = await c.readFileBytes(attachment.file.file_conv);
     assert.deepEqual(received, Array.from(bytes));
     return true;
   });
-  await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified; OS save picker is outside embedded W3C DOM automation and was not invoked." });
+  await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified after recipient approval; OS save picker is outside embedded W3C DOM automation and was not invoked." });
   await privacySettings();
   const settingsLayouts = {};
   for (const { name, request, viewport } of settingsTargets) {

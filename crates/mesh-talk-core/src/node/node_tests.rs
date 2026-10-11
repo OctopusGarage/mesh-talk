@@ -1661,7 +1661,8 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
 
     // A multi-chunk IMAGE payload sent via the MEDIA button (kind drives media-store).
-    let payload = vec![0x89u8; crate::file::CHUNK_SIZE + 4242];
+    let mut payload = vec![0x89u8; crate::file::CHUNK_SIZE + 4242];
+    payload[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
     let src = dir.path().join("shot.png");
     std::fs::write(&src, &payload).unwrap();
 
@@ -1804,6 +1805,7 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
         "pw",
     )
     .unwrap();
+    bob_node.set_attachment_global_auto(true).unwrap();
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
 
     // A multi-chunk payload.
@@ -1839,6 +1841,7 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
     assert_eq!(rf.size, payload.len() as u64);
     assert_eq!(rf.file_conv, file_conv);
     assert_eq!(rf.from, alice_node.user_id());
+    assert!(!rf.is_channel);
 
     // And the received file appears in Bob's conversation history (not just the tray) as
     // a non-`from_me` file message — so it persists across reload.
@@ -1865,6 +1868,159 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
     .await
     .expect("bob saved the file within 5s");
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
+}
+
+#[tokio::test]
+async fn attachment_offer_waits_for_exact_recipient_approval() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&bob, "Bob", port, &alice.public().user_id());
+    let bob_roster = seed_roster(&alice, "Alice", 1, &bob.public().user_id());
+    let dir = tempfile::tempdir().unwrap();
+    let (a_dm, _) = mpsc::unbounded_channel();
+    let (a_ch, _) = mpsc::unbounded_channel();
+    let (a_file, _) = mpsc::unbounded_channel();
+    let (b_dm, _) = mpsc::unbounded_channel();
+    let (b_ch, _) = mpsc::unbounded_channel();
+    let (b_file, mut received) = mpsc::unbounded_channel();
+    let a = Node::open(
+        alice,
+        alice_roster,
+        a_dm,
+        a_ch,
+        a_file,
+        &dir.path().join("a.log"),
+        &dir.path().join("a-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let b = Node::open(
+        bob,
+        bob_roster,
+        b_dm,
+        b_ch,
+        b_file,
+        &dir.path().join("b.log"),
+        &dir.path().join("b-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    tokio::spawn(Arc::clone(&b).run_accept_loop(listener));
+    let payload = vec![0x53; crate::file::CHUNK_SIZE + 19];
+    let source = dir.path().join("untrusted.bin");
+    std::fs::write(&source, &payload).unwrap();
+    let (card, file) = a
+        .enqueue_file_dm(&b.user_id(), &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let mut chunk_first = a
+        .privacy_dial(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            &b.identity.public(),
+        )
+        .await
+        .unwrap();
+    let _ = crate::node::session::request_round(
+        &mut chunk_first,
+        &a.sync_store(&b.identity.public()),
+        file,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    a.flush_file_delivery(card).await;
+    let offer = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offer.file_conv, file);
+    assert_eq!(
+        b.attachment_consent_status(file),
+        Some(crate::node::ReceiveDecision::Pending)
+    );
+    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    // Simulate an older sender bypassing the optional consent query. The
+    // recipient's durable ingest gate still refuses unsolicited chunks.
+    let mut unsolicited = a
+        .privacy_dial(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            &b.identity.public(),
+        )
+        .await
+        .unwrap();
+    let _ = crate::node::session::request_round(
+        &mut unsolicited,
+        &a.sync_store(&b.identity.public()),
+        file,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    b.decide_attachment(file, false).unwrap();
+    a.flush_file_delivery(card).await;
+    assert_eq!(
+        b.attachment_consent_status(file),
+        Some(crate::node::ReceiveDecision::Declined)
+    );
+    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    b.decide_attachment(file, true).unwrap();
+    assert!(
+        !b.attachment_chunk_author_allowed(file, &DeviceIdentity::generate().public().ed25519_pub)
+    );
+    assert_eq!(
+        b.attachment_consent_for_peer(
+            file,
+            crate::eventlog::EventId::new([0; 32]),
+            &a.identity.public()
+        ),
+        crate::node::ReceiveDecision::Pending
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !b.file_ready_to_save(file) {
+            a.flush_file_delivery(card).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("chunks transfer after approval");
+    let dest = dir.path().join("accepted.bin");
+    b.save_file(file, &dest).unwrap();
+    assert_eq!(std::fs::read(dest).unwrap(), payload);
+
+    let image = dir.path().join("inline.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nimage payload").unwrap();
+    let image_file = a
+        .send_file_dm(&b.user_id(), &image, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    let image_offer = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(image_offer.file_conv, image_file);
+    assert_eq!(
+        b.attachment_consent_status(image_file),
+        Some(crate::node::ReceiveDecision::Accepted)
+    );
+
+    let video = dir.path().join("clip.mp4");
+    std::fs::write(&video, b"video payload").unwrap();
+    let video_file = a
+        .send_file_dm(&b.user_id(), &video, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    let video_offer = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(video_offer.file_conv, video_file);
+    assert_eq!(
+        b.attachment_consent_status(video_file),
+        Some(crate::node::ReceiveDecision::Pending)
+    );
+    assert_eq!(b.file_progress(video_file).unwrap().done, 0);
 }
 
 #[tokio::test]
@@ -1904,6 +2060,7 @@ async fn two_nodes_transfer_nested_directory_and_save_it() {
         "pw",
     )
     .unwrap();
+    bob_node.set_attachment_global_auto(true).unwrap();
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
 
     let source = dir.path().join("photos");
@@ -2012,6 +2169,7 @@ async fn recipient_pulls_file_chunks_directly_when_push_missed() {
         "pw",
     )
     .unwrap();
+    bob_node.set_attachment_global_auto(true).unwrap();
     tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
 
     let payload = vec![0xCDu8; crate::file::CHUNK_SIZE + 999];
@@ -2108,6 +2266,7 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
         "pw",
     )
     .unwrap();
+    bob_node.set_attachment_global_auto(true).unwrap();
     // ~5 chunks → the file_conv batch far exceeds one frame → multiple rounds.
     let payload = vec![0x5Au8; crate::file::CHUNK_SIZE * 4 + 999];
     let src = dir.path().join("big.bin");
@@ -2395,8 +2554,11 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     assert_eq!(rf.name, "photo.bin");
     assert_eq!(rf.size, payload.len() as u64);
     assert_eq!(rf.conv, channel);
+    assert!(rf.is_channel);
     assert_eq!(rf.file_conv, file_conv);
     assert_eq!(rf.from, alice_node.user_id());
+    assert_eq!(bob_node.file_progress(file_conv).unwrap().done, 0);
+    bob_node.decide_attachment(file_conv, true).unwrap();
 
     // The file is a first-class message in the channel history for BOTH the sender (her
     // own, `from_me`) and the receiver (Bob's, not `from_me`) — not just the tray.
@@ -2429,6 +2591,7 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     let dest = dir.path().join("saved.bin");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
+            bob_node.pull_pending_files().await;
             match bob_node.save_file(rf.file_conv, &dest) {
                 Ok(()) => break,
                 Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -2463,10 +2626,13 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     assert_eq!(rf2.conv, channel);
     assert_eq!(rf2.file_conv, file_conv2);
     assert_eq!(rf2.from, bob_node.user_id());
+    assert_eq!(alice_node.file_progress(file_conv2).unwrap().done, 0);
+    alice_node.decide_attachment(file_conv2, true).unwrap();
 
     let dest2 = dir.path().join("alice-saved.bin");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
+            alice_node.pull_pending_files().await;
             match alice_node.save_file(rf2.file_conv, &dest2) {
                 Ok(()) => break,
                 Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -3749,6 +3915,33 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
         .expect("bob received the file within 5s")
         .expect("file stream open");
     assert_eq!(got.name, "hello.txt");
+
+    // Exercise the large-file wire path with a small fixture: the only format
+    // difference is the omitted hash list, so a huge test file is unnecessary.
+    let (mut compact, compact_conv) = alice_node
+        .stage_file(&file, crate::file::FileKind::File, |_| {})
+        .unwrap();
+    compact.v2.chunk_hashes.clear();
+    let peer = alice_node.routing_peer(&bob_uid).unwrap();
+    let host = dm_conversation_id(&alice_node.identity.public(), &peer.public);
+    let card = alice_node
+        .accept_staged_manifest(&[peer], host, None, &compact)
+        .unwrap();
+    let saved = dir.path().join("compact-copy.txt");
+    alice_node
+        .save_directory_archive(compact_conv, &saved)
+        .unwrap();
+    assert_eq!(std::fs::read(saved).unwrap(), b"account file payload");
+    alice_node.flush_delivery(card).await;
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), b_f_r.recv())
+        .await
+        .expect("bob received the compact manifest within 5s")
+        .expect("file stream open");
+    assert_eq!(received.file_conv, compact_conv);
+    assert!(matches!(
+        bob_node.files.lock().unwrap().manifest(&compact_conv),
+        Some(crate::file::AnyManifest::V4(_))
+    ));
 }
 
 #[tokio::test]

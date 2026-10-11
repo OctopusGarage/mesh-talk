@@ -5,12 +5,20 @@ import type {
   ChannelMembersInfo,
   HistoryItem,
   FileStatus,
+  OutgoingFileStatus,
   PeerInfo,
   ReactionInfo,
   SafetyNumber,
   SearchHitInfo,
   TrustInfo,
 } from "../types";
+
+// Preserve order across rapid unread/read updates and webview reloads.
+let lastBadgeRevision = 0;
+function nextBadgeRevision(): number {
+  lastBadgeRevision = Math.max(lastBadgeRevision + 1, Date.now() * 1000);
+  return lastBadgeRevision;
+}
 
 export const chat = {
   ownerIdentity: (owner: string) =>
@@ -53,15 +61,19 @@ export const chat = {
   ownerHistory: (owner: string, account: string, limit: number) =>
     invoke<HistoryItem[]>("owner_account_history", { owner, account, limit }),
   deliveryStatuses: (owner: string, account: string, ids: string[]) =>
-    invoke<Array<{ id: string; status: "awaiting" | "delivered" }>>(
-      "owner_delivery_statuses",
-      { owner, account, ids },
-    ),
+    invoke<
+      Array<{
+        id: string;
+        status: "awaiting" | "delivered";
+        file_progress?: OutgoingFileStatus;
+      }>
+    >("owner_delivery_statuses", { owner, account, ids }),
   myId: () => invoke<string>("my_id"),
   accountId: () => invoke<string>("account_id"),
 
   /** Set the OS app-icon unread badge (dock/taskbar); 0 clears it. */
-  setBadge: (count: number) => invoke<void>("set_badge", { count }),
+  setBadge: (count: number, owner: string) =>
+    invoke<void>("set_badge", { count, owner, revision: nextBadgeRevision() }),
 
   /** The current Wi-Fi network name (SSID), or null if unknown (wired / no Wi-Fi / OS withholds it). */
   networkName: () => invoke<string | null>("network_name"),
@@ -173,6 +185,17 @@ export const chat = {
     invoke<void>("save_file", { fileConv, dest }),
   fileStatuses: (fileConvs: string[]) =>
     invoke<FileStatus[]>("file_statuses", { fileConvs }),
+  attachmentReceivePolicy: (account?: string) =>
+    invoke<import("../types").AttachmentReceivePolicy>(
+      "attachment_receive_policy",
+      { account: account ?? null },
+    ),
+  setAttachmentGlobalAuto: (auto: boolean) =>
+    invoke<void>("set_attachment_global_auto", { auto }),
+  setAttachmentContactAuto: (account: string, auto: boolean | null) =>
+    invoke<void>("set_attachment_contact_auto", { account, auto }),
+  decideAttachment: (fileConv: string, accept: boolean) =>
+    invoke<void>("decide_attachment", { fileConv, accept }),
   saveFileToDir: (fileConv: string, dir: string) =>
     invoke<string>("save_file_to_dir", { fileConv, dir }),
   /** The platform's standard Downloads folder (macOS ~/Downloads, Windows Downloads, Linux

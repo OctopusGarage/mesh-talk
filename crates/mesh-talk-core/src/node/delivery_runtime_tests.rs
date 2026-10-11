@@ -641,6 +641,13 @@ struct NegativeCustodyStore<S> {
 impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
     for NegativeCustodyStore<S>
 {
+    fn file_consent(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> crate::eventlog::sync::FileConsentStatus {
+        self.inner.file_consent(file, manifest)
+    }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
         if *conversation != self.file {
             return self.inner.durable_have(conversation, id);
@@ -855,6 +862,10 @@ async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() 
             .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
             .await
             .unwrap();
+        let upload = a
+            .outgoing_file_progress(id)
+            .expect("accepted file progress");
+        assert_eq!((upload.done, upload.total, upload.delivered), (0, 1, false));
         let mut workers = tokio::task::JoinSet::new();
         workers.spawn(b.clone().run_accept_loop(bl));
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
@@ -1377,7 +1388,7 @@ async fn delayed_private_file_peer(
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    } else if super::session::is_round_request(&bytes, file)
+                    } else if super::session::is_followup(&bytes, file)
                         && node
                             .file_progress(file)
                             .is_some_and(|progress| progress.done == 1)
@@ -1388,8 +1399,9 @@ async fn delayed_private_file_peer(
                         observation
                             .interrupted_connection
                             .store(connection, std::sync::atomic::Ordering::SeqCst);
-                        // One original chunk is already admitted. Force this
-                        // round past 400ms once; retries must abandon its socket.
+                        // One original chunk is already admitted. A burst's next
+                        // Followup now arrives in the same reconciliation; stall it
+                        // past 400ms so retries must abandon this socket.
                         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
                     }
                     timing.phase("delayed-peer-serve-exchange");
@@ -2393,6 +2405,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
     b.set_invisible(true).await.unwrap();
     b.initiate_contact_locally(&aa.account_id()).await.unwrap();
     b.initiate_contact_locally(&ca.account_id()).await.unwrap();
+    b.set_attachment_global_auto(false).unwrap();
     let manifest = crate::file::FileManifest {
         name: "alias.txt".into(),
         size: 0,
@@ -2421,6 +2434,22 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
     }
     assert_eq!(b.account_history(&aa.account_id(), 10).len(), 1);
     assert_eq!(b.account_history(&ca.account_id(), 10).len(), 1);
+    assert_eq!(
+        b.attachment_consent_status(manifest.file_conv),
+        Some(crate::node::ReceiveDecision::Pending)
+    );
+    b.set_attachment_contact_auto(&ca.account_id(), Some(true))
+        .unwrap();
+    assert_eq!(
+        b.attachment_consent_status(manifest.file_conv),
+        Some(crate::node::ReceiveDecision::Pending),
+        "one automatic alias must not hide the other sender's approval controls"
+    );
+    b.decide_attachment(manifest.file_conv, true).unwrap();
+    assert_eq!(
+        b.attachment_consent_status(manifest.file_conv),
+        Some(crate::node::ReceiveDecision::Accepted)
+    );
     b.delete_account_message(&aa.account_id(), originals[0].id)
         .unwrap();
     {
@@ -2507,7 +2536,7 @@ async fn offline_file_card_has_durable_awaiting_id_and_no_text_history_row() {
 }
 
 #[test]
-fn oversized_manifest_is_rejected_before_staging_ciphertext_chunks() {
+fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
     let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
@@ -2517,19 +2546,72 @@ fn oversized_manifest_is_rejected_before_staging_ciphertext_chunks() {
         Account::generate(),
         &bp,
     );
-    let path = dir.path().join("oversized.txt");
-    std::fs::File::create(&path)
-        .unwrap()
-        .set_len(4 * 1024 * 1024 * 1024)
-        .unwrap();
+    let size = 4 * 1024 * 1024 * 1024;
+    let prospective = crate::file::FileManifestV3 {
+        v2: crate::file::FileManifestV2 {
+            name: "large-folder.tar".into(),
+            size,
+            mime: crate::file::directory::MIME.into(),
+            checksum: [0; 32],
+            file_key: [0; 32],
+            file_nonce: [0; 8],
+            file_conv: ConversationId::new([0; 32]),
+            chunk_size: crate::file::CHUNK_SIZE as u32,
+            chunk_count: crate::file::chunk_count_for(size),
+            chunk_hashes: vec![],
+        },
+        kind: crate::file::FileKind::File,
+    };
     let before = a.log.lock().unwrap().conversations();
-    let result = a.stage_file(&path, crate::file::FileKind::File, |_| {
-        panic!("transport-impossible manifests must fail before the first chunk");
-    });
-    assert!(
-        matches!(result, Err(NodeError::InvalidInput(ref error)) if error.contains("transport frame"))
-    );
+    assert!(super::files::compact_manifest_needed(&a.identity, &prospective).unwrap());
+    assert!(super::files::compact_manifest_needed(
+        &a.identity,
+        &crate::file::FileManifestV3 {
+            v2: crate::file::FileManifestV2 {
+                size: 1024,
+                chunk_count: 1,
+                ..prospective.v2.clone()
+            },
+            ..prospective.clone()
+        }
+    )
+    .is_ok_and(|compact| !compact));
     assert_eq!(a.log.lock().unwrap().conversations(), before);
+}
+
+#[tokio::test]
+#[ignore = "large disk transfer runs separately in backend E2E"]
+async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let bob = DeviceIdentity::generate();
+    let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
+    let (alice, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &bp,
+    );
+    let folder = dir.path().join("paintings");
+    std::fs::create_dir(&folder).unwrap();
+    // Write actual data: sparse files can be encoded differently by tar on CI.
+    let mut source = std::fs::File::create(folder.join("large.bin")).unwrap();
+    let block = vec![0xA5; 1024 * 1024];
+    for _ in 0..110 {
+        std::io::Write::write_all(&mut source, &block).unwrap();
+    }
+    drop(source);
+
+    let (_, file_conv) = alice
+        .enqueue_file_dm(&bob.user_id(), &folder, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let files = alice.files.lock().unwrap();
+    let Some(crate::file::AnyManifest::V4(manifest)) = files.manifest(&file_conv) else {
+        panic!("large folder must use the compact manifest");
+    };
+    assert_eq!(manifest.v3.v2.name, "paintings.tar");
+    assert_eq!(manifest.v3.v2.mime, crate::file::directory::MIME);
+    assert!(manifest.v3.v2.chunk_count > 2_000);
 }
 
 #[test]
@@ -2710,22 +2792,22 @@ fn node_with_files(
     let (tx, rx) = mpsc::unbounded_channel();
     let (ch, _) = mpsc::unbounded_channel();
     let (file, files) = mpsc::unbounded_channel();
-    (
-        Node::open_with_account(
-            identity,
-            account,
-            roster,
-            tx,
-            ch,
-            file,
-            &dir.join("events.log"),
-            &dir.join("sent.log"),
-            "pw",
-        )
-        .unwrap(),
-        rx,
-        files,
+    let node = Node::open_with_account(
+        identity,
+        account,
+        roster,
+        tx,
+        ch,
+        file,
+        &dir.join("events.log"),
+        &dir.join("sent.log"),
+        "pw",
     )
+    .unwrap();
+    // Legacy delivery tests exercise the previous automatic-transfer contract.
+    // The consent-specific loopback test keeps the new manual default.
+    node.set_attachment_global_auto(true).unwrap();
+    (node, rx, files)
 }
 
 #[tokio::test]
@@ -3310,7 +3392,7 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
 }
 
 #[tokio::test]
-async fn file_post_office_final_custody_does_not_retire_target_resume_after_early_card_ack() {
+async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -3350,6 +3432,8 @@ async fn file_post_office_final_custody_does_not_retire_target_resume_after_earl
     a.log.lock().unwrap().append_durable(ack).unwrap();
     a.emit_new_messages(control_conv);
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    let upload = a.outgoing_file_progress(id).unwrap();
+    assert_eq!((upload.done, upload.total, upload.delivered), (0, 2, false));
     assert!(b.read_file(file).is_err());
     let final_chunk = a
         .delivery
@@ -3376,7 +3460,10 @@ async fn file_post_office_final_custody_does_not_retire_target_resume_after_earl
         .unwrap()
         .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
     a.flush_file_delivery(id).await;
-    assert!(relay.lock().unwrap().has(&final_chunk));
+    assert!(
+        !relay.lock().unwrap().has(&final_chunk),
+        "offline relay must not receive attachment chunks before recipient consent"
+    );
     assert!(
         a.delivery
             .lock()
@@ -3412,6 +3499,15 @@ async fn file_post_office_final_custody_does_not_retire_target_resume_after_earl
     let _ = bt.await;
     assert!(resumed.is_ok());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert_eq!(
+        a.outgoing_file_progress(id).unwrap(),
+        super::OutgoingFileProgress {
+            done: 2,
+            total: 2,
+            delivered: true,
+            consent: None,
+        }
+    );
     assert_eq!(b.read_file(file).unwrap(), bytes);
 }
 
@@ -3433,7 +3529,8 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, _) = node(bd.path(), bob, ba, &ap);
-    let bytes = vec![6; 1024];
+    let mut bytes = vec![6; 1024];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
     let path = ad.path().join("preview.png");
     std::fs::write(&path, &bytes).unwrap();
     let (id, file) = a

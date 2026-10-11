@@ -112,6 +112,7 @@ enum FilePhase {
     Dial,
     Manifest,
     ManifestCustody,
+    Consent,
     InitialCustody,
     Chunks,
     FinalCustody,
@@ -190,6 +191,7 @@ impl FileScan {
 impl FileDeliveryScheduler {
     fn scan(&mut self, node: &Node) -> FileScan {
         node.prune_file_transfers(&mut self.transfers);
+        node.prune_outgoing_file_acks();
         FileScan {
             cursor: self.pending_cursor,
             slots: MAX_FILE_TRANSFERS - self.transfers.len(),
@@ -233,14 +235,21 @@ impl FileDeliveryScheduler {
             if node
                 .retry_file_step(&file, &destination, &mut self.transfers)
                 .await
-                && node
+            {
+                if node
                     .delivery
                     .lock()
                     .expect("delivery lock not poisoned")
                     .retire_file_destination(file.id, destination.binding.event_id)
                     .is_err()
-            {
-                diagnostic.warn_if_due();
+                {
+                    diagnostic.warn_if_due();
+                } else {
+                    node.outgoing_file_acks
+                        .lock()
+                        .expect("outgoing file progress lock not poisoned")
+                        .remove(&key);
+                }
             }
             if self.transfers.contains_key(&key) {
                 progress.insert(key);
@@ -334,11 +343,20 @@ impl Node {
             ));
         }
         {
+            let mut permitted_authors = self
+                .files
+                .lock()
+                .expect("files lock not poisoned")
+                .authors(manifest.file_conv());
+            permitted_authors.insert(event.author);
             let log = self.log.lock().expect("log lock not poisoned");
             let mut chunks = log.events(&manifest.file_conv());
             chunks.sort_by_key(|chunk| chunk.seq);
             let mut previous = None;
+            let mut chunk_author = None;
             if chunks.iter().enumerate().any(|(index, chunk)| {
+                let mixed_authors = chunk_author.is_some_and(|author| author != chunk.author);
+                chunk_author = Some(chunk.author);
                 let malformed_chain = chunk.seq != index as u64 + 1
                     || match previous {
                         None => !chunk.parents.is_empty(),
@@ -346,8 +364,9 @@ impl Node {
                     };
                 previous = Some(chunk.id);
                 malformed_chain
+                    || mixed_authors
                     || chunk.kind != crate::eventlog::EventKind::Message
-                    || chunk.author != event.author
+                    || !permitted_authors.contains(&chunk.author)
                     || chunk.seq == 0
                     || chunk.seq > u64::from(manifest.chunk_count())
                     || !chunk.verify_integrity()
@@ -739,7 +758,11 @@ impl Node {
                                 let mut book = self.files.lock().expect("files lock not poisoned");
                                 let fresh = !book.is_emitted(&entry.event_id);
                                 book.mark_emitted(entry.event_id);
-                                book.record_event(entry.event_id, manifest.clone());
+                                book.record_event(
+                                    entry.event_id,
+                                    crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
+                                    manifest.clone(),
+                                );
                                 fresh
                             };
                             self.remember_manifest_scope(
@@ -758,6 +781,7 @@ impl Node {
                                     .insert(manifest.file_conv());
                                 let _ = self.file_incoming.send(ReceivedFile {
                                     conv: original_conv,
+                                    is_channel: false,
                                     from: sender.user_id(),
                                     name: manifest.name().to_owned(),
                                     size: manifest.size(),
@@ -802,6 +826,61 @@ impl Node {
             .lock()
             .expect("delivery lock not poisoned")
             .status(id)
+    }
+
+    /// Confirmed chunks across the recipient account's devices. Local staging and
+    /// self-device replication are excluded from the sender's upload percentage.
+    pub fn outgoing_file_progress(&self, id: EventId) -> Option<super::OutgoingFileProgress> {
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        let card = delivery.file_card(id)?;
+        let own_account = self.account_id();
+        let recipients = card
+            .destinations
+            .iter()
+            .filter(|d| d.binding.account.as_deref() != Some(own_account.as_str()))
+            .collect::<Vec<_>>();
+        if recipients.is_empty() {
+            return None;
+        }
+        let acks = self
+            .outgoing_file_acks
+            .lock()
+            .expect("outgoing file progress lock not poisoned");
+        let consent_answers = self
+            .outgoing_file_consents
+            .lock()
+            .expect("outgoing consent lock not poisoned");
+        let consent = if recipients.iter().any(|destination| {
+            consent_answers.get(&(id, destination.binding.event_id))
+                == Some(&crate::eventlog::sync::FileConsentStatus::Declined)
+        }) {
+            Some(super::ReceiveDecision::Declined)
+        } else if recipients.iter().any(|destination| {
+            consent_answers.get(&(id, destination.binding.event_id))
+                == Some(&crate::eventlog::sync::FileConsentStatus::Pending)
+        }) {
+            Some(super::ReceiveDecision::Pending)
+        } else {
+            None
+        };
+        let total = card.chunk_count.saturating_mul(recipients.len() as u32);
+        let done = recipients.iter().fold(0u32, |sum, destination| {
+            let confirmed = if destination.active {
+                acks.get(&(id, destination.binding.event_id))
+                    .copied()
+                    .unwrap_or(0)
+                    .min(card.chunk_count)
+            } else {
+                card.chunk_count
+            };
+            sum.saturating_add(confirmed)
+        });
+        Some(super::OutgoingFileProgress {
+            done,
+            total,
+            delivered: recipients.iter().all(|d| !d.active),
+            consent,
+        })
     }
 
     /// Bounded account-conversation status snapshot, with no plaintext payloads.
@@ -1474,6 +1553,7 @@ impl Node {
             FilePhase::Dial => "file-dial",
             FilePhase::Manifest => "file-manifest-exchange",
             FilePhase::ManifestCustody => "file-manifest-custody",
+            FilePhase::Consent => "file-consent",
             FilePhase::InitialCustody => "file-initial-custody",
             FilePhase::Chunks => "file-chunk-exchange",
             FilePhase::FinalCustody => "file-final-custody",
@@ -1528,6 +1608,30 @@ impl Node {
                     .as_ref()
                     .is_none_or(|channel| channel.io_admitted())
         });
+    }
+
+    fn prune_outgoing_file_acks(&self) {
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.outgoing_file_acks
+            .lock()
+            .expect("outgoing file progress lock not poisoned")
+            .retain(|(id, destination_id), _| {
+                delivery.file_card(*id).is_some_and(|card| {
+                    card.destinations
+                        .iter()
+                        .any(|d| d.active && d.binding.event_id == *destination_id)
+                })
+            });
+        self.outgoing_file_consents
+            .lock()
+            .expect("outgoing consent lock not poisoned")
+            .retain(|(id, destination_id), _| {
+                delivery.file_card(*id).is_some_and(|card| {
+                    card.destinations
+                        .iter()
+                        .any(|d| d.active && d.binding.event_id == *destination_id)
+                })
+            });
     }
 
     async fn advance_file_transfer(
@@ -1618,8 +1722,35 @@ impl Node {
                 transfer.phase = if transfer.legacy {
                     FilePhase::Chunks
                 } else {
-                    FilePhase::InitialCustody
+                    FilePhase::Consent
                 };
+            }
+            FilePhase::Consent => {
+                match super::session::request_file_consent(
+                    channel,
+                    file.file_conversation,
+                    binding.event_id,
+                )
+                .await
+                {
+                    Ok(status) => {
+                        self.outgoing_file_consents
+                            .lock()
+                            .expect("outgoing consent lock not poisoned")
+                            .insert((file.id, binding.event_id), status);
+                        if status == crate::eventlog::sync::FileConsentStatus::Accepted {
+                            transfer.phase = FilePhase::InitialCustody;
+                        }
+                    }
+                    Err(_) => {
+                        // Pre-consent clients do not understand the appended query.
+                        // Their old automatic transfer path remains available.
+                        transfer.channel = None;
+                        transfer.legacy = true;
+                        transfer.sync = super::session::SyncProgress::default();
+                        transfer.phase = FilePhase::Dial;
+                    }
+                }
             }
             FilePhase::InitialCustody => {
                 if super::session::request_durable_have(
@@ -1634,11 +1765,25 @@ impl Node {
                 transfer.phase = FilePhase::Chunks;
             }
             FilePhase::Chunks => {
-                if transfer
+                let complete = transfer
                     .sync
-                    .step(channel, &store, file.file_conversation)
-                    .await?
-                {
+                    .step_burst(
+                        channel,
+                        &store,
+                        file.file_conversation,
+                        super::session::FILE_FOLLOWUP_BURST,
+                    )
+                    .await?;
+                if let Some(confirmed) = transfer.sync.remote_have_count() {
+                    self.outgoing_file_acks
+                        .lock()
+                        .expect("outgoing file progress lock not poisoned")
+                        .insert(
+                            (file.id, binding.event_id),
+                            confirmed.min(file.chunk_count as usize) as u32,
+                        );
+                }
+                if complete {
                     transfer.phase = FilePhase::FinalCustody;
                 }
             }
@@ -1692,6 +1837,16 @@ impl Node {
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);
         for relay in [false, true].into_iter().filter(|relay| *relay || direct) {
+            if relay
+                && self
+                    .outgoing_file_consents
+                    .lock()
+                    .expect("outgoing consent lock not poisoned")
+                    .get(&(file.id, binding.event_id))
+                    != Some(&crate::eventlog::sync::FileConsentStatus::Accepted)
+            {
+                continue;
+            }
             let peer = if relay {
                 let roster = self.roster.lock().expect("roster lock not poisoned");
                 super::postbox::elected_post_office(&roster)
@@ -1733,6 +1888,39 @@ impl Node {
                 }
                 if !current() || (relay && !self.relay_allowed(&peer.public)) {
                     return false;
+                }
+                if !relay {
+                    match super::session::request_file_consent(
+                        &mut channel,
+                        file.file_conversation,
+                        binding.event_id,
+                    )
+                    .await
+                    {
+                        Ok(status) => {
+                            self.outgoing_file_consents
+                                .lock()
+                                .expect("outgoing consent lock not poisoned")
+                                .insert((file.id, binding.event_id), status);
+                            if status != crate::eventlog::sync::FileConsentStatus::Accepted {
+                                return false;
+                            }
+                        }
+                        Err(_) => {
+                            // Reconnect before speaking the original chunk protocol.
+                            let Ok(reconnected) = self.privacy_dial(peer.addr, &peer.public).await
+                            else {
+                                return false;
+                            };
+                            channel = reconnected;
+                            if super::session::request_round(&mut channel, &store, manifest_conv)
+                                .await
+                                .is_err()
+                            {
+                                return false;
+                            }
+                        }
+                    }
                 }
                 let Some(final_chunk) = file.final_chunk else {
                     return false;
@@ -1779,7 +1967,7 @@ impl Node {
                 }
                 #[cfg(test)]
                 phase.store(4, std::sync::atomic::Ordering::Relaxed);
-                if super::session::request_round(&mut channel, &store, file.file_conversation)
+                if super::session::request_file_round(&mut channel, &store, file.file_conversation)
                     .await
                     .is_err()
                 {
@@ -1832,12 +2020,19 @@ impl Node {
             return;
         };
         for destination in &file.destinations {
-            if destination.active && self.retry_file_destination(&file, destination).await {
-                let _ = self
+            if destination.active
+                && self.retry_file_destination(&file, destination).await
+                && self
                     .delivery
                     .lock()
                     .expect("delivery lock not poisoned")
-                    .retire_file_destination(file.id, destination.binding.event_id);
+                    .retire_file_destination(file.id, destination.binding.event_id)
+                    .is_ok()
+            {
+                self.outgoing_file_acks
+                    .lock()
+                    .expect("outgoing file progress lock not poisoned")
+                    .remove(&(file.id, destination.binding.event_id));
             }
         }
     }

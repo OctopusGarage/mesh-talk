@@ -3,6 +3,7 @@ import { chat, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import { notifyInbound } from "@/lib/notify";
+import { loadPendingUnread, loadUnread } from "@/lib/unreadStorage";
 import { useAvatars } from "@/store/avatars";
 import { useCalls } from "@/store/calls";
 import { useTransfers } from "@/store/transfers";
@@ -128,7 +129,40 @@ async function pollUntilReady(
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
       const acct = identity.account_id;
-      set({ myId: identity.device_id, myAccountId: acct, ready: true });
+      const persistedUnread = loadUnread(owner, acct);
+      const persistedPendingUnread = loadPendingUnread(owner, acct);
+      set((state) => {
+        const sameScope =
+          state.unreadOwner === owner && state.myAccountId === acct;
+        const replacedScope = state.unreadOwner !== "" && !sameScope;
+        const unread = sameScope ? state.unread : { ...persistedUnread };
+        const pendingUnknownUnread = sameScope
+          ? state.pendingUnknownUnread
+          : { ...persistedPendingUnread };
+        if (!sameScope && !replacedScope)
+          for (const [key, count] of Object.entries(state.unread))
+            unread[key] = (unread[key] ?? 0) + count;
+        if (!sameScope && !replacedScope)
+          for (const [sender, count] of Object.entries(
+            state.pendingUnknownUnread,
+          ))
+            pendingUnknownUnread[sender] = Math.min(
+              1_000_000,
+              (pendingUnknownUnread[sender] ?? 0) + count,
+            );
+        return {
+          ...(replacedScope ? invalidateConversationIdentity() : {}),
+          identityEpoch: replacedScope
+            ? state.identityEpoch + 1
+            : state.identityEpoch,
+          myId: identity.device_id,
+          myAccountId: acct,
+          unread,
+          pendingUnknownUnread,
+          unreadOwner: owner,
+          ready: true,
+        };
+      });
       // Tell the avatars store who "we" are (so setting our own avatar publishes it) and
       // pull avatars peers already propagated to us (durable across restart).
       useAvatars.getState().setOwnId(acct);
@@ -188,6 +222,8 @@ export interface ChatState {
   messages: Record<string, ChatMessage[]>;
   reactions: Record<string, ReactionInfo[]>;
   unread: Record<string, number>;
+  unreadOwner: string;
+  pendingUnknownUnread: Record<string, number>;
   // Conversation keys in open-recency order (most-recent-last); drives cache eviction.
   // Not read by any component selector — purely internal LRU bookkeeping.
   cacheOrder: string[];
@@ -213,7 +249,8 @@ export interface ChatState {
   setError: (msg: string) => void;
   refreshRoster: () => Promise<void>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
-  reload: () => Promise<void>;
+  markActiveRead: () => void;
+  reload: () => Promise<boolean>;
   refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
   admitText: (text: string, replyTo: string | null) => boolean;
@@ -261,6 +298,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   messages: {},
   reactions: {},
   unread: {},
+  unreadOwner: "",
+  pendingUnknownUnread: {},
   cacheOrder: [],
   members: [],
   channelOwner: "",
@@ -403,6 +442,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       messages: {},
       reactions: {},
       unread: {},
+      unreadOwner: "",
+      pendingUnknownUnread: {},
       cacheOrder: [],
       members: [],
       channelOwner: "",
@@ -523,14 +564,29 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       // Polling returns fresh arrays even when discovery has not changed. Preserve
       // the previous references so sidebar subscribers do not redraw every tick.
       const previous = get();
-      if (
+      const rosterChanged =
         JSON.stringify([
           previous.peers,
           previous.accounts,
           previous.channels,
-        ]) !== JSON.stringify([peers, accounts, channels])
-      )
-        set({ peers, accounts, channels });
+        ]) !== JSON.stringify([peers, accounts, channels]);
+      const resolved = peers.filter(
+        (peer) =>
+          peer.account_id && previous.pendingUnknownUnread[peer.user_id],
+      );
+      if (rosterChanged || resolved.length) {
+        const unread = { ...previous.unread };
+        const pendingUnknownUnread = { ...previous.pendingUnknownUnread };
+        for (const peer of resolved) {
+          const key = `account:${peer.account_id}`;
+          unread[key] = (unread[key] ?? 0) + pendingUnknownUnread[peer.user_id];
+          delete pendingUnknownUnread[peer.user_id];
+        }
+        set({
+          ...(rosterChanged ? { peers, accounts, channels } : {}),
+          ...(resolved.length ? { unread, pendingUnknownUnread } : {}),
+        });
+      }
       // Cache each channel's members for the composite group avatar (best-effort per
       // channel; a single failure just leaves that channel's montage on its fallback).
       const memberEntries = await Promise.all(
@@ -564,8 +620,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return;
     const request = get().activeRequest + 1;
     set((state) => openConversationState(state, c, target, request));
-    await get().reload();
+    const loaded = await get().reload();
     if (!lease.current() || get().activeRequest !== request) return;
+    if (loaded) get().markActiveRead();
     if (c.kind === "channel") {
       try {
         const info = await chat.channelMembers(c.id);
@@ -575,6 +632,20 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         /* ignore */
       }
     }
+  },
+
+  markActiveRead: () => {
+    const { active, loading, historyError } = get();
+    if (
+      !active ||
+      loading ||
+      historyError === convKey(active) ||
+      !isConversationVisible()
+    )
+      return;
+    const key = convKey(active);
+    if (get().unread[key])
+      rawSet((state) => ({ unread: { ...state.unread, [key]: 0 } }));
   },
 
   reload: () => reloadConversation(rawSet, get),
@@ -853,7 +924,28 @@ function bump(set: Set, key: string, active: boolean) {
   }
 }
 
+function isConversationVisible(): boolean {
+  return (
+    typeof document !== "undefined" &&
+    document.visibilityState === "visible" &&
+    document.hasFocus()
+  );
+}
+
 let lastUnknownSenderRefresh = 0;
+
+function queueUnknownUnread(set: Set, sender: string) {
+  set((state) => {
+    const pending = state.pendingUnknownUnread;
+    if (!pending[sender] && Object.keys(pending).length >= 256) return {};
+    return {
+      pendingUnknownUnread: {
+        ...pending,
+        [sender]: Math.min(1_000_000, (pending[sender] ?? 0) + 1),
+      },
+    };
+  });
+}
 
 function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   // Route to the sender's account conversation (multi-device aware).
@@ -863,6 +955,8 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // Unknown sender (not yet discovered). Throttle: a burst from an undiscovered account
     // would otherwise fire one roster refresh (3 invokes) per message. The 4s interval
     // poll also covers this.
+    queueUnknownUnread(set, e.from);
+    void notifyInbound(e.from_name || "New message", e.text, false);
     const now = Date.now();
     if (now - lastUnknownSenderRefresh > 2000) {
       lastUnknownSenderRefresh = now;
@@ -878,7 +972,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   const key = convKey(conv);
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
-  bump(set, key, isActive);
+  bump(set, key, isActive && isConversationVisible());
   void notifyInbound(conv.name || "New message", e.text, isActive);
 }
 
@@ -891,7 +985,7 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
   const key = convKey(conv);
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
-  bump(set, key, isActive);
+  bump(set, key, isActive && isConversationVisible());
   void notifyInbound(e.channel_name, e.text, isActive);
 }
 
@@ -899,41 +993,48 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   // Surface received files in the dedicated tray (quick Save via a native dialog), and —
   // since files are now first-class conversation messages — reload the active conversation
   // so the new media bubble appears inline. De-dupe the tray by file_conv.
+  if (get().incomingFiles.some((f) => f.fileConv === e.file_conv)) return;
   const peer = get().peers.find((p) => p.user_id === e.from);
   const fromName = peer?.name || e.from;
-  set((s) =>
-    s.incomingFiles.some((f) => f.fileConv === e.file_conv)
-      ? {}
-      : {
-          // Cap the tray list so a long session in a busy channel can't grow it without
-          // bound (entries otherwise leave only on explicit save/dismiss).
-          incomingFiles: [
-            {
-              fromName,
-              name: e.name,
-              size: e.size,
-              mime: e.mime,
-              fileConv: e.file_conv,
-              media: e.media,
-            },
-            ...s.incomingFiles,
-          ].slice(0, INCOMING_FILES_CAP),
-        },
-  );
+  set((s) => ({
+    // Cap the tray list so a long session in a busy channel can't grow it without
+    // bound (entries otherwise leave only on explicit save/dismiss).
+    incomingFiles: [
+      {
+        fromName,
+        name: e.name,
+        size: e.size,
+        mime: e.mime,
+        fileConv: e.file_conv,
+        media: e.media,
+      },
+      ...s.incomingFiles,
+    ].slice(0, INCOMING_FILES_CAP),
+  }));
 
   // Route the file to its conversation so its bubble lands in the stream. A channel file's
   // `conv` is the channel id; a DM file is filed (on both sides) under the sender's ACCOUNT
   // conversation, matching get_handleDm. If that conversation is active, reload it so the
   // new bubble appears; otherwise bump its unread badge.
-  const isChannelFile = get().channels.some((c) => c.channel_id === e.conv);
+  const isChannelFile = e.is_channel;
   let key: string | null = null;
   if (isChannelFile) {
     key = convKey({ kind: "channel", id: e.conv, name: "" });
   } else if (peer?.account_id) {
     key = convKey({ kind: "account", id: peer.account_id, name: "" });
   }
-  if (!key) return;
+  if (!key) {
+    if (!isChannelFile) {
+      queueUnknownUnread(set, e.from);
+      const now = Date.now();
+      if (now - lastUnknownSenderRefresh > 2000) {
+        lastUnknownSenderRefresh = now;
+        void get().refreshRoster();
+      }
+    }
+    return;
+  }
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
-  bump(set, key, isActive);
+  bump(set, key, isActive && isConversationVisible());
 }

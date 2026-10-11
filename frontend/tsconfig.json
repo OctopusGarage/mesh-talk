@@ -20,7 +20,10 @@
     "noFallthroughCasesInSwitch": true,
 
     "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"] }
+    "paths": {
+      "@/*": ["./src/*"],
+      "virtual:mesh-asset-catalog": ["./src/virtual-asset-catalog.d.ts"]
+    }
   },
   "include": ["src"]
 }

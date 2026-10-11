@@ -28,6 +28,7 @@ import { useChat, captureChatOwnership } from "@/store/chat";
 import {
   useFileAvailability,
   watchFileAvailability,
+  refreshFileAvailability,
 } from "@/store/fileAvailability";
 import { TransferBar } from "./TransferBar";
 import { ReceiveProgress } from "./ReceiveProgress";
@@ -36,11 +37,12 @@ import { fileGlyph } from "./mediaFile";
 export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  // "Received files" is ATTACHMENTS only. A file sent via the media button is shown inline +
-  // auto-saved, so it never appears here — decided by the sender's INTENT (manifest kind),
-  // not the file extension (a .mov sent via the attach button DOES belong here).
+  // Images sent as media appear inline automatically. Files, folders and videos
+  // can require approval, so keep them discoverable in the Received files tray.
   const incoming = useChat((s) => s.incomingFiles);
-  const files = incoming.filter((f) => !f.media);
+  const files = incoming.filter(
+    (f) => !f.media || !f.mime.startsWith("image/"),
+  );
   const [query, setQuery] = useState("");
   const [savingFile, setSavingFile] = useState<string | null>(null);
   const visibleFiles = files.filter((f) =>
@@ -65,6 +67,17 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   }, [open, visibleFileKeys]);
   const dismissFile = useChat((s) => s.dismissFile);
   const setError = useChat((s) => s.setError);
+  const decide = async (fileConv: string, accept: boolean) => {
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
+    try {
+      await chat.decideAttachment(fileConv, accept);
+      if (lease.current()) await refreshFileAvailability([fileConv]);
+    } catch (error) {
+      if (lease.current())
+        setError(t("files.approvalFailed", { error: errorMessage(error) }));
+    }
+  };
 
   // Remembered default download folder ("" = use the OS Downloads folder). Loaded on open, kept as
   // a primitive (memory: zustand selectors returning fresh objects can black-screen).
@@ -440,6 +453,27 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                 {!savedPaths[f.fileConv] && (
                   <ReceiveProgress status={statuses[f.fileConv]} />
                 )}
+                {!savedPaths[f.fileConv] &&
+                  (statuses[f.fileConv]?.consent === "pending" ||
+                    statuses[f.fileConv]?.consent === "declined") && (
+                    <div className="mt-2 flex gap-2 pl-6">
+                      <Button
+                        size="sm"
+                        onClick={() => void decide(f.fileConv, true)}
+                      >
+                        {t("files.approve")}
+                      </Button>
+                      {statuses[f.fileConv]?.consent === "pending" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void decide(f.fileConv, false)}
+                        >
+                          {t("files.decline")}
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 <TransferBar transferKey={f.fileConv} />
               </div>
             ))}

@@ -71,9 +71,9 @@ export async function reloadConversation(rawSet: Set, get: Get) {
   const set: Set = (partial) => {
     if (lease.current()) rawSet(partial);
   };
-  if (!lease.current()) return;
+  if (!lease.current()) return false;
   const c = get().active;
-  if (!c) return;
+  if (!c) return false;
   const key = convKey(c);
   const loadingRequest = get().loadingRequest + 1;
   const request = loadingRequest;
@@ -98,7 +98,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
         get().active &&
         convKey(get().active!) !== key)
     )
-      return;
+      return false;
     set((s) => ({
       messages: {
         ...s.messages,
@@ -127,6 +127,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
     }));
     if (lease.current() && get().active && convKey(get().active!) === key)
       await get().refreshStatuses();
+    return lease.current();
   } catch {
     if (
       get().loadingRequest === loadingRequest &&
@@ -134,6 +135,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
       convKey(get().active!) === key
     )
       set({ loading: false, historyError: key });
+    return false;
   }
 }
 
@@ -179,6 +181,16 @@ export async function refreshDeliveryStatuses(
           .map((m) => m.id!),
       ),
     ];
+    const fileIds = new Set(
+      [
+        ...(get().messages[key] ?? []),
+        ...Object.values(get().intents)
+          .filter((i) => convKey(i.conversation) === key)
+          .map((i) => i.message),
+      ]
+        .filter((m) => m.fromMe && m.id && m.file)
+        .map((m) => m.id!),
+    );
     const projection = new Map<string, "awaiting" | "delivered">();
     for (let i = 0; i < ids.length; i += 256) {
       if (!lease.current()) return;
@@ -188,8 +200,24 @@ export async function refreshDeliveryStatuses(
         ids.slice(i, i + 256),
       );
       if (!lease.current()) return;
-      for (const row of rows)
-        if (ids.includes(row.id)) projection.set(row.id, row.status);
+      for (const row of rows) {
+        if (!ids.includes(row.id)) continue;
+        projection.set(row.id, row.status);
+        if (fileIds.has(row.id)) {
+          if (row.file_progress)
+            useTransfers
+              .getState()
+              .applyUploadStatus(row.id, row.file_progress);
+          else if (row.status === "delivered")
+            // Older status providers cannot report chunk custody. End the
+            // placeholder without ever presenting an unverified 100%.
+            useTransfers.getState().applyUploadStatus(row.id, {
+              done: 0,
+              total: 0,
+              delivered: true,
+            });
+        }
+      }
     }
     set((s) => ({
       messages: s.messages[key]
@@ -357,6 +385,10 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
       failReason: sendFailReason(e),
     });
     if (payload.kind === "file")
-      guarded({ error: `Couldn't send file: ${errorMessage(e)}` });
+      guarded({
+        error: /file manifest exceeds transport frame/i.test(errorMessage(e))
+          ? "This attachment has too much metadata to send. Try a shorter name or a smaller folder."
+          : `Couldn't send file: ${errorMessage(e)}`,
+      });
   }
 }

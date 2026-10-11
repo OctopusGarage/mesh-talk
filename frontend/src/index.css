@@ -336,7 +336,7 @@
         hsl(205 55% 96% / 0.72) 100%
       ),
       linear-gradient(165deg, hsl(205 55% 95% / 0.84), hsl(202 55% 97% / 0.91)),
-      url("./assets/themes/argentina-bg.webp");
+      url("/themes/argentina-bg.webp");
   }
 
   html[data-palette="barcelona"]:not([data-wallpaper="off"])
@@ -348,7 +348,7 @@
         hsl(226 48% 5% / 0.62) 100%
       ),
       linear-gradient(165deg, hsl(224 46% 9% / 0.74), hsl(226 44% 11% / 0.9)),
-      url("./assets/themes/barcelona-bg.jpg");
+      url("/themes/barcelona-bg.jpg");
   }
 
   html[data-palette="messi"]:not([data-wallpaper="off"])
@@ -360,7 +360,7 @@
         hsl(208 50% 96% / 0.72) 100%
       ),
       linear-gradient(165deg, hsl(208 46% 95% / 0.85), hsl(206 50% 97% / 0.92)),
-      url("./assets/themes/messi-bg.jpg");
+      url("/themes/messi-bg.jpg");
   }
 
   html[data-palette="nature"]:not([data-wallpaper="off"])

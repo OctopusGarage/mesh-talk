@@ -17,6 +17,7 @@ vi.mock("@/lib/events", () => ({
 import { useChat, convKey } from "./chat";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
+import { useTransfers } from "./transfers";
 
 it("old roster identity failure cannot undo newer readiness", async () => {
   let reject!: (e: Error) => void;
@@ -463,6 +464,7 @@ it("preacceptance failure and retry retain exact deletion protection outside the
 
 beforeEach(() => {
   invoke.mockReset();
+  useTransfers.getState().reset();
   useAuth.setState({
     user: { id: "host", username: "alice", display_name: "Alice" },
     generation: 0,
@@ -471,6 +473,61 @@ beforeEach(() => {
     error: null,
   });
   reset();
+});
+
+it("projects recipient-confirmed upload progress onto only the matching outgoing file", async () => {
+  let delivered = false;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === "owner_delivery_statuses")
+      return Promise.resolve([
+        {
+          id: "file-id",
+          status: delivered ? "delivered" : "awaiting",
+          file_progress: { done: 3, total: 8, delivered },
+        },
+      ]);
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+    messages: {
+      "account:target": [
+        {
+          id: "file-id",
+          fromMe: true,
+          who: "me",
+          text: "",
+          replyTo: null,
+          wallClock: 1,
+          file: {
+            name: "large.bin",
+            fileConv: "fc",
+            size: 8,
+            mime: "application/octet-stream",
+            media: false,
+          },
+        },
+        {
+          id: "other-id",
+          fromMe: true,
+          who: "me",
+          text: "",
+          replyTo: null,
+          wallClock: 2,
+        },
+      ],
+    },
+  });
+  await useChat.getState().refreshStatuses();
+  expect(useTransfers.getState().transfers["file-id"]).toMatchObject({
+    direction: "send",
+    done: 3,
+    total: 8,
+  });
+  expect(useTransfers.getState().transfers["other-id"]).toBeUndefined();
+  delivered = true;
+  await useChat.getState().refreshStatuses();
+  expect(useTransfers.getState().transfers["file-id"]?.delivered).toBe(true);
 });
 
 describe("convKey", () => {
@@ -556,13 +613,20 @@ describe("open", () => {
       return Promise.resolve(undefined);
     });
     useChat.setState({ unread: { "account:a1": 3 } });
-    await useChat.getState().open({ kind: "account", id: "a1", name: "A" });
-
-    const s = useChat.getState();
-    expect(s.active).toEqual({ kind: "account", id: "a1", name: "A" });
-    expect(s.messages["account:a1"]).toHaveLength(1);
-    expect(s.messages["account:a1"][0].text).toBe("hello");
-    expect(s.unread["account:a1"]).toBe(0);
+    vi.stubGlobal("document", {
+      visibilityState: "visible",
+      hasFocus: () => true,
+    });
+    try {
+      await useChat.getState().open({ kind: "account", id: "a1", name: "A" });
+      const s = useChat.getState();
+      expect(s.active).toEqual({ kind: "account", id: "a1", name: "A" });
+      expect(s.messages["account:a1"]).toHaveLength(1);
+      expect(s.messages["account:a1"][0].text).toBe("hello");
+      expect(s.unread["account:a1"]).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -1305,6 +1369,8 @@ describe("incoming events", () => {
     const stop = useChat.getState().start();
     await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
     useChat.setState({
+      active: { kind: "account", id: "target", name: "Previous peer" },
+      unread: { "account:target": 3 },
       messages: {
         "account:target": [
           {
@@ -1325,8 +1391,43 @@ describe("incoming events", () => {
       expect(useChat.getState().myAccountId).toBe(account),
     );
     expect(useChat.getState().messages).toEqual({});
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().unread).toEqual({});
     expect(useChat.getState().identityEpoch).toBe(1);
     expect(useChat.getState().intents).toEqual({});
+    stop();
+  });
+
+  it("does not carry unread state through a failed identity lookup into another account", async () => {
+    let account = "myacct";
+    let failNext = false;
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd !== "owner_node_identity") return Promise.resolve([]);
+      if (failNext) {
+        failNext = false;
+        return Promise.reject(new Error("node restarting"));
+      }
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: account,
+      });
+    });
+    const stop = useChat.getState().start();
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    useChat.setState({
+      active: { kind: "account", id: "old-peer", name: "Old peer" },
+      unread: { "account:old-peer": 3 },
+    });
+    failNext = true;
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().ready).toBe(false);
+    account = "replacement-account";
+    useChat.getState().retryBoot();
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    expect(useChat.getState().unread).toEqual({});
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().identityEpoch).toBe(1);
     stop();
   });
 
@@ -1349,6 +1450,7 @@ describe("incoming events", () => {
     const run = useChat.getState().runEpoch;
     oldEvents.onFile({
       from: "stranger",
+      is_channel: false,
       file_conv: "old",
       name: "old",
       size: 1,
@@ -1427,7 +1529,61 @@ describe("incoming events", () => {
     stop();
   });
 
-  it("does not bump unread for a DM from an undiscovered peer", async () => {
+  it("does not count existing unread messages again when the same node recovers", async () => {
+    const stop = await boot();
+    useChat.setState({
+      unread: { "account:acctA": 2 },
+      ready: false,
+      bootBusy: false,
+    });
+    useChat.getState().retryBoot();
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    expect(useChat.getState().unread["account:acctA"]).toBe(2);
+    stop();
+  });
+
+  it("keeps messages and files in the open chat unread while unfocused", async () => {
+    const stop = await boot();
+    const view = { visibilityState: "visible", hasFocus: () => false };
+    vi.stubGlobal("document", view);
+    try {
+      useChat.setState({
+        active: { kind: "account", id: "acctA", name: "Alice" },
+      });
+      captured.current!.onDm({
+        from: "dev1",
+        from_name: "Alice",
+        text: "hi",
+        reply_to: null,
+      });
+      captured.current!.onFile({
+        conv: "acctA",
+        is_channel: false,
+        from: "dev1",
+        name: "a.pdf",
+        size: 10,
+        mime: "application/pdf",
+        file_conv: "fc-background",
+      });
+      expect(useChat.getState().unread["account:acctA"]).toBe(2);
+      await useChat.getState().open({
+        kind: "account",
+        id: "acctA",
+        name: "Alice",
+      });
+      expect(useChat.getState().unread["account:acctA"]).toBe(2);
+      useChat.getState().markActiveRead();
+      expect(useChat.getState().unread["account:acctA"]).toBe(2);
+      view.hasFocus = () => true;
+      useChat.getState().markActiveRead();
+      expect(useChat.getState().unread["account:acctA"]).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      stop();
+    }
+  });
+
+  it("counts a DM after its sender appears in the peer roster", async () => {
     const stop = await boot();
     captured.current!.onDm({
       from: "ghost",
@@ -1436,6 +1592,66 @@ describe("incoming events", () => {
       reply_to: null,
     });
     expect(useChat.getState().unread["account:ghost"]).toBeUndefined();
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (cmd === "list_peers")
+        return Promise.resolve([
+          peer,
+          {
+            user_id: "ghost",
+            account_id: "new-account",
+            name: "New contact",
+            addr: "1.2.3.4:7001",
+            post_office: false,
+          },
+        ]);
+      return Promise.resolve([]);
+    });
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().unread["account:new-account"]).toBe(1);
+    stop();
+  });
+
+  it("counts a DM file after its sender appears in the peer roster", async () => {
+    const stop = await boot();
+    captured.current!.onFile({
+      conv: "new-account",
+      is_channel: false,
+      from: "ghost-file",
+      name: "report.pdf",
+      size: 10,
+      mime: "application/pdf",
+      file_conv: "fc-early-file",
+      media: false,
+    });
+    expect(useChat.getState().pendingUnknownUnread["ghost-file"]).toBe(1);
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (cmd === "list_peers")
+        return Promise.resolve([
+          peer,
+          {
+            user_id: "ghost-file",
+            account_id: "new-account",
+            name: "New contact",
+            addr: "1.2.3.4:7001",
+            post_office: false,
+          },
+        ]);
+      return Promise.resolve([]);
+    });
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().unread["account:new-account"]).toBe(1);
     stop();
   });
 
@@ -1452,10 +1668,28 @@ describe("incoming events", () => {
     stop();
   });
 
+  it("routes a new channel file by its explicit scope before roster refresh", async () => {
+    const stop = await boot();
+    captured.current!.onFile({
+      conv: "new-channel",
+      is_channel: true,
+      from: "dev1",
+      name: "notes.pdf",
+      size: 10,
+      mime: "application/pdf",
+      file_conv: "fc-new-channel",
+      media: false,
+    });
+    expect(useChat.getState().unread["channel:new-channel"]).toBe(1);
+    expect(useChat.getState().unread["account:acctA"]).toBeUndefined();
+    stop();
+  });
+
   it("de-dupes received files by file_conv", async () => {
     const stop = await boot();
     const f = {
       conv: "x",
+      is_channel: false,
       from: "dev1",
       name: "a.pdf",
       size: 10,
@@ -1465,6 +1699,7 @@ describe("incoming events", () => {
     captured.current!.onFile(f);
     captured.current!.onFile(f);
     expect(useChat.getState().incomingFiles).toHaveLength(1);
+    expect(useChat.getState().unread["account:acctA"]).toBe(1);
     expect(useChat.getState().incomingFiles[0].fromName).toBe("Alice");
     stop();
   });

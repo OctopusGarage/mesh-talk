@@ -204,10 +204,26 @@ fn two_cli_nodes_transfer_a_file() {
     let payload = b"mesh-talk-file-e2e-known-bytes\n";
     std::fs::write(&src, payload).expect("write source file");
 
-    let (mut alpha, alpha_uid, bravo, bravo_uid) = two_converged_nodes(dir.path(), discovery_port);
+    let (mut alpha, alpha_uid, mut bravo, bravo_uid) =
+        two_converged_nodes(dir.path(), discovery_port);
 
     // Alpha sends the file to Bravo by user_id prefix.
     alpha.send(&format!("/sendfile {} {}", &bravo_uid[..8], src.display()));
+
+    let offer = bravo
+        .wait_for(
+            |line| line.starts_with(&format!("file offer from {alpha_uid}:")),
+            Duration::from_secs(20),
+        )
+        .expect("Bravo receives the offer before any file bytes");
+    let id = offer
+        .split(" id ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    bravo.send(&format!("/receive {id}"));
 
     // Bravo prints the inbound-file line (saved into his data dir) with name + size.
     let got = bravo

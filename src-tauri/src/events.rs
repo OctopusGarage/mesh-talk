@@ -59,7 +59,7 @@ pub const EVENT_DM_RECEIVED: &str = "dm-received";
 pub const EVENT_CHANNEL_MESSAGE: &str = "channel-message";
 /// A received file (DM or channel).
 pub const EVENT_FILE_RECEIVED: &str = "file-received";
-/// Progress of an in-flight file send or save (throttled).
+/// Progress of local file preparation or saving (throttled).
 pub const EVENT_FILE_PROGRESS: &str = "file-progress";
 /// A peer propagated their avatar (a signed profile) to us.
 pub const EVENT_PROFILE_RECEIVED: &str = "profile-received";
@@ -189,6 +189,7 @@ impl<R: Runtime> ProgressThrottle<R> {
 #[derive(serde::Serialize, Clone)]
 pub struct FileReceivedEvent {
     pub conv: String, // hex (channel id for a channel file; the DM conv otherwise)
+    pub is_channel: bool,
     pub from: String, // sender user-id
     pub name: String,
     pub size: u64,
@@ -245,6 +246,7 @@ pub fn emit_channel_message<R: Runtime>(
 pub fn emit_file_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     conv: String,
+    is_channel: bool,
     from: String,
     name: String,
     size: u64,
@@ -254,6 +256,7 @@ pub fn emit_file_received<R: Runtime>(
 ) {
     let event = FileReceivedEvent {
         conv,
+        is_channel,
         from,
         name,
         size,
