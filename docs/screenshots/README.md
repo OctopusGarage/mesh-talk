@@ -1,6 +1,6 @@
 # Desktop screenshots
 
-These images show the current v0.2.0 React interface against deterministic
+These images show the current v0.3.0 React interface against deterministic
 football-themed demo data. The three `hero-*.webp` captures share the same
 conversation and show the Barcelona, Argentina, and Messi palettes.
 They are UI examples, not captures of a real network or evidence of message delivery.

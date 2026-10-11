@@ -40,7 +40,7 @@ encrypted events for offline peers.
        alt="Mesh-Talk Barcelona theme showing a football team chat with Lionel Messi, Neymar Jr., player avatars, and a message composer">
 </p>
 
-<p align="center"><sub>Barcelona × Argentina demo, captured from the current v0.2.0 interface with deterministic sample messages.</sub></p>
+<p align="center"><sub>Barcelona × Argentina demo, captured from the current v0.3.0 interface with deterministic sample messages.</sub></p>
 
 ---
 

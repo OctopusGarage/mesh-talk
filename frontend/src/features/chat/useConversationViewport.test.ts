@@ -112,10 +112,56 @@ it("restores the reading position after switching away and back", async () => {
   await render("account:bob");
   scroller.scrollTop = 0;
   await render("account:alice");
-  expect(viewport.initialIndex).toBe(1);
+  expect(viewport.initialIndex).toBe(0);
   await nextAnimationFrame();
   expect(scroller.scrollTop).toBe(120);
   expect(viewport.showJump).toBe(true);
+
+  // A late virtual-list measurement must not replace the restored position.
+  await act(async () => viewport.atBottomStateChange(true));
+  expect(viewport.showJump).toBe(true);
+  scroller.scrollTop = 700;
+  await act(async () => {
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>);
+  });
+  expect(scroller.scrollTop).toBe(120);
+  viewport.stopRestoring();
+  scroller.scrollTop = 240;
+  await act(async () => {
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>);
+  });
+  expect(scroller.scrollTop).toBe(240);
+});
+
+it("shows the jump button from the measured scroll position despite a stale bottom callback", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  scroller.scrollTop = 0;
+  await act(async () => {
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>);
+  });
+  expect(viewport.showJump).toBe(true);
+
+  await act(async () => viewport.atBottomStateChange(true));
+  expect(viewport.showJump).toBe(true);
+
+  scroller.scrollTop = 700;
+  await act(async () => {
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>);
+  });
+  expect(viewport.showJump).toBe(false);
 });
 
 it("navigates to an exact search result and reports a later miss", async () => {

@@ -8,6 +8,9 @@ export const messageRowKey = (message: ChatMessage, index: number) =>
 
 type Target = (SearchTarget & { key: string; request: number }) | null;
 
+const isAtBottom = (scroller: HTMLElement) =>
+  scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 48;
+
 /** Movement and restoration for the rendered virtual list, scoped by conversation. */
 export function useConversationViewport(
   key: string,
@@ -64,7 +67,8 @@ export function useConversationViewport(
         atBottom.current.set(key, bottom);
         setShowJump(!bottom);
       }
-      restoringScroll.current = null;
+      // Virtuoso may adjust its scroll position again after measuring rows.
+      // Keep the saved offset until the reader starts a new interaction.
     };
     frame = requestAnimationFrame(restore);
     return () => cancelAnimationFrame(frame);
@@ -88,6 +92,7 @@ export function useConversationViewport(
     setSearchMiss(false);
     setHighlightedKey(messageRowKey(messages[index], index));
     const frame = requestAnimationFrame(() => {
+      if (restoringScroll.current === key) restoringScroll.current = null;
       virtuosoRef.current?.scrollToIndex({
         index,
         align: "center",
@@ -112,20 +117,32 @@ export function useConversationViewport(
     scrollerRef(element: HTMLElement | Window | null) {
       scrollerRef.current = element instanceof HTMLElement ? element : null;
     },
-    initialIndex: Math.min(
-      messages.length - 1,
-      scrollPositions.current.get(key) ?? messages.length - 1,
-    ),
+    stopRestoring() {
+      if (restoringScroll.current === key) restoringScroll.current = null;
+    },
+    // Exact pixel restoration runs after the list has measured its rows. Starting
+    // Virtuoso at the saved row as well can issue a later scroll that overwrites it.
+    initialIndex: exactScrollPositions.current.has(key)
+      ? 0
+      : Math.min(
+          messages.length - 1,
+          scrollPositions.current.get(key) ?? messages.length - 1,
+        ),
     atBottomStateChange(bottom: boolean) {
-      atBottom.current.set(key, bottom);
+      // Virtuoso can report a previous measurement after a long row changes height.
+      // The DOM scroller is the source of truth for whether the reader scrolled up.
+      const observedBottom = scrollerRef.current
+        ? isAtBottom(scrollerRef.current)
+        : bottom;
+      atBottom.current.set(key, observedBottom);
       if (restoringScroll.current === key) return;
-      if (bottom) {
+      if (observedBottom) {
         scrollPositions.current.delete(key);
         exactScrollPositions.current.delete(key);
       } else {
         scrollPositions.current.set(key, lastVisibleRows.current.get(key) ?? 0);
       }
-      setShowJump(!bottom);
+      setShowJump(!observedBottom);
     },
     rangeChanged(startIndex: number) {
       lastVisibleRows.current.set(key, startIndex);
@@ -133,12 +150,26 @@ export function useConversationViewport(
         scrollPositions.current.set(key, startIndex);
     },
     onScroll(event: React.UIEvent<HTMLElement>) {
-      if (restoringScroll.current === key) return;
+      if (restoringScroll.current === key) {
+        const top = exactScrollPositions.current.get(key);
+        if (top !== undefined) {
+          const scroller = event.currentTarget;
+          const maxTop = Math.max(
+            0,
+            scroller.scrollHeight - scroller.clientHeight,
+          );
+          const target = Math.min(top, maxTop);
+          if (Math.abs(scroller.scrollTop - target) > 1)
+            scroller.scrollTop = target;
+        }
+        return;
+      }
       const scroller = event.currentTarget;
-      if (
-        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
-        48
-      ) {
+      const bottom = isAtBottom(scroller);
+      atBottom.current.set(key, bottom);
+      setShowJump(!bottom);
+      if (bottom) {
+        scrollPositions.current.delete(key);
         exactScrollPositions.current.delete(key);
         return;
       }
@@ -150,6 +181,7 @@ export function useConversationViewport(
         );
     },
     jumpToLatest() {
+      if (restoringScroll.current === key) restoringScroll.current = null;
       jumpToLatest(() => virtuosoRef.current);
     },
   };

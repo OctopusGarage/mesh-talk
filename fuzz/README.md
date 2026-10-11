@@ -5,7 +5,7 @@ nightly toolchain. Its targets call the same public decode entry points used for
 network frames and opened peer payloads. The weekly and manual [Fuzz workflow](../.github/workflows/fuzz.yml)
 iterates over every target; a crash artifact is uploaded for reproduction.
 
-The v0.2.0 targets cover LAN announcements, message and reaction payloads, DM and recall
+The v0.3.0 targets cover LAN announcements, message and reaction payloads, DM and recall
 envelopes, channel metadata and sender keys, ratchet state and headers, file manifests,
 signed account profiles, device-pairing frames, and call-signal envelopes. The new framed
 targets try both the raw input and the expected magic prefix so mutations reach the

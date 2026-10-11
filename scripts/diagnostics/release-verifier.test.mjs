@@ -18,9 +18,11 @@ test("signature and provenance failures stop the real aggregate verifier before 
     mkdirSync(bin);
     mkdirSync(assets);
     for (const platform of ["macos_arm64", "macos_x86_64", "windows_arm64", "windows_x86_64", "linux_aarch64", "linux_x86_64"]) {
-      const path = join(assets, `mesh-talk_v0.1.5_${platform}.zip`);
-      writeFileSync(path, "fixture archive");
-      writeFileSync(`${path}.bundle`, "fixture signature");
+      for (const suffix of ["", "_lite"]) {
+        const path = join(assets, `mesh-talk_v0.1.5_${platform}${suffix}.zip`);
+        writeFileSync(path, "fixture archive");
+        writeFileSync(`${path}.bundle`, "fixture signature");
+      }
     }
     writeFileSync(join(bin, "cosign"), '#!/usr/bin/env bash\nexit "${SIGNATURE_EXIT:-0}"\n', { mode: 0o755 });
     const record = join(root, "provenance-args.txt");
@@ -33,7 +35,7 @@ test("signature and provenance failures stop the real aggregate verifier before 
     for (const value of ["--source-digest", sha, "--source-ref", "refs/tags/v0.1.5", "--signer-workflow", "OctopusGarage/mesh-talk/.github/workflows/release.yml", "--deny-self-hosted-runners"]) assert.ok(forwarded.includes(value), value);
     // All crypto verifier commands succeeding cannot bypass malformed contents.
     assert.notEqual(spawnSync("bash", args, { env }).status, 0);
-    assert.equal(readFileSync(record, "utf8").split(/\r?\n/).filter((value) => value === "--deny-self-hosted-runners").length, 7, "all six platforms are checked after the single deliberate provenance failure");
+    assert.equal(readFileSync(record, "utf8").split(/\r?\n/).filter((value) => value === "--deny-self-hosted-runners").length, 13, "both editions of all six platforms are checked after the single deliberate provenance failure");
     // Empty PATH is set inside the already-running Bash process, so missing
     // verification tooling is a deterministic failure on every platform.
     const missing = spawnSync("bash", ["-c", 'PATH="$1"; source "$2" "${@:3}"', "fixture", bashPath(join(root, "empty-bin")), ...args]);

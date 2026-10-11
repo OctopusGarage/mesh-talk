@@ -1,58 +1,21 @@
 import { create } from "zustand";
-import {
-  DEFAULT_NATURE_WALLPAPER,
-  getNatureWallpaper,
-} from "@/lib/natureWallpapers";
-import {
-  DEFAULT_CAT_ACRYLIC_WALLPAPER,
-  getCatAcrylicWallpaper,
-} from "@/lib/catAcrylicWallpapers";
+import { installedTheme } from "@/store/packs";
+import type { ThemePack } from "@/lib/pack";
 
 // Base modes use the default Ink & Signal look. Football and nature themes apply
 // their own palette via `data-palette`; nature also selects a separate wallpaper.
-export type Theme =
-  | "light"
-  | "dark"
-  | "oled"
-  | "argentina"
-  | "barcelona"
-  | "messi"
-  | "nature"
-  | "cat-acrylic";
+export type Theme = string;
 
 /** Personal palettes (driven by `html[data-palette=…]`); the rest are base modes. */
-const PALETTES = new Set<Theme>([
-  "argentina",
-  "barcelona",
-  "messi",
-  "nature",
-  "cat-acrylic",
-]);
-
-/** Light palettes build on light defaults; Barcelona remains dark. */
-const LIGHT_PALETTES = new Set<Theme>([
-  "argentina",
-  "messi",
-  "nature",
-  "cat-acrylic",
-]);
-
 /** Every selectable theme, in display order. */
-export const ALL_THEMES: Theme[] = [
-  "dark",
-  "light",
-  "oled",
-  "argentina",
-  "barcelona",
-  "messi",
-  "nature",
-  "cat-acrylic",
-];
+export const ALL_THEMES: Theme[] = ["dark", "light", "oled"];
 
 const KEY = "mesh-talk-theme";
 const WALLPAPER_KEY = "mesh-talk-wallpaper";
-const NATURE_WALLPAPER_KEY = "mesh-talk-nature-wallpaper";
-const CAT_ACRYLIC_WALLPAPER_KEY = "mesh-talk-cat-acrylic-wallpaper";
+const PACK_WALLPAPERS_KEY = "mesh-talk-pack-wallpapers";
+const LEGACY_PACK_WALLPAPER_KEY = "mesh-talk-pack-wallpaper";
+const LEGACY_NATURE_WALLPAPER_KEY = "mesh-talk-nature-wallpaper";
+const LEGACY_CAT_ACRYLIC_WALLPAPER_KEY = "mesh-talk-cat-acrylic-wallpaper";
 let themeTransitionTimer: number | undefined;
 
 function readWallpaper(): boolean {
@@ -69,44 +32,83 @@ function applyWallpaper(enabled: boolean) {
 function read(): Theme {
   if (typeof localStorage === "undefined") return "dark";
   const v = localStorage.getItem(KEY) as Theme | null;
-  return v && ALL_THEMES.includes(v) ? v : "dark";
+  return v && /^[a-z0-9][a-z0-9._-]{2,79}$/.test(v) ? v : "dark";
 }
 
-function readNatureWallpaper(): string {
-  if (typeof localStorage === "undefined") return DEFAULT_NATURE_WALLPAPER.id;
-  return getNatureWallpaper(
-    localStorage.getItem(NATURE_WALLPAPER_KEY) ?? DEFAULT_NATURE_WALLPAPER.id,
-  ).id;
+function readPackWallpapers(activeTheme: string): Record<string, string> {
+  if (typeof localStorage === "undefined") return {};
+  let selections: Record<string, string> = {};
+  try {
+    const saved = localStorage.getItem(PACK_WALLPAPERS_KEY);
+    if (saved) {
+      const parsed: unknown = JSON.parse(saved);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        selections = Object.fromEntries(
+          Object.entries(parsed).filter(
+            ([packId, wallpaperId]) =>
+              /^[a-z0-9][a-z0-9._-]{2,79}$/.test(packId) &&
+              typeof wallpaperId === "string" &&
+              /^[a-z0-9-]+$/.test(wallpaperId),
+          ),
+        );
+      }
+    }
+  } catch {
+    // A damaged preference must not prevent the theme picker from loading.
+  }
+  const legacy = localStorage.getItem(LEGACY_PACK_WALLPAPER_KEY);
+  const legacyNature = localStorage.getItem(LEGACY_NATURE_WALLPAPER_KEY);
+  const legacyCatAcrylic = localStorage.getItem(
+    LEGACY_CAT_ACRYLIC_WALLPAPER_KEY,
+  );
+  let migrated = false;
+  if (
+    legacy &&
+    !ALL_THEMES.includes(activeTheme) &&
+    /^[a-z0-9-]+$/.test(legacy)
+  ) {
+    if (!selections[activeTheme]) {
+      selections[activeTheme] = legacy;
+      migrated = true;
+    }
+    localStorage.removeItem(LEGACY_PACK_WALLPAPER_KEY);
+  }
+  if (legacyNature && /^[a-z0-9-]+$/.test(legacyNature)) {
+    if (!selections.nature) {
+      selections.nature = legacyNature;
+      migrated = true;
+    }
+    localStorage.removeItem(LEGACY_NATURE_WALLPAPER_KEY);
+  }
+  if (legacyCatAcrylic && /^[a-z0-9-]+$/.test(legacyCatAcrylic)) {
+    if (!selections["cat-acrylic"]) {
+      selections["cat-acrylic"] = legacyCatAcrylic;
+      migrated = true;
+    }
+    localStorage.removeItem(LEGACY_CAT_ACRYLIC_WALLPAPER_KEY);
+  }
+  if (migrated)
+    localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selections));
+  return selections;
 }
 
-function applyNatureWallpaper(id: string) {
-  if (typeof document === "undefined") return;
-  const url = getNatureWallpaper(id).url;
-  document.documentElement.style.setProperty(
-    "--nature-wallpaper-url",
-    `url("${url}")`,
+export function selectedPackWallpaper(
+  pack: ThemePack,
+  selections: Record<string, string>,
+): NonNullable<ThemePack["wallpapers"]>[number] | undefined {
+  return (
+    pack.wallpapers?.find((item) => item.id === selections[pack.id]) ??
+    pack.wallpapers?.[0]
   );
 }
 
-function readCatAcrylicWallpaper(): string {
-  if (typeof localStorage === "undefined")
-    return DEFAULT_CAT_ACRYLIC_WALLPAPER.id;
-  return getCatAcrylicWallpaper(
-    localStorage.getItem(CAT_ACRYLIC_WALLPAPER_KEY) ??
-      DEFAULT_CAT_ACRYLIC_WALLPAPER.id,
-  ).id;
-}
+let activeTokens: string[] = [];
 
-function applyCatAcrylicWallpaper(id: string) {
-  if (typeof document === "undefined") return;
-  const url = getCatAcrylicWallpaper(id).url;
-  document.documentElement.style.setProperty(
-    "--cat-acrylic-wallpaper-url",
-    `url("${url}")`,
-  );
-}
-
-function apply(t: Theme, animate: boolean) {
+function apply(
+  t: Theme,
+  animate: boolean,
+  wallpaperSelections: Record<string, string>,
+) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
 
@@ -122,13 +124,29 @@ function apply(t: Theme, animate: boolean) {
     window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
   if (animate && !reduceMotion) root.classList.add("theme-transitioning");
 
-  const isPalette = PALETTES.has(t);
-  // Light palettes build on light defaults; OLED and Barcelona build on dark defaults.
+  for (const token of activeTokens) root.style.removeProperty(`--${token}`);
+  activeTokens = [];
+  root.style.removeProperty("--pack-wallpaper-url");
+  const pack = installedTheme(t);
   const darkBase =
-    t === "dark" || t === "oled" || (isPalette && !LIGHT_PALETTES.has(t));
+    t === "dark" ||
+    t === "oled" ||
+    pack?.base === "dark" ||
+    (!pack && !ALL_THEMES.includes(t));
   root.classList.toggle("dark", darkBase);
   root.classList.toggle("oled", t === "oled");
-  if (isPalette) root.setAttribute("data-palette", t);
+  if (pack) {
+    for (const [token, value] of Object.entries(pack.colors)) {
+      root.style.setProperty(`--${token}`, value);
+      activeTokens.push(token);
+    }
+    const wallpaper =
+      selectedPackWallpaper(pack, wallpaperSelections)?.url ?? pack.wallpaper;
+    if (wallpaper)
+      root.style.setProperty("--pack-wallpaper-url", `url("${wallpaper}")`);
+    root.setAttribute("data-pack-theme", "");
+  } else root.removeAttribute("data-pack-theme");
+  if (pack) root.setAttribute("data-palette", t);
   else root.removeAttribute("data-palette");
 
   if (animate && !reduceMotion) {
@@ -141,44 +159,43 @@ function apply(t: Theme, animate: boolean) {
 
 const initial = read();
 const initialWallpaper = readWallpaper();
-const initialNatureWallpaper = readNatureWallpaper();
-const initialCatAcrylicWallpaper = readCatAcrylicWallpaper();
-apply(initial, false); // before first paint — no animation
+const initialPackWallpapers = readPackWallpapers(initial);
+apply(initial, false, initialPackWallpapers); // before first paint — no animation
 applyWallpaper(initialWallpaper);
-applyNatureWallpaper(initialNatureWallpaper);
-applyCatAcrylicWallpaper(initialCatAcrylicWallpaper);
 
 interface ThemeState {
   theme: Theme;
   wallpaperEnabled: boolean;
-  natureWallpaperId: string;
-  catAcrylicWallpaperId: string;
+  packWallpaperIds: Record<string, string>;
   /** Quick light↔dark toggle (the sidebar icon button); from any brand/oled it lands on dark. */
   toggle: () => void;
   /** Set an explicit theme (the Settings picker). */
   set: (t: Theme) => void;
   setWallpaperEnabled: (enabled: boolean) => void;
-  setNatureWallpaper: (id: string) => void;
-  setCatAcrylicWallpaper: (id: string) => void;
+  setPackWallpaper: (id: string) => void;
+  refresh: () => void;
 }
 
-function persist(t: Theme, animate: boolean) {
+function persist(
+  t: Theme,
+  animate: boolean,
+  wallpaperSelections: Record<string, string>,
+) {
   if (typeof localStorage !== "undefined") localStorage.setItem(KEY, t);
-  apply(t, animate);
+  apply(t, animate, wallpaperSelections);
 }
 
 export const useTheme = create<ThemeState>((set, get) => ({
   theme: initial,
   wallpaperEnabled: initialWallpaper,
-  natureWallpaperId: initialNatureWallpaper,
-  catAcrylicWallpaperId: initialCatAcrylicWallpaper,
+  packWallpaperIds: initialPackWallpapers,
   toggle: () => {
     const next: Theme = get().theme === "light" ? "dark" : "light";
-    persist(next, true);
+    persist(next, true, get().packWallpaperIds);
     set({ theme: next });
   },
   set: (next: Theme) => {
-    persist(next, true);
+    persist(next, true, get().packWallpaperIds);
     set({ theme: next });
   },
   setWallpaperEnabled: (enabled: boolean) => {
@@ -188,22 +205,22 @@ export const useTheme = create<ThemeState>((set, get) => ({
     applyWallpaper(enabled);
     set({ wallpaperEnabled: enabled });
   },
-  setNatureWallpaper: (id: string) => {
-    const wallpaper = getNatureWallpaper(id);
+  setPackWallpaper: (id: string) => {
+    const pack = installedTheme(get().theme);
+    const wallpaper = pack?.wallpapers?.find((item) => item.id === id);
+    if (!pack || !wallpaper) return;
+    const selections = { ...get().packWallpaperIds, [pack.id]: wallpaper.id };
     if (typeof localStorage !== "undefined") {
-      localStorage.setItem(NATURE_WALLPAPER_KEY, wallpaper.id);
+      localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selections));
     }
-    applyNatureWallpaper(wallpaper.id);
-    persist("nature", true);
-    set({ theme: "nature", natureWallpaperId: wallpaper.id });
+    apply(get().theme, true, selections);
+    set({ packWallpaperIds: selections });
   },
-  setCatAcrylicWallpaper: (id: string) => {
-    const wallpaper = getCatAcrylicWallpaper(id);
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(CAT_ACRYLIC_WALLPAPER_KEY, wallpaper.id);
-    }
-    applyCatAcrylicWallpaper(wallpaper.id);
-    persist("cat-acrylic", true);
-    set({ theme: "cat-acrylic", catAcrylicWallpaperId: wallpaper.id });
+  refresh: () => {
+    const current = get().theme;
+    if (!ALL_THEMES.includes(current) && !installedTheme(current)) {
+      persist("dark", false, get().packWallpaperIds);
+      set({ theme: "dark" });
+    } else apply(current, false, get().packWallpaperIds);
   },
 }));

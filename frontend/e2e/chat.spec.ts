@@ -1,4 +1,5 @@
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
+import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
@@ -185,9 +186,22 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(
       page.getByRole("log").getByText("latest-after-long-message"),
     ).toBeInViewport();
+    await expect
+      .poll(() =>
+        log.evaluate((element) => element.scrollHeight - element.clientHeight),
+      )
+      .toBeGreaterThan(48);
     await log.evaluate((element) => {
       element.scrollTop = 0;
     });
+    await expect
+      .poll(() =>
+        log.evaluate(
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      )
+      .toBeGreaterThan(48);
     const jump = page.getByRole("button", { name: "Jump to latest messages" });
     await expect(jump).toBeVisible();
     await jump.click();
@@ -574,6 +588,7 @@ test.describe("Mesh-Talk UI flow", () => {
   test("Settings: pick themes (light, oled, brand palette)", async ({
     page,
   }) => {
+    await seedMarketPacks(page, ["barcelona", "messi"]);
     await enterChat(page);
     // App boots dark.
     await expect(page.locator("html")).toHaveClass(/dark/);
