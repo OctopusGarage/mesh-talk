@@ -1,7 +1,8 @@
-import type { CustomizationPack } from "@/lib/pack";
-
-const MAX_SIDE = 4096;
-const MAX_PIXELS = 16_000_000;
+import {
+  MAX_IMAGE_PIXELS,
+  MAX_IMAGE_SIDE,
+  type CustomizationPack,
+} from "@/lib/pack";
 
 export async function verifyPackImages(pack: CustomizationPack): Promise<void> {
   const urls =
@@ -22,9 +23,9 @@ export async function verifyPackImages(pack: CustomizationPack): Promise<void> {
       if (
         !image.naturalWidth ||
         !image.naturalHeight ||
-        image.naturalWidth > MAX_SIDE ||
-        image.naturalHeight > MAX_SIDE ||
-        image.naturalWidth * image.naturalHeight > MAX_PIXELS
+        image.naturalWidth > MAX_IMAGE_SIDE ||
+        image.naturalHeight > MAX_IMAGE_SIDE ||
+        image.naturalWidth * image.naturalHeight > MAX_IMAGE_PIXELS
       ) {
         throw new Error("Pack image dimensions exceed the safety limit");
       }

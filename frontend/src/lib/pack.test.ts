@@ -116,6 +116,51 @@ describe("customization pack", () => {
     ).toThrow(/unreferenced image/i);
   });
 
+  it("does not treat unknown fields as visible image references", () => {
+    expect(() =>
+      parsePack(
+        archive(
+          {
+            format: 1,
+            id: "test.theme",
+            version: "1.0.0",
+            name: "Theme",
+            kind: "theme",
+            base: "dark",
+            colors: { primary: "170 70% 55%" },
+            file: "images/hidden.png",
+          },
+          { "images/hidden.png": png },
+        ),
+      ),
+    ).toThrow(/unreferenced image/i);
+  });
+
+  it("rejects excessive raster dimensions before browser decoding", () => {
+    const oversizedPng = new Uint8Array(24);
+    oversizedPng.set(png.subarray(0, 8));
+    oversizedPng.set(strToU8("IHDR"), 12);
+    oversizedPng.set([0, 0, 0x20, 0], 16);
+    oversizedPng.set([0, 0, 0, 1], 20);
+    expect(() =>
+      parsePack(
+        archive(
+          {
+            format: 1,
+            id: "test.huge",
+            version: "1.0.0",
+            name: "Huge",
+            kind: "avatar",
+            category: "personal",
+            fit: "cover",
+            avatars: [{ label: "Huge", file: "images/huge.png" }],
+          },
+          { "images/huge.png": oversizedPng },
+        ),
+      ),
+    ).toThrow(/dimensions exceed/i);
+  });
+
   it("rejects a supplied theme image with an invalid path", () => {
     expect(() =>
       parsePack(
@@ -244,7 +289,7 @@ describe("customization pack", () => {
   });
 
   it("loads an animated sticker pack with an explicit fallback", () => {
-    const gif = strToU8("GIF89a000000");
+    const gif = new Uint8Array([...strToU8("GIF89a"), 1, 0, 1, 0]);
     const pack = parsePack(
       archive(
         {
