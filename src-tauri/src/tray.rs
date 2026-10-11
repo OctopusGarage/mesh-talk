@@ -7,9 +7,9 @@ const MENU_HIDE: &str = "hide";
 const MENU_QUIT: &str = "quit";
 pub const TRAY_ID: &str = "mesh-talk-tray";
 
-fn unread_tray_labels(count: u32) -> (Option<String>, String) {
+fn unread_tray_labels(count: u32) -> (String, String) {
     if count == 0 {
-        return (None, "Mesh-Talk".to_string());
+        return (String::new(), "Mesh-Talk".to_string());
     }
     let title = if count > 99 {
         "99+".to_string()
@@ -17,7 +17,7 @@ fn unread_tray_labels(count: u32) -> (Option<String>, String) {
         count.to_string()
     };
     let noun = if count == 1 { "message" } else { "messages" };
-    (Some(title), format!("Mesh-Talk — {count} unread {noun}"))
+    (title, format!("Mesh-Talk — {count} unread {noun}"))
 }
 
 /// Keep the menu bar count in sync with the dock/launcher badge. macOS displays the
@@ -25,7 +25,9 @@ fn unread_tray_labels(count: u32) -> (Option<String>, String) {
 pub fn set_unread_count<R: tauri::Runtime>(app: &AppHandle<R>, count: u32) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let (title, tooltip) = unread_tray_labels(count);
-        let _ = tray.set_title(title.as_deref());
+        // tray-icon 0.24.1 leaves the existing macOS title untouched for None.
+        // An explicit empty string clears a previously painted unread count.
+        let _ = tray.set_title(Some(title.as_str()));
         let _ = tray.set_tooltip(Some(tooltip));
     }
 }
@@ -98,25 +100,22 @@ mod tests {
 
     #[test]
     fn unread_count_is_visible_beside_the_menu_bar_icon() {
-        assert_eq!(unread_tray_labels(0), (None, "Mesh-Talk".to_string()));
+        assert_eq!(
+            unread_tray_labels(0),
+            (String::new(), "Mesh-Talk".to_string())
+        );
         assert_eq!(
             unread_tray_labels(1),
-            (
-                Some("1".to_string()),
-                "Mesh-Talk — 1 unread message".to_string()
-            )
+            ("1".to_string(), "Mesh-Talk — 1 unread message".to_string())
         );
         assert_eq!(
             unread_tray_labels(3),
-            (
-                Some("3".to_string()),
-                "Mesh-Talk — 3 unread messages".to_string()
-            )
+            ("3".to_string(), "Mesh-Talk — 3 unread messages".to_string())
         );
         assert_eq!(
             unread_tray_labels(135),
             (
-                Some("99+".to_string()),
+                "99+".to_string(),
                 "Mesh-Talk — 135 unread messages".to_string()
             )
         );
