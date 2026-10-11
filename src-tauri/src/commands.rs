@@ -463,6 +463,7 @@ pub async fn logout<R: tauri::Runtime>(
             .matching(&lease, |_| ())
             .map_err(CommandError::Authentication)?;
         let result = logout_impl(app_state.inner())?;
+        crate::chat_commands::clear_badge_after_logout(&app_handle, app_state.session().clone());
         let ticket = node_state.next_lifecycle_ticket();
         // Forget exactly the successfully signed-out credential before releasing
         // auth serialization. A replacement login can now remember its own secret.

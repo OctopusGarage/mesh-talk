@@ -13,6 +13,13 @@ import type {
   TrustInfo,
 } from "../types";
 
+// Preserve order across rapid unread/read updates and webview reloads.
+let lastBadgeRevision = 0;
+function nextBadgeRevision(): number {
+  lastBadgeRevision = Math.max(lastBadgeRevision + 1, Date.now() * 1000);
+  return lastBadgeRevision;
+}
+
 export const chat = {
   ownerIdentity: (owner: string) =>
     invoke<{ owner: string; device_id: string; account_id: string }>(
@@ -65,7 +72,8 @@ export const chat = {
   accountId: () => invoke<string>("account_id"),
 
   /** Set the OS app-icon unread badge (dock/taskbar); 0 clears it. */
-  setBadge: (count: number) => invoke<void>("set_badge", { count }),
+  setBadge: (count: number, owner: string) =>
+    invoke<void>("set_badge", { count, owner, revision: nextBadgeRevision() }),
 
   /** The current Wi-Fi network name (SSID), or null if unknown (wired / no Wi-Fi / OS withholds it). */
   networkName: () => invoke<string | null>("network_name"),

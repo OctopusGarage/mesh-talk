@@ -4,7 +4,7 @@ import { test } from "node:test";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 35], ["extended", 36]]) {
+  for (const [tier, count] of [["core", 36], ["extended", 37]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));

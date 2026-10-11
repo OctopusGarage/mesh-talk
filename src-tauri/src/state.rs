@@ -45,6 +45,10 @@ impl SessionLease {
     pub(crate) fn owner(&self) -> &str {
         &self.owner
     }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 impl SessionState {
@@ -206,6 +210,7 @@ pub struct AppState {
     pub(crate) owner_file_progress_hook: FileProgressHook,
     auth_service: AuthService,
     session_state: SessionState,
+    badge_revision: Arc<Mutex<BadgeRevision>>,
     pub(crate) auth_operation: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -224,6 +229,7 @@ impl AppState {
             owner_file_progress_hook: Arc::new(Mutex::new(None)),
             auth_service,
             session_state: SessionState::default(),
+            badge_revision: Arc::new(Mutex::new(BadgeRevision::default())),
             auth_operation: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -234,5 +240,45 @@ impl AppState {
 
     pub fn session(&self) -> &SessionState {
         &self.session_state
+    }
+
+    pub(crate) fn admit_badge_revision(&self, generation: u64, revision: u64) -> bool {
+        self.badge_revision
+            .lock()
+            .is_ok_and(|mut badge| badge.admit(generation, revision))
+    }
+}
+
+#[derive(Default)]
+struct BadgeRevision {
+    generation: u64,
+    latest: u64,
+}
+
+impl BadgeRevision {
+    fn admit(&mut self, generation: u64, revision: u64) -> bool {
+        if self.generation != generation {
+            self.generation = generation;
+            self.latest = 0;
+        }
+        if revision <= self.latest {
+            return false;
+        }
+        self.latest = revision;
+        true
+    }
+}
+
+#[cfg(test)]
+mod badge_revision_tests {
+    use super::BadgeRevision;
+
+    #[test]
+    fn older_same_session_badge_updates_cannot_repaint_after_read() {
+        let mut badge = BadgeRevision::default();
+        assert!(badge.admit(1, 100));
+        assert!(badge.admit(1, 102));
+        assert!(!badge.admit(1, 101));
+        assert!(badge.admit(2, 1));
     }
 }

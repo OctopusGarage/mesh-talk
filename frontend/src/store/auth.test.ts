@@ -26,7 +26,11 @@ describe("auth store", () => {
 
     await useAuth.getState().logout();
 
-    expect(invoke).toHaveBeenCalledWith("set_badge", { count: 0 });
+    expect(invoke).toHaveBeenCalledWith("set_badge", {
+      count: 0,
+      owner: "u1",
+      revision: expect.any(Number),
+    });
   });
 
   it("late same-UUID old-session catch cannot change the new session loading/error", async () => {

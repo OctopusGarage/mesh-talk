@@ -231,8 +231,10 @@ publishes the manifest and members pull chunks only after their own consent; aut
 images retain eager distribution. Decisions bind the signed manifest event and survive
 restart. Identical signed manifests that share the same file conversation are aliases
 of one immutable byte stream; one explicit decision covers those aliases while each
-sender's automatic policy is evaluated separately. Approved partial files are requeued
-on startup. Offline recipients leave
+sender's automatic policy is evaluated separately. Exact decisions are retained
+for the account lifetime, so later offers or policy changes cannot silently
+reverse an earlier decline. Approved partial files are requeued on startup.
+Offline recipients leave
 the sender's chunks local until they reconnect and approve, so the sender must be
 available later to finish delivery. The CLI exposes `/receive` and `/decline` for
 manual decisions. Pre-consent peers retain the legacy direct-transfer fallback,

@@ -49,7 +49,7 @@ impl FileBook {
             .or_insert(manifest);
     }
 
-    pub(in crate::node) fn accepts(&self, _author: Author, manifest: &AnyManifest) -> bool {
+    pub(in crate::node) fn accepts(&self, manifest: &AnyManifest) -> bool {
         self.manifests
             .get(&manifest.file_conv())
             .is_none_or(|existing| existing == manifest)
@@ -61,7 +61,7 @@ impl FileBook {
         author: Author,
         manifest: AnyManifest,
     ) -> bool {
-        if !self.accepts(author, &manifest) {
+        if !self.accepts(&manifest) {
             return false;
         }
         self.manifest_events

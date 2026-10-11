@@ -33,6 +33,7 @@ export default defineConfig({
     "file-send-progress.spec.ts",
     "directory-transfer.spec.ts",
     "attachment-approval.spec.ts",
+    "unread-badge.spec.ts",
     "screenshot-portable.spec.ts",
   ],
   grepInvert: tier === "core" ? /@extended/ : undefined,

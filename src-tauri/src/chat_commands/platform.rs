@@ -3,53 +3,85 @@ use serde::Serialize;
 use tauri::Manager;
 
 /// Set the OS app-icon unread badge and the macOS menu bar count.
-/// `count` is the total unread messages; 0 (or None) clears the badge. Best-effort — a
+/// `count` is the total unread messages; 0 clears the badge. Best-effort — a
 /// platform without stable count-badge support (notably Windows) intentionally no-ops.
 #[tauri::command]
-pub async fn set_badge(app: tauri::AppHandle, count: u32) -> Result<(), CommandError> {
+pub async fn set_badge(
+    app: tauri::AppHandle,
+    app_state: tauri::State<'_, crate::state::AppState>,
+    owner: String,
+    count: u32,
+    revision: u64,
+) -> Result<(), CommandError> {
+    let session = app_state.session().clone();
+    let lease = session.capture().map_err(CommandError::Authentication)?;
+    if lease.owner() != owner {
+        return Err(CommandError::Authentication("session replaced".into()));
+    }
+    let handle = app.clone();
+    let badge_state = app_state.inner().clone();
+    app.run_on_main_thread(move || {
+        // The webview can dispatch this command just before logout. Never paint a
+        // count belonging to a retired session, even if the same account signs in.
+        let _ = session.matching(&lease, |_| {
+            if badge_state.admit_badge_revision(lease.generation(), revision) {
+                paint_badge(&handle, count);
+            }
+        });
+    })
+    .map_err(|e| CommandError::Internal(format!("set_badge: {e}")))?;
+    Ok(())
+}
+
+/// Clear the badge after native logout, including when the frontend has already
+/// unmounted. A later login invalidates this queued main-thread update.
+pub(crate) fn clear_badge_after_logout<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    session: crate::state::SessionState,
+) {
+    let generation = session.generation();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = session.unchanged(generation, || paint_badge(&handle, 0));
+    });
+}
+
+fn paint_badge<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, count: u32) {
     let label = if count == 0 {
         None
     } else {
         Some(count.to_string())
     };
-    // The macOS dock badge is set via NSApp.dockTile (AppKit), which MUST run on the main
-    // thread — but this async command runs on the Tauri runtime thread pool. Hop onto the
-    // main thread to actually update the dock/taskbar badge.
-    let handle = app.clone();
-    app.run_on_main_thread(move || {
-        crate::tray::set_unread_count(&handle, count);
-        #[cfg(target_os = "macos")]
-        {
-            let _ = &handle;
-            set_dock_badge(label);
+    crate::tray::set_unread_count(handle, count);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = handle;
+        set_dock_badge(label);
+    }
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        let n = label.and_then(|s| s.parse::<i64>().ok());
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.set_badge_count(n);
         }
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "dragonfly",
-            target_os = "freebsd",
-            target_os = "netbsd",
-            target_os = "openbsd"
-        ))]
-        {
-            let n = label.and_then(|s| s.parse::<i64>().ok());
-            if let Some(window) = handle.get_webview_window("main") {
-                let _ = window.set_badge_count(n);
-            }
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "linux",
-            target_os = "dragonfly",
-            target_os = "freebsd",
-            target_os = "netbsd",
-            target_os = "openbsd"
-        )))]
-        {
-            let _ = (handle, label);
-        }
-    })
-    .map_err(|e| CommandError::Internal(format!("set_badge: {e}")))?;
-    Ok(())
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    {
+        let _ = (handle, label);
+    }
 }
 
 /// Set (or clear, with `None`) the macOS dock-icon badge label directly via AppKit.

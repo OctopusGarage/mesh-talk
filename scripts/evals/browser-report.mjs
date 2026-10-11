@@ -41,6 +41,7 @@ export function requiredBrowserPaths(tier) {
     ["attachment-approval.spec.ts", "incoming folder waits for approval and can be declined or received"],
     ["attachment-approval.spec.ts", "global and per-contact automatic receive controls persist their selection"],
     ["attachment-approval.spec.ts", "video media requires approval and appears in Received files"],
+    ["unread-badge.spec.ts", "incoming unread count reaches the OS badge and clears on read and logout"],
   );
   return paths;
 }

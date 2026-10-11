@@ -48,8 +48,8 @@ export function ChatApp() {
   }, [loadSettings]);
 
   useEffect(() => {
-    chatApi.setBadge(totalUnread).catch(() => {});
-  }, [totalUnread]);
+    if (owner) chatApi.setBadge(totalUnread, owner).catch(() => {});
+  }, [totalUnread, owner, generation]);
 
   useEffect(() => {
     if (!owner) return;

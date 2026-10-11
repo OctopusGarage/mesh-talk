@@ -249,7 +249,7 @@ impl Node {
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .accepts(event.author, &manifest)
+                .accepts(&manifest)
             {
                 continue;
             }

@@ -22,7 +22,7 @@ fn unread_tray_labels(count: u32) -> (Option<String>, String) {
 
 /// Keep the menu bar count in sync with the dock/launcher badge. macOS displays the
 /// title immediately beside the tray icon; its template icon stays legible in both themes.
-pub fn set_unread_count(app: &AppHandle, count: u32) {
+pub fn set_unread_count<R: tauri::Runtime>(app: &AppHandle<R>, count: u32) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let (title, tooltip) = unread_tray_labels(count);
         let _ = tray.set_title(title.as_deref());

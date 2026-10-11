@@ -116,6 +116,7 @@ export const useAuth = create<AuthState>((set, get) => ({
   },
 
   logout: async () => {
+    const owner = get().user?.id;
     // Invalidate before native retirement awaits, including a same-UUID relogin.
     set((s) => ({
       user: null,
@@ -127,7 +128,7 @@ export const useAuth = create<AuthState>((set, get) => ({
     }));
     // The unread badge belongs to the signed-in session. ChatApp unmounts at this
     // point, so its unread-count effect cannot clear the OS badge on its own.
-    void chat.setBadge(0).catch(() => {});
+    if (owner) void chat.setBadge(0, owner).catch(() => {});
     try {
       await auth.logout();
     } catch {

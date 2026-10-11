@@ -7,11 +7,10 @@ use crate::identity::device::PublicIdentity;
 use crate::node::{Node, NodeError};
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 
 const MAGIC: &[u8; 6] = b"MTACPT";
-const MAX_DECISIONS: usize = 4096;
 const COMPACT_AFTER: usize = 8192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -34,28 +33,29 @@ pub struct AttachmentConsent {
     log: EncryptedRecordLog<Record>,
     global_auto: bool,
     contacts: HashMap<String, bool>,
-    decisions: HashMap<EventId, bool>,
-    order: VecDeque<EventId>,
+    decisions: HashMap<EventId, (bool, u64)>,
+    next_sequence: u64,
     writes: usize,
 }
 
 impl AttachmentConsent {
+    /// Load the account-local encrypted preferences and exact offer decisions.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (log, records) = EncryptedRecordLog::open(path, password, MAGIC)?;
-        let writes = records.len();
+        let record_count = records.len();
         let mut store = Self {
             log,
             global_auto: false,
             contacts: HashMap::new(),
             decisions: HashMap::new(),
-            order: VecDeque::new(),
-            writes,
+            next_sequence: 0,
+            writes: 0,
         };
         for record in records {
             store.apply(record);
         }
-        store.trim();
-        if store.writes >= COMPACT_AFTER {
+        let live_records = 1 + store.contacts.len() + store.decisions.len();
+        if record_count >= COMPACT_AFTER && record_count >= live_records.saturating_mul(2) {
             store.compact()?;
         }
         Ok(store)
@@ -73,17 +73,8 @@ impl AttachmentConsent {
                 }
             },
             Record::File { event, accept } => {
-                self.order.retain(|id| *id != event);
-                self.order.push_back(event);
-                self.decisions.insert(event, accept);
-            }
-        }
-    }
-
-    fn trim(&mut self) {
-        while self.order.len() > MAX_DECISIONS {
-            if let Some(old) = self.order.pop_front() {
-                self.decisions.remove(&old);
+                self.next_sequence += 1;
+                self.decisions.insert(event, (accept, self.next_sequence));
             }
         }
     }
@@ -91,7 +82,6 @@ impl AttachmentConsent {
     fn write(&mut self, record: Record) -> Result<(), LogError> {
         self.log.append_durable(&record)?;
         self.apply(record);
-        self.trim();
         self.writes += 1;
         if self.writes >= COMPACT_AFTER {
             // The new decision is already durable. Compaction is maintenance; a
@@ -109,31 +99,37 @@ impl AttachmentConsent {
                 auto: Some(*auto),
             });
         }
-        for event in &self.order {
-            if let Some(accept) = self.decisions.get(event) {
-                records.push(Record::File {
-                    event: *event,
-                    accept: *accept,
-                });
-            }
+        let mut decisions = self.decisions.iter().collect::<Vec<_>>();
+        decisions.sort_unstable_by_key(|(_, (_, sequence))| *sequence);
+        for (event, (accept, _)) in decisions {
+            records.push(Record::File {
+                event: *event,
+                accept: *accept,
+            });
         }
         self.log.rewrite(&records)?;
-        self.writes = records.len();
+        // Count writes since the rewrite. The set of unique offers may itself
+        // exceed COMPACT_AFTER; using its size here would rewrite on every send.
+        self.writes = 0;
         Ok(())
     }
 
+    /// Whether generic attachments are received automatically by default.
     pub fn global_auto(&self) -> bool {
         self.global_auto
     }
 
+    /// Return a contact override, if one was set.
     pub fn contact_auto(&self, account: &str) -> Option<bool> {
         self.contacts.get(account).copied()
     }
 
+    /// Durably set the account-wide default for generic attachments.
     pub fn set_global_auto(&mut self, auto: bool) -> Result<(), LogError> {
         self.write(Record::Global(auto))
     }
 
+    /// Durably set or remove one contact's automatic receive override.
     pub fn set_contact_auto(&mut self, account: &str, auto: Option<bool>) -> Result<(), LogError> {
         if account.len() != 32 || !account.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(LogError::Serialization("invalid account id".into()));
@@ -144,6 +140,7 @@ impl AttachmentConsent {
         })
     }
 
+    /// Durably accept or decline one signed manifest event.
     pub fn decide(&mut self, event: EventId, accept: bool) -> Result<(), LogError> {
         self.write(Record::File { event, accept })
     }
@@ -153,13 +150,13 @@ impl AttachmentConsent {
         self.status_for_events(&[event], account)
     }
 
+    /// Resolve exact decisions across equivalent signed offers before preferences.
     pub fn status_for_events(&self, events: &[EventId], account: &str) -> ReceiveDecision {
-        let decision = self.order.iter().rev().find_map(|event| {
-            events
-                .contains(event)
-                .then(|| self.decisions.get(event).copied())
-                .flatten()
-        });
+        let decision = events
+            .iter()
+            .filter_map(|event| self.decisions.get(event))
+            .max_by_key(|(_, sequence)| sequence)
+            .map(|(accept, _)| *accept);
         match decision {
             Some(true) => ReceiveDecision::Accepted,
             Some(false) => ReceiveDecision::Declined,
@@ -420,6 +417,73 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_decline_survives_decision_limit_and_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("attachment-consent.log");
+        let account = "a".repeat(32);
+        let declined = EventId::new([1; 32]);
+        let reapproved_alias = EventId::new([2; 32]);
+        {
+            let mut consent = AttachmentConsent::open(&path, "pw").unwrap();
+            consent.set_global_auto(true).unwrap();
+            consent.decide(declined, false).unwrap();
+            consent.apply(Record::File {
+                event: reapproved_alias,
+                accept: true,
+            });
+            // Cross the previous 4096-decision eviction boundary.
+            for index in 0..=4096 {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&(index as u64 + 2).to_le_bytes());
+                consent.apply(Record::File {
+                    event: EventId::new(bytes),
+                    accept: true,
+                });
+            }
+            assert_eq!(
+                consent.status(declined, &account),
+                ReceiveDecision::Declined
+            );
+            assert_eq!(
+                consent.status_for_events(&[declined, reapproved_alias], &account),
+                ReceiveDecision::Accepted
+            );
+            consent.compact().unwrap();
+        }
+        let reopened = AttachmentConsent::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.status(declined, &account),
+            ReceiveDecision::Declined
+        );
+        assert_eq!(
+            reopened.status_for_events(&[declined, reapproved_alias], &account),
+            ReceiveDecision::Accepted
+        );
+    }
+
+    #[test]
+    fn reopening_many_unique_decisions_does_not_rewrite_the_encrypted_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("attachment-consent.log");
+        {
+            let mut consent = AttachmentConsent::open(&path, "pw").unwrap();
+            for index in 0..COMPACT_AFTER {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                consent.apply(Record::File {
+                    event: EventId::new(bytes),
+                    accept: true,
+                });
+            }
+            consent.compact().unwrap();
+        }
+        let encrypted = std::fs::read(&path).unwrap();
+        let reopened = AttachmentConsent::open(&path, "pw").unwrap();
+        assert_eq!(reopened.decisions.len(), COMPACT_AFTER);
+        assert_eq!(std::fs::read(&path).unwrap(), encrypted);
+    }
 
     #[test]
     fn preferences_and_exact_decisions_survive_reopen() {
