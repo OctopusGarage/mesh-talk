@@ -54,11 +54,15 @@ function FileBubble({
   mine,
   metadataPending,
   sendKey,
+  messageId,
+  isChannel,
 }: {
   file: NonNullable<ChatMessage["file"]>;
   mine: boolean;
   metadataPending?: boolean;
   sendKey?: string;
+  messageId?: string | null;
+  isChannel: boolean;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
@@ -69,6 +73,8 @@ function FileBubble({
   const available = !!savedPath || !!status?.ready;
   const [saving, setSaving] = useState(false);
   const directory = isDirectoryAttachment(file.mime);
+  const uploadKey =
+    mine && !metadataPending && !isChannel ? messageId || undefined : undefined;
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -134,6 +140,12 @@ function FileBubble({
           size={file.size}
           mime={file.mime}
         />
+        {uploadKey && (
+          <TransferBar
+            transferKey={uploadKey}
+            waitingDirection={sendKey ? "send" : undefined}
+          />
+        )}
       </div>
     );
   }
@@ -185,8 +197,18 @@ function FileBubble({
           )}
         </button>
       </div>
-      {metadataPending && <TransferBar transferKey={sendKey} />}
-      {!metadataPending && !savedPath && <ReceiveProgress status={status} />}
+      {metadataPending && mine && (
+        <TransferBar transferKey={sendKey} waitingDirection="prepare" />
+      )}
+      {uploadKey && (
+        <TransferBar
+          transferKey={uploadKey}
+          waitingDirection={sendKey ? "send" : undefined}
+        />
+      )}
+      {!mine && !metadataPending && !savedPath && (
+        <ReceiveProgress status={status} />
+      )}
       {savedPath && (
         <div className="mt-1 truncate text-[11px] opacity-70" title={savedPath}>
           {t("files.savedTo", { path: savedPath })}
@@ -483,6 +505,8 @@ export function MessageBubble({
                     mine={mine}
                     metadataPending={m.metadataPending}
                     sendKey={m.clientId}
+                    messageId={m.id}
+                    isChannel={isChannel}
                   />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">

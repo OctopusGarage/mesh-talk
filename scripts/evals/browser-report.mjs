@@ -32,6 +32,9 @@ export function requiredBrowserPaths(tier) {
     ["screenshot-portable.spec.ts", "hidden screenshot capture cancels without sending"],
     ["screenshot-portable.spec.ts", "rectangle arrow text and undo remain usable before send"],
     ["screenshot-portable.spec.ts", "unavailable capture is disabled and failed save preserves the editor"],
+    ["file-send-progress.spec.ts", "file sender keeps confirmed upload percent and ETA visible until recipient custody"],
+    ["file-send-progress.spec.ts", "image sender keeps confirmed upload percent and ETA visible until recipient custody"],
+    ["file-send-progress.spec.ts", "concurrent sends keep progress with their own file bubbles"],
   );
   return paths;
 }

@@ -206,6 +206,11 @@
     "reactionRemove": "Remove your {{emoji}} reaction"
   },
   "transfer": {
+    "preparing": "Preparing file…",
+    "awaitingRecipient": "Waiting for recipient…",
+    "confirming": "Confirming receipt…",
+    "remainingSeconds": "About {{seconds}}s left",
+    "remainingMinutes": "About {{minutes}}m left",
     "sending": "Sending file…",
     "saving": "Saving file…",
     "receiving": "Receiving file…",

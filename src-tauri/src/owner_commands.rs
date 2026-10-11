@@ -224,7 +224,7 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
     let mut progress = crate::events::ProgressThrottle::new(
         handle,
         progress_key.unwrap_or_else(|| account.clone()),
-        "send",
+        "prepare",
     );
     admission
         .detached(move |runtime, admission| {
@@ -290,6 +290,15 @@ pub async fn owner_account_history(
 pub struct MessageStatus {
     id: String,
     status: mesh_talk_core::node::DeliveryStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_progress: Option<OutgoingFileStatus>,
+}
+
+#[derive(Serialize)]
+pub struct OutgoingFileStatus {
+    done: u32,
+    total: u32,
+    delivered: bool,
 }
 
 #[tauri::command]
@@ -320,6 +329,13 @@ pub async fn owner_delivery_statuses(
                 .map(|(id, status)| MessageStatus {
                     id: hex::encode(id.as_bytes()),
                     status,
+                    file_progress: runtime.handle().outgoing_file_progress(id).map(|progress| {
+                        OutgoingFileStatus {
+                            done: progress.done,
+                            total: progress.total,
+                            delivered: progress.delivered,
+                        }
+                    }),
                 })
                 .collect())
         })
@@ -752,6 +768,20 @@ mod tests {
             .unwrap()
             .iter()
             .all(|item| item["status"] == "awaiting"));
+        let file_status = statuses
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == file["id"])
+            .unwrap();
+        assert_eq!(
+            file_status["file_progress"],
+            serde_json::json!({
+                "done": 0,
+                "total": 1,
+                "delivered": false
+            })
+        );
         let history = fixture
             .invoke(
                 "owner_account_history",

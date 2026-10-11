@@ -234,6 +234,8 @@ pub struct Node {
     pub(in crate::node) dm_ratchet: Mutex<DmRatchet>,
     /// Serializes every DM ratchet consumer and ordered recovery.
     pub(in crate::node) delivery: Mutex<super::delivery_store::DeliveryStore>,
+    /// Transient recipient Have counts for active outgoing file destinations.
+    pub(in crate::node) outgoing_file_acks: Mutex<HashMap<(EventId, EventId), u32>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_control_ids:
@@ -517,6 +519,7 @@ impl Node {
             media,
             dm_ratchet: Mutex::new(dm_ratchet),
             delivery: Mutex::new(delivery),
+            outgoing_file_acks: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
             delivery_status_notify: tokio::sync::Notify::new(),
             delivery_control_ids: Mutex::new(delivery_control_ids),

@@ -855,6 +855,10 @@ async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() 
             .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
             .await
             .unwrap();
+        let upload = a
+            .outgoing_file_progress(id)
+            .expect("accepted file progress");
+        assert_eq!((upload.done, upload.total, upload.delivered), (0, 1, false));
         let mut workers = tokio::task::JoinSet::new();
         workers.spawn(b.clone().run_accept_loop(bl));
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
@@ -3350,6 +3354,8 @@ async fn file_post_office_final_custody_does_not_retire_target_resume_after_earl
     a.log.lock().unwrap().append_durable(ack).unwrap();
     a.emit_new_messages(control_conv);
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    let upload = a.outgoing_file_progress(id).unwrap();
+    assert_eq!((upload.done, upload.total, upload.delivered), (0, 2, false));
     assert!(b.read_file(file).is_err());
     let final_chunk = a
         .delivery
@@ -3412,6 +3418,14 @@ async fn file_post_office_final_custody_does_not_retire_target_resume_after_earl
     let _ = bt.await;
     assert!(resumed.is_ok());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+    assert_eq!(
+        a.outgoing_file_progress(id).unwrap(),
+        super::OutgoingFileProgress {
+            done: 2,
+            total: 2,
+            delivered: true
+        }
+    );
     assert_eq!(b.read_file(file).unwrap(), bytes);
 }
 

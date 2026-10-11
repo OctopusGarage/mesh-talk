@@ -1,19 +1,72 @@
 import { create } from "zustand";
-import type { FileProgressEvent } from "@/lib/types";
+import type { FileProgressEvent, OutgoingFileStatus } from "@/lib/types";
 
 export interface Transfer {
   fileConv: string;
-  direction: "send" | "save";
+  direction: "prepare" | "send" | "save";
   done: number;
   total: number;
+  etaSeconds?: number | null;
+  lastAdvancedAt?: number;
+  delivered?: boolean;
 }
 
 interface TransfersState {
   // Keyed by per-file id for saves, or optimistic message key for sends.
   transfers: Record<string, Transfer>;
   applyProgress: (e: FileProgressEvent) => void;
+  applyUploadStatus: (id: string, status: OutgoingFileStatus) => void;
   clear: (key: string) => void;
   reset: () => void;
+}
+
+const TRANSFER_RECORD_LIMIT = 1024;
+
+function boundTransfers(
+  transfers: Record<string, Transfer>,
+): Record<string, Transfer> {
+  const keys = Object.keys(transfers);
+  if (keys.length <= TRANSFER_RECORD_LIMIT) return transfers;
+  let excess = keys.length - TRANSFER_RECORD_LIMIT;
+  for (const key of keys) {
+    if (excess === 0) break;
+    if (transfers[key].delivered) {
+      delete transfers[key];
+      excess--;
+    }
+  }
+  for (const key of keys) {
+    if (excess === 0) break;
+    if (key in transfers) {
+      delete transfers[key];
+      excess--;
+    }
+  }
+  return transfers;
+}
+
+/** A rate needs two distinct positive recipient observations. Never infer it
+ * from local preparation time or time spent waiting for an offline peer. */
+export function estimateRemainingSeconds(
+  done: number,
+  total: number,
+  previousDone: number,
+  previousAt: number,
+  now: number,
+): number | null {
+  if (
+    previousDone <= 0 ||
+    done <= previousDone ||
+    !Number.isFinite(done) ||
+    !Number.isFinite(total) ||
+    done >= total ||
+    now <= previousAt ||
+    now - previousAt > 10_000
+  )
+    return null;
+  return Math.ceil(
+    ((total - done) * (now - previousAt)) / ((done - previousDone) * 1000),
+  );
 }
 
 /** Fast-changing file-transfer progress lives in its OWN store so emitting ~10/s does
@@ -35,7 +88,53 @@ export const useTransfers = create<TransfersState>((set) => ({
           total: e.total,
         };
       }
-      return { transfers: next };
+      return { transfers: boundTransfers(next) };
+    }),
+  applyUploadStatus: (id, status) =>
+    set((s) => {
+      const next = { ...s.transfers };
+      if (status.delivered) {
+        if (s.transfers[id]?.delivered) return s;
+        next[id] = {
+          fileConv: id,
+          direction: "send",
+          done: status.total,
+          total: status.total,
+          delivered: true,
+        };
+        return { transfers: boundTransfers(next) };
+      }
+      const total = Math.max(0, Math.floor(status.total));
+      const done = Math.min(total, Math.max(0, Math.floor(status.done)));
+      const now = Date.now();
+      const previous = s.transfers[id];
+      const sameRun =
+        previous?.direction === "send" && previous.total === total;
+      const advancing = sameRun && done > previous.done;
+      const regressed = sameRun && done < previous.done;
+      const etaSeconds = advancing
+        ? estimateRemainingSeconds(
+            done,
+            total,
+            previous.done,
+            previous.lastAdvancedAt ?? now,
+            now,
+          )
+        : sameRun &&
+            !regressed &&
+            now - (previous.lastAdvancedAt ?? now) < 10_000
+          ? (previous.etaSeconds ?? null)
+          : null;
+      next[id] = {
+        fileConv: id,
+        direction: "send",
+        done,
+        total,
+        etaSeconds,
+        lastAdvancedAt:
+          advancing || regressed || !sameRun ? now : previous.lastAdvancedAt,
+      };
+      return { transfers: boundTransfers(next) };
     }),
   clear: (key) =>
     set((s) => {

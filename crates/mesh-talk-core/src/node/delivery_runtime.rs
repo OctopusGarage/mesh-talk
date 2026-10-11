@@ -190,6 +190,7 @@ impl FileScan {
 impl FileDeliveryScheduler {
     fn scan(&mut self, node: &Node) -> FileScan {
         node.prune_file_transfers(&mut self.transfers);
+        node.prune_outgoing_file_acks();
         FileScan {
             cursor: self.pending_cursor,
             slots: MAX_FILE_TRANSFERS - self.transfers.len(),
@@ -233,14 +234,21 @@ impl FileDeliveryScheduler {
             if node
                 .retry_file_step(&file, &destination, &mut self.transfers)
                 .await
-                && node
+            {
+                if node
                     .delivery
                     .lock()
                     .expect("delivery lock not poisoned")
                     .retire_file_destination(file.id, destination.binding.event_id)
                     .is_err()
-            {
-                diagnostic.warn_if_due();
+                {
+                    diagnostic.warn_if_due();
+                } else {
+                    node.outgoing_file_acks
+                        .lock()
+                        .expect("outgoing file progress lock not poisoned")
+                        .remove(&key);
+                }
             }
             if self.transfers.contains_key(&key) {
                 progress.insert(key);
@@ -802,6 +810,43 @@ impl Node {
             .lock()
             .expect("delivery lock not poisoned")
             .status(id)
+    }
+
+    /// Confirmed chunks across the recipient account's devices. Local staging and
+    /// self-device replication are excluded from the sender's upload percentage.
+    pub fn outgoing_file_progress(&self, id: EventId) -> Option<super::OutgoingFileProgress> {
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        let card = delivery.file_card(id)?;
+        let own_account = self.account_id();
+        let recipients = card
+            .destinations
+            .iter()
+            .filter(|d| d.binding.account.as_deref() != Some(own_account.as_str()))
+            .collect::<Vec<_>>();
+        if recipients.is_empty() {
+            return None;
+        }
+        let acks = self
+            .outgoing_file_acks
+            .lock()
+            .expect("outgoing file progress lock not poisoned");
+        let total = card.chunk_count.saturating_mul(recipients.len() as u32);
+        let done = recipients.iter().fold(0u32, |sum, destination| {
+            let confirmed = if destination.active {
+                acks.get(&(id, destination.binding.event_id))
+                    .copied()
+                    .unwrap_or(0)
+                    .min(card.chunk_count)
+            } else {
+                card.chunk_count
+            };
+            sum.saturating_add(confirmed)
+        });
+        Some(super::OutgoingFileProgress {
+            done,
+            total,
+            delivered: recipients.iter().all(|d| !d.active),
+        })
     }
 
     /// Bounded account-conversation status snapshot, with no plaintext payloads.
@@ -1530,6 +1575,20 @@ impl Node {
         });
     }
 
+    fn prune_outgoing_file_acks(&self) {
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.outgoing_file_acks
+            .lock()
+            .expect("outgoing file progress lock not poisoned")
+            .retain(|(id, destination_id), _| {
+                delivery.file_card(*id).is_some_and(|card| {
+                    card.destinations
+                        .iter()
+                        .any(|d| d.active && d.binding.event_id == *destination_id)
+                })
+            });
+    }
+
     async fn advance_file_transfer(
         &self,
         transfer: &mut FileTransfer,
@@ -1634,11 +1693,20 @@ impl Node {
                 transfer.phase = FilePhase::Chunks;
             }
             FilePhase::Chunks => {
-                if transfer
+                let complete = transfer
                     .sync
                     .step(channel, &store, file.file_conversation)
-                    .await?
-                {
+                    .await?;
+                if let Some(confirmed) = transfer.sync.remote_have_count() {
+                    self.outgoing_file_acks
+                        .lock()
+                        .expect("outgoing file progress lock not poisoned")
+                        .insert(
+                            (file.id, binding.event_id),
+                            confirmed.min(file.chunk_count as usize) as u32,
+                        );
+                }
+                if complete {
                     transfer.phase = FilePhase::FinalCustody;
                 }
             }
@@ -1832,12 +1900,19 @@ impl Node {
             return;
         };
         for destination in &file.destinations {
-            if destination.active && self.retry_file_destination(&file, destination).await {
-                let _ = self
+            if destination.active
+                && self.retry_file_destination(&file, destination).await
+                && self
                     .delivery
                     .lock()
                     .expect("delivery lock not poisoned")
-                    .retire_file_destination(file.id, destination.binding.event_id);
+                    .retire_file_destination(file.id, destination.binding.event_id)
+                    .is_ok()
+            {
+                self.outgoing_file_acks
+                    .lock()
+                    .expect("outgoing file progress lock not poisoned")
+                    .remove(&(file.id, destination.binding.event_id));
             }
         }
     }

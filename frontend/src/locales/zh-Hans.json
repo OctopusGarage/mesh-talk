@@ -206,6 +206,11 @@
     "reactionRemove": "移除你的 {{emoji}} 表情回应"
   },
   "transfer": {
+    "preparing": "正在准备文件…",
+    "awaitingRecipient": "正在等待接收方…",
+    "confirming": "正在确认接收…",
+    "remainingSeconds": "预计还需 {{seconds}} 秒",
+    "remainingMinutes": "预计还需 {{minutes}} 分钟",
     "receiving": "正在接收文件…",
     "waiting": "等待文件…",
     "receivingProgress": "正在接收文件：{{percent}}%",

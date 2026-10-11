@@ -111,6 +111,15 @@ pub struct FileProgress {
     pub total: u32,
 }
 
+/// Chunks confirmed in recipient logs across this file's external destinations.
+/// `delivered` becomes true only after final custody has been verified for each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutgoingFileProgress {
+    pub done: u32,
+    pub total: u32,
+    pub delivered: bool,
+}
+
 impl Node {
     pub(in crate::node) fn reseed_live_file_book(
         &self,

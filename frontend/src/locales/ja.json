@@ -206,6 +206,11 @@
     "reactionRemove": "自分の {{emoji}} リアクションを削除"
   },
   "transfer": {
+    "preparing": "ファイルを準備中…",
+    "awaitingRecipient": "受信者を待っています…",
+    "confirming": "受信を確認中…",
+    "remainingSeconds": "残り約{{seconds}}秒",
+    "remainingMinutes": "残り約{{minutes}}分",
     "sending": "ファイルを送信中…",
     "saving": "ファイルを保存中…",
     "receiving": "ファイルを受信中…",

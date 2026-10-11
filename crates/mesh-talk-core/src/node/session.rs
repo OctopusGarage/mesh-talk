@@ -305,9 +305,15 @@ pub(in crate::node) struct SyncProgress {
     total: ApplyReport,
     first_have: usize,
     pushed_total: usize,
+    /// IDs the authenticated responder reported holding in its durable log.
+    remote_have_count: Option<usize>,
 }
 
 impl SyncProgress {
+    pub(in crate::node) fn remote_have_count(&self) -> Option<usize> {
+        self.remote_have_count
+    }
+
     pub(in crate::node) async fn step<S, IO>(
         &mut self,
         channel: &mut SecureChannel<IO>,
@@ -326,9 +332,11 @@ impl SyncProgress {
         // only skip a diff — never corrupt — so this is safe.)
         if !self.started {
             self.started = true;
-            let fp = {
+            let (fp, local_count) = {
                 let store = store.lock().expect("store mutex not poisoned");
-                fingerprint(store.event_ids(&conversation))
+                let ids = store.event_ids(&conversation);
+                let count = ids.len();
+                (fingerprint(ids), count)
             };
             channel
                 .send(&encode(&SyncWire::FpRequest(FpRequest {
@@ -338,6 +346,7 @@ impl SyncProgress {
                 .await?;
             match decode(&channel.recv().await?)? {
                 SyncWire::FpResponse(FpResponse { matched: true }) => {
+                    self.remote_have_count = Some(local_count);
                     log::debug!(
                         target: "mesh_talk::sync",
                         "sync conv={} fp_match skipped",
@@ -390,6 +399,15 @@ impl SyncProgress {
             return Err(SessionError::UnexpectedMessage);
         }
         response.have = recv_have(channel, false, conversation).await?;
+        // Count only distinct local events the authenticated peer claims to
+        // hold. Sort in place so large transfers need no second Have set.
+        response.have.sort_unstable();
+        response.have.dedup();
+        self.remote_have_count = Some(
+            have.iter()
+                .filter(|id| response.have.binary_search(id).is_ok())
+                .count(),
+        );
 
         let (report, followup) = {
             let mut store = store.lock().expect("store mutex not poisoned");
@@ -1236,11 +1254,31 @@ mod tests {
         });
         let mut channel = SecureChannel::connect(aio, &alice, None).await.unwrap();
         let store = Mutex::new(log);
-        let report = request_round(&mut channel, &store, conv()).await.unwrap();
+        let mut progress = SyncProgress::default();
+        let mut saw_partial_recipient_have = false;
+        let mut complete = false;
+        for _ in 0..100 {
+            complete = progress.step(&mut channel, &store, conv()).await.unwrap();
+            if progress
+                .remote_have_count()
+                .is_some_and(|count| count > 0 && count < ids.len())
+            {
+                saw_partial_recipient_have = true;
+            }
+            if complete {
+                break;
+            }
+        }
+        assert!(complete, "bounded rounds must finish the transfer");
+        assert!(
+            saw_partial_recipient_have,
+            "recipient Have exposes intermediate progress"
+        );
+        assert_eq!(progress.remote_have_count(), Some(ids.len()));
         drop(channel);
         let (remote, handled) = server.await.unwrap();
         assert_eq!(
-            report.applied, 0,
+            progress.total.applied, 0,
             "progress comes entirely from remote acceptance"
         );
         assert!(

@@ -17,6 +17,7 @@ vi.mock("@/lib/events", () => ({
 import { useChat, convKey } from "./chat";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
+import { useTransfers } from "./transfers";
 
 it("old roster identity failure cannot undo newer readiness", async () => {
   let reject!: (e: Error) => void;
@@ -463,6 +464,7 @@ it("preacceptance failure and retry retain exact deletion protection outside the
 
 beforeEach(() => {
   invoke.mockReset();
+  useTransfers.getState().reset();
   useAuth.setState({
     user: { id: "host", username: "alice", display_name: "Alice" },
     generation: 0,
@@ -471,6 +473,61 @@ beforeEach(() => {
     error: null,
   });
   reset();
+});
+
+it("projects recipient-confirmed upload progress onto only the matching outgoing file", async () => {
+  let delivered = false;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === "owner_delivery_statuses")
+      return Promise.resolve([
+        {
+          id: "file-id",
+          status: delivered ? "delivered" : "awaiting",
+          file_progress: { done: 3, total: 8, delivered },
+        },
+      ]);
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+    messages: {
+      "account:target": [
+        {
+          id: "file-id",
+          fromMe: true,
+          who: "me",
+          text: "",
+          replyTo: null,
+          wallClock: 1,
+          file: {
+            name: "large.bin",
+            fileConv: "fc",
+            size: 8,
+            mime: "application/octet-stream",
+            media: false,
+          },
+        },
+        {
+          id: "other-id",
+          fromMe: true,
+          who: "me",
+          text: "",
+          replyTo: null,
+          wallClock: 2,
+        },
+      ],
+    },
+  });
+  await useChat.getState().refreshStatuses();
+  expect(useTransfers.getState().transfers["file-id"]).toMatchObject({
+    direction: "send",
+    done: 3,
+    total: 8,
+  });
+  expect(useTransfers.getState().transfers["other-id"]).toBeUndefined();
+  delivered = true;
+  await useChat.getState().refreshStatuses();
+  expect(useTransfers.getState().transfers["file-id"]?.delivered).toBe(true);
 });
 
 describe("convKey", () => {

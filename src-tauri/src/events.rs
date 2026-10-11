@@ -59,7 +59,7 @@ pub const EVENT_DM_RECEIVED: &str = "dm-received";
 pub const EVENT_CHANNEL_MESSAGE: &str = "channel-message";
 /// A received file (DM or channel).
 pub const EVENT_FILE_RECEIVED: &str = "file-received";
-/// Progress of an in-flight file send or save (throttled).
+/// Progress of local file preparation or saving (throttled).
 pub const EVENT_FILE_PROGRESS: &str = "file-progress";
 /// A peer propagated their avatar (a signed profile) to us.
 pub const EVENT_PROFILE_RECEIVED: &str = "profile-received";

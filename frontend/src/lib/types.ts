@@ -235,9 +235,15 @@ export interface FileReceivedEvent {
 
 export interface FileProgressEvent {
   file_conv: string; // per-file id for saves, optimistic message key for sends
-  direction: "send" | "save";
+  direction: "prepare" | "send" | "save";
   done: number;
   total: number;
+}
+
+export interface OutgoingFileStatus {
+  done: number;
+  total: number;
+  delivered: boolean;
 }
 
 export interface FileStatus {

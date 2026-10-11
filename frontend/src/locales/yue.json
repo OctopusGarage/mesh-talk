@@ -206,6 +206,11 @@
     "reactionRemove": "移除你嘅 {{emoji}} 表情回應"
   },
   "transfer": {
+    "preparing": "準備緊檔案…",
+    "awaitingRecipient": "等緊收件人…",
+    "confirming": "確認緊收件…",
+    "remainingSeconds": "大約仲有 {{seconds}} 秒",
+    "remainingMinutes": "大約仲有 {{minutes}} 分鐘",
     "receiving": "收緊檔案…",
     "waiting": "等緊檔案…",
     "receivingProgress": "收緊檔案：{{percent}}%",

@@ -5,6 +5,7 @@ import type {
   ChannelMembersInfo,
   HistoryItem,
   FileStatus,
+  OutgoingFileStatus,
   PeerInfo,
   ReactionInfo,
   SafetyNumber,
@@ -53,10 +54,13 @@ export const chat = {
   ownerHistory: (owner: string, account: string, limit: number) =>
     invoke<HistoryItem[]>("owner_account_history", { owner, account, limit }),
   deliveryStatuses: (owner: string, account: string, ids: string[]) =>
-    invoke<Array<{ id: string; status: "awaiting" | "delivered" }>>(
-      "owner_delivery_statuses",
-      { owner, account, ids },
-    ),
+    invoke<
+      Array<{
+        id: string;
+        status: "awaiting" | "delivered";
+        file_progress?: OutgoingFileStatus;
+      }>
+    >("owner_delivery_statuses", { owner, account, ids }),
   myId: () => invoke<string>("my_id"),
   accountId: () => invoke<string>("account_id"),
 

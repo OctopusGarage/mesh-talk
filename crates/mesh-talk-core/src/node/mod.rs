@@ -64,7 +64,7 @@ pub use delivery_store::DeliveryStatus;
 pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
-pub use files::FileProgress;
+pub use files::{FileProgress, OutgoingFileProgress};
 pub use message::MessageBody;
 pub use node::{
     ChannelSummary, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm, ReceivedProfile,

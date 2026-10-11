@@ -57,7 +57,7 @@ pub async fn send_file_dm(
 ) -> Result<String, CommandError> {
     let node = state.node_handle().await?;
     // The legacy DM command has no optimistic message key; retain its recipient key.
-    let mut prog = crate::events::ProgressThrottle::new(app, recipient.clone(), "send");
+    let mut prog = crate::events::ProgressThrottle::new(app, recipient.clone(), "prepare");
     let id = node
         .send_file_dm_progress(
             &recipient,
@@ -79,7 +79,7 @@ pub async fn send_file_to_account(
     media: bool,
 ) -> Result<String, CommandError> {
     let node = state.node_handle().await?;
-    let mut prog = crate::events::ProgressThrottle::new(app, account.clone(), "send");
+    let mut prog = crate::events::ProgressThrottle::new(app, account.clone(), "prepare");
     let id = node
         .send_file_to_account_progress(
             &account,
@@ -106,7 +106,7 @@ pub async fn send_file_channel(
     let mut prog = crate::events::ProgressThrottle::new(
         app,
         progress_key.unwrap_or_else(|| channel_id.clone()),
-        "send",
+        "prepare",
     );
     let file_conv = node
         .send_file_channel_progress(
