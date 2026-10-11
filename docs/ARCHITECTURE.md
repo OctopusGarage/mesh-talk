@@ -381,6 +381,16 @@ contact-visibility read; Connection diagnostics distinguish loading from failure
 The chat roster and presence snapshot poll every 2 s. Unchanged roster snapshots
 retain their existing references so a poll does not redraw conversation rows.
 
+Unread counters are local presentation state. An incoming event in the selected
+conversation remains unread while the window is unfocused or hidden; focusing that
+conversation or opening another unread conversation clears only the one viewed.
+`lib/unreadStorage.ts` restores opaque conversation keys and counts from the webview's
+local storage, scoped by both the signed-in host user and the mesh account. This
+metadata is stored locally without message text, is not encrypted, and does not
+sync read status to other devices. A runtime account change discards the previous
+account's in-memory selection and counters. The frontend's total drives both the
+macOS menu-bar title and the OS app-icon badge through one session-guarded command.
+
 **Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
 the signed-in local user's hidden account IDs and last-known names are stored separately
 in `accounts/<local-user-id>/hidden-contacts.json`. Mutations validate the session owner

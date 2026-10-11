@@ -255,6 +255,7 @@ impl Node {
             }
             let received = ReceivedFile {
                 conv,
+                is_channel,
                 from: event.author.user_id(),
                 name: manifest.name().to_string(),
                 size: manifest.size(),

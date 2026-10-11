@@ -7,6 +7,7 @@ import { ConversationView } from "./ConversationView";
 import { CallDialog } from "./CallDialog";
 import { chat as chatApi } from "@/lib/api";
 import { ensureNotificationPermission } from "@/lib/notify";
+import { saveUnread } from "@/lib/unreadStorage";
 import { useChat } from "@/store/chat";
 import { usePresence } from "@/store/presence";
 import { useSettings } from "@/store/settings";
@@ -22,6 +23,8 @@ export function ChatApp() {
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const ready = useChat((s) => s.ready);
+  const accountId = useChat((s) => s.myAccountId);
+  const unreadOwner = useChat((s) => s.unreadOwner);
   useEffect(() => {
     if (owner) void useContactPolicy.getState().load(owner);
     return () => {
@@ -33,10 +36,17 @@ export function ChatApp() {
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);
   const clearError = useChat((s) => s.clearError);
-  const totalUnread = useChat((s) =>
-    Object.values(s.unread).reduce((sum, count) => sum + count, 0),
+  const unread = useChat((s) => s.unread);
+  const totalUnread = Object.values(unread).reduce(
+    (sum, count) => sum + count,
+    0,
   );
   const markActiveRead = useChat((s) => s.markActiveRead);
+
+  useEffect(() => {
+    if (owner && owner === unreadOwner && accountId && ready)
+      saveUnread(owner, accountId, unread);
+  }, [owner, unreadOwner, accountId, ready, unread]);
 
   // Request notification authorization once at startup. On macOS the dock unread badge only
   // renders if the app is authorized for notification badges, so this is what makes the badge

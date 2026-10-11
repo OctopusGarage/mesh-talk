@@ -1362,6 +1362,8 @@ describe("incoming events", () => {
     const stop = useChat.getState().start();
     await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
     useChat.setState({
+      active: { kind: "account", id: "target", name: "Previous peer" },
+      unread: { "account:target": 3 },
       messages: {
         "account:target": [
           {
@@ -1382,6 +1384,8 @@ describe("incoming events", () => {
       expect(useChat.getState().myAccountId).toBe(account),
     );
     expect(useChat.getState().messages).toEqual({});
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().unread).toEqual({});
     expect(useChat.getState().identityEpoch).toBe(1);
     expect(useChat.getState().intents).toEqual({});
     stop();
@@ -1484,6 +1488,19 @@ describe("incoming events", () => {
     stop();
   });
 
+  it("does not count existing unread messages again when the same node recovers", async () => {
+    const stop = await boot();
+    useChat.setState({
+      unread: { "account:acctA": 2 },
+      ready: false,
+      bootBusy: false,
+    });
+    useChat.getState().retryBoot();
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    expect(useChat.getState().unread["account:acctA"]).toBe(2);
+    stop();
+  });
+
   it("keeps messages and files in the open chat unread while unfocused", async () => {
     const stop = await boot();
     const view = { visibilityState: "visible", hasFocus: () => false };
@@ -1540,6 +1557,23 @@ describe("incoming events", () => {
       reply_to: null,
     });
     expect(useChat.getState().unread["channel:c1"]).toBe(1);
+    stop();
+  });
+
+  it("routes a new channel file by its explicit scope before roster refresh", async () => {
+    const stop = await boot();
+    captured.current!.onFile({
+      conv: "new-channel",
+      is_channel: true,
+      from: "dev1",
+      name: "notes.pdf",
+      size: 10,
+      mime: "application/pdf",
+      file_conv: "fc-new-channel",
+      media: false,
+    });
+    expect(useChat.getState().unread["channel:new-channel"]).toBe(1);
+    expect(useChat.getState().unread["account:acctA"]).toBeUndefined();
     stop();
   });
 

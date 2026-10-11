@@ -328,6 +328,9 @@ export function clearConversationMessages(
 export function invalidateConversationIdentity(): Partial<ChatState> {
   return {
     ready: false,
+    active: null,
+    unread: {},
+    unreadOwner: "",
     messages: {},
     searchTarget: null,
     reactions: {},

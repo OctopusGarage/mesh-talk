@@ -767,6 +767,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         crate::events::emit_file_received(
                             &app_handle_for_file,
                             hex::encode(f.conv.as_bytes()),
+                            f.is_channel,
                             f.from,
                             f.name,
                             f.size,

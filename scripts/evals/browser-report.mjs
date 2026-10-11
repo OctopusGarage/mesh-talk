@@ -42,6 +42,10 @@ export function requiredBrowserPaths(tier) {
     ["attachment-approval.spec.ts", "global and per-contact automatic receive controls persist their selection"],
     ["attachment-approval.spec.ts", "video media requires approval and appears in Received files"],
     ["unread-badge.spec.ts", "incoming unread count reaches the OS badge and clears on read and logout"],
+    ["unread-badge.spec.ts", "an open chat remains unread while Mesh-Talk is in the background"],
+    ["unread-badge.spec.ts", "background channel messages and files clear only when that chat is viewed"],
+    ["unread-badge.spec.ts", "foreground delivery is read only in the conversation being viewed"],
+    ["unread-badge.spec.ts", "unread messages survive reopening the same account and clear after reading"],
   );
   return paths;
 }

@@ -3,6 +3,7 @@ import { chat, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import { notifyInbound } from "@/lib/notify";
+import { loadUnread } from "@/lib/unreadStorage";
 import { useAvatars } from "@/store/avatars";
 import { useCalls } from "@/store/calls";
 import { useTransfers } from "@/store/transfers";
@@ -128,7 +129,22 @@ async function pollUntilReady(
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
       const acct = identity.account_id;
-      set({ myId: identity.device_id, myAccountId: acct, ready: true });
+      const persistedUnread = loadUnread(owner, acct);
+      set((state) => {
+        const sameScope =
+          state.unreadOwner === owner && state.myAccountId === acct;
+        const unread = sameScope ? state.unread : { ...persistedUnread };
+        if (!sameScope)
+          for (const [key, count] of Object.entries(state.unread))
+            unread[key] = (unread[key] ?? 0) + count;
+        return {
+          myId: identity.device_id,
+          myAccountId: acct,
+          unread,
+          unreadOwner: owner,
+          ready: true,
+        };
+      });
       // Tell the avatars store who "we" are (so setting our own avatar publishes it) and
       // pull avatars peers already propagated to us (durable across restart).
       useAvatars.getState().setOwnId(acct);
@@ -188,6 +204,7 @@ export interface ChatState {
   messages: Record<string, ChatMessage[]>;
   reactions: Record<string, ReactionInfo[]>;
   unread: Record<string, number>;
+  unreadOwner: string;
   // Conversation keys in open-recency order (most-recent-last); drives cache eviction.
   // Not read by any component selector — purely internal LRU bookkeeping.
   cacheOrder: string[];
@@ -262,6 +279,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   messages: {},
   reactions: {},
   unread: {},
+  unreadOwner: "",
   cacheOrder: [],
   members: [],
   channelOwner: "",
@@ -404,6 +422,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       messages: {},
       reactions: {},
       unread: {},
+      unreadOwner: "",
       cacheOrder: [],
       members: [],
       channelOwner: "",
@@ -942,7 +961,8 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   // `conv` is the channel id; a DM file is filed (on both sides) under the sender's ACCOUNT
   // conversation, matching get_handleDm. If that conversation is active, reload it so the
   // new bubble appears; otherwise bump its unread badge.
-  const isChannelFile = get().channels.some((c) => c.channel_id === e.conv);
+  const isChannelFile =
+    e.is_channel ?? get().channels.some((c) => c.channel_id === e.conv);
   let key: string | null = null;
   if (isChannelFile) {
     key = convKey({ kind: "channel", id: e.conv, name: "" });

@@ -189,6 +189,7 @@ impl<R: Runtime> ProgressThrottle<R> {
 #[derive(serde::Serialize, Clone)]
 pub struct FileReceivedEvent {
     pub conv: String, // hex (channel id for a channel file; the DM conv otherwise)
+    pub is_channel: bool,
     pub from: String, // sender user-id
     pub name: String,
     pub size: u64,
@@ -245,6 +246,7 @@ pub fn emit_channel_message<R: Runtime>(
 pub fn emit_file_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     conv: String,
+    is_channel: bool,
     from: String,
     name: String,
     size: u64,
@@ -254,6 +256,7 @@ pub fn emit_file_received<R: Runtime>(
 ) {
     let event = FileReceivedEvent {
         conv,
+        is_channel,
         from,
         name,
         size,

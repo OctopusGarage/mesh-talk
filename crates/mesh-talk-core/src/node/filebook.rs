@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 pub struct ReceivedFile {
     /// The DM/channel conversation the manifest arrived in.
     pub conv: ConversationId,
+    /// Whether `conv` names a channel rather than a direct conversation.
+    pub is_channel: bool,
     /// The sender's user-id fingerprint.
     pub from: String,
     pub name: String,

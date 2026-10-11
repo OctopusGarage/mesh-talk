@@ -289,3 +289,39 @@ test("foreground delivery is read only in the conversation being viewed", async 
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
 });
+
+test("unread messages survive reopening the same account and clear after reading", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockEmit: (event: string, payload: unknown) => void;
+      }
+    ).__mockEmit("dm-received", {
+      from: "device_bob_2222",
+      from_name: "bob",
+      text: "read after restart",
+      reply_to: null,
+    });
+  });
+  await expect(
+    page
+      .getByTestId(`conversation-row-${BOB.account}`)
+      .locator("..")
+      .getByText("1", { exact: true }),
+  ).toBeVisible();
+  await enterChat(page);
+  await observeBadge(page);
+  await expect(
+    page
+      .getByTestId(`conversation-row-${BOB.account}`)
+      .locator("..")
+      .getByText("1", { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});

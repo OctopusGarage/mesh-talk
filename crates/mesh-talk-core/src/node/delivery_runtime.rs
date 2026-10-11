@@ -781,6 +781,7 @@ impl Node {
                                     .insert(manifest.file_conv());
                                 let _ = self.file_incoming.send(ReceivedFile {
                                     conv: original_conv,
+                                    is_channel: false,
                                     from: sender.user_id(),
                                     name: manifest.name().to_owned(),
                                     size: manifest.size(),

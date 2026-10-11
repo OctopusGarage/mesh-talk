@@ -1841,6 +1841,7 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
     assert_eq!(rf.size, payload.len() as u64);
     assert_eq!(rf.file_conv, file_conv);
     assert_eq!(rf.from, alice_node.user_id());
+    assert!(!rf.is_channel);
 
     // And the received file appears in Bob's conversation history (not just the tray) as
     // a non-`from_me` file message — so it persists across reload.
@@ -2553,6 +2554,7 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     assert_eq!(rf.name, "photo.bin");
     assert_eq!(rf.size, payload.len() as u64);
     assert_eq!(rf.conv, channel);
+    assert!(rf.is_channel);
     assert_eq!(rf.file_conv, file_conv);
     assert_eq!(rf.from, alice_node.user_id());
     assert_eq!(bob_node.file_progress(file_conv).unwrap().done, 0);
