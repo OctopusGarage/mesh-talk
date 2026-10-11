@@ -414,6 +414,8 @@ test("history load failure leaves unread until the chat can be viewed", async ({
 test("an undiscovered sender remains unread across restart until discovery", async ({
   page,
 }) => {
+  // This scenario signs in twice; each mocked startup can take ~30s on Windows CI.
+  test.setTimeout(process.platform === "win32" ? 120_000 : 30_000);
   await enterChat(page);
   await page.evaluate(() => {
     (
