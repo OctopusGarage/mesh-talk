@@ -8,6 +8,9 @@ export const messageRowKey = (message: ChatMessage, index: number) =>
 
 type Target = (SearchTarget & { key: string; request: number }) | null;
 
+const isAtBottom = (scroller: HTMLElement) =>
+  scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 48;
+
 /** Movement and restoration for the rendered virtual list, scoped by conversation. */
 export function useConversationViewport(
   key: string,
@@ -126,15 +129,20 @@ export function useConversationViewport(
           scrollPositions.current.get(key) ?? messages.length - 1,
         ),
     atBottomStateChange(bottom: boolean) {
-      atBottom.current.set(key, bottom);
+      // Virtuoso can report a previous measurement after a long row changes height.
+      // The DOM scroller is the source of truth for whether the reader scrolled up.
+      const observedBottom = scrollerRef.current
+        ? isAtBottom(scrollerRef.current)
+        : bottom;
+      atBottom.current.set(key, observedBottom);
       if (restoringScroll.current === key) return;
-      if (bottom) {
+      if (observedBottom) {
         scrollPositions.current.delete(key);
         exactScrollPositions.current.delete(key);
       } else {
         scrollPositions.current.set(key, lastVisibleRows.current.get(key) ?? 0);
       }
-      setShowJump(!bottom);
+      setShowJump(!observedBottom);
     },
     rangeChanged(startIndex: number) {
       lastVisibleRows.current.set(key, startIndex);
@@ -157,10 +165,11 @@ export function useConversationViewport(
         return;
       }
       const scroller = event.currentTarget;
-      if (
-        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
-        48
-      ) {
+      const bottom = isAtBottom(scroller);
+      atBottom.current.set(key, bottom);
+      setShowJump(!bottom);
+      if (bottom) {
+        scrollPositions.current.delete(key);
         exactScrollPositions.current.delete(key);
         return;
       }
