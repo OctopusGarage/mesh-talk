@@ -121,6 +121,14 @@ remaining duplicate-offer and sequence-2 bypass findings closed. These reviews
 were source inspection; the loopback, CLI, browser, and health suites provide
 the executable verification.
 
+An alias-specific review (`target/ai-eval/attachment-alias-review.md`) then found
+that two signed senders referencing the same immutable file stream could lose an
+alias, mix chunk authors, or hide one contact's pending approval. The node now
+keeps matching manifest aliases, admits only one chunk author for a file stream,
+and keeps the manual control visible whenever any alias needs approval. A
+follow-up source review (`target/ai-eval/attachment-alias-closure.md`) found all
+three findings closed; the alias regression test checks the mixed-policy status.
+
 The read-only model review (`target/ai-eval/directory-transfer-review.md`) found a
 retry-loss path: pruning archive chunks before extraction succeeds could make a failed
 save permanent. The save path now defers completion and pruning until after extraction,

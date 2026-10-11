@@ -2404,6 +2404,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
     b.set_invisible(true).await.unwrap();
     b.initiate_contact_locally(&aa.account_id()).await.unwrap();
     b.initiate_contact_locally(&ca.account_id()).await.unwrap();
+    b.set_attachment_global_auto(false).unwrap();
     let manifest = crate::file::FileManifest {
         name: "alias.txt".into(),
         size: 0,
@@ -2432,6 +2433,22 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
     }
     assert_eq!(b.account_history(&aa.account_id(), 10).len(), 1);
     assert_eq!(b.account_history(&ca.account_id(), 10).len(), 1);
+    assert_eq!(
+        b.attachment_consent_status(manifest.file_conv),
+        Some(crate::node::ReceiveDecision::Pending)
+    );
+    b.set_attachment_contact_auto(&ca.account_id(), Some(true))
+        .unwrap();
+    assert_eq!(
+        b.attachment_consent_status(manifest.file_conv),
+        Some(crate::node::ReceiveDecision::Pending),
+        "one automatic alias must not hide the other sender's approval controls"
+    );
+    b.decide_attachment(manifest.file_conv, true).unwrap();
+    assert_eq!(
+        b.attachment_consent_status(manifest.file_conv),
+        Some(crate::node::ReceiveDecision::Accepted)
+    );
     b.delete_account_message(&aa.account_id(), originals[0].id)
         .unwrap();
     {

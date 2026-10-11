@@ -535,6 +535,19 @@ impl SyncStore for GuardedSyncStore<'_> {
             }
         }
         let mut log = self.node.log.lock().expect("log lock not poisoned");
+        if event.kind == EventKind::Message
+            && known_file
+            && log
+                .events(&event.conversation_id)
+                .iter()
+                .any(|chunk| chunk.author != event.author)
+        {
+            self.denied = true;
+            return Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "attachment chunk stream already belongs to another sender",
+            )));
+        }
         if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
             log.append_durable(event)
         } else {

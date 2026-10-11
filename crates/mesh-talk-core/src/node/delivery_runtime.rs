@@ -343,11 +343,20 @@ impl Node {
             ));
         }
         {
+            let mut permitted_authors = self
+                .files
+                .lock()
+                .expect("files lock not poisoned")
+                .authors(manifest.file_conv());
+            permitted_authors.insert(event.author);
             let log = self.log.lock().expect("log lock not poisoned");
             let mut chunks = log.events(&manifest.file_conv());
             chunks.sort_by_key(|chunk| chunk.seq);
             let mut previous = None;
+            let mut chunk_author = None;
             if chunks.iter().enumerate().any(|(index, chunk)| {
+                let mixed_authors = chunk_author.is_some_and(|author| author != chunk.author);
+                chunk_author = Some(chunk.author);
                 let malformed_chain = chunk.seq != index as u64 + 1
                     || match previous {
                         None => !chunk.parents.is_empty(),
@@ -355,8 +364,9 @@ impl Node {
                     };
                 previous = Some(chunk.id);
                 malformed_chain
+                    || mixed_authors
                     || chunk.kind != crate::eventlog::EventKind::Message
-                    || chunk.author != event.author
+                    || !permitted_authors.contains(&chunk.author)
                     || chunk.seq == 0
                     || chunk.seq > u64::from(manifest.chunk_count())
                     || !chunk.verify_integrity()

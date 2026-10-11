@@ -93,7 +93,7 @@ pub(super) async fn run(
                         let mut ready = false;
                         let states = candidates.into_iter().map(|file| {
                             let state = checking_node.file_progress(file).map(|mut progress| {
-                                if checking_node.attachment_consent_status(file) != Some(ReceiveDecision::Accepted) {
+                                if matches!(checking_node.attachment_consent_status(file), Some(ReceiveDecision::Pending | ReceiveDecision::Declined)) {
                                     progress.done = 0;
                                 } else if !ready && checking_node.file_ready_to_save(file) { progress.done = progress.total; ready = true; }
                                 progress
@@ -214,7 +214,8 @@ mod tests {
         let at = tokio::spawn(a.clone().run_accept_loop(al));
         let bt = tokio::spawn(b.clone().run_accept_loop(bl));
         let channel = a.create_channel("media", vec![bpublic]).await.unwrap();
-        let bytes = vec![7; 2048];
+        let mut bytes = vec![7; 2048];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
         let source = ad.path().join("channel.png");
         std::fs::write(&source, &bytes).unwrap();
         let file = a

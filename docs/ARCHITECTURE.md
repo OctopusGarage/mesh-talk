@@ -229,7 +229,10 @@ synchronizing chunk events. The receiver independently rejects unsolicited chunk
 durable sync gate, including chunk-first delivery from older senders. A channel sender
 publishes the manifest and members pull chunks only after their own consent; automatic
 images retain eager distribution. Decisions bind the signed manifest event and survive
-restart; approved partial files are requeued on startup. Offline recipients leave
+restart. Identical signed manifests that share the same file conversation are aliases
+of one immutable byte stream; one explicit decision covers those aliases while each
+sender's automatic policy is evaluated separately. Approved partial files are requeued
+on startup. Offline recipients leave
 the sender's chunks local until they reconnect and approve, so the sender must be
 available later to finish delivery. The CLI exposes `/receive` and `/decline` for
 manual decisions. Pre-consent peers retain the legacy direct-transfer fallback,

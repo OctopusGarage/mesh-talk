@@ -277,15 +277,38 @@ impl Node {
     /// Status for an attachment surfaced to this account. `None` means there is
     /// no verified incoming offer for the requested file conversation.
     pub fn attachment_consent_status(&self, file: ConversationId) -> Option<ReceiveDecision> {
-        let (automatic, account, _, _) = self.incoming_offer(file, None, None)?;
-        Some(if automatic {
+        let events = self.equivalent_offer_events(file);
+        let offers: Vec<_> = events
+            .iter()
+            .filter_map(|id| self.incoming_offer(file, Some(*id), None))
+            .collect();
+        if offers.is_empty() {
+            return None;
+        }
+        let consent = self
+            .attachment_consent
+            .lock()
+            .expect("consent lock not poisoned");
+        let mut pending = false;
+        let mut accepted = false;
+        for (automatic, account, _, _) in offers {
+            let decision = if automatic {
+                ReceiveDecision::Accepted
+            } else {
+                consent.status_for_events(&events, &account)
+            };
+            match decision {
+                ReceiveDecision::Accepted => accepted = true,
+                ReceiveDecision::Pending => pending = true,
+                ReceiveDecision::Declined => {}
+            }
+        }
+        Some(if pending {
+            ReceiveDecision::Pending
+        } else if accepted {
             ReceiveDecision::Accepted
         } else {
-            let events = self.equivalent_offer_events(file);
-            self.attachment_consent
-                .lock()
-                .expect("consent lock not poisoned")
-                .status_for_events(&events, &account)
+            ReceiveDecision::Declined
         })
     }
 
@@ -294,18 +317,27 @@ impl Node {
         file: ConversationId,
         author: &[u8; 32],
     ) -> bool {
-        let Some((automatic, account, _, sender)) = self.incoming_offer(file, None, None) else {
+        if !self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .has_author(file, crate::eventlog::Author::from_ed25519(*author))
+        {
             return false;
-        };
+        }
         let events = self.equivalent_offer_events(file);
-        &sender.ed25519_pub == author
-            && (automatic
-                || self
-                    .attachment_consent
-                    .lock()
-                    .expect("consent lock not poisoned")
-                    .status_for_events(&events, &account)
-                    == ReceiveDecision::Accepted)
+        let offers: Vec<_> = events
+            .iter()
+            .filter_map(|id| self.incoming_offer(file, Some(*id), None))
+            .filter(|(_, _, _, sender)| &sender.ed25519_pub == author)
+            .collect();
+        let consent = self
+            .attachment_consent
+            .lock()
+            .expect("consent lock not poisoned");
+        offers.into_iter().any(|(automatic, account, _, _)| {
+            automatic || consent.status_for_events(&events, &account) == ReceiveDecision::Accepted
+        })
     }
 
     fn equivalent_offer_events(&self, file: ConversationId) -> Vec<EventId> {
@@ -316,21 +348,21 @@ impl Node {
     }
 
     pub fn decide_attachment(&self, file: ConversationId, accept: bool) -> Result<(), NodeError> {
-        let Some((automatic, _, event, _)) = self.incoming_offer(file, None, None) else {
+        let offers: Vec<_> = self
+            .equivalent_offer_events(file)
+            .into_iter()
+            .filter_map(|id| self.incoming_offer(file, Some(id), None))
+            .collect();
+        let Some((_, _, event, _)) = offers.iter().find(|(automatic, _, _, _)| !automatic) else {
             return Err(NodeError::InvalidInput(
-                "unknown incoming attachment".into(),
+                "attachment does not require approval or is unknown".into(),
             ));
         };
-        if automatic {
-            return Err(NodeError::InvalidInput(
-                "attachment does not require approval".into(),
-            ));
-        }
-        // One durable decision covers all identical, same-author offer events.
+        // One durable decision covers all identical signed offer events for this file.
         self.attachment_consent
             .lock()
             .expect("consent lock not poisoned")
-            .decide(event, accept)
+            .decide(*event, accept)
             .map_err(NodeError::Log)?;
         if accept {
             self.pending_files

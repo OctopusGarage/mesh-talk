@@ -29,7 +29,7 @@ pub struct FileBook {
     manifests: HashMap<ConversationId, AnyManifest>, // keyed by file_conv
     emitted: HashSet<EventId>,
     manifest_events: HashMap<ConversationId, HashSet<EventId>>,
-    authors: HashMap<ConversationId, Author>,
+    authors: HashMap<ConversationId, HashSet<Author>>,
 }
 
 impl FileBook {
@@ -49,14 +49,10 @@ impl FileBook {
             .or_insert(manifest);
     }
 
-    pub(in crate::node) fn accepts(&self, author: Author, manifest: &AnyManifest) -> bool {
+    pub(in crate::node) fn accepts(&self, _author: Author, manifest: &AnyManifest) -> bool {
         self.manifests
             .get(&manifest.file_conv())
             .is_none_or(|existing| existing == manifest)
-            && self
-                .authors
-                .get(&manifest.file_conv())
-                .is_none_or(|existing| *existing == author)
     }
 
     pub(in crate::node) fn record_event(
@@ -72,7 +68,10 @@ impl FileBook {
             .entry(manifest.file_conv())
             .or_default()
             .insert(event);
-        self.authors.insert(manifest.file_conv(), author);
+        self.authors
+            .entry(manifest.file_conv())
+            .or_default()
+            .insert(author);
         self.record(manifest);
         true
     }
@@ -84,6 +83,16 @@ impl FileBook {
             .flatten()
             .copied()
             .collect()
+    }
+
+    pub(in crate::node) fn has_author(&self, file: ConversationId, author: Author) -> bool {
+        self.authors
+            .get(&file)
+            .is_some_and(|authors| authors.contains(&author))
+    }
+
+    pub(in crate::node) fn authors(&self, file: ConversationId) -> HashSet<Author> {
+        self.authors.get(&file).cloned().unwrap_or_default()
     }
 
     /// Whether a FileManifest event id was already surfaced (or seeded on open).
@@ -140,7 +149,7 @@ mod tests {
         conflicting.file_key = [9; 32];
         let author = Author::from_ed25519([4; 32]);
         assert!(book.record_event(first, author, AnyManifest::V1(m.clone())));
-        assert!(!book.record_event(
+        assert!(book.record_event(
             crate::eventlog::event::EventId::new([2; 32]),
             Author::from_ed25519([5; 32]),
             AnyManifest::V1(m)
@@ -150,6 +159,8 @@ mod tests {
             author,
             AnyManifest::V1(conflicting)
         ));
-        assert_eq!(book.manifest_events(conv(1)), vec![first]);
+        assert_eq!(book.manifest_events(conv(1)).len(), 2);
+        assert!(book.has_author(conv(1), author));
+        assert!(book.has_author(conv(1), Author::from_ed25519([5; 32])));
     }
 }
