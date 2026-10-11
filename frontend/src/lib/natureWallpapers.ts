@@ -1,8 +1,4 @@
-const images = import.meta.glob<string>("../assets/themes/nature/*.webp", {
-  eager: true,
-  query: "?url",
-  import: "default",
-});
+import { assetEntries } from "./assetCatalog";
 
 export interface NatureWallpaper {
   id: string;
@@ -10,7 +6,9 @@ export interface NatureWallpaper {
   url: string;
 }
 
-export const NATURE_WALLPAPERS: NatureWallpaper[] = Object.entries(images)
+export const NATURE_WALLPAPERS: NatureWallpaper[] = assetEntries(
+  "themes/nature",
+)
   .map(([path, url]) => {
     const id = path
       .split("/")

@@ -276,17 +276,54 @@ pub fn handle_response_bounded(
     response: &SyncResponse,
     frame_budget: usize,
 ) -> (ApplyReport, SyncFollowup) {
+    let (report, mut frames) = handle_response_bounded_burst(store, response, frame_budget, 1);
+    (
+        report,
+        frames.pop().unwrap_or(SyncFollowup {
+            conversation: response.conversation,
+            events: Vec::new(),
+        }),
+    )
+}
+
+/// Pack several ordinary Followup frames from one reconciliation. A file transfer
+/// can push a bounded burst without re-advertising its entire growing id set after
+/// every chunk. Each frame remains independently validated by the old responder.
+pub fn handle_response_bounded_burst(
+    store: &mut impl SyncStore,
+    response: &SyncResponse,
+    frame_budget: usize,
+    max_frames: usize,
+) -> (ApplyReport, Vec<SyncFollowup>) {
     let report = ingest_all(store, &response.events);
     let remote_have: HashSet<EventId> = response.have.iter().copied().collect();
     let all_missing = store.events_excluding(&response.conversation, &remote_have);
-    let events = cap_events(all_missing, frame_budget.saturating_sub(SYNC_MARGIN));
-    (
-        report,
-        SyncFollowup {
+    let budget = frame_budget.saturating_sub(SYNC_MARGIN);
+    let mut frames = Vec::new();
+    let mut events = Vec::new();
+    let mut used = 0usize;
+    for event in all_missing {
+        let size = encoded_event_size(&event);
+        if !events.is_empty() && used.saturating_add(size) > budget {
+            frames.push(SyncFollowup {
+                conversation: response.conversation,
+                events: std::mem::take(&mut events),
+            });
+            if frames.len() == max_frames {
+                break;
+            }
+            used = 0;
+        }
+        used = used.saturating_add(size);
+        events.push(event);
+    }
+    if !events.is_empty() && frames.len() < max_frames {
+        frames.push(SyncFollowup {
             conversation: response.conversation,
             events,
-        },
-    )
+        });
+    }
+    (report, frames)
 }
 
 /// Apply a responder's reply: ingest the events it sent, then compute the

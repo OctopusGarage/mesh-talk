@@ -8,6 +8,19 @@ import {
   expectNoHorizontalOverflow,
 } from "./helpers/ui-audit";
 
+test("chat startup does not import each preset image as a module", async ({
+  page,
+}) => {
+  const imageModules: string[] = [];
+  page.on("request", (request) => {
+    if (/\.(?:webp|jpe?g|svg)\?import&url/.test(request.url())) {
+      imageModules.push(request.url());
+    }
+  });
+  await enterChat(page);
+  expect(imageModules).toEqual([]);
+});
+
 test("city avatar thumbnails load after scrolling the gallery", async ({
   page,
 }) => {

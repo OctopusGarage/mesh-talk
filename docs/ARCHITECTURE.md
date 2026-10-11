@@ -184,6 +184,11 @@ work only after the exact target confirms the final event in the validated
 dense signed chunk chain. The worker's file scheduler owns its pending and
 active cursors, bounded transfer cache, liveness checks and retirement; journal
 scans use an immutable cursor/capacity snapshot before network work resumes.
+File chunk sync sends at most four ordinary Followup frames after each have-set
+exchange. This reduces repeated id-set scans and round trips without changing
+the wire format; an older responder already accepts each Followup independently.
+The next exchange still confirms which signed chunks reached the recipient,
+and exact final durable custody remains required before retiring source work.
 A receiver may instead confirm historical verified
 completion after saving all content and reclaiming chunks: it verifies the entire
 original-author chain, chunk AEAD/hashes and whole-file checksum, synchronizes the

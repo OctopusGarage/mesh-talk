@@ -1388,7 +1388,7 @@ async fn delayed_private_file_peer(
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    } else if super::session::is_round_request(&bytes, file)
+                    } else if super::session::is_followup(&bytes, file)
                         && node
                             .file_progress(file)
                             .is_some_and(|progress| progress.done == 1)
@@ -1399,8 +1399,9 @@ async fn delayed_private_file_peer(
                         observation
                             .interrupted_connection
                             .store(connection, std::sync::atomic::Ordering::SeqCst);
-                        // One original chunk is already admitted. Force this
-                        // round past 400ms once; retries must abandon its socket.
+                        // One original chunk is already admitted. A burst's next
+                        // Followup now arrives in the same reconciliation; stall it
+                        // past 400ms so retries must abandon this socket.
                         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
                     }
                     timing.phase("delayed-peer-serve-exchange");

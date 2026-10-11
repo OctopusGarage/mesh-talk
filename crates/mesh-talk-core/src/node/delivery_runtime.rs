@@ -1767,7 +1767,12 @@ impl Node {
             FilePhase::Chunks => {
                 let complete = transfer
                     .sync
-                    .step(channel, &store, file.file_conversation)
+                    .step_burst(
+                        channel,
+                        &store,
+                        file.file_conversation,
+                        super::session::FILE_FOLLOWUP_BURST,
+                    )
                     .await?;
                 if let Some(confirmed) = transfer.sync.remote_have_count() {
                     self.outgoing_file_acks
@@ -1962,7 +1967,7 @@ impl Node {
                 }
                 #[cfg(test)]
                 phase.store(4, std::sync::atomic::Ordering::Relaxed);
-                if super::session::request_round(&mut channel, &store, file.file_conversation)
+                if super::session::request_file_round(&mut channel, &store, file.file_conversation)
                     .await
                     .is_err()
                 {

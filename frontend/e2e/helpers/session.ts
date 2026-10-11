@@ -19,7 +19,7 @@ export async function enterChat(page: Page, user = "tester", path = "/") {
   }
   // Windows CI can take longer to finish the mocked startup while other UI jobs run.
   await expect(page.getByTestId("chat-shell")).toBeVisible({
-    timeout: process.platform === "win32" ? 60_000 : 15_000,
+    timeout: process.platform === "win32" ? 90_000 : 15_000,
   });
   await expect(
     page.getByTestId(`conversation-row-${BOB.account}`),

@@ -10,9 +10,9 @@
 
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::sync::{
-    build_request, fingerprint, handle_followup, handle_request_bounded, handle_response_bounded,
-    ApplyReport, FileConsentStatus, FpRequest, FpResponse, SyncFollowup, SyncRequest, SyncResponse,
-    SyncStore, MAX_REJECTED_DETAIL,
+    build_request, fingerprint, handle_followup, handle_request_bounded,
+    handle_response_bounded_burst, ApplyReport, FileConsentStatus, FpRequest, FpResponse,
+    SyncFollowup, SyncRequest, SyncResponse, SyncStore, MAX_REJECTED_DETAIL,
 };
 use crate::transport::{SecureChannel, TransportError, MAX_PLAINTEXT};
 use bincode::Options;
@@ -21,9 +21,13 @@ use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Backstop on sync rounds for one conversation (a peer that resends
-/// non-applying events forever can't spin us indefinitely). Generous: a round
-/// transfers up to ~one frame, so this bounds a single conversation's transfer.
+/// non-applying events forever can't spin us indefinitely).
 const MAX_SYNC_ROUNDS: usize = 10_000;
+
+/// Keep file bursts short enough for the transfer scheduler's per-step deadline
+/// and to let other destinations make progress. Existing peers already accept
+/// consecutive Followup frames, so this does not change the wire format.
+pub(in crate::node) const FILE_FOLLOWUP_BURST: usize = 4;
 
 /// Bytes per event id (a 32-byte hash) — used to estimate the `have`-set bandwidth in the
 /// sync-cost telemetry below.
@@ -81,8 +85,8 @@ enum SyncWire {
 }
 
 #[cfg(test)]
-pub(in crate::node) fn is_round_request(bytes: &[u8], conversation: ConversationId) -> bool {
-    round_request_conversation(bytes) == Some(conversation)
+pub(in crate::node) fn is_followup(bytes: &[u8], conversation: ConversationId) -> bool {
+    matches!(decode(bytes), Ok(SyncWire::Followup(frame)) if frame.conversation == conversation)
 }
 
 #[cfg(test)]
@@ -331,6 +335,26 @@ where
     Ok(progress.total)
 }
 
+/// File conversations can send several existing Followup frames after each
+/// full have-set exchange. Ordinary conversations retain their single-frame
+/// reconciliation for predictable scheduling.
+pub(in crate::node) async fn request_file_round<S, IO>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<ApplyReport, SessionError>
+where
+    S: SyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut progress = SyncProgress::default();
+    while !progress
+        .step_burst(channel, store, conversation, FILE_FOLLOWUP_BURST)
+        .await?
+    {}
+    Ok(progress.total)
+}
+
 /// Resume only between complete protocol exchanges, never midway through
 /// a Noise frame. A caller timing out a step must discard its channel and state.
 #[derive(Default)]
@@ -360,6 +384,23 @@ impl SyncProgress {
         S: SyncStore,
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        self.step_burst(channel, store, conversation, 1).await
+    }
+
+    pub(in crate::node) async fn step_burst<S, IO>(
+        &mut self,
+        channel: &mut SecureChannel<IO>,
+        store: &Mutex<S>,
+        conversation: ConversationId,
+        max_followups: usize,
+    ) -> Result<bool, SessionError>
+    where
+        S: SyncStore,
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        if max_followups == 0 || max_followups > FILE_FOLLOWUP_BURST {
+            return Err(SessionError::UnexpectedMessage);
+        }
         // Phase 0 — fingerprint short-circuit. Exchange a single 32-byte digest of our whole
         // id-set; if the responder's matches, the logs are identical and we skip the O(N)
         // have-set streaming entirely (the common idle-drain case). A mismatch falls through to
@@ -445,9 +486,10 @@ impl SyncProgress {
                 .count(),
         );
 
-        let (report, followup) = {
+        let (report, mut followups) = {
             let mut store = store.lock().expect("store mutex not poisoned");
-            let result = handle_response_bounded(&mut *store, &response, MAX_PLAINTEXT);
+            let result =
+                handle_response_bounded_burst(&mut *store, &response, MAX_PLAINTEXT, max_followups);
             if store.admission_denied() {
                 return Err(SessionError::UnexpectedMessage);
             }
@@ -466,13 +508,26 @@ impl SyncProgress {
         {
             return Err(SessionError::NoProgress);
         }
-        let more_to_push = !followup.events.is_empty();
-        self.pushed_total += followup.events.len();
-        self.previous_push = followup.events.iter().map(|event| event.id).collect();
-
-        channel
-            .send(&encode(&SyncWire::Followup(followup))?)
-            .await?;
+        let more_to_push = !followups.is_empty();
+        self.pushed_total += followups
+            .iter()
+            .map(|frame| frame.events.len())
+            .sum::<usize>();
+        self.previous_push = followups
+            .iter()
+            .flat_map(|frame| frame.events.iter().map(|event| event.id))
+            .collect();
+        if followups.is_empty() {
+            followups.push(SyncFollowup {
+                conversation,
+                events: Vec::new(),
+            });
+        }
+        for followup in followups {
+            channel
+                .send(&encode(&SyncWire::Followup(followup))?)
+                .await?;
+        }
 
         self.total.applied += report.applied;
         self.total.duplicates += report.duplicates;
@@ -1341,6 +1396,40 @@ mod tests {
         for event in store.lock().unwrap().events(&conv()) {
             assert_eq!(remote.get(&event.id), Some(event));
         }
+    }
+
+    #[tokio::test]
+    async fn file_burst_reuses_one_have_exchange_for_several_legacy_followups() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let (aio, bio) = tokio::io::duplex(512 * 1024);
+        let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
+        let ids = log.event_ids(&conv());
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
+            let store = Mutex::new(EventLog::default());
+            while let Ok(Served::Handled(_)) = serve_one(&mut channel, &store).await {}
+            store.into_inner().unwrap()
+        });
+        let mut channel = SecureChannel::connect(aio, &alice, None).await.unwrap();
+        let store = Mutex::new(log);
+        let mut progress = SyncProgress::default();
+        for _ in 0..10 {
+            if progress
+                .step_burst(&mut channel, &store, conv(), FILE_FOLLOWUP_BURST)
+                .await
+                .unwrap()
+            {
+                break;
+            }
+        }
+        assert_eq!(progress.remote_have_count(), Some(ids.len()));
+        assert!(
+            progress.rounds <= 3,
+            "burst must avoid per-chunk reconciliation"
+        );
+        drop(channel);
+        assert_eq!(server.await.unwrap().event_ids(&conv()), ids);
     }
 
     #[tokio::test]

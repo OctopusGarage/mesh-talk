@@ -1,7 +1,9 @@
 // Built-in avatar packs the user can pick from, instead of uploading a photo.
 // Clubs, NBA teams, and city paintings are for GROUP avatars; people are for
 // PERSONAL avatars. The manifests are built automatically from bundled assets via
-// `import.meta.glob` (eager URL imports) — drop a file in the folder and it shows up.
+// Vite discovers filenames once; drop a file in the folder and it shows up after restart.
+
+import { assetEntries } from "./assetCatalog";
 
 export interface AvatarPreset {
   /** Display name shown under the thumbnail. */
@@ -24,28 +26,18 @@ function labelFromPath(path: string): string {
     .join(" ");
 }
 
-function pack(modules: Record<string, string>): AvatarPreset[] {
-  return Object.entries(modules)
+function pack(entries: Array<[string, string]>): AvatarPreset[] {
+  return entries
     .sort(([a], [b]) => a.localeCompare(b)) // by path: clubs keep rank order, players A→Z
     .map(([path, url]) => ({ label: labelFromPath(path), url }));
 }
 
 /** Club logos — preset GROUP (channel) avatars. */
-export const CLUB_AVATARS: AvatarPreset[] = pack(
-  import.meta.glob("../assets/avatars/clubs/*.svg", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
-);
+export const CLUB_AVATARS: AvatarPreset[] = pack(assetEntries("avatars/clubs"));
 
 /** Football-star photos — preset PERSONAL avatars. */
 export const PLAYER_AVATARS: AvatarPreset[] = pack(
-  import.meta.glob("../assets/avatars/players/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
+  assetEntries("avatars/players"),
 );
 
 export type AvatarPackName =
@@ -81,56 +73,32 @@ export function avatarPack(name: AvatarPackName): AvatarPreset[] {
 
 /** NBA team logos — preset GROUP (channel) avatars. */
 export const NBA_TEAM_AVATARS: AvatarPreset[] = pack(
-  import.meta.glob("../assets/avatars/nba-teams/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
+  assetEntries("avatars/nba-teams"),
 );
 
 /** Impressionist city landmarks — preset GROUP (channel) avatars. */
 export const CITY_AVATARS: AvatarPreset[] = pack(
-  import.meta.glob("../assets/avatars/cities/*.jpg", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
+  assetEntries("avatars/cities"),
 );
 
 /** NBA star photos — preset PERSONAL avatars. */
 export const NBA_PLAYER_AVATARS: AvatarPreset[] = pack(
-  import.meta.glob("../assets/avatars/nba-players/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
+  assetEntries("avatars/nba-players"),
 );
 
 /** Sports-star portraits — preset PERSONAL avatars. */
 export const SPORTS_AVATARS: AvatarPreset[] = pack(
-  import.meta.glob("../assets/avatars/sports/*.jpg", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
+  assetEntries("avatars/sports"),
 );
 
 /** Famous-person portraits — preset PERSONAL avatars. */
 export const FAMOUS_AVATARS: AvatarPreset[] = pack(
-  import.meta.glob("../assets/avatars/famous/*.jpg", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
+  assetEntries("avatars/famous"),
 );
 
 /** Small acrylic cat portraits — preset PERSONAL avatars. */
-export const CAT_ACRYLIC_AVATARS: AvatarPreset[] = Object.entries(
-  import.meta.glob<string>("../assets/avatars/cat-acrylic/*.webp", {
-    eager: true,
-    query: "?url",
-    import: "default",
-  }),
+export const CAT_ACRYLIC_AVATARS: AvatarPreset[] = assetEntries(
+  "avatars/cat-acrylic",
 )
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([path, url]) => ({
