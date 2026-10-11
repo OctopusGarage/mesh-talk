@@ -5,13 +5,21 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.2.2
+### What's new in v0.2.3
 
-- Added per-file transfer progress and guarded download/open actions until received files are ready.
-- Added directory attachments with safe extraction and a shortcut to the downloads folder.
-- Added screenshot capture and annotation on macOS, Windows, and Linux: select a region, annotate,
-  then explicitly send or cancel. Availability depends on the desktop's capture permissions and
-  portal support.
+- Show sender progress and time remaining for file, image, and folder transfers based on chunks
+  confirmed by the recipient. Failed sends stay visible with an actionable error.
+- Ask before receiving generic attachments, with automatic receive controls for all contacts or
+  an individual contact. Received folders save to the configured Downloads directory.
+- Keep conversation, Dock, and macOS menu bar unread counts aligned, including messages that
+  arrive while the app is in the background.
+- Support large folders with a compact manifest and reduce reconciliation overhead by batching
+  existing file followups. Smaller attachments keep the format supported by older clients.
+- Load bundled stickers and other built-in images directly, reducing chat startup work.
+
+Version 0.2.2 added received-file progress, folder sharing, and region screenshot capture with
+annotation on macOS, Windows, and Linux. Screenshot availability depends on desktop permissions
+and portal support.
 
 ### Downloads
 
