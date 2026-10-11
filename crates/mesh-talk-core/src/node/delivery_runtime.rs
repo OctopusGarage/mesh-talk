@@ -72,10 +72,10 @@ impl TestTiming {
     }
 
     pub(super) fn socket(&mut self, stream: &tokio::net::TcpStream) {
-        if self.enabled {
-            if let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) {
-                self.ports = Some((local.port(), remote.port()));
-            }
+        if self.enabled
+            && let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr())
+        {
+            self.ports = Some((local.port(), remote.port()));
         }
     }
 }
@@ -750,67 +750,65 @@ impl Node {
                     .first()
                     .is_none_or(|tx| tx.id() != id)
             });
-            if removed {
-                if let Some((sender, original_conv, entry, file, incoming)) = notification {
-                    if file {
-                        if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
-                            let fresh = {
-                                let mut book = self.files.lock().expect("files lock not poisoned");
-                                let fresh = !book.is_emitted(&entry.event_id);
-                                book.mark_emitted(entry.event_id);
-                                book.record_event(
-                                    entry.event_id,
-                                    crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
-                                    manifest.clone(),
-                                );
-                                fresh
-                            };
-                            self.remember_manifest_scope(
-                                manifest.file_conv(),
-                                original_conv,
-                                crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
+            if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
+                if file {
+                    if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
+                        let fresh = {
+                            let mut book = self.files.lock().expect("files lock not poisoned");
+                            let fresh = !book.is_emitted(&entry.event_id);
+                            book.mark_emitted(entry.event_id);
+                            book.record_event(
                                 entry.event_id,
+                                crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
+                                manifest.clone(),
                             );
-                            if !incoming {
-                                self.install_file_card_scopes_for(store, Some(entry.event_id));
-                            }
-                            if incoming && fresh {
-                                self.pending_files
-                                    .lock()
-                                    .expect("pending files lock not poisoned")
-                                    .insert(manifest.file_conv());
-                                let _ = self.file_incoming.send(ReceivedFile {
-                                    conv: original_conv,
-                                    is_channel: false,
-                                    from: sender.user_id(),
-                                    name: manifest.name().to_owned(),
-                                    size: manifest.size(),
-                                    mime: manifest.mime().to_owned(),
-                                    file_conv: manifest.file_conv(),
-                                    media: super::media_store::manifest_is_media(&manifest),
-                                });
-                            }
-                        }
-                    } else if self
-                        .emitted
-                        .lock()
-                        .expect("emitted lock not poisoned")
-                        .insert(entry.event_id)
-                    {
-                        let body = DmEnvelope::decode(&entry.plaintext).map_or_else(
-                            || MessageBody::decode(&entry.plaintext),
-                            |env| MessageBody::decode(&env.body),
+                            fresh
+                        };
+                        self.remember_manifest_scope(
+                            manifest.file_conv(),
+                            original_conv,
+                            crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
+                            entry.event_id,
                         );
-                        let from_name = self
-                            .historical_author(&sender.ed25519_pub)
-                            .map_or_else(|| sender.user_id(), |proof| proof.name);
-                        let _ = self.incoming.send(ReceivedDm {
-                            from: sender.user_id(),
-                            from_name,
-                            text: body.text,
-                            reply_to: body.reply_to,
-                        });
+                        if !incoming {
+                            self.install_file_card_scopes_for(store, Some(entry.event_id));
+                        }
+                        if incoming && fresh {
+                            self.pending_files
+                                .lock()
+                                .expect("pending files lock not poisoned")
+                                .insert(manifest.file_conv());
+                            let _ = self.file_incoming.send(ReceivedFile {
+                                conv: original_conv,
+                                is_channel: false,
+                                from: sender.user_id(),
+                                name: manifest.name().to_owned(),
+                                size: manifest.size(),
+                                mime: manifest.mime().to_owned(),
+                                file_conv: manifest.file_conv(),
+                                media: super::media_store::manifest_is_media(&manifest),
+                            });
+                        }
                     }
+                } else if self
+                    .emitted
+                    .lock()
+                    .expect("emitted lock not poisoned")
+                    .insert(entry.event_id)
+                {
+                    let body = DmEnvelope::decode(&entry.plaintext).map_or_else(
+                        || MessageBody::decode(&entry.plaintext),
+                        |env| MessageBody::decode(&env.body),
+                    );
+                    let from_name = self
+                        .historical_author(&sender.ed25519_pub)
+                        .map_or_else(|| sender.user_id(), |proof| proof.name);
+                    let _ = self.incoming.send(ReceivedDm {
+                        from: sender.user_id(),
+                        from_name,
+                        text: body.text,
+                        reply_to: body.reply_to,
+                    });
                 }
             }
             if installed?.is_none() {
@@ -928,12 +926,12 @@ impl Node {
             .expect("sent lock not poisoned")
             .entries(&conversation);
         for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx {
-                if sent.conversation == conversation {
-                    ids.insert(sent.seq, message.logical_id);
-                    if !entries.iter().any(|e| e == sent) {
-                        entries.push(sent.clone());
-                    }
+            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx
+                && sent.conversation == conversation
+            {
+                ids.insert(sent.seq, message.logical_id);
+                if !entries.iter().any(|e| e == sent) {
+                    entries.push(sent.clone());
                 }
             }
         }
@@ -954,10 +952,11 @@ impl Node {
             .expect("sent lock not poisoned")
             .entries(&conversation);
         for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { sent, .. } = tx {
-                if sent.conversation == conversation && !entries.iter().any(|e| e == sent) {
-                    entries.push(sent.clone());
-                }
+            if let DeliveryTransaction::Outgoing { sent, .. } = tx
+                && sent.conversation == conversation
+                && !entries.iter().any(|e| e == sent)
+            {
+                entries.push(sent.clone());
             }
         }
         entries

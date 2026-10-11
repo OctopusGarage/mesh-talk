@@ -79,10 +79,10 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
                 return Err(NodeError::Authorization("owner generation changed".into()));
             }
             let result = operation();
-            if result.is_ok() {
-                if let Some(entered) = entered.take() {
-                    let _ = entered.send(());
-                }
+            if result.is_ok()
+                && let Some(entered) = entered.take()
+            {
+                let _ = entered.send(());
             }
             result
         };
@@ -158,7 +158,9 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
             Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
         )
         .unwrap();
-    eprintln!("denied grant: memory_unchanged={unchanged}, disk_unchanged={disk_unchanged}, staged_callbacks={staged}, log_empty={log_empty}");
+    eprintln!(
+        "denied grant: memory_unchanged={unchanged}, disk_unchanged={disk_unchanged}, staged_callbacks={staged}, log_empty={log_empty}"
+    );
     assert!(
         unchanged,
         "invalid owner must not change policy, certified binding or routes"
@@ -1193,9 +1195,21 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         "a bounded active set must advance despite the backlog"
     );
     if completed.is_err() {
-        eprintln!("file-backlog observer slowest-poll-ms={} completed={}/{} accepted={} max-file-channels={}",
-            slowest_poll.as_millis(), originals.iter().filter(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total)).count(),
-            count, observation.next_connection.load(std::sync::atomic::Ordering::SeqCst), observation.max_file_channels.load(std::sync::atomic::Ordering::SeqCst));
+        eprintln!(
+            "file-backlog observer slowest-poll-ms={} completed={}/{} accepted={} max-file-channels={}",
+            slowest_poll.as_millis(),
+            originals
+                .iter()
+                .filter(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total))
+                .count(),
+            count,
+            observation
+                .next_connection
+                .load(std::sync::atomic::Ordering::SeqCst),
+            observation
+                .max_file_channels
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
         let final_chunk = *ids.last().unwrap();
         let exact_bytes = b
             .read_file(file)
@@ -1222,7 +1236,9 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .map(|e| e.id)
             .collect::<Vec<_>>()
             == ids;
-        eprintln!("file-restart failure chunks={counts:?} exact-bytes={exact_bytes} final-authorized-have={held} pending-work={pending} immutable-ids={immutable}");
+        eprintln!(
+            "file-restart failure chunks={counts:?} exact-bytes={exact_bytes} final-authorized-have={held} pending-work={pending} immutable-ids={immutable}"
+        );
     }
     assert!(
         completed.is_ok(),
@@ -3617,7 +3633,10 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
         .unwrap()
         .next_file_destination(None)
         .is_none());
-    assert!(b.log.lock().unwrap().events(&file).is_empty(), "completed/pruned media must not be retransmitted and retained merely to satisfy exact final custody");
+    assert!(
+        b.log.lock().unwrap().events(&file).is_empty(),
+        "completed/pruned media must not be retransmitted and retained merely to satisfy exact final custody"
+    );
     std::fs::remove_file(b.media.path(file).unwrap()).unwrap();
     assert!(!b.file_ready_to_save(file));
 }

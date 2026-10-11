@@ -25,12 +25,18 @@ pub(super) fn configure() {
     let existing = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
     if should_disable_dmabuf(args.iter().map(|arg| arg.as_os_str()), existing.as_deref()) {
         // Set before any threads/WebKit initialization; never change compositing or GDK.
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        // SAFETY: configure() is called from main before Tauri, GTK, or any
+        // application threads start, so no other thread can access the environment.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
         eprintln!("Linux renderer compatibility: DMA-BUF renderer disabled for this launch.");
     } else {
-        eprintln!("Linux renderer compatibility: preserving explicit WEBKIT_DISABLE_DMABUF_RENDERER; unset it to use the compatibility default.");
+        eprintln!(
+            "Linux renderer compatibility: preserving explicit WEBKIT_DISABLE_DMABUF_RENDERER; unset it to use the compatibility default."
+        );
     }
-    eprintln!("Fully quit any existing Mesh-Talk instance (including the tray) before switching renderer mode; a second launch only focuses the existing window.");
+    eprintln!(
+        "Fully quit any existing Mesh-Talk instance (including the tray) before switching renderer mode; a second launch only focuses the existing window."
+    );
 }
 
 #[cfg(test)]

@@ -23,10 +23,10 @@ impl Node {
         // Idempotent: if an unexpired code is already pending (e.g. the UI double-fired
         // the button), return it rather than invalidating the code the user may already
         // be reading aloud. A fresh code requires stop_linking (or letting it expire).
-        if let Some(pl) = guard.as_ref() {
-            if now_millis().saturating_sub(pl.created_at_ms) <= PAIRING_TTL_MS {
-                return pl.code.as_hex();
-            }
+        if let Some(pl) = guard.as_ref()
+            && now_millis().saturating_sub(pl.created_at_ms) <= PAIRING_TTL_MS
+        {
+            return pl.code.as_hex();
         }
         let code = PairingCode::generate();
         let hex = code.as_hex();

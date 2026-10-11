@@ -122,18 +122,16 @@ impl MessageBody {
                     sticker: None,
                 };
             }
-        } else if let Some(rest) = bytes.strip_prefix(MSG_MAGIC_V2) {
-            if let Some((&version, body)) = rest.split_first() {
-                if version == MTB2_V_STICKER {
-                    if let Ok(b) = opts().reject_trailing_bytes().deserialize::<WireV2>(body) {
-                        return MessageBody {
-                            text: b.text,
-                            reply_to: b.reply_to,
-                            sticker: b.sticker,
-                        };
-                    }
-                }
-            }
+        } else if let Some(rest) = bytes.strip_prefix(MSG_MAGIC_V2)
+            && let Some((&version, body)) = rest.split_first()
+            && version == MTB2_V_STICKER
+            && let Ok(b) = opts().reject_trailing_bytes().deserialize::<WireV2>(body)
+        {
+            return MessageBody {
+                text: b.text,
+                reply_to: b.reply_to,
+                sticker: b.sticker,
+            };
         }
         MessageBody {
             text: bytes.to_vec(),

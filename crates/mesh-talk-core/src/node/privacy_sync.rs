@@ -140,25 +140,26 @@ impl GuardedSyncStore<'_> {
                 .as_ref()
                 .is_some_and(|id| manual_accounts.contains(id))
         };
-        if state.own.post_office && manual(&peer_account) {
-            if let Some(other) = proofs.iter().find(|a| {
+        if state.own.post_office
+            && manual(&peer_account)
+            && let Some(other) = proofs.iter().find(|a| {
                 a.public() != self.peer
                     && manual(&a.account_id())
                     && super::delivery_receipt::delivery_conversation_id(&self.peer, &a.public())
                         == *conversation
-            }) {
-                for event in events {
-                    let author = event.author.ed25519_pub();
-                    if (*author == self.peer.ed25519_pub || *author == other.ed25519_pub)
-                        && event.kind == EventKind::Message
-                        && super::delivery_receipt::valid_sealed_wire(&event.ciphertext)
-                        && event.parents.iter().all(|id| allowed.contains(id))
-                    {
-                        allowed.insert(event.id);
-                    }
+            })
+        {
+            for event in events {
+                let author = event.author.ed25519_pub();
+                if (*author == self.peer.ed25519_pub || *author == other.ed25519_pub)
+                    && event.kind == EventKind::Message
+                    && super::delivery_receipt::valid_sealed_wire(&event.ciphertext)
+                    && event.parents.iter().all(|id| allowed.contains(id))
+                {
+                    allowed.insert(event.id);
                 }
-                return allowed;
             }
+            return allowed;
         }
         // A file conversation inherits its verified manifest's parent scope.
         if let Some(scopes) = state.file_scopes.get(conversation) {

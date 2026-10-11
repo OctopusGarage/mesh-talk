@@ -59,7 +59,7 @@ impl Drop for ScopedTimer {
 /// Macro for easily adding performance monitoring to functions
 #[macro_export]
 macro_rules! perf_monitor {
-    ($name:expr) => {
+    ($name:expr_2021) => {
         $crate::perf::ScopedTimer::new($name)
     };
 }

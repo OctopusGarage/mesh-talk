@@ -547,21 +547,21 @@ async fn register_impl(
     let user = match register_result {
         Ok(user) => user,
         Err(AuthError::UserAlreadyExists) => {
-            return Err(CommandError::Validation("Username already exists".into()))
+            return Err(CommandError::Validation("Username already exists".into()));
         }
         Err(AuthError::PasswordTooWeak) => {
             return Err(CommandError::Validation(
                 "Password must be at least 8 characters".into(),
-            ))
+            ));
         }
         Err(AuthError::InvalidInput(msg)) => return Err(CommandError::Validation(msg)),
         Err(AuthError::StorageError(msg)) | Err(AuthError::InternalError(msg)) => {
-            return Err(CommandError::Service(msg))
+            return Err(CommandError::Service(msg));
         }
         Err(other) => {
             return Err(CommandError::Service(format!(
                 "Failed to register user: {other:?}"
-            )))
+            )));
         }
     };
 

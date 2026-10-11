@@ -44,7 +44,7 @@ jobs:
       - name: Validate diagnostic classifiers and native fixture formatting
         run: |
           node --test scripts/diagnostics/network-console-report.test.mjs
-          rustfmt --edition 2021 --check scripts/diagnostics/console-fixture.rs
+          rustfmt --edition 2024 --check scripts/diagnostics/console-fixture.rs
       - name: Install driver matching the actual WebView2 runtime
         shell: pwsh
         run: |
@@ -73,9 +73,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path $env:NATIVE_CONSOLE_CONTROL_DIR -Force | Out-Null
-          rustc --edition 2021 --check-cfg 'cfg(console_child)' --cfg console_child -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-child.exe"
+          rustc --edition 2024 --check-cfg 'cfg(console_child)' --cfg console_child -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-child.exe"
           if ($LASTEXITCODE -ne 0) { throw 'Console child fixture build failed' }
-          rustc --edition 2021 --check-cfg 'cfg(console_child)' -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-launcher.exe"
+          rustc --edition 2024 --check-cfg 'cfg(console_child)' -D warnings scripts/diagnostics/console-fixture.rs -o "$env:NATIVE_CONSOLE_CONTROL_DIR/console-launcher.exe"
           if ($LASTEXITCODE -ne 0) { throw 'GUI parent fixture build failed' }
       - name: Verify baseline and fixed production application on the same native runner
         shell: pwsh

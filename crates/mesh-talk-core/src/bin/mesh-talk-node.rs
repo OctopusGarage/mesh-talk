@@ -392,7 +392,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => emit("usage: /receive <file-id> or /decline <file-id>"),
             }
         } else if !line.is_empty() {
-            emit("commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit");
+            emit(
+                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+            );
         }
     }
     Ok(())

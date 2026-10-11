@@ -219,10 +219,9 @@ impl Node {
             .lock()
             .expect("reaction_cache mutex not poisoned")
             .get(&conv)
+            && *v == version
         {
-            if *v == version {
-                return cached.clone();
-            }
+            return cached.clone();
         }
         let is_channel = {
             let book = self.channels.lock().expect("channels mutex not poisoned");

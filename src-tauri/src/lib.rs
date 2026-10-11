@@ -253,11 +253,11 @@ pub fn run_tauri_configured(
             // The window is created hidden in `tauri.conf.json`, then explicitly shown only
             // for normal launches. This avoids a visible flash on Windows autostart where a
             // visible window would otherwise be created first and hidden later in setup.
-            if !std::env::args().any(|a| a == "--hidden") {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+            if !std::env::args().any(|a| a == "--hidden")
+                && let Some(window) = app.get_webview_window("main")
+            {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
 
             #[cfg(debug_assertions)]
@@ -274,17 +274,17 @@ pub fn run_tauri_configured(
         // Close-to-tray: if "minimize to tray" is on, hide instead of exiting so the
         // node runtime stays alive and keeps receiving. Quit (tray menu) is the real exit.
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    let hide = window
-                        .app_handle()
-                        .try_state::<SettingsState>()
-                        .map(|s| s.get().minimize_to_tray)
-                        .unwrap_or(true);
-                    if hide {
-                        api.prevent_close();
-                        let _ = crate::window_visibility::hide(window);
-                    }
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+            {
+                let hide = window
+                    .app_handle()
+                    .try_state::<SettingsState>()
+                    .map(|s| s.get().minimize_to_tray)
+                    .unwrap_or(true);
+                if hide {
+                    api.prevent_close();
+                    let _ = crate::window_visibility::hide(window);
                 }
             }
         })

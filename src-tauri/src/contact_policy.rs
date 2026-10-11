@@ -710,7 +710,7 @@ impl HiddenContactsState {
                 return Ok(HiddenContactsSnapshot {
                     owner: owner.into(),
                     contacts: vec![],
-                })
+                });
             }
             Err(_) => return Err("Could not read hidden contacts".into()),
         };

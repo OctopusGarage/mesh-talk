@@ -284,11 +284,9 @@ pub async fn capture_screen(
         }
     });
 
-    if hide_window {
-        if let Some(w) = &window {
-            let _ = crate::window_visibility::show(w);
-            let _ = w.set_focus();
-        }
+    if hide_window && let Some(w) = &window {
+        let _ = crate::window_visibility::show(w);
+        let _ = w.set_focus();
     }
 
     result
@@ -301,7 +299,7 @@ pub async fn capture_screen(
 #[cfg(target_os = "macos")]
 mod screen_recording {
     #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
     }
@@ -424,7 +422,7 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
         Err(e) => {
             return Err(CommandError::Internal(format!(
                 "screenshot portal failed: {e}"
-            )))
+            )));
         }
     };
     let path = portal_file_path(shot.uri().as_str())?;

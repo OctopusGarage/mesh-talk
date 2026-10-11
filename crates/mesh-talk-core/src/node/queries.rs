@@ -28,17 +28,14 @@ impl Node {
             .expect("received_files mutex not poisoned")
             .entries(&conversation);
         for transaction in delivery.pending_transactions() {
-            if let super::delivery_store::DeliveryTransaction::OutgoingManifest {
-                received, ..
-            } = transaction
+            if let super::delivery_store::DeliveryTransaction::OutgoingManifest { received, .. } =
+                transaction
+                && received.conversation == conversation
+                && !entries
+                    .iter()
+                    .any(|entry| entry.event_id == received.event_id)
             {
-                if received.conversation == conversation
-                    && !entries
-                        .iter()
-                        .any(|entry| entry.event_id == received.event_id)
-                {
-                    entries.push((**received).clone());
-                }
+                entries.push((**received).clone());
             }
         }
         entries

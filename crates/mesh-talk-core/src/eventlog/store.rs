@@ -69,13 +69,13 @@ impl EventLog {
             return Err(LogError::MissingParents(missing));
         }
         // The author must not already have a different event at this seq.
-        if let Some(existing) = self.author_seq.get(&(conv, event.author, event.seq)) {
-            if *existing != event.id {
-                return Err(LogError::AuthorEquivocation {
-                    author: event.author,
-                    seq: event.seq,
-                });
-            }
+        if let Some(existing) = self.author_seq.get(&(conv, event.author, event.seq))
+            && *existing != event.id
+        {
+            return Err(LogError::AuthorEquivocation {
+                author: event.author,
+                seq: event.seq,
+            });
         }
         Ok(true)
     }

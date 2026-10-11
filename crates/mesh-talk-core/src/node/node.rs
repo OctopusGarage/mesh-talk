@@ -453,10 +453,10 @@ impl Node {
         // (first-wins on the chain they already hold) cannot follow.
         for channel in channels.channel_ids() {
             for (epoch, bytes) in channel_senders.get(&channel) {
-                if let Some(sk) = SenderKey::deserialize(&bytes) {
-                    if let Some(state) = channels.state_mut(&channel) {
-                        state.import_my_sender(epoch, sk);
-                    }
+                if let Some(sk) = SenderKey::deserialize(&bytes)
+                    && let Some(state) = channels.state_mut(&channel)
+                {
+                    state.import_my_sender(epoch, sk);
                 }
             }
         }

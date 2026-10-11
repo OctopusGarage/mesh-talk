@@ -63,10 +63,10 @@ impl ProfileStore {
         updated_at: u64,
         avatar: Option<Vec<u8>>,
     ) -> Result<bool, LogError> {
-        if let Some(a) = &avatar {
-            if a.len() > MAX_AVATAR_BYTES {
-                return Ok(false);
-            }
+        if let Some(a) = &avatar
+            && a.len() > MAX_AVATAR_BYTES
+        {
+            return Ok(false);
         }
         // Stale/duplicate? Don't write — keeps the log from growing on a replay.
         if matches!(self.by_account.get(account_id), Some(cur) if cur.updated_at >= updated_at) {

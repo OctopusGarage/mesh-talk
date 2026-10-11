@@ -59,18 +59,16 @@ fn cleanup_old_logs(logs_dir: &Path, max_days: u64) -> Result<(), std::io::Error
                 let path = entry.path();
 
                 // Only process files with .log extension
-                if path.extension().is_some_and(|ext| ext == "log") {
-                    if let Ok(metadata) = fs::metadata(&path) {
-                        if let Ok(modified) = metadata.modified() {
-                            if modified < cutoff_time {
-                                // Delete old log file
-                                if let Err(e) = fs::remove_file(&path) {
-                                    println!("Failed to delete old log file {:?}: {}", path, e);
-                                } else {
-                                    println!("Deleted old log file: {:?}", path);
-                                }
-                            }
-                        }
+                if path.extension().is_some_and(|ext| ext == "log")
+                    && let Ok(metadata) = fs::metadata(&path)
+                    && let Ok(modified) = metadata.modified()
+                    && modified < cutoff_time
+                {
+                    // Delete old log file
+                    if let Err(e) = fs::remove_file(&path) {
+                        println!("Failed to delete old log file {:?}: {}", path, e);
+                    } else {
+                        println!("Deleted old log file: {:?}", path);
                     }
                 }
             }

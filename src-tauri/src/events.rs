@@ -27,10 +27,10 @@ fn notify_if_unfocused<R: Runtime>(app_handle: &tauri::AppHandle<R>, title: &str
     }
 
     // Skip when the window is focused — the message is already on screen.
-    if let Some(window) = app_handle.get_webview_window("main") {
-        if window.is_focused().unwrap_or(false) {
-            return;
-        }
+    if let Some(window) = app_handle.get_webview_window("main")
+        && window.is_focused().unwrap_or(false)
+    {
+        return;
     }
 
     if let Err(e) = app_handle
