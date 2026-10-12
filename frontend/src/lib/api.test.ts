@@ -5,11 +5,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { auth, chat, contactPolicy, settings } from "./api";
+import { auth, avatars, chat, contactPolicy, favorites, settings } from "./api";
+import { useAuth } from "@/store/auth";
 
 beforeEach(() => {
   invoke.mockReset();
   invoke.mockResolvedValue(undefined);
+  useAuth.setState({ user: null });
 });
 
 describe("contact visibility command mapping", () => {
@@ -28,7 +30,69 @@ describe("contact visibility command mapping", () => {
   });
 });
 
+describe("account contact metadata command mapping", () => {
+  it("binds pin, alias, and avatar writes to the explicit owner", async () => {
+    await favorites.setFavorite("alice", "peer", true);
+    expect(invoke).toHaveBeenCalledWith("set_favorite", {
+      owner: "alice",
+      id: "peer",
+      pinned: true,
+    });
+    await favorites.setAlias("alice", "peer", "Friend");
+    expect(invoke).toHaveBeenCalledWith("set_alias", {
+      owner: "alice",
+      id: "peer",
+      alias: "Friend",
+    });
+    await avatars.set("alice", "peer", "data:image/png;base64,AA==");
+    expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      owner: "alice",
+      id: "peer",
+      dataUrl: "data:image/png;base64,AA==",
+    });
+  });
+
+  it("binds verification reads and writes to the explicit owner", async () => {
+    await chat.getTrust("alice", "peer", "fingerprint");
+    expect(invoke).toHaveBeenCalledWith("get_trust", {
+      owner: "alice",
+      accountId: "peer",
+      currentFingerprint: "fingerprint",
+    });
+    await chat.markVerified("alice", "peer", "fingerprint");
+    expect(invoke).toHaveBeenCalledWith("mark_verified", {
+      owner: "alice",
+      accountId: "peer",
+      fingerprint: "fingerprint",
+    });
+  });
+});
+
 describe("settings updates", () => {
+  it("captures the owner before a queued update crosses a login", async () => {
+    useAuth.setState({
+      user: { id: "alice", username: "alice", display_name: "Alice" },
+    });
+    let release!: () => void;
+    invoke.mockImplementation((command: string) =>
+      command === "get_app_settings"
+        ? new Promise((resolve) => {
+            release = () => resolve({ notifications: true });
+          })
+        : Promise.resolve(),
+    );
+    const pending = settings.update({ notifications: false });
+    await vi.waitFor(() => expect(release).toBeDefined());
+    useAuth.setState({
+      user: { id: "bob", username: "bob", display_name: "Bob" },
+    });
+    release();
+    await pending;
+    expect(invoke).toHaveBeenCalledWith("set_app_settings", {
+      owner: "alice",
+      settings: { notifications: false },
+    });
+  });
   it("preserves both fields when two updates are requested before the first write finishes", async () => {
     const persisted = { calls_enabled: false, notifications: true };
     let releaseFirst!: () => void;
@@ -167,6 +231,12 @@ describe("chat command mapping", () => {
     expect(invoke).toHaveBeenCalledWith("save_file", {
       fileConv: "fc",
       dest: "/tmp/out",
+    });
+  });
+  it("opens only the current owner's configured download folder", async () => {
+    await chat.openDownloadDir("alice");
+    expect(invoke).toHaveBeenCalledWith("open_download_dir", {
+      owner: "alice",
     });
   });
   it("maps per-file sender keys and batch receive status to the Tauri IPC contract", async () => {

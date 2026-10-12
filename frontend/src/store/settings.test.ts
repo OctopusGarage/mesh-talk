@@ -5,10 +5,37 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { useSettings } from "./settings";
 import { DEFAULT_RINGTONE } from "@/lib/ringtones";
+import { useAuth } from "./auth";
 
 beforeEach(() => {
   invoke.mockReset();
+  useAuth.setState({
+    user: { id: "alice", username: "alice", display_name: "Alice" },
+    generation: 0,
+  });
+  useSettings.getState().setOwner(null);
+  useSettings.getState().setOwner("alice");
   useSettings.setState({ callsEnabled: false, ringtone: DEFAULT_RINGTONE });
+});
+
+it("does not install an old owner's delayed settings", async () => {
+  let finish!: (value: { calls_enabled: boolean; ringtone: string }) => void;
+  invoke.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = useSettings.getState().load();
+  useAuth.setState({
+    user: { id: "bob", username: "bob", display_name: "Bob" },
+    generation: 1,
+  });
+  useSettings.getState().setOwner("bob");
+  finish({ calls_enabled: true, ringtone: "marimba" });
+  await pending;
+  expect(useSettings.getState().callsEnabled).toBe(false);
+  expect(useSettings.getState().ringtone).toBe(DEFAULT_RINGTONE);
 });
 
 describe("useSettings.load", () => {

@@ -201,6 +201,12 @@ pub async fn login<R: tauri::Runtime>(
     let result = outcome.result;
 
     if result.success {
+        app_state
+            .session()
+            .matching(&outcome.lease, |_| {
+                settings_state.activate(outcome.lease.owner())
+            })
+            .map_err(CommandError::Authorization)?;
         // Start the node: per-account stores under ~/.mesh-talk/accounts/<user_id>/.
         // NOTE: the node keystore intentionally uses the RAW `password` here, while the auth
         // keystore uses the trimmed form (auth_service::login trims). They are independent
@@ -287,6 +293,12 @@ pub async fn auto_login<R: tauri::Runtime>(
     .await
     {
         Ok(outcome) if outcome.result.success => {
+            app_state
+                .session()
+                .matching(&outcome.lease, |_| {
+                    settings_state.activate(outcome.lease.owner())
+                })
+                .map_err(CommandError::Authorization)?;
             let user_info = UserInfo::from(outcome.user);
             spawn_node_runtime(
                 app_handle.clone(),
@@ -472,6 +484,7 @@ pub async fn logout<R: tauri::Runtime>(
             .matching(&lease, |_| ())
             .map_err(CommandError::Authentication)?;
         let result = logout_impl(app_state.inner())?;
+        settings_state.deactivate();
         app_state.app_lock().clear();
         crate::chat_commands::clear_badge_after_logout(&app_handle, app_state.session().clone());
         let ticket = node_state.next_lifecycle_ticket();

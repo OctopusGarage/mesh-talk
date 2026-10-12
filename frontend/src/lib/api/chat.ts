@@ -182,10 +182,10 @@ export const chat = {
     }),
 
   // Contact trust / safety numbers
-  getTrust: (accountId: string, currentFingerprint: string) =>
-    invoke<TrustInfo>("get_trust", { accountId, currentFingerprint }),
-  markVerified: (accountId: string, fingerprint: string) =>
-    invoke<void>("mark_verified", { accountId, fingerprint }),
+  getTrust: (owner: string, accountId: string, currentFingerprint: string) =>
+    invoke<TrustInfo>("get_trust", { owner, accountId, currentFingerprint }),
+  markVerified: (owner: string, accountId: string, fingerprint: string) =>
+    invoke<void>("mark_verified", { owner, accountId, fingerprint }),
   safetyNumber: (fingerprint: string) =>
     invoke<SafetyNumber>("safety_number", { fingerprint }),
 
@@ -211,7 +211,8 @@ export const chat = {
   /** The platform's standard Downloads folder (macOS ~/Downloads, Windows Downloads, Linux
    * XDG_DOWNLOAD_DIR → ~/Downloads). The default save location when none is configured. */
   defaultDownloadDir: () => invoke<string | null>("default_download_dir"),
-  openDownloadDir: () => invoke<void>("open_download_dir"),
+  openDownloadDir: (owner: string) =>
+    invoke<void>("open_download_dir", { owner }),
   readFile: (fileConv: string) =>
     invoke<ArrayBuffer>("read_file", { fileConv }),
   /** Read DURABLE media bytes (image/screenshot/video) from the chat-media store. Survives

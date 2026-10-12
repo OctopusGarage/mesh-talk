@@ -111,6 +111,97 @@ impl Default for AppSettings {
     }
 }
 
+/// Settings shared by the desktop installation, including auto-login bookkeeping.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct GlobalSettings {
+    minimize_to_tray: bool,
+    stay_signed_in: bool,
+    last_user: Option<String>,
+}
+
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        Self {
+            minimize_to_tray: true,
+            stay_signed_in: true,
+            last_user: None,
+        }
+    }
+}
+
+impl From<&AppSettings> for GlobalSettings {
+    fn from(value: &AppSettings) -> Self {
+        Self {
+            minimize_to_tray: value.minimize_to_tray,
+            stay_signed_in: value.stay_signed_in,
+            last_user: value.last_user.clone(),
+        }
+    }
+}
+
+/// Settings that can reveal or affect the signed-in account's activity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct AccountSettings {
+    notifications: bool,
+    download_dir: String,
+    retention_days: u32,
+    calls_enabled: bool,
+    ringtone: String,
+    privacy_level: PrivacyLevel,
+    notification_preview: bool,
+    auto_lock_seconds: u32,
+    lock_when_hidden: bool,
+    confirm_sensitive_copy: bool,
+    clipboard_clear_seconds: u32,
+}
+
+impl Default for AccountSettings {
+    fn default() -> Self {
+        Self::from(&AppSettings::default())
+    }
+}
+
+impl From<&AppSettings> for AccountSettings {
+    fn from(value: &AppSettings) -> Self {
+        Self {
+            notifications: value.notifications,
+            download_dir: value.download_dir.clone(),
+            retention_days: value.retention_days,
+            calls_enabled: value.calls_enabled,
+            ringtone: value.ringtone.clone(),
+            privacy_level: value.privacy_level,
+            notification_preview: value.notification_preview,
+            auto_lock_seconds: value.auto_lock_seconds,
+            lock_when_hidden: value.lock_when_hidden,
+            confirm_sensitive_copy: value.confirm_sensitive_copy,
+            clipboard_clear_seconds: value.clipboard_clear_seconds,
+        }
+    }
+}
+
+impl AccountSettings {
+    fn with_global(&self, global: &GlobalSettings) -> AppSettings {
+        AppSettings {
+            minimize_to_tray: global.minimize_to_tray,
+            notifications: self.notifications,
+            download_dir: self.download_dir.clone(),
+            stay_signed_in: global.stay_signed_in,
+            last_user: global.last_user.clone(),
+            retention_days: self.retention_days,
+            calls_enabled: self.calls_enabled,
+            ringtone: self.ringtone.clone(),
+            privacy_level: self.privacy_level,
+            notification_preview: self.notification_preview,
+            auto_lock_seconds: self.auto_lock_seconds,
+            lock_when_hidden: self.lock_when_hidden,
+            confirm_sensitive_copy: self.confirm_sensitive_copy,
+            clipboard_clear_seconds: self.clipboard_clear_seconds,
+        }
+    }
+}
+
 impl AppSettings {
     pub fn with_privacy_level(mut self, level: PrivacyLevel) -> Self {
         self.privacy_level = level;
@@ -155,24 +246,101 @@ pub fn retention_cutoff_ms(days: u32) -> Option<u64> {
     Some(now.saturating_sub(days as u64 * 24 * 60 * 60 * 1000))
 }
 
-/// Managed Tauri state wrapping [`AppSettings`] so the close-handler and the
-/// notification path can read it cheaply behind a `Mutex`.
+#[derive(Default)]
+struct SettingsRuntime {
+    global: GlobalSettings,
+    owner: Option<String>,
+    current: AppSettings,
+}
+
+/// The active account's effective settings and the installation-wide controls.
 #[derive(Clone, Default)]
 pub struct SettingsState(
-    Arc<Mutex<AppSettings>>,
+    Arc<Mutex<SettingsRuntime>>,
     #[cfg(test)] Option<std::path::PathBuf>,
 );
 
 impl SettingsState {
     #[cfg(test)]
     pub(crate) fn isolated(path: std::path::PathBuf) -> Self {
-        Self(Arc::new(Mutex::new(AppSettings::default())), Some(path))
+        Self(Arc::new(Mutex::new(SettingsRuntime::default())), Some(path))
     }
     pub fn get(&self) -> AppSettings {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().current.clone()
+    }
+    pub(crate) fn active_retention(&self) -> Option<(String, u32)> {
+        let inner = self.0.lock().unwrap();
+        inner
+            .owner
+            .as_ref()
+            .map(|owner| (owner.clone(), inner.current.retention_days))
     }
     pub fn set(&self, value: AppSettings) {
-        *self.0.lock().unwrap() = value;
+        let mut inner = self.0.lock().unwrap();
+        inner.global = GlobalSettings::from(&value);
+        inner.owner = None;
+        inner.current = value;
+    }
+
+    pub(crate) fn activate(&self, owner: &str) {
+        let path = config_store::account_path(&crate::data_dir(), owner, SETTINGS_FILE)
+            .expect("authenticated owner has a valid profile path");
+        self.activate_at(owner, &path);
+    }
+
+    fn activate_at(&self, owner: &str, path: &std::path::Path) {
+        let account: AccountSettings = config_store::read_account(path);
+        let mut inner = self.0.lock().unwrap();
+        inner.current = account.with_global(&inner.global);
+        inner.owner = Some(owner.to_owned());
+    }
+
+    pub(crate) fn deactivate(&self) {
+        let mut inner = self.0.lock().unwrap();
+        inner.owner = None;
+        inner.current = AccountSettings::default().with_global(&inner.global);
+    }
+
+    pub(crate) fn get_for_owner(&self, owner: &str) -> Result<AppSettings, CommandError> {
+        let inner = self.0.lock().unwrap();
+        if inner.owner.as_deref() != Some(owner) {
+            return Err(CommandError::Authorization(
+                "settings owner mismatch".into(),
+            ));
+        }
+        Ok(inner.current.clone())
+    }
+
+    fn update_for_owner(
+        &self,
+        owner: &str,
+        settings: AppSettings,
+    ) -> Result<GlobalSettings, CommandError> {
+        let mut inner = self.0.lock().unwrap();
+        if inner.owner.as_deref() != Some(owner) {
+            return Err(CommandError::Authorization(
+                "settings owner mismatch".into(),
+            ));
+        }
+        inner.global.minimize_to_tray = settings.minimize_to_tray;
+        inner.global.stay_signed_in = settings.stay_signed_in;
+        inner.global.last_user = settings.last_user.clone();
+        inner.current = AccountSettings::from(&settings).with_global(&inner.global);
+        Ok(inner.global.clone())
+    }
+
+    fn update_without_owner(&self, settings: AppSettings) -> Result<GlobalSettings, CommandError> {
+        let mut inner = self.0.lock().unwrap();
+        if inner.owner.is_some() {
+            return Err(CommandError::Authorization(
+                "settings owner required".into(),
+            ));
+        }
+        inner.global.minimize_to_tray = settings.minimize_to_tray;
+        inner.global.stay_signed_in = settings.stay_signed_in;
+        inner.global.last_user = settings.last_user;
+        inner.current = AccountSettings::default().with_global(&inner.global);
+        Ok(inner.global.clone())
     }
 }
 
@@ -182,11 +350,19 @@ const SETTINGS_FILE: &str = "settings.json";
 /// Load persisted settings (defaults if the file is missing or unreadable) and
 /// seed the managed state. Called once during setup.
 pub fn load_into_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &SettingsState) {
-    state.set(config_store::load::<R, AppSettings>(app, SETTINGS_FILE));
+    let global = config_store::load::<R, GlobalSettings>(app, SETTINGS_FILE);
+    let mut inner = state.0.lock().unwrap();
+    inner.current = AccountSettings::default().with_global(&global);
+    inner.global = global.clone();
+    // Preserve unowned preferences before removing them from the active global file.
+    match config_store::archive_legacy_settings(app) {
+        Ok(()) => save(app, &global),
+        Err(error) => log::warn!("Could not archive legacy settings: {error}"),
+    }
 }
 
 /// Persist settings to disk (best-effort; logged on failure).
-fn save<R: tauri::Runtime>(app: &tauri::AppHandle<R>, value: &AppSettings) {
+fn save<R: tauri::Runtime>(app: &tauri::AppHandle<R>, value: &GlobalSettings) {
     config_store::save(app, SETTINGS_FILE, "settings", value);
 }
 
@@ -198,23 +374,63 @@ pub fn record_last_user<R: tauri::Runtime>(
     state: &SettingsState,
     last_user: Option<String>,
 ) {
-    let mut settings = state.get();
-    settings.last_user = last_user;
+    let mut inner = state.0.lock().unwrap();
+    inner.global.last_user = last_user.clone();
+    inner.current.last_user = last_user;
     #[cfg(test)]
     if let Some(path) = state.1.as_ref() {
-        std::fs::write(path, serde_json::to_vec(&settings).unwrap()).unwrap();
-        state.set(settings);
+        std::fs::write(path, serde_json::to_vec(&inner.global).unwrap()).unwrap();
         return;
     }
-    save(app, &settings);
-    state.set(settings);
+    save(app, &inner.global);
 }
 
 /// Read the current two non-autostart toggles. (Launch-at-login is queried via
 /// the autostart plugin's `is_enabled` on the frontend.)
 #[tauri::command]
-pub fn get_app_settings(state: tauri::State<'_, SettingsState>) -> AppSettings {
-    state.get()
+pub fn get_app_settings(
+    app: tauri::State<'_, crate::state::AppState>,
+    state: tauri::State<'_, SettingsState>,
+    owner: Option<String>,
+) -> Result<AppSettings, CommandError> {
+    match owner {
+        Some(owner) => config_store::with_account(&app, &owner, SETTINGS_FILE, |_| {
+            state.get_for_owner(&owner).map(redact_login_owner)
+        }),
+        None => {
+            if app.session().capture().is_ok() {
+                return Err(CommandError::Authorization(
+                    "settings owner required".into(),
+                ));
+            }
+            Ok(redact_login_owner(
+                AccountSettings::default().with_global(&state.0.lock().unwrap().global),
+            ))
+        }
+    }
+}
+
+fn redact_login_owner(mut settings: AppSettings) -> AppSettings {
+    settings.last_user = None;
+    settings
+}
+
+fn preserve_login_bookkeeping(
+    mut settings: AppSettings,
+    previous: &AppSettings,
+) -> (AppSettings, Option<String>) {
+    let clear_user = if previous.stay_signed_in && !settings.stay_signed_in {
+        previous.last_user.clone()
+    } else {
+        None
+    };
+    // The frontend never chooses which saved credential the backend will use.
+    settings.last_user = if previous.stay_signed_in && !settings.stay_signed_in {
+        None
+    } else {
+        previous.last_user.clone()
+    };
+    (settings, clear_user)
 }
 
 /// Update the toggles and persist them. If "stay signed in" was just turned OFF,
@@ -223,34 +439,52 @@ pub fn get_app_settings(state: tauri::State<'_, SettingsState>) -> AppSettings {
 #[tauri::command]
 pub async fn set_app_settings(
     app: tauri::AppHandle,
+    app_state: tauri::State<'_, crate::state::AppState>,
     state: tauri::State<'_, SettingsState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
+    owner: Option<String>,
     settings: AppSettings,
 ) -> Result<(), CommandError> {
     let level = settings.privacy_level;
-    let mut settings = settings.with_privacy_level(level);
-    let prev = state.get();
-    if prev.stay_signed_in && !settings.stay_signed_in {
-        if let Some(user) = prev.last_user.as_deref() {
-            crate::session_store::clear(user);
-        }
-        // The frontend doesn't manage `last_user`; preserve our own bookkeeping and
-        // clear it here so a stale username can't drive a future auto-login.
-        settings.last_user = None;
-    } else {
-        // Likewise keep `last_user` under backend control, not the frontend payload.
-        settings.last_user = prev.last_user;
-    }
+    let settings = settings.with_privacy_level(level);
     let retention_days = settings.retention_days;
-    save(&app, &settings);
-    state.set(settings);
+    match owner.as_deref() {
+        Some(owner) => config_store::with_account(&app_state, owner, SETTINGS_FILE, |path| {
+            let previous = state.get_for_owner(owner)?;
+            let (settings, clear_user) = preserve_login_bookkeeping(settings.clone(), &previous);
+            config_store::write_account(path, &AccountSettings::from(&settings))?;
+            let global = state.update_for_owner(owner, settings)?;
+            save(&app, &global);
+            if let Some(user) = clear_user.as_deref() {
+                crate::session_store::clear(user);
+            }
+            Ok(())
+        })?,
+        None => {
+            if app_state.session().capture().is_ok() {
+                return Err(CommandError::Authorization(
+                    "settings owner required".into(),
+                ));
+            }
+            let (settings, clear_user) = preserve_login_bookkeeping(settings, &state.get());
+            let global = state.update_without_owner(settings)?;
+            save(&app, &global);
+            if let Some(user) = clear_user.as_deref() {
+                crate::session_store::clear(user);
+            }
+        }
+    }
 
     // Apply a tightened retention window immediately (the periodic prune would otherwise
     // only catch it on its next tick). Best-effort; a no-op if the node isn't running yet.
-    if let Some(cutoff) = retention_cutoff_ms(retention_days) {
+    if let (Some(owner), Some(cutoff)) = (owner.as_deref(), retention_cutoff_ms(retention_days)) {
         let node = {
             let guard = node_state.0.lock().await;
-            guard.as_ref().map(|rt| rt.handle())
+            guard.as_ref().and_then(|rt| {
+                (rt.host_account_id() == Some(owner)
+                    && matches!(app_state.session().capture(), Ok(ref lease) if lease.owner() == owner))
+                    .then(|| rt.handle())
+            })
         };
         if let Some(node) = node {
             let _ = tokio::task::spawn_blocking(move || node.prune_older_than(cutoff)).await;
@@ -262,6 +496,121 @@ pub async fn set_app_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_settings_keep_private_values_separate_from_device_settings() {
+        let alice = AccountSettings {
+            retention_days: 7,
+            notification_preview: false,
+            ..AccountSettings::default()
+        };
+        let bob = AccountSettings::default();
+        let global = GlobalSettings {
+            minimize_to_tray: false,
+            stay_signed_in: true,
+            last_user: Some("alice".into()),
+        };
+        let alice_view = alice.with_global(&global);
+        let bob_view = bob.with_global(&global);
+        assert_eq!(alice_view.retention_days, 7);
+        assert_eq!(bob_view.retention_days, 0);
+        assert!(!alice_view.notification_preview);
+        assert!(bob_view.notification_preview);
+        assert!(!alice_view.minimize_to_tray);
+        assert!(!bob_view.minimize_to_tray);
+        assert_eq!(alice_view.last_user.as_deref(), Some("alice"));
+        assert!(redact_login_owner(alice_view).last_user.is_none());
+    }
+
+    #[test]
+    fn renderer_cannot_choose_saved_login_owner() {
+        let previous = AppSettings {
+            last_user: Some("alice".into()),
+            ..AppSettings::default()
+        };
+        let forged = AppSettings {
+            last_user: Some("bob".into()),
+            ..AppSettings::default()
+        };
+        let (kept, clear) = preserve_login_bookkeeping(forged.clone(), &previous);
+        assert_eq!(kept.last_user.as_deref(), Some("alice"));
+        assert!(clear.is_none());
+        let (disabled, clear) = preserve_login_bookkeeping(
+            AppSettings {
+                stay_signed_in: false,
+                ..forged
+            },
+            &previous,
+        );
+        assert!(disabled.last_user.is_none());
+        assert_eq!(clear.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn account_settings_persist_separately_and_legacy_global_fields_are_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let alice_path = config_store::account_path(root.path(), "alice", SETTINGS_FILE).unwrap();
+        let bob_path = config_store::account_path(root.path(), "bob", SETTINGS_FILE).unwrap();
+        let alice = AccountSettings {
+            download_dir: "/Alice/private".into(),
+            retention_days: 5,
+            ..AccountSettings::default()
+        };
+        config_store::write_account(&alice_path, &alice).unwrap();
+        let loaded: AccountSettings = config_store::read_account(&alice_path);
+        let other: AccountSettings = config_store::read_account(&bob_path);
+        assert_eq!(loaded.download_dir, "/Alice/private");
+        assert_eq!(loaded.retention_days, 5);
+        assert!(other.download_dir.is_empty());
+        assert_eq!(other.retention_days, 0);
+        let old_global = r#"{"stay_signed_in":false,"last_user":"alice","download_dir":"/leaked","retention_days":30}"#;
+        let global: GlobalSettings = serde_json::from_str(old_global).unwrap();
+        assert!(!global.stay_signed_in);
+        assert_eq!(
+            AccountSettings::default()
+                .with_global(&global)
+                .retention_days,
+            0
+        );
+    }
+
+    #[test]
+    fn active_runtime_switches_preferences_and_clears_them_on_sign_out() {
+        let root = tempfile::tempdir().unwrap();
+        let alice = config_store::account_path(root.path(), "alice", SETTINGS_FILE).unwrap();
+        let bob = config_store::account_path(root.path(), "bob", SETTINGS_FILE).unwrap();
+        config_store::write_account(
+            &alice,
+            &AccountSettings {
+                retention_days: 7,
+                notifications: false,
+                ..AccountSettings::default()
+            },
+        )
+        .unwrap();
+        config_store::write_account(
+            &bob,
+            &AccountSettings {
+                retention_days: 30,
+                notifications: true,
+                ..AccountSettings::default()
+            },
+        )
+        .unwrap();
+        let state = SettingsState::default();
+        state.activate_at("alice", &alice);
+        assert_eq!(state.get().retention_days, 7);
+        assert_eq!(state.active_retention(), Some(("alice".into(), 7)));
+        assert!(!state.get().notifications);
+        assert!(state.get_for_owner("bob").is_err());
+        state.activate_at("bob", &bob);
+        assert_eq!(state.get().retention_days, 30);
+        assert!(state.get().notifications);
+        state.deactivate();
+        assert_eq!(state.get().retention_days, 0);
+        assert_eq!(state.active_retention(), None);
+        assert!(state.get_for_owner("bob").is_err());
+    }
 
     #[test]
     fn old_settings_json_without_the_new_fields_loads_with_defaults() {

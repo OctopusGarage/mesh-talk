@@ -6,11 +6,14 @@ import {
   type RingtoneId,
 } from "@/lib/ringtones";
 import type { AppSettings } from "@/lib/types";
+import { captureOwner } from "./ownership";
 
 /** App-setting flags the UI needs reactively (most settings are read in Rust, but a few —
  * like the experimental calls toggle and the ringtone — drive UI affordances / playback and
  * must re-render on change). */
 interface SettingsStore {
+  owner: string | null;
+  setOwner: (owner: string | null) => void;
   /** Experimental voice/video calls — off by default, opt-in via the Settings dialog. */
   callsEnabled: boolean;
   /** The chosen incoming-call ringtone. */
@@ -42,13 +45,26 @@ export const balancedPrivacy: SettingsStore["privacy"] = {
   clipboard_clear_seconds: 0,
 };
 
-export const useSettings = create<SettingsStore>((set) => ({
+export const useSettings = create<SettingsStore>((set, get) => ({
+  owner: null,
+  setOwner: (owner) => {
+    if (get().owner === owner) return;
+    set({
+      owner,
+      callsEnabled: false,
+      ringtone: DEFAULT_RINGTONE,
+      privacy: balancedPrivacy,
+    });
+  },
   callsEnabled: false,
   ringtone: DEFAULT_RINGTONE,
   privacy: balancedPrivacy,
   load: async () => {
+    const lease = captureOwner();
+    if (!lease.owner || !lease.current() || get().owner !== lease.owner) return;
     try {
       const s = await settingsApi.get();
+      if (!lease.current() || get().owner !== lease.owner) return;
       set({
         callsEnabled: s.calls_enabled,
         ringtone: asRingtoneId(s.ringtone),

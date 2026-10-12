@@ -186,6 +186,7 @@ pub fn run_tauri_configured(
             }
             #[cfg(target_os = "linux")]
             crate::diagnostics::log_linux_graphics_configuration();
+            crate::config_store::quarantine_legacy(&app.handle().clone());
             // Seed the managed settings from disk before any window/notification logic runs.
             crate::settings::load_into_state(&app.handle().clone(), &app.state::<SettingsState>());
             {
@@ -197,18 +198,6 @@ pub fn run_tauri_configured(
                     }
                 });
             }
-            crate::trust::load_into_state(
-                &app.handle().clone(),
-                &app.state::<crate::trust::TrustState>(),
-            );
-            crate::favorites::load_into_state(
-                &app.handle().clone(),
-                &app.state::<crate::favorites::FavoritesState>(),
-            );
-            crate::avatars::load_into_state(
-                &app.handle().clone(),
-                &app.state::<crate::avatars::AvatarsState>(),
-            );
             crate::tray::create_system_tray(&app.handle().clone())?;
 
             // Chat-history retention: one app-lifetime task that periodically erases messages
@@ -221,13 +210,24 @@ pub fn run_tauri_configured(
                 tauri::async_runtime::spawn(async move {
                     use tauri::Manager;
                     loop {
-                        let days = app_handle.state::<SettingsState>().get().retention_days;
-                        if let Some(cutoff) = crate::settings::retention_cutoff_ms(days) {
+                        let active = app_handle.state::<SettingsState>().active_retention();
+                        if let Some((owner, cutoff)) = active.and_then(|(owner, days)| {
+                            crate::settings::retention_cutoff_ms(days).map(|cutoff| (owner, cutoff))
+                        }) {
                             let node = {
                                 let node_state =
                                     app_handle.state::<crate::chat_commands::NodeState>();
                                 let guard = node_state.0.lock().await;
-                                guard.as_ref().map(|rt| rt.handle())
+                                guard.as_ref().and_then(|rt| {
+                                    (rt.host_account_id() == Some(owner.as_str())
+                                        && matches!(
+                                            app_handle.state::<crate::state::AppState>()
+                                                .session()
+                                                .capture(),
+                                            Ok(ref lease) if lease.owner() == owner
+                                        ))
+                                    .then(|| rt.handle())
+                                })
                             };
                             if let Some(node) = node {
                                 let _ = tokio::task::spawn_blocking(move || {

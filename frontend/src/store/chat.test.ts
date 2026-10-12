@@ -18,6 +18,7 @@ import { useChat, convKey } from "./chat";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
+import { useAvatars } from "./avatars";
 
 it("old roster identity failure cannot undo newer readiness", async () => {
   let reject!: (e: Error) => void;
@@ -464,6 +465,8 @@ it("preacceptance failure and retry retain exact deletion protection outside the
 
 beforeEach(() => {
   invoke.mockReset();
+  useAvatars.getState().setOwner(null);
+  useAvatars.getState().setOwner("host");
   useTransfers.getState().reset();
   useAuth.setState({
     user: { id: "host", username: "alice", display_name: "Alice" },
@@ -473,6 +476,24 @@ beforeEach(() => {
     error: null,
   });
   reset();
+});
+
+it("persists contact pins and aliases under the signed-in owner", async () => {
+  invoke.mockImplementation((command: string) =>
+    command === "get_favorites" ? Promise.resolve([]) : Promise.resolve(),
+  );
+  await useChat.getState().togglePinned("peer", true);
+  expect(invoke).toHaveBeenCalledWith("set_favorite", {
+    owner: "host",
+    id: "peer",
+    pinned: true,
+  });
+  await useChat.getState().setAlias("peer", " Friend ");
+  expect(invoke).toHaveBeenCalledWith("set_alias", {
+    owner: "host",
+    id: "peer",
+    alias: "Friend",
+  });
 });
 
 it("projects recipient-confirmed upload progress onto only the matching outgoing file", async () => {
