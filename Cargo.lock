@@ -3040,6 +3040,7 @@ name = "mesh-talk"
 version = "0.3.0"
 dependencies = [
  "ashpd",
+ "block2 0.6.1",
  "core-foundation 0.10.1",
  "hex",
  "image",
@@ -3051,6 +3052,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit",
  "objc2-foundation 0.3.2",
+ "objc2-local-authentication",
  "rand 0.10.3",
  "raw-window-handle",
  "security-framework 3.6.0",
@@ -3581,6 +3583,17 @@ checksum = "2a1e6550c4caed348956ce3370c9ffeca70bb1dbed4fa96112e7c6170e074586"
 dependencies = [
  "objc2 0.6.5",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-local-authentication"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48e0b8b339e0d9d2ed4416b7f93f9d4daadff7d4dd797f89867cde11aeac607"
+dependencies = [
+ "block2 0.6.1",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

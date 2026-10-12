@@ -67,6 +67,13 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# The Tauri shell dominates local release rebuilds. Split only this crate's
+# code generation across cores; keep dependencies and the protocol core at one
+# unit for their existing release-size/runtime trade-off. Thin LTO and symbol
+# stripping still apply to the final app.
+[profile.release.package.mesh-talk]
+codegen-units = 4
+
 # Dev-build ergonomics: full-strength Argon2/PBKDF2 are unbearably slow in an unoptimized
 # debug build — `tauri dev` keystore unlock ("unlocking your encrypted stores") can take
 # minutes and looks like a hang. Optimize ONLY the crypto crates so unlock is fast, while our

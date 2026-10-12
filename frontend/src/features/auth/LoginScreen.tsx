@@ -10,7 +10,7 @@ import { Logo } from "@/components/Logo";
 import { fadeSlideUp, useMotionOK } from "@/lib/motion";
 import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
-import { needsCustomWindowControls } from "@/lib/platform";
+import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
 import { RestoreBackup } from "./RestoreBackup";
 
@@ -209,6 +209,14 @@ export function LoginScreen() {
                     />
                     {t("login.staySignedIn")}
                   </label>
+                )}
+                {isMacOverlay() && (
+                  <p
+                    className="text-xs leading-5 text-muted-foreground"
+                    data-testid="mac-auth-guidance"
+                  >
+                    {t("login.macAuthGuidance")}
+                  </p>
                 )}
 
                 {stayError && (

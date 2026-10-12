@@ -105,6 +105,7 @@
     "createAccount": "Create account",
     "accountCreated": "Account created — you can sign in now.",
     "staySignedIn": "Stay signed in",
+    "macAuthGuidance": "Your Mac’s Touch ID or login password unlocks Mesh-Talk after it locks. Set up Touch ID in macOS System Settings; no separate app setup is needed.",
     "resuming": "Resuming your session…",
     "footer": "Your keys never leave this device. Peers are discovered on your LAN.",
     "signingIn": "Signing in…",
@@ -379,7 +380,7 @@
     "lockedTitle": "Mesh-Talk is locked",
     "lockedDescription": "Messages stay available after you unlock. Background delivery continues.",
     "unlock": "Unlock",
-    "useTouchId": "Use Touch ID",
+    "useTouchId": "Use Touch ID or Mac password",
     "mediaMigrationWarning": "Some older media could not be encrypted. The original files remain readable. Free disk space or check permissions, then restart to retry. Existing backups may still hold plaintext.",
     "exportLimit": "Files you save and text you copy leave the encrypted app store; the operating system and other apps may access them.",
     "managedDeviceLimit": "A company-managed device may observe the screen, input, files, and network activity. These settings reduce app-created exposure; they cannot prevent device monitoring."
