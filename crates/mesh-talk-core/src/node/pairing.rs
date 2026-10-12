@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(PairingCode::from_hex(&c.as_hex()).unwrap().0, c.0);
         assert!(PairingCode::from_hex("nothex").is_none());
         assert!(PairingCode::from_hex("ab").is_none()); // wrong length
-                                                        // An implausibly long input is rejected up front (length bound before decode).
+        // An implausibly long input is rejected up front (length bound before decode).
         assert!(PairingCode::from_hex(&"a".repeat(100_000)).is_none());
         assert!(PairingCode::from_hex(&"ab".repeat(17)).is_none()); // 34 chars
     }

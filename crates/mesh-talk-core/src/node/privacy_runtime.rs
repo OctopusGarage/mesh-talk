@@ -1,15 +1,15 @@
 //! Serialized durable privacy decisions and authenticated disclosure boundaries.
 use super::peer_directory::PeerDirectory;
 use super::*;
-use crate::discovery::{visibility::DiscoveryVisibility, Announce};
+use crate::discovery::{Announce, visibility::DiscoveryVisibility};
 use crate::identity::device::PublicIdentity;
 use crate::transport::{SecureChannel, TransportError, VerifiedPeer};
 use std::{
     io,
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use tokio::net::TcpStream;
@@ -482,10 +482,9 @@ impl Node {
             for event in log.events(&id) {
                 if event.kind == crate::eventlog::EventKind::MembershipChange
                     && event.author.user_id() == current.owner()
+                    && let Some(meta) = crate::channel::ChannelMeta::decode(&event.ciphertext)
                 {
-                    if let Some(meta) = crate::channel::ChannelMeta::decode(&event.ciphertext) {
-                        current.apply_meta(meta);
-                    }
+                    current.apply_meta(meta);
                 }
             }
             current.members().contains(public)
@@ -647,15 +646,14 @@ impl Node {
                 .state
                 .read()
                 .expect("privacy lock not poisoned");
-            if let Some(state) = state.as_ref() {
-                if let (Some(old), Some(new)) = (
+            if let Some(state) = state.as_ref()
+                && let (Some(old), Some(new)) = (
                     state.proofs.by_author(&peer.public_identity().ed25519_pub),
                     peer.announcement(),
-                ) {
-                    if old.public() != new.public() || old.account_id() != new.account_id() {
-                        return false;
-                    }
-                }
+                )
+                && (old.public() != new.public() || old.account_id() != new.account_id())
+            {
+                return false;
             }
         }
         self.account_allowed(peer.public_identity(), peer.announcement())
@@ -788,11 +786,11 @@ impl Node {
                 log::warn!("discovered peer proof was not cached");
                 continue;
             }
-            if let Some(peer) = peers.iter().find(|p| p.public == proof.public()) {
-                if state.routes.record(&peer.public, peer.addr.ip()).is_err() {
-                    log::warn!("discovered peer route was not cached");
-                    continue;
-                }
+            if let Some(peer) = peers.iter().find(|p| p.public == proof.public())
+                && state.routes.record(&peer.public, peer.addr.ip()).is_err()
+            {
+                log::warn!("discovered peer route was not cached");
+                continue;
             }
             successful.push(proof);
         }
@@ -865,12 +863,11 @@ impl Node {
                 .state
                 .read()
                 .expect("privacy lock not poisoned");
-            if let Some(state) = state.as_ref() {
-                if let Some(old) = state.proofs.by_author(&expected.ed25519_pub) {
-                    if old.public() != new.public() || old.account_id() != new.account_id() {
-                        return Err(TransportError::AdmissionDenied);
-                    }
-                }
+            if let Some(state) = state.as_ref()
+                && let Some(old) = state.proofs.by_author(&expected.ed25519_pub)
+                && (old.public() != new.public() || old.account_id() != new.account_id())
+            {
+                return Err(TransportError::AdmissionDenied);
             }
         }
         #[cfg(test)]

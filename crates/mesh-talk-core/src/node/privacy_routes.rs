@@ -2,7 +2,7 @@
 //! full Ed25519/X25519 transport pinning; an IP address proves no identity.
 use crate::identity::device::PublicIdentity;
 use crate::storage::encryption::{
-    decrypt_data, encrypt_data, generate_salt, EncryptionKey, NONCE_SIZE, SALT_SIZE,
+    EncryptionKey, NONCE_SIZE, SALT_SIZE, decrypt_data, encrypt_data, generate_salt,
 };
 use bincode::Options;
 use serde::{Deserialize, Serialize};

@@ -50,13 +50,12 @@ pub(crate) fn show(window: &Window) -> tauri::Result<()> {
         && !window.is_fullscreen()?
     {
         let state = window.state::<HiddenPositions>();
-        let position = state
+        state
             .0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(window.label())
-            .copied();
-        position
+            .copied()
     } else {
         None
     };

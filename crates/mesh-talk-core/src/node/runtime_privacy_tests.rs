@@ -263,10 +263,12 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
         .await
         .unwrap()
         .unwrap();
-    assert!(alice
-        .account_history(&old, 100)
-        .iter()
-        .any(|e| e.text == b"before rekey"));
+    assert!(
+        alice
+            .account_history(&old, 100)
+            .iter()
+            .any(|e| e.text == b"before rekey")
+    );
     let public = bob.node.identity.public();
     let new = bob.rekey_account().unwrap();
     drop(bob);
@@ -282,16 +284,20 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         alice.user_id(),
     );
-    assert!(alice
-        .privacy_snapshot()
-        .allowed_accounts
-        .iter()
-        .any(|a| a.id == old));
-    assert!(!alice
-        .privacy_snapshot()
-        .allowed_accounts
-        .iter()
-        .any(|a| a.id == new));
+    assert!(
+        alice
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|a| a.id == old)
+    );
+    assert!(
+        !alice
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|a| a.id == new)
+    );
     assert!(
         alice
             .node
@@ -315,24 +321,32 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
             .text,
         b"explicit contact after rekey"
     );
-    assert!(alice
-        .privacy_snapshot()
-        .allowed_accounts
-        .iter()
-        .any(|a| a.id == new));
-    assert!(alice
-        .privacy_snapshot()
-        .allowed_accounts
-        .iter()
-        .any(|a| a.id == old));
-    assert!(alice
-        .account_history(&old, 100)
-        .iter()
-        .all(|e| e.text != b"explicit contact after rekey"));
-    assert!(alice
-        .account_history(&new, 100)
-        .iter()
-        .all(|e| e.text != b"before rekey"));
+    assert!(
+        alice
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|a| a.id == new)
+    );
+    assert!(
+        alice
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|a| a.id == old)
+    );
+    assert!(
+        alice
+            .account_history(&old, 100)
+            .iter()
+            .all(|e| e.text != b"explicit contact after rekey")
+    );
+    assert!(
+        alice
+            .account_history(&new, 100)
+            .iter()
+            .all(|e| e.text != b"before rekey")
+    );
 }
 
 #[tokio::test]
@@ -528,13 +542,15 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
         b"unrelated chunk".to_vec(),
     );
     alice.node.log.lock().unwrap().append(event).unwrap();
-    assert!(alice
-        .node
-        .sync_store(&bob.node.identity.public())
-        .lock()
-        .unwrap()
-        .event_ids(&unrelated)
-        .is_empty());
+    assert!(
+        alice
+            .node
+            .sync_store(&bob.node.identity.public())
+            .lock()
+            .unwrap()
+            .event_ids(&unrelated)
+            .is_empty()
+    );
     alice.set_allowed(bob.account_id(), false).await.unwrap();
     let snapshot = alice.privacy_snapshot();
     alice.node.pull_pending_files().await;

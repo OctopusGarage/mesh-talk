@@ -81,9 +81,11 @@ fn control_ciphertext_is_not_legacy_chat_ciphertext() {
     let dir = tempfile::tempdir().unwrap();
     let mut ratchet =
         DmRatchet::new(RatchetSessions::open(&dir.path().join("legacy"), "pw").unwrap());
-    assert!(ratchet
-        .decrypt(&f.alice, &f.bob.public(), &event.ciphertext)
-        .is_err());
+    assert!(
+        ratchet
+            .decrypt(&f.alice, &f.bob.public(), &event.ciphertext)
+            .is_err()
+    );
     // A still older permissive bincode parser sees only an empty Vec; its
     // normal AEAD opener cannot authenticate that as a chat message either.
     let legacy: crate::dm::SealedEnvelope = bincode::DefaultOptions::new()
@@ -92,12 +94,14 @@ fn control_ciphertext_is_not_legacy_chat_ciphertext() {
         .deserialize(&event.ciphertext)
         .unwrap();
     assert!(legacy.ciphertext.is_empty());
-    assert!(crate::dm::open(
-        &f.alice,
-        &f.bob.public().x25519_pub,
-        &bincode::serialize(&legacy).unwrap()
-    )
-    .is_err());
+    assert!(
+        crate::dm::open(
+            &f.alice,
+            &f.bob.public().x25519_pub,
+            &bincode::serialize(&legacy).unwrap()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -343,11 +347,13 @@ fn actual_signed_sealed_receipt_binds_account_and_raw_device_messages() {
             f.authenticate(&event).unwrap().logical_id(),
             proof.logical_id()
         );
-        assert!(!payload
-            .encode()
-            .unwrap()
-            .windows(12)
-            .any(|w| w == b"message text"));
+        assert!(
+            !payload
+                .encode()
+                .unwrap()
+                .windows(12)
+                .any(|w| w == b"message text")
+        );
         let outsider = DeviceIdentity::generate();
         assert!(crate::dm::open(&outsider, &f.bob.public().x25519_pub, &event.ciphertext).is_err());
     }
@@ -526,24 +532,28 @@ fn mint_rejects_wrong_recipient_own_copies_malformed_routes_and_history() {
             "mint case {case}"
         );
     }
-    assert!(ReceiptPayload::prepare(
-        &f.alice.public(),
-        &f.alice_account.account_id(),
-        &f.alice_proof,
-        &f.message.destinations[0].event,
-        &f.received,
-        50
-    )
-    .is_none());
-    assert!(ReceiptPayload::prepare(
-        &f.bob.public(),
-        &f.alice_account.account_id(),
-        &f.alice_proof,
-        &f.message.destinations[0].event,
-        &f.received,
-        50
-    )
-    .is_none());
+    assert!(
+        ReceiptPayload::prepare(
+            &f.alice.public(),
+            &f.alice_account.account_id(),
+            &f.alice_proof,
+            &f.message.destinations[0].event,
+            &f.received,
+            50
+        )
+        .is_none()
+    );
+    assert!(
+        ReceiptPayload::prepare(
+            &f.bob.public(),
+            &f.alice_account.account_id(),
+            &f.alice_proof,
+            &f.message.destinations[0].event,
+            &f.received,
+            50
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -659,15 +669,17 @@ fn authenticated_own_account_copy_never_mints_or_confirms_delivery() {
     let own = Fixture::with_accounts(true, true);
     assert!(own.alice_proof.verify() && own.bob_proof.verify());
     assert_eq!(own.alice_account.account_id(), own.bob_account.account_id());
-    assert!(ReceiptPayload::prepare(
-        &own.bob.public(),
-        &own.bob_account.account_id(),
-        &own.alice_proof,
-        &own.message.destinations[0].event,
-        &own.received,
-        50
-    )
-    .is_none());
+    assert!(
+        ReceiptPayload::prepare(
+            &own.bob.public(),
+            &own.bob_account.account_id(),
+            &own.alice_proof,
+            &own.message.destinations[0].event,
+            &own.received,
+            50
+        )
+        .is_none()
+    );
     let mut payload = Fixture::new(true).payload();
     payload.sender_device = own.alice.public();
     payload.recipient_device = own.bob.public();
@@ -708,26 +720,30 @@ fn framed_message_trailing_and_forged_lengths_do_not_fall_back_to_raw_receipts()
             2 => received.plaintext.resize(MAX_DM_PLAINTEXT + 1, 0),
             _ => unreachable!(),
         }
-        assert!(ReceiptPayload::prepare(
-            &f.bob.public(),
-            &f.bob_account.account_id(),
-            &f.alice_proof,
-            &f.message.destinations[0].event,
-            &received,
-            50
-        )
-        .is_none());
+        assert!(
+            ReceiptPayload::prepare(
+                &f.bob.public(),
+                &f.bob_account.account_id(),
+                &f.alice_proof,
+                &f.message.destinations[0].event,
+                &received,
+                50
+            )
+            .is_none()
+        );
     }
     let legacy_source = Announce::new(&f.alice, "accountless", 1);
-    assert!(ReceiptPayload::prepare(
-        &f.bob.public(),
-        &f.bob_account.account_id(),
-        &legacy_source,
-        &f.message.destinations[0].event,
-        &f.received,
-        50
-    )
-    .is_none());
+    assert!(
+        ReceiptPayload::prepare(
+            &f.bob.public(),
+            &f.bob_account.account_id(),
+            &legacy_source,
+            &f.message.destinations[0].event,
+            &f.received,
+            50
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -736,14 +752,16 @@ fn valid_signature_does_not_override_canonical_parents_or_raw_logical_id() {
     let event = f.event_for(&f.payload());
     let mut message = f.message.clone();
     message.logical_id = EventId::new([8; 32]);
-    assert!(authenticate_receipt(
-        &f.alice,
-        &f.alice_account.account_id(),
-        &f.bob_proof,
-        &message,
-        &event
-    )
-    .is_none());
+    assert!(
+        authenticate_receipt(
+            &f.alice,
+            &f.alice_account.account_id(),
+            &f.bob_proof,
+            &message,
+            &event
+        )
+        .is_none()
+    );
     let mut noncanonical = event.clone();
     noncanonical.parents = vec![EventId::new([2; 32]), EventId::new([1; 32])];
     noncanonical.id = noncanonical.recompute_id();

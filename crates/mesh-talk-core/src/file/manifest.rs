@@ -20,7 +20,7 @@
 
 use crate::eventlog::event::ConversationId;
 use crate::file::crypto::{
-    chunk_hash, file_checksum, open_chunk, open_chunk_indexed, FileError, FileKey,
+    FileError, FileKey, chunk_hash, file_checksum, open_chunk, open_chunk_indexed,
 };
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -361,8 +361,8 @@ pub fn reassemble_and_verify(
 mod tests {
     use super::*;
     use crate::file::crypto::{
-        chunk_count_for, generate_file_nonce, seal_chunk, seal_chunk_indexed, split_chunks,
-        FileKey, CHUNK_SIZE,
+        CHUNK_SIZE, FileKey, chunk_count_for, generate_file_nonce, seal_chunk, seal_chunk_indexed,
+        split_chunks,
     };
     use rand_core::OsRng;
     use rand_core::RngCore;

@@ -100,16 +100,20 @@ mod tests {
             .unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        assert!(!visibility
-            .send_announce(&sender, b"identity", receiver.local_addr().unwrap())
-            .await
-            .unwrap());
+        assert!(
+            !visibility
+                .send_announce(&sender, b"identity", receiver.local_addr().unwrap())
+                .await
+                .unwrap()
+        );
         let mut buf = [0; 128];
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            receiver.recv_from(&mut buf)
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                receiver.recv_from(&mut buf)
+            )
+            .await
+            .is_err()
+        );
     }
 }

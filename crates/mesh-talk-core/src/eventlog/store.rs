@@ -2,8 +2,8 @@
 //! (integrity, signature, canonical form, causal completeness, equivocation)
 //! and answers ordering/heads/version queries. Pure data structure — no I/O.
 
-use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::LogError;
+use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Result of an append: a genuinely new event, or an already-present duplicate.
@@ -69,13 +69,13 @@ impl EventLog {
             return Err(LogError::MissingParents(missing));
         }
         // The author must not already have a different event at this seq.
-        if let Some(existing) = self.author_seq.get(&(conv, event.author, event.seq)) {
-            if *existing != event.id {
-                return Err(LogError::AuthorEquivocation {
-                    author: event.author,
-                    seq: event.seq,
-                });
-            }
+        if let Some(existing) = self.author_seq.get(&(conv, event.author, event.seq))
+            && *existing != event.id
+        {
+            return Err(LogError::AuthorEquivocation {
+                author: event.author,
+                seq: event.seq,
+            });
         }
         Ok(true)
     }

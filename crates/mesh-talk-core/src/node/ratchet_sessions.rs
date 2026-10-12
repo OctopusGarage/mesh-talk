@@ -151,11 +151,13 @@ mod tests {
         let path = dir.path().join("sessions.db");
         let mut store = RatchetSessions::open(&path, "pw").unwrap();
         let (alice, _) = make_pair();
-        assert!(store
-            .put_with("peer", &alice, |_, _| Err(LogError::Io(
-                std::io::Error::other("injected append failure")
-            )))
-            .is_err());
+        assert!(
+            store
+                .put_with("peer", &alice, |_, _| Err(LogError::Io(
+                    std::io::Error::other("injected append failure")
+                )))
+                .is_err()
+        );
         assert!(!store.has("peer"));
         let reopened = RatchetSessions::open(&path, "pw").unwrap();
         assert!(!reopened.has("peer"));

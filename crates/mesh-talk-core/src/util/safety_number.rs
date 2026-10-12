@@ -96,7 +96,7 @@ mod tests {
     fn words_handles_short_or_nonhex_input() {
         assert!(words("", 4).is_empty());
         assert!(words("xyz", 4).is_empty()); // no hex digits
-                                             // one hex digit = 4 bits < 5, so no full word
+        // one hex digit = 4 bits < 5, so no full word
         assert!(words("a", 4).is_empty());
     }
 }

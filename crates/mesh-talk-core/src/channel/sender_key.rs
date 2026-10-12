@@ -312,8 +312,8 @@ mod tests {
         let mut sk1 = SenderKey::generate();
         let (_n, mk1) = sk1.ratchet();
         let mut sk2 = SenderKey::generate(); // rotation: brand-new chain
-                                             // Snapshot the distribution at position 0 (before sending) so a receiver
-                                             // follows the new chain from the start.
+        // Snapshot the distribution at position 0 (before sending) so a receiver
+        // follows the new chain from the start.
         let mut rc2 = SenderChain::from_distribution(&sk2.distribution());
         let (_n2, mk2) = sk2.ratchet();
         assert_ne!(mk1, mk2);

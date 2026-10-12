@@ -9,7 +9,7 @@ use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
 use crate::node::conversation::dm_conversation_id;
-use crate::node::profile::{ProfilePayload, MAX_AVATAR_BYTES};
+use crate::node::profile::{MAX_AVATAR_BYTES, ProfilePayload};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,13 +26,13 @@ impl Node {
     /// contacts actually see the photo. Best-effort delivery per device (the event is
     /// durably logged and syncs later if a peer is offline).
     pub async fn set_avatar(&self, avatar: Option<Vec<u8>>) -> Result<(), NodeError> {
-        if let Some(a) = &avatar {
-            if a.len() > MAX_AVATAR_BYTES {
-                return Err(NodeError::Channel(format!(
-                    "avatar too large: {} bytes (max {MAX_AVATAR_BYTES})",
-                    a.len()
-                )));
-            }
+        if let Some(a) = &avatar
+            && a.len() > MAX_AVATAR_BYTES
+        {
+            return Err(NodeError::Channel(format!(
+                "avatar too large: {} bytes (max {MAX_AVATAR_BYTES})",
+                a.len()
+            )));
         }
         if self
             .my_profile

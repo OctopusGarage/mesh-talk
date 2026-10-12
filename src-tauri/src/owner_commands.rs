@@ -80,10 +80,10 @@ impl OwnerAdmission {
             .authorized(runtime, || Ok(accept()))
             .map_err(|error| NodeError::Authorization(error.to_string()))?;
         #[cfg(test)]
-        if result.is_ok() {
-            if let Some(entered) = self.app.owner_command_captured.lock().unwrap().as_ref() {
-                let _ = entered.send("owner-authorized");
-            }
+        if result.is_ok()
+            && let Some(entered) = self.app.owner_command_captured.lock().unwrap().as_ref()
+        {
+            let _ = entered.send("owner-authorized");
         }
         result
     }
@@ -770,11 +770,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(statuses.as_array().unwrap().len(), 3);
-        assert!(statuses
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["status"] == "awaiting"));
+        assert!(
+            statuses
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["status"] == "awaiting")
+        );
         let file_status = statuses
             .as_array()
             .unwrap()
@@ -823,12 +825,14 @@ mod tests {
         assert_eq!(input["kind"], "invalid-input");
         assert!(fixture.invoke("owner_enqueue_text", serde_json::json!({"owner":"bob", "account":account, "text":"reject", "replyTo":null})).is_err());
         fixture.app_state.session().clear();
-        assert!(fixture
-            .invoke(
-                "owner_delivery_statuses",
-                serde_json::json!({"owner":"alice", "account":account, "ids":ids})
-            )
-            .is_err());
+        assert!(
+            fixture
+                .invoke(
+                    "owner_delivery_statuses",
+                    serde_json::json!({"owner":"alice", "account":account, "ids":ids})
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1014,7 +1018,9 @@ mod tests {
         let reopened_policy = reopened.handle().privacy_snapshot();
         let reopened_empty = reopened.account_history(&account, 10).is_empty();
         tauri::async_runtime::block_on(reopened.stop());
-        eprintln!("{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, log_unchanged={log_unchanged}");
+        eprintln!(
+            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, log_unchanged={log_unchanged}"
+        );
         assert!(authorized && published && logged_out && replaced);
         assert_eq!(
             holder_result.unwrap_err().kind(),

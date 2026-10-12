@@ -11,7 +11,7 @@ use crate::transport::auth::build_auth;
 use crate::transport::handshake::{Handshake, HandshakeOutput};
 use crate::transport::presence_auth;
 use crate::transport::session::Session;
-use crate::transport::{TransportError, VerifiedPeer, MAX_FRAME};
+use crate::transport::{MAX_FRAME, TransportError, VerifiedPeer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// An established, authenticated, encrypted channel to one peer.
@@ -60,10 +60,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         // Pin the Noise-authenticated static key before disclosing our static
         // key or Ed25519 auth to an endpoint reached through a stale/spoofed
         // discovery address. The full identity is still checked below.
-        if let Some(expected) = expected_peer {
-            if hs.remote_static()? != expected.x25519_pub {
-                return Err(TransportError::UnexpectedPeer);
-            }
+        if let Some(expected) = expected_peer
+            && hs.remote_static()? != expected.x25519_pub
+        {
+            return Err(TransportError::UnexpectedPeer);
         }
         let m3 = hs.write_message()?;
         write_frame(&mut stream, &m3).await?;
@@ -80,10 +80,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
         )
         .await?;
 
-        if let Some(expected) = expected_peer {
-            if expected != peer.public_identity() {
-                return Err(TransportError::UnexpectedPeer);
-            }
+        if let Some(expected) = expected_peer
+            && expected != peer.public_identity()
+        {
+            return Err(TransportError::UnexpectedPeer);
         }
         Ok(Self {
             stream,

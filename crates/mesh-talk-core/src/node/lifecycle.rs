@@ -12,8 +12,8 @@
 use super::node::Node;
 use super::queries::decode_account_entry;
 use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
-use crate::node::conversation::account_conversation_id;
 use crate::node::NodeError;
+use crate::node::conversation::account_conversation_id;
 use std::collections::HashMap;
 
 impl Node {

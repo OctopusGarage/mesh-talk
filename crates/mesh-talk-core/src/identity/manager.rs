@@ -126,14 +126,13 @@ impl IdentityManager {
         if self
             .file_manager
             .file_exists(username, "meta/display_name.enc")
-        {
-            if let Ok(display_name) = self.file_manager.read_encrypted_file::<String>(
+            && let Ok(display_name) = self.file_manager.read_encrypted_file::<String>(
                 username,
                 "meta/display_name.enc",
                 password,
-            ) {
-                user.display_name = display_name;
-            }
+            )
+        {
+            user.display_name = display_name;
         }
 
         Ok(user)

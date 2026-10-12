@@ -90,9 +90,11 @@ fn incoming_file_wal_reserves_completion_and_erase_exactly_once_at_tight_cap() {
         1
     );
     store.erase_file(conversation, card.id).unwrap();
-    assert!(store
-        .completed_files(manifest.file_conv, final_chunk)
-        .is_empty());
+    assert!(
+        store
+            .completed_files(manifest.file_conv, final_chunk)
+            .is_empty()
+    );
 }
 
 #[test]
@@ -129,9 +131,11 @@ fn verified_file_completion_spends_reserved_bytes_after_reopen_and_erases_its_in
     drop(store);
     let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
     store.complete_file(card.id, final_chunk).unwrap();
-    assert!(store
-        .complete_file(card.id, EventId::new([75; 32]))
-        .is_err());
+    assert!(
+        store
+            .complete_file(card.id, EventId::new([75; 32]))
+            .is_err()
+    );
     drop(store);
     let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
     assert_eq!(
@@ -140,15 +144,19 @@ fn verified_file_completion_spends_reserved_bytes_after_reopen_and_erases_its_in
             .len(),
         1
     );
-    assert!(store
-        .completed_files(card.file_conversation, EventId::new([75; 32]))
-        .is_empty());
+    assert!(
+        store
+            .completed_files(card.file_conversation, EventId::new([75; 32]))
+            .is_empty()
+    );
     store.erase_file(card.conversation, card.id).unwrap();
     drop(store);
     let store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
-    assert!(store
-        .completed_files(card.file_conversation, final_chunk)
-        .is_empty());
+    assert!(
+        store
+            .completed_files(card.file_conversation, final_chunk)
+            .is_empty()
+    );
     assert!(store.manifest_event_erased(card.id));
 }
 
@@ -247,9 +255,11 @@ fn completion_binding_rejects_certificate_for_other_source_before_acceptance() {
     };
     let mut store =
         DeliveryStore::open_with_limits(dir.path(), "pw", DeliveryLimits::default()).unwrap();
-    assert!(store
-        .install_record(OutboxRecord::FileCard(card.clone()))
-        .is_err());
+    assert!(
+        store
+            .install_record(OutboxRecord::FileCard(card.clone()))
+            .is_err()
+    );
     assert!(store.file_card(card.id).is_none());
 }
 
@@ -535,9 +545,11 @@ fn old_compact_receipt_keeps_dedup_but_only_new_bound_record_can_project_after_r
     drop(store);
     let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
     assert!(store.has_receipt_for(receipt.conversation, receipt.original_event_id));
-    assert!(!store
-        .control_ids()
-        .contains_key(&receipt.destination.event.id));
+    assert!(
+        !store
+            .control_ids()
+            .contains_key(&receipt.destination.event.id)
+    );
     store
         .install_record(OutboxRecord::FinishedBoundReceipt(
             CompletedReceipt::from(&receipt),
@@ -755,10 +767,12 @@ fn conflicting_queued_or_completed_receipt_rejects_before_durable_intent() {
             journal_before
         );
         drop(store);
-        assert!(DeliveryStore::open(dir.path(), "pw")
-            .unwrap()
-            .pending_transactions()
-            .is_empty());
+        assert!(
+            DeliveryStore::open(dir.path(), "pw")
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
     }
 }
 
@@ -794,10 +808,12 @@ fn malformed_incoming_history_routing_and_receipt_ids_reject_before_install() {
         assert!(store.pending_transactions().is_empty());
         assert_eq!(std::fs::read(dir.path().join("sessions")).unwrap(), before);
         drop(store);
-        assert!(DeliveryStore::open(dir.path(), "pw")
-            .unwrap()
-            .pending_transactions()
-            .is_empty());
+        assert!(
+            DeliveryStore::open(dir.path(), "pw")
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
     }
 }
 use crate::eventlog::event::{ConversationId, EventKind};
@@ -1010,9 +1026,11 @@ fn retry_cursor_pages_past_earlier_awaiting_work_without_eviction() {
         store.retry_messages_after(Some(EventId::new([8; 32])), 2)[0].logical_id,
         EventId::new([9; 32])
     );
-    assert!(store
-        .retry_messages_after(Some(EventId::new([9; 32])), 2)
-        .is_empty());
+    assert!(
+        store
+            .retry_messages_after(Some(EventId::new([9; 32])), 2)
+            .is_empty()
+    );
     assert_eq!(store.retry_messages(64).len(), 3);
 }
 
@@ -1096,26 +1114,30 @@ fn bounded_replay_rejects_file_bytes_and_record_count_before_install() {
     store.begin(outgoing(dir.path(), 7)).unwrap();
     store.begin(outgoing(dir.path(), 8)).unwrap();
     drop(store);
-    assert!(DeliveryStore::open_with_limits(
-        dir.path(),
-        "pw",
-        DeliveryLimits {
-            transactions: 1,
-            ..DeliveryLimits::default()
-        }
-    )
-    .is_err());
+    assert!(
+        DeliveryStore::open_with_limits(
+            dir.path(),
+            "pw",
+            DeliveryLimits {
+                transactions: 1,
+                ..DeliveryLimits::default()
+            }
+        )
+        .is_err()
+    );
     let path = dir.path().join("delivery-transactions.log");
     let size = std::fs::metadata(&path).unwrap().len();
-    assert!(DeliveryStore::open_with_limits(
-        dir.path(),
-        "pw",
-        DeliveryLimits {
-            journal_bytes: size - 1,
-            ..DeliveryLimits::default()
-        }
-    )
-    .is_err());
+    assert!(
+        DeliveryStore::open_with_limits(
+            dir.path(),
+            "pw",
+            DeliveryLimits {
+                journal_bytes: size - 1,
+                ..DeliveryLimits::default()
+            }
+        )
+        .is_err()
+    );
     let store = DeliveryStore::open(dir.path(), "pw").unwrap();
     assert_eq!(store.pending_transactions().len(), 2);
 }
@@ -1214,9 +1236,11 @@ fn crash_after_metadata_before_secret_scrub_replays_without_duplicate_history() 
     let mut received = ReceivedLog::open(&dir.path().join("received"), "pw").unwrap();
     let blocker = dir.path().join("delivery-transactions.compact-tmp");
     std::fs::create_dir(&blocker).unwrap();
-    assert!(store
-        .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
-        .is_err());
+    assert!(
+        store
+            .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
+            .is_err()
+    );
     assert_eq!(store.pending_transactions().len(), 1);
     assert_eq!(sent.entries(&account_conv()).len(), 1);
     let outbox_bytes = std::fs::metadata(dir.path().join("delivery-outbox.log"))
@@ -1401,9 +1425,11 @@ fn receive_history_write_failure_keeps_intent_and_never_queues_receipt() {
     let mut sent = SentLog::open(&dir.path().join("sent"), "pw").unwrap();
     let mut received = ReceivedLog::open(&receive_dir.join("received"), "pw").unwrap();
     std::fs::rename(&receive_dir, &moved).unwrap();
-    assert!(store
-        .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
-        .is_err());
+    assert!(
+        store
+            .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
+            .is_err()
+    );
     assert_eq!(store.pending_transactions().len(), 1);
     assert!(store.retry_receipts(1).is_empty());
     std::fs::rename(&moved, &receive_dir).unwrap();
@@ -1516,15 +1542,17 @@ fn capacity_and_conflicts_reject_before_ratchet_install() {
     assert!(store.begin(conflict).is_err());
     assert_eq!(std::fs::read(dir.path().join("sessions")).unwrap(), before);
     assert_eq!(store.pending_transactions().len(), 1);
-    assert!(DeliveryStore::open_with_limits(
-        dir.path(),
-        "pw",
-        DeliveryLimits {
-            journal_bytes: 22,
-            ..DeliveryLimits::default()
-        }
-    )
-    .is_err());
+    assert!(
+        DeliveryStore::open_with_limits(
+            dir.path(),
+            "pw",
+            DeliveryLimits {
+                journal_bytes: 22,
+                ..DeliveryLimits::default()
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1591,8 +1619,10 @@ fn failed_durable_intent_does_not_install_or_publish_status() {
     assert_eq!(store.status(EventId::new([7; 32])), None);
     std::fs::rename(&moved, &parent).unwrap();
     drop(store);
-    assert!(DeliveryStore::open(&parent, "pw")
-        .unwrap()
-        .pending_transactions()
-        .is_empty());
+    assert!(
+        DeliveryStore::open(&parent, "pw")
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
 }

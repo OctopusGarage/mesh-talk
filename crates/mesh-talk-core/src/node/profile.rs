@@ -128,10 +128,10 @@ impl ProfilePayload {
     /// True if the signature is a valid account binding AND any present avatar is within
     /// the size bound. A `None` (cleared) avatar is always within bound.
     pub fn verify(&self) -> bool {
-        if let Some(a) = &self.avatar {
-            if a.len() > MAX_AVATAR_BYTES {
-                return false;
-            }
+        if let Some(a) = &self.avatar
+            && a.len() > MAX_AVATAR_BYTES
+        {
+            return false;
         }
         let avatar_bytes = self.avatar.as_deref().unwrap_or(&[]);
         DeviceIdentity::verify(

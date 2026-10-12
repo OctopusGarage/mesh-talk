@@ -1093,9 +1093,11 @@ async fn two_nodes_exchange_channel_messages_both_directions_over_loopback_tcp()
     // Alice's channel_history now shows both: her own sent line + Bob's decrypted one.
     let alice_hist = alice_node.channel_history(channel, 10);
     assert!(alice_hist.iter().any(|h| h.from_me && h.text == b"hi bob"));
-    assert!(alice_hist
-        .iter()
-        .any(|h| !h.from_me && h.text == b"hi alice" && h.who == bob_node.user_id()));
+    assert!(
+        alice_hist
+            .iter()
+            .any(|h| !h.from_me && h.text == b"hi alice" && h.who == bob_node.user_id())
+    );
 }
 
 /// Restart rig: Alice creates a {Alice, Bob} channel and sends a message Bob
@@ -2074,10 +2076,12 @@ async fn two_nodes_transfer_nested_directory_and_save_it() {
     let legacy_tar = dir.path().join("legacy.tar");
     alice_node.save_file(file_conv, &legacy_tar).unwrap();
     let mut archive = tar::Archive::new(std::fs::File::open(&legacy_tar).unwrap());
-    assert!(archive
-        .entries()
-        .unwrap()
-        .any(|item| item.unwrap().path().unwrap() == std::path::Path::new("nested/pic.txt")));
+    assert!(
+        archive
+            .entries()
+            .unwrap()
+            .any(|item| item.unwrap().path().unwrap() == std::path::Path::new("nested/pic.txt"))
+    );
     let card = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
         .await
         .unwrap()
@@ -2424,6 +2428,11 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
             .iter()
             .any(|v| v.emoji == "👍" && v.who.contains(&bob_uid)),
         "bob sees his own reaction"
+    );
+    assert_eq!(
+        bob_node.reactions(conv),
+        bob_views,
+        "cached reaction view is stable"
     );
 
     // Give the distribution a moment, then check Alice.

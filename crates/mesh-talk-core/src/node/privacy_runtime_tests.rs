@@ -116,9 +116,10 @@ async fn configured_public_node_receives_encrypted_accountless_discovery_dm_and_
         "accountless sealed manifest must surface"
     );
     bob.set_invisible(true).await.unwrap();
-    assert!(bob
-        .historical_author(&alice.identity.public().ed25519_pub)
-        .is_none());
+    assert!(
+        bob.historical_author(&alice.identity.public().ed25519_pub)
+            .is_none()
+    );
     server.abort();
 }
 
@@ -180,11 +181,12 @@ fn rejected_discovery_proof_does_not_hide_successfully_persisted_peer() {
             .account_id(),
         Some(alice.account_id())
     );
-    assert!(!bob
-        .cached_peer_snapshot()
-        .unwrap()
-        .iter()
-        .any(|p| p.public == alice.identity.public()));
+    assert!(
+        !bob.cached_peer_snapshot()
+            .unwrap()
+            .iter()
+            .any(|p| p.public == alice.identity.public())
+    );
 }
 
 #[tokio::test]
@@ -314,13 +316,15 @@ async fn cached_private_author_requires_permission_during_real_relay_rounds() {
         .privacy_dial(addr, &relay.identity.public())
         .await
         .unwrap();
-    assert!(super::session::request_round(
-        &mut channel,
-        &bob.sync_store(&relay.identity.public()),
-        conv
-    )
-    .await
-    .is_err());
+    assert!(
+        super::session::request_round(
+            &mut channel,
+            &bob.sync_store(&relay.identity.public()),
+            conv
+        )
+        .await
+        .is_err()
+    );
     assert!(bob.log.lock().unwrap().events(&conv).is_empty());
     assert!(rx.try_recv().is_err());
     bob.set_allowed(&alice.account_id(), true).await.unwrap();
@@ -357,13 +361,15 @@ async fn cached_private_author_requires_permission_during_real_relay_rounds() {
         .privacy_dial(addr, &relay.identity.public())
         .await
         .unwrap();
-    assert!(super::session::request_round(
-        &mut channel,
-        &bob.sync_store(&relay.identity.public()),
-        conv
-    )
-    .await
-    .is_err());
+    assert!(
+        super::session::request_round(
+            &mut channel,
+            &bob.sync_store(&relay.identity.public()),
+            conv
+        )
+        .await
+        .is_err()
+    );
     assert!(!bob.log.lock().unwrap().has(&revoked.id));
     assert!(bob.log.lock().unwrap().has(&event.id));
     assert!(rx.try_recv().is_err());
@@ -493,18 +499,20 @@ async fn historical_proofs_do_not_grant_private_dm_scope_or_online_presence() {
     assert!(bob.historical_author(&proof.ed25519_pub).is_some());
     bob.set_allowed(&alice.account_id(), false).await.unwrap();
     assert!(bob.historical_author(&proof.ed25519_pub).is_none());
-    assert!(bob
-        .historical_author(&DeviceIdentity::generate().public().ed25519_pub)
-        .is_none());
+    assert!(
+        bob.historical_author(&DeviceIdentity::generate().public().ed25519_pub)
+            .is_none()
+    );
     let mut tampered = proof.clone();
     tampered.sig[0] ^= 1;
-    assert!(bob
-        .remember_peer(
+    assert!(
+        bob.remember_peer(
             &proof.public(),
             Some(&tampered),
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         )
-        .is_err());
+        .is_err()
+    );
     assert!(bob.roster.lock().unwrap().peers().is_empty());
 }
 
@@ -732,18 +740,22 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
     let parent = crate::eventlog::ConversationId::new([32; 32]);
     let author = crate::eventlog::Author::from_ed25519(alice.identity.public().ed25519_pub);
     let event = crate::eventlog::EventId::new([33; 32]);
-    assert!(alice
-        .remember_sent_manifest_scope(file, parent, author, event)
-        .is_err());
-    assert!(!alice
-        .privacy
-        .state
-        .read()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .file_scopes
-        .contains_key(&file));
+    assert!(
+        alice
+            .remember_sent_manifest_scope(file, parent, author, event)
+            .is_err()
+    );
+    assert!(
+        !alice
+            .privacy
+            .state
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .file_scopes
+            .contains_key(&file)
+    );
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();
     alice
@@ -1098,11 +1110,13 @@ async fn manual_presence_publication_has_one_deadline_for_multiple_stalled_devic
     .await
     .expect("publication multiplied the per-device deadline")
     .unwrap();
-    assert!(alice
-        .privacy_snapshot()
-        .allowed_accounts
-        .iter()
-        .any(|a| a.id == account.account_id()));
+    assert!(
+        alice
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|a| a.id == account.account_id())
+    );
     tokio::time::timeout(DEADLINE, alice.set_allowed(&account.account_id(), false))
         .await
         .unwrap()
@@ -1148,12 +1162,13 @@ async fn allowed_carrier_cannot_create_a_group_owned_by_an_unknown_author() {
         crate::eventlog::EventKind::MembershipChange,
         meta.encode(),
     );
-    assert!(bob
-        .sync_store(&alice.identity.public())
-        .lock()
-        .unwrap()
-        .ingest(genesis)
-        .is_err());
+    assert!(
+        bob.sync_store(&alice.identity.public())
+            .lock()
+            .unwrap()
+            .ingest(genesis)
+            .is_err()
+    );
     assert!(bob.log.lock().unwrap().events(&conv).is_empty());
 }
 
@@ -1197,12 +1212,13 @@ async fn projected_group_removal_takes_effect_before_channel_book_refresh() {
         !bob.group_member(&alice.identity.public()),
         "stale channel book must not disclose signed listening presence to a removed member"
     );
-    assert!(bob
-        .sync_store(&alice.identity.public())
-        .lock()
-        .unwrap()
-        .event_ids(&group)
-        .is_empty());
+    assert!(
+        bob.sync_store(&alice.identity.public())
+            .lock()
+            .unwrap()
+            .event_ids(&group)
+            .is_empty()
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(bob.clone().run_accept_loop(listener));
@@ -1329,10 +1345,12 @@ async fn sdk_reopening_private_policy_suppresses_initial_discovery() {
         .unwrap();
     let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    assert!(!visibility
-        .send_announce(&sender, b"presence", receiver.local_addr().unwrap())
-        .await
-        .unwrap());
+    assert!(
+        !visibility
+            .send_announce(&sender, b"presence", receiver.local_addr().unwrap())
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1429,13 +1447,15 @@ async fn revoking_an_open_connection_rejects_late_event_without_append() {
         ))
         .unwrap();
     let store = Mutex::new(store);
-    assert!(tokio::time::timeout(
-        DEADLINE,
-        crate::node::session::request_round(&mut channel, &store, conv)
-    )
-    .await
-    .unwrap()
-    .is_err());
+    assert!(
+        tokio::time::timeout(
+            DEADLINE,
+            crate::node::session::request_round(&mut channel, &store, conv)
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
     assert!(bob.log.lock().unwrap().events(&conv).is_empty());
     server.abort();
 }
@@ -1493,13 +1513,14 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
     .await
     .unwrap()
     .unwrap();
-    assert!(bob
-        .log
-        .lock()
-        .unwrap()
-        .events(&group)
-        .iter()
-        .any(|e| e.id == id));
+    assert!(
+        bob.log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .iter()
+            .any(|e| e.id == id)
+    );
     let conv = crate::node::conversation::dm_conversation_id(
         &alice.identity.public(),
         &bob.identity.public(),
@@ -1517,18 +1538,21 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
     ))
     .unwrap();
     let store = Mutex::new(log);
-    assert!(tokio::time::timeout(
-        DEADLINE,
-        crate::node::session::request_round(&mut channel, &store, conv)
-    )
-    .await
-    .unwrap()
-    .is_err());
-    assert!(bob.log.lock().unwrap().events(&conv).is_empty());
-    assert!(bob
-        .send_call_signal(&alice.user_id(), b"offer")
+    assert!(
+        tokio::time::timeout(
+            DEADLINE,
+            crate::node::session::request_round(&mut channel, &store, conv)
+        )
         .await
-        .is_err());
+        .unwrap()
+        .is_err()
+    );
+    assert!(bob.log.lock().unwrap().events(&conv).is_empty());
+    assert!(
+        bob.send_call_signal(&alice.user_id(), b"offer")
+            .await
+            .is_err()
+    );
     assert!(bob.privacy_snapshot().allowed_accounts.is_empty());
     server.abort();
 }
@@ -1746,11 +1770,13 @@ async fn explicit_send_grants_and_authenticates_return_contact_without_discovery
             .text,
         b"hello"
     );
-    assert!(alice
-        .privacy_snapshot()
-        .allowed_accounts
-        .iter()
-        .any(|a| a.id == bob.account_id()));
+    assert!(
+        alice
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|a| a.id == bob.account_id())
+    );
     bob.send_dm(&alice.user_id(), b"reply").await.unwrap();
     assert_eq!(
         tokio::time::timeout(DEADLINE, arx.recv())
@@ -1779,13 +1805,14 @@ async fn policy_startup_failure_and_unknown_grants_fail_closed() {
     assert!(node.set_allowed(&"a".repeat(32), true).await.is_err());
     node.set_invisible(true).await.unwrap();
     std::fs::write(dir.path().join("privacy.policy"), b"corrupt").unwrap();
-    assert!(node
-        .configure_privacy(
+    assert!(
+        node.configure_privacy(
             dir.path(),
             "pw",
             &own,
             Arc::new(DiscoveryVisibility::new(true))
         )
-        .is_err());
+        .is_err()
+    );
     assert!(node.privacy_snapshot().invisible);
 }

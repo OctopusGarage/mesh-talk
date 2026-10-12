@@ -8,9 +8,9 @@
 
 use crate::channel::sender_key::SenderKey;
 use crate::discovery::roster::{Roster, UserId};
+use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::eventlog::persist::PersistentEventLog;
-use crate::eventlog::LogError;
 use crate::identity::account::Account;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::channel::{ChannelBook, ReceivedChannelMessage};
@@ -453,10 +453,10 @@ impl Node {
         // (first-wins on the chain they already hold) cannot follow.
         for channel in channels.channel_ids() {
             for (epoch, bytes) in channel_senders.get(&channel) {
-                if let Some(sk) = SenderKey::deserialize(&bytes) {
-                    if let Some(state) = channels.state_mut(&channel) {
-                        state.import_my_sender(epoch, sk);
-                    }
+                if let Some(sk) = SenderKey::deserialize(&bytes)
+                    && let Some(state) = channels.state_mut(&channel)
+                {
+                    state.import_my_sender(epoch, sk);
                 }
             }
         }

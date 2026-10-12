@@ -154,10 +154,10 @@ impl Announce {
             return false;
         }
         // If a cert is present it must be for THIS device and validly account-signed.
-        if let Some(cert) = &self.account_cert {
-            if cert.device_ed25519_pub != self.ed25519_pub || !cert.verify() {
-                return false;
-            }
+        if let Some(cert) = &self.account_cert
+            && (cert.device_ed25519_pub != self.ed25519_pub || !cert.verify())
+        {
+            return false;
         }
         let account_pub = self.account_cert.as_ref().map(|c| &c.account_ed25519_pub);
         let Ok(sig): Result<[u8; 64], _> = self.sig.as_slice().try_into() else {

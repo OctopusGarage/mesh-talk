@@ -14,7 +14,7 @@ hash-linked event log that syncs CRDT-style. An elected "post office" peer store
 forwards (still-encrypted) events for offline recipients.
 
 ### Technology Stack
-- **Language**: Rust 2021 · **Desktop**: Tauri 2.x · **Frontend**: React 19 + TypeScript + Tailwind + Radix primitives (Vite)
+- **Language**: Rust 2024 · **Desktop**: Tauri 2.x · **Frontend**: React 19 + TypeScript + Tailwind + Radix primitives (Vite)
 - **Async**: Tokio · **Serialization**: bincode (wire/at-rest), serde_json (IPC)
 - **Crypto**: Ed25519 + X25519 (dalek; keeps `rand` 0.8), Noise_XX (snow), Double Ratchet
   + sender-key group ratchet, AES-256-GCM + ChaChaPoly, SHA-256/HKDF, PBKDF2-600k at rest

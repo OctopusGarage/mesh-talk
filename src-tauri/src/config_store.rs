@@ -5,7 +5,7 @@
 //! per-struct `#[serde(default)]` forward-compat. This module only collapses the
 //! identical path / load / save file-IO scaffolding into generics over `T`.
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
 
 /// `<app config dir>/<filename>`, or `None` if there is no app config dir.

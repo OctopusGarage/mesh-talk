@@ -363,12 +363,14 @@ mod tests {
         builder.finish().unwrap();
         drop(builder);
         let target = tempfile::tempdir().unwrap();
-        assert!(extract(
-            archive.path(),
-            target.path(),
-            archive.as_file().metadata().unwrap().len()
-        )
-        .is_err());
+        assert!(
+            extract(
+                archive.path(),
+                target.path(),
+                archive.as_file().metadata().unwrap().len()
+            )
+            .is_err()
+        );
         assert!(!target.path().join("link").exists());
     }
 

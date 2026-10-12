@@ -169,12 +169,13 @@ fn current_ssid() -> Option<String> {
     for line in text.lines() {
         let l = line.trim();
         // Match "SSID                   : Name" but not "BSSID".
-        if l.starts_with("SSID") && !l.starts_with("BSSID") {
-            if let Some((_, v)) = l.split_once(':') {
-                let v = v.trim();
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
+        if l.starts_with("SSID")
+            && !l.starts_with("BSSID")
+            && let Some((_, v)) = l.split_once(':')
+        {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
             }
         }
     }
@@ -284,11 +285,9 @@ pub async fn capture_screen(
         }
     });
 
-    if hide_window {
-        if let Some(w) = &window {
-            let _ = crate::window_visibility::show(w);
-            let _ = w.set_focus();
-        }
+    if hide_window && let Some(w) = &window {
+        let _ = crate::window_visibility::show(w);
+        let _ = w.set_focus();
     }
 
     result
@@ -301,7 +300,7 @@ pub async fn capture_screen(
 #[cfg(target_os = "macos")]
 mod screen_recording {
     #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
     }
@@ -397,8 +396,8 @@ fn portal_file_path(uri: &str) -> Result<std::path::PathBuf, CommandError> {
 
 #[cfg(target_os = "linux")]
 async fn capture_png() -> Result<Vec<u8>, CommandError> {
-    use ashpd::desktop::screenshot::{AvailableTargets, Screenshot, ScreenshotProxy};
     use ashpd::desktop::ResponseError;
+    use ashpd::desktop::screenshot::{AvailableTargets, Screenshot, ScreenshotProxy};
 
     let proxy = ScreenshotProxy::new()
         .await
@@ -424,7 +423,7 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
         Err(e) => {
             return Err(CommandError::Internal(format!(
                 "screenshot portal failed: {e}"
-            )))
+            )));
         }
     };
     let path = portal_file_path(shot.uri().as_str())?;

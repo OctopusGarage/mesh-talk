@@ -230,10 +230,10 @@ impl AuthService {
 
         {
             let mut current_user = self.current_user.lock().unwrap();
-            if let Some(existing) = current_user.as_ref() {
-                if existing.user_id != user_id {
-                    return Err(AuthError::AlreadyLoggedIn);
-                }
+            if let Some(existing) = current_user.as_ref()
+                && existing.user_id != user_id
+            {
+                return Err(AuthError::AlreadyLoggedIn);
             }
             *current_user = Some(user.clone());
         }

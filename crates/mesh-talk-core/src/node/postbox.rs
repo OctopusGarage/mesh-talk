@@ -5,9 +5,9 @@
 
 use crate::discovery::roster::{PeerRecord, Roster};
 use crate::identity::device::DeviceIdentity;
-use crate::node::session::{serve_one, Served};
+use crate::node::session::{Served, serve_one};
 use crate::node::transport::secure_accept;
-use crate::postoffice::{elect, PostOffice};
+use crate::postoffice::{PostOffice, elect};
 use crate::transport::SecureChannel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

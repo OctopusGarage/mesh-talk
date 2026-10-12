@@ -12,7 +12,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use mesh_talk_core::eventlog::{persist::PersistentEventLog, EventKind};
+use mesh_talk_core::eventlog::{EventKind, persist::PersistentEventLog};
 
 /// A spawned `mesh-talk-node` (normal or `--post-office`) with a line view of stdout.
 struct CliNode {
@@ -189,19 +189,20 @@ fn offline_dm_delivered_via_post_office() {
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut replicated = None;
     while Instant::now() < deadline {
-        if sender_log.is_file() && relay_log.is_file() {
-            if let (Ok(sender), Ok(relay)) = (
+        if sender_log.is_file()
+            && relay_log.is_file()
+            && let (Ok(sender), Ok(relay)) = (
                 PersistentEventLog::open(&sender_log, "pw"),
                 PersistentEventLog::open(&relay_log, "pw"),
-            ) {
-                replicated = sender.all_event_ids().into_iter().find(|id| {
-                    sender.get(id).is_some_and(|event| {
-                        event.kind == EventKind::Message
-                            && event.author.user_id() == alice_uid
-                            && relay.has(id)
-                    })
-                });
-            }
+            )
+        {
+            replicated = sender.all_event_ids().into_iter().find(|id| {
+                sender.get(id).is_some_and(|event| {
+                    event.kind == EventKind::Message
+                        && event.author.user_id() == alice_uid
+                        && relay.has(id)
+                })
+            });
         }
         if replicated.is_some() {
             break;

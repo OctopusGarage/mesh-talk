@@ -547,21 +547,21 @@ async fn register_impl(
     let user = match register_result {
         Ok(user) => user,
         Err(AuthError::UserAlreadyExists) => {
-            return Err(CommandError::Validation("Username already exists".into()))
+            return Err(CommandError::Validation("Username already exists".into()));
         }
         Err(AuthError::PasswordTooWeak) => {
             return Err(CommandError::Validation(
                 "Password must be at least 8 characters".into(),
-            ))
+            ));
         }
         Err(AuthError::InvalidInput(msg)) => return Err(CommandError::Validation(msg)),
         Err(AuthError::StorageError(msg)) | Err(AuthError::InternalError(msg)) => {
-            return Err(CommandError::Service(msg))
+            return Err(CommandError::Service(msg));
         }
         Err(other) => {
             return Err(CommandError::Service(format!(
                 "Failed to register user: {other:?}"
-            )))
+            )));
         }
     };
 
@@ -1058,12 +1058,14 @@ mod tests {
                 "consent": null
             }])
         );
-        assert!(invoke_auth(
-            &fixture.webview,
-            "file_statuses",
-            serde_json::json!({ "fileConvs": vec!["00"; 501] }),
-        )
-        .is_err());
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "file_statuses",
+                serde_json::json!({ "fileConvs": vec!["00"; 501] }),
+            )
+            .is_err()
+        );
         invoke_auth(
             &fixture.webview,
             "set_attachment_global_auto",
@@ -1094,12 +1096,14 @@ mod tests {
             .unwrap()["global_auto"],
             true
         );
-        assert!(invoke_auth(
-            &fixture.webview,
-            "set_attachment_contact_auto",
-            serde_json::json!({ "account": "invalid", "auto": true }),
-        )
-        .is_err());
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "set_attachment_contact_auto",
+                serde_json::json!({ "account": "invalid", "auto": true }),
+            )
+            .is_err()
+        );
         for command in ["decide_attachment", "save_file_to_dir", "read_media"] {
             let body = match command {
                 "decide_attachment" => serde_json::json!({ "fileConv": "invalid", "accept": true }),
@@ -1108,18 +1112,22 @@ mod tests {
             };
             assert!(invoke_auth(&fixture.webview, command, body).is_err());
         }
-        assert!(invoke_auth(
-            &fixture.webview,
-            "decide_attachment",
-            serde_json::json!({ "fileConv": unknown_file, "accept": true }),
-        )
-        .is_err());
-        assert!(invoke_auth(
-            &fixture.webview,
-            "read_media",
-            serde_json::json!({ "fileConv": unknown_file }),
-        )
-        .is_err());
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "decide_attachment",
+                serde_json::json!({ "fileConv": unknown_file, "accept": true }),
+            )
+            .is_err()
+        );
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "read_media",
+                serde_json::json!({ "fileConv": unknown_file }),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1159,15 +1167,17 @@ mod tests {
             " password-b ",
         )
         .unwrap();
-        assert!(remember_login(
-            fixture.webview.app_handle(),
-            &fixture.app_state,
-            &fixture.settings,
-            &stale_user,
-            &stale,
-            "old wrong password"
-        )
-        .is_err());
+        assert!(
+            remember_login(
+                fixture.webview.app_handle(),
+                &fixture.app_state,
+                &fixture.settings,
+                &stale_user,
+                &stale,
+                "old wrong password"
+            )
+            .is_err()
+        );
         // Production forget helper is tested against a later B snapshot too;
         // the actual logout command executes it under auth serialization.
         forget_logged_out(
@@ -1253,12 +1263,14 @@ mod tests {
             &fixture.app_state,
         ))
         .unwrap();
-        assert!(invoke_auth(
-            &fixture.webview,
-            "adopt_linked_account",
-            serde_json::json!({})
-        )
-        .is_err());
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "adopt_linked_account",
+                serde_json::json!({})
+            )
+            .is_err()
+        );
         assert_eq!(
             crate::session_store::load(&fixture.alice).as_deref(),
             Some(" password-a ")

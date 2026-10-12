@@ -35,7 +35,7 @@
 - Reference `specifications/development_conventions.md` for naming nuances.
 
 ## Architecture & Components
-- Stack: Rust 2021 on Tokio; Tauri 2 + React shell. No server.
+- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No server.
 - The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
   (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
   low-level socket in `transport/net.rs`) + the content-addressed event log + DM/channel/

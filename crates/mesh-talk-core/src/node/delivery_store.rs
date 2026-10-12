@@ -4,9 +4,9 @@ use super::dm_envelope::DmEnvelope;
 use super::dm_ratchet::{DmRatchet, PreparedRatchet};
 use super::received_log::{ReceivedEntry, ReceivedLog};
 use super::sentlog::{SentEntry, SentLog};
+use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::eventlog::persist::PersistentEventLog;
-use crate::eventlog::LogError;
 use crate::identity::device::PublicIdentity;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
@@ -1022,14 +1022,14 @@ impl DeliveryStore {
     }
 
     fn remove_file_completion(&mut self, id: EventId) {
-        if let Some(final_chunk) = self.file_completions.remove(&id) {
-            if let Some(file) = self.files.get(&id) {
-                let key = (*file.file_conversation.as_bytes(), final_chunk);
-                if let Some(ids) = self.completion_index.get_mut(&key) {
-                    ids.remove(&id);
-                    if ids.is_empty() {
-                        self.completion_index.remove(&key);
-                    }
+        if let Some(final_chunk) = self.file_completions.remove(&id)
+            && let Some(file) = self.files.get(&id)
+        {
+            let key = (*file.file_conversation.as_bytes(), final_chunk);
+            if let Some(ids) = self.completion_index.get_mut(&key) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    self.completion_index.remove(&key);
                 }
             }
         }
@@ -1539,14 +1539,13 @@ impl DeliveryStore {
                 self.files.insert(file.id, file);
             }
             OutboxRecord::RetireFileDestination(id, original) => {
-                if let Some(file) = self.files.get_mut(&id) {
-                    if let Some(destination) = file
+                if let Some(file) = self.files.get_mut(&id)
+                    && let Some(destination) = file
                         .destinations
                         .iter_mut()
                         .find(|d| d.binding.event_id == original)
-                    {
-                        destination.active = false;
-                    }
+                {
+                    destination.active = false;
                 }
                 self.active_files.remove(&(id, original));
             }
@@ -1627,10 +1626,10 @@ impl DeliveryStore {
                 self.completed_receipt_devices.insert(original, device);
             }
             OutboxRecord::FinishedReceipt(completed) => {
-                if let Some(receipt) = self.receipts.get(&completed.receipt_event_id) {
-                    if CompletedReceipt::from(receipt) != completed {
-                        return Err(invalid("conflicting completed receipt metadata"));
-                    }
+                if let Some(receipt) = self.receipts.get(&completed.receipt_event_id)
+                    && CompletedReceipt::from(receipt) != completed
+                {
+                    return Err(invalid("conflicting completed receipt metadata"));
                 }
                 self.receipts.remove(&completed.receipt_event_id);
                 self.receipt_events.remove(&completed.original_event_id);

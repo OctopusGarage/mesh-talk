@@ -1,4 +1,4 @@
-use super::{parse_channel_id, NodeState};
+use super::{NodeState, parse_channel_id};
 use crate::commands::CommandError;
 use tauri::Manager;
 
@@ -370,13 +370,15 @@ mod tests {
         assert!(saved.starts_with(cache.path()));
         assert_eq!(saved.file_name().unwrap(), "photo.png");
         assert_eq!(std::fs::read(saved).unwrap(), bytes);
-        assert!(write_temp_file_in_cache(
-            cache.path(),
-            &vec![0; 64 * 1024 * 1024 + 1],
-            "png",
-            None,
-            43
-        )
-        .is_err());
+        assert!(
+            write_temp_file_in_cache(
+                cache.path(),
+                &vec![0; 64 * 1024 * 1024 + 1],
+                "png",
+                None,
+                43
+            )
+            .is_err()
+        );
     }
 }

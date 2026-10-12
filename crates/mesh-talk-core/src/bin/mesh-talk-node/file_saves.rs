@@ -272,9 +272,11 @@ mod tests {
     fn incomplete_card_waits_then_complete_card_saves_once_and_deduplicates() {
         let mut queue = PendingSaves::default();
         assert_eq!(queue.enqueue(file(2)), Ok(true));
-        assert!(queue
-            .take_ready(|_| Some(FileProgress { done: 0, total: 1 }))
-            .is_none());
+        assert!(
+            queue
+                .take_ready(|_| Some(FileProgress { done: 0, total: 1 }))
+                .is_none()
+        );
         assert_eq!(queue.enqueue(file(2)), Ok(false));
         assert_eq!(
             queue.take_ready(complete).unwrap().file_conv,

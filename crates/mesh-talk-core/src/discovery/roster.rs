@@ -119,16 +119,16 @@ impl Roster {
         // least-recently-seen existing peer first, so a flood of distinct fake ids can
         // churn the table but never grows it past the cap. Known peers (refreshes) are
         // exempt — they overwrite in place and don't add an entry.
-        if !existed && self.peers.len() >= MAX_PEERS {
-            if let Some(oldest) = self
+        if !existed
+            && self.peers.len() >= MAX_PEERS
+            && let Some(oldest) = self
                 .peers
                 .iter()
                 .min_by_key(|(_, r)| r.last_seen)
                 .map(|(id, _)| id.clone())
-            {
-                self.peers.remove(&oldest);
-                self.announcements.remove(&oldest);
-            }
+        {
+            self.peers.remove(&oldest);
+            self.announcements.remove(&oldest);
         }
         self.announcements
             .insert(announce.user_id.clone(), announce.clone());
