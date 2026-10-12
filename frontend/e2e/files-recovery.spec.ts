@@ -44,12 +44,17 @@ test("received files opens the configured or system download folder", async ({
     win.__openedFolderPaths = [];
     win.__folderOpenFails = false;
     const original = win.__TAURI_INTERNALS__.invoke;
-    win.__TAURI_INTERNALS__.invoke = (cmd, args) => {
-      if (cmd === "plugin:opener|open_path") {
+    win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "open_download_dir") {
         if (win.__folderOpenFails)
-          return Promise.reject(new Error("file manager unavailable"));
-        win.__openedFolderPaths.push(String(args.path));
-        return Promise.resolve(null);
+          throw new Error("file manager unavailable");
+        const settings = (await original("get_app_settings", {})) as {
+          download_dir: string;
+        };
+        const path =
+          settings.download_dir || "/home/tester/System Downloads";
+        win.__openedFolderPaths.push(path);
+        return null;
       }
       if (cmd === "default_download_dir")
         return Promise.resolve("/home/tester/System Downloads");

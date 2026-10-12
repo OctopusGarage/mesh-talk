@@ -244,6 +244,33 @@ pub fn default_download_dir(app: tauri::AppHandle) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Open only the configured download folder (or the OS default) in the file manager.
+/// The renderer cannot choose a different path for this command.
+#[tauri::command]
+pub fn open_download_dir(
+    app: tauri::AppHandle,
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+) -> Result<(), CommandError> {
+    let configured = settings.get().download_dir;
+    let dir = if configured.is_empty() {
+        default_download_dir(app)
+            .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
+    } else {
+        configured
+    };
+    let path = std::path::Path::new(&dir);
+    if !path.is_dir() {
+        return Err(CommandError::Validation(
+            "download folder unavailable".into(),
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    let opened = tauri_plugin_opener::open_path(path, Some("Finder"));
+    #[cfg(not(target_os = "macos"))]
+    let opened = tauri_plugin_opener::open_path(path, None::<&str>);
+    opened.map_err(|error| CommandError::Service(format!("open download folder: {error}")))
+}
+
 #[tauri::command]
 pub async fn save_file_to_dir(
     state: tauri::State<'_, NodeState>,

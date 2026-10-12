@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Download, ExternalLink, FolderOpen, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -143,7 +143,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
         setFolderOpenError(t("files.folderUnknown"));
         return;
       }
-      await openPath(dir);
+      await chat.openDownloadDir();
     } catch (e) {
       if (lease.current())
         setFolderOpenError(t("files.couldntOpen", { error: errorMessage(e) }));

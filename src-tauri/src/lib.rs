@@ -379,6 +379,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::decide_attachment,
                 crate::chat_commands::save_file_to_dir,
                 crate::chat_commands::default_download_dir,
+                crate::chat_commands::open_download_dir,
                 crate::chat_commands::safety_number,
                 crate::chat_commands::read_file,
                 crate::chat_commands::read_media,

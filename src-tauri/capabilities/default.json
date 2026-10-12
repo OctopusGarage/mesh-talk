@@ -17,7 +17,6 @@
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
     { "identifier": "opener:allow-open-url", "allow": [{ "url": "https://*" }, { "url": "http://*" }] },
-    "opener:allow-open-path",
     "opener:allow-reveal-item-in-dir"
   ]
 }
