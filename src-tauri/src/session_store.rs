@@ -1,9 +1,9 @@
 //! "Stay signed in": persist the login password in the OS credential store so the app can
-//! reopen the encrypted stores on the next launch. macOS requires Touch ID to read it;
-//! canceling the prompt falls back to the app password form.
+//! reopen the encrypted stores on the next launch. On macOS a separate Touch ID
+//! item is used only to unlock the in-app lock screen.
 //!
-//! On macOS the Keychain item is device-local and tied to the current enrolled
-//! fingerprints. Other platforms retain their existing OS credential providers.
+//! The macOS auto-login item uses the standard OS Keychain; the optional lock-screen
+//! item is device-local and tied to the current enrolled fingerprints.
 //! The password is never written to a plaintext file or localStorage. The feature
 //! remains gated behind the user-controllable "Stay signed in" toggle.
 //!
@@ -16,7 +16,7 @@
 #[cfg_attr(test, allow(dead_code))]
 mod macos;
 #[cfg(all(not(test), target_os = "macos"))]
-pub use macos::{clear, load, save};
+pub use macos::{clear, load, load_for_unlock, save};
 
 /// The credential service name; the account is the mesh-talk username.
 #[cfg(all(not(test), not(target_os = "macos")))]
@@ -87,6 +87,10 @@ pub fn save(username: &str, password: &str) {
 #[cfg(test)]
 pub fn load(username: &str) -> Option<String> {
     TEST_SECRETS.lock().unwrap().get(username).cloned()
+}
+#[cfg(all(test, target_os = "macos"))]
+pub fn load_for_unlock(username: &str) -> Option<String> {
+    load(username)
 }
 #[cfg(test)]
 pub fn clear(username: &str) {

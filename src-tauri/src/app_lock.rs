@@ -203,7 +203,7 @@ pub async fn unlock_app(
         #[cfg(target_os = "macos")]
         {
             let name = username.clone();
-            tokio::task::spawn_blocking(move || crate::session_store::load(&name))
+            tokio::task::spawn_blocking(move || crate::session_store::load_for_unlock(&name))
                 .await
                 .map_err(|e| CommandError::Internal(format!("credential read: {e}")))?
                 .ok_or_else(|| {

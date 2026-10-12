@@ -253,8 +253,8 @@ pub async fn auto_login<R: tauri::Runtime>(
     let Some(username) = settings.last_user else {
         return Ok(None);
     };
-    // A Touch ID protected Keychain read can wait for user interaction. Keep it
-    // off Tokio's worker threads while the native authentication sheet is open.
+    // Keychain access can block while the OS unlocks its credential store.
+    // Keep it off Tokio's worker threads.
     let credential_user = username.clone();
     let saved = tokio::task::spawn_blocking(move || crate::session_store::load(&credential_user))
         .await

@@ -119,15 +119,13 @@ command names for Tauri registration. Commands clone a node handle from
   and each inbound callback against the current lease/ticket. A late rename cannot
   change a replacement session or runtime; startup uses the current matching name.
   Successful logout forgets the original login credential before awaiting teardown.
-  On macOS, a remembered login password is stored in a device-local Keychain item
-  protected by the current Touch ID enrollment. Launch reads that item on a blocking
-  thread; Keychain prompts for Touch ID before releasing it, and cancellation or an
-  unavailable sensor leaves the app at the password form. A previously saved,
-  unprotected Keychain credential is migrated to the protected item before it can
-  resume a session. macOS 10.13–10.14 retains password sign-in because the
-  required data-protection Keychain API is unavailable. Sign-out removes both
-  item types. Windows and Linux continue using their OS credential stores for
-  remembered sessions.
+  On macOS, Stay signed in stores a password in the standard OS Keychain so a
+  previously unlocked desktop can resume the session on launch. A separate,
+  device-local Touch ID item supports biometric unlock of the in-app lock screen.
+  An item saved by the earlier Touch ID-only release can migrate to the standard
+  Keychain after one successful biometric read; if that read is unavailable,
+  password sign-in still works. Sign-out removes both item types. Windows and
+  Linux continue using their OS credential stores for remembered sessions.
 
   New `owner_*` delivery IPC captures the lease before waiting for the runtime
   lock. `OwnerAdmission` owns capture, checked reads, guarded local acceptance,

@@ -1,6 +1,6 @@
-//! macOS saved-session credential. Keychain enforces Touch ID on every read;
-//! the app never treats a standalone biometric success as permission to read an
-//! unprotected password.
+//! macOS saved-session credential. A standard Keychain item permits an already
+//! unlocked desktop to resume the session, as the Stay signed in control promises.
+//! The Touch ID item is also a migration source when no standard item exists.
 
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
@@ -18,8 +18,7 @@ type KeychainResult<T> = security_framework::base::Result<T>;
 trait CredentialStore {
     fn read_protected(&self, username: &str) -> KeychainResult<Vec<u8>>;
     fn read_legacy(&self, username: &str) -> Option<String>;
-    fn save_protected(&self, username: &str, password: &str) -> KeychainResult<()>;
-    fn clear_legacy(&self, username: &str);
+    fn save_legacy(&self, username: &str, password: &str) -> Result<(), String>;
 }
 
 struct MacKeychain;
@@ -36,16 +35,17 @@ impl CredentialStore for MacKeychain {
             .ok()
     }
 
-    fn save_protected(&self, username: &str, password: &str) -> KeychainResult<()> {
-        save_protected(username, password)
-    }
-
-    fn clear_legacy(&self, username: &str) {
-        clear_legacy(username);
+    fn save_legacy(&self, username: &str, password: &str) -> Result<(), String> {
+        keyring::Entry::new(LEGACY_SERVICE, username)
+            .map_err(|error| error.to_string())?
+            .set_password(password)
+            .map_err(|error| error.to_string())
     }
 }
 
 const SERVICE: &str = "mesh-talk-touch-id";
+// This was the legacy item during the Touch ID-only release. It is again the
+// standard item for the user-facing Stay signed in setting.
 const LEGACY_SERVICE: &str = "mesh-talk";
 
 fn options(username: &str) -> Option<PasswordOptions> {
@@ -75,26 +75,6 @@ fn options(username: &str) -> Option<PasswordOptions> {
     Some(options)
 }
 
-fn save_protected(username: &str, password: &str) -> KeychainResult<()> {
-    let mut item_options =
-        options(username).ok_or_else(|| Error::from_code(errSecUnimplemented))?;
-    // Recreate the item to preserve the access rule even when a password changes.
-    // ThisDeviceOnly also prevents the resumable credential from syncing to iCloud.
-    match delete_generic_password_options(
-        options(username).ok_or_else(|| Error::from_code(errSecUnimplemented))?,
-    ) {
-        Ok(()) => {}
-        Err(error) if error.code() == errSecItemNotFound => {}
-        Err(error) => return Err(error),
-    }
-    let access = SecAccessControl::create_with_protection(
-        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-        AccessControlOptions::BIOMETRY_CURRENT_SET.bits(),
-    )?;
-    item_options.set_access_control(access);
-    set_generic_password_options(password.as_bytes(), item_options)
-}
-
 fn clear_legacy(username: &str) {
     let Ok(entry) = keyring::Entry::new(LEGACY_SERVICE, username) else {
         return;
@@ -105,53 +85,25 @@ fn clear_legacy(username: &str) {
     }
 }
 
-/// Save the raw login password only behind the current enrolled Touch ID set.
-pub fn save(username: &str, password: &str) {
-    if let Err(error) = save_protected(username, password) {
-        log::warn!("failed to save Touch ID credential: {error}");
+fn save_protected(username: &str, password: &str) -> KeychainResult<()> {
+    let mut item_options =
+        options(username).ok_or_else(|| Error::from_code(errSecUnimplemented))?;
+    let access = SecAccessControl::create_with_protection(
+        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+        AccessControlOptions::BIOMETRY_CURRENT_SET.bits(),
+    )?;
+    item_options.set_access_control(access);
+    match delete_generic_password_options(
+        options(username).ok_or_else(|| Error::from_code(errSecUnimplemented))?,
+    ) {
+        Ok(()) => {}
+        Err(error) if error.code() == errSecItemNotFound => {}
+        Err(error) => return Err(error),
     }
-    // An older release stored this password in a standard Keychain item. Never
-    // leave that weaker copy behind, even if biometric enrollment is unavailable.
-    clear_legacy(username);
+    set_generic_password_options(password.as_bytes(), item_options)
 }
 
-/// Read the secret through Keychain's access control. A canceled or unavailable
-/// biometric prompt returns None, so the caller shows the app password form.
-pub fn load(username: &str) -> Option<String> {
-    load_from(&MacKeychain, username)
-}
-
-fn load_from(store: &impl CredentialStore, username: &str) -> Option<String> {
-    let bytes = match store.read_protected(username) {
-        Ok(bytes) => bytes,
-        Err(error) if error.code() == errSecItemNotFound => {
-            // Existing saved sessions migrate once. Do not use the legacy secret
-            // to authenticate directly: the new item must first pass Touch ID.
-            let password = store.read_legacy(username)?;
-            let saved = store.save_protected(username, &password);
-            store.clear_legacy(username);
-            if let Err(error) = saved {
-                log::warn!("failed to migrate saved session to Touch ID: {error}");
-                return None;
-            }
-            match store.read_protected(username) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    log::warn!("Touch ID credential unavailable after migration: {error}");
-                    return None;
-                }
-            }
-        }
-        Err(error) => {
-            log::info!("Touch ID credential was not unlocked: {error}");
-            return None;
-        }
-    };
-    String::from_utf8(bytes).ok()
-}
-
-/// Delete both the biometric item and any saved item from an older release.
-pub fn clear(username: &str) {
+fn clear_protected(username: &str) {
     if let Some(options) = options(username) {
         match delete_generic_password_options(options) {
             Ok(()) => {}
@@ -159,6 +111,56 @@ pub fn clear(username: &str) {
             Err(error) => log::warn!("failed to remove Touch ID credential: {error}"),
         }
     }
+}
+
+/// Save the raw login password in the OS Keychain for the next launch.
+pub fn save(username: &str, password: &str) {
+    save_to(&MacKeychain, username, password);
+    // The lock screen uses this second, biometric-only item. Its availability
+    // must not determine whether Stay signed in works on the next app launch.
+    if let Err(error) = save_protected(username, password) {
+        log::info!("Touch ID unlock credential unavailable: {error}");
+    }
+}
+
+fn save_to(store: &impl CredentialStore, username: &str, password: &str) {
+    if let Err(error) = store.save_legacy(username, password) {
+        log::warn!("failed to save stay-signed-in credential: {error}");
+    }
+}
+
+/// Read only the biometric item when unlocking an already running session.
+pub fn load_for_unlock(username: &str) -> Option<String> {
+    let bytes = MacKeychain.read_protected(username).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Read a standard Keychain item without prompting. An old Touch ID item can
+/// be migrated once after a successful biometric read.
+pub fn load(username: &str) -> Option<String> {
+    load_from(&MacKeychain, username)
+}
+
+fn load_from(store: &impl CredentialStore, username: &str) -> Option<String> {
+    if let Some(password) = store.read_legacy(username) {
+        return Some(password);
+    }
+    let bytes = match store.read_protected(username) {
+        Ok(bytes) => bytes,
+        Err(error) if error.code() == errSecItemNotFound => return None,
+        Err(error) => {
+            log::info!("Touch ID credential was not unlocked during migration: {error}");
+            return None;
+        }
+    };
+    let password = String::from_utf8(bytes).ok()?;
+    save_to(store, username, &password);
+    Some(password)
+}
+
+/// Delete both the standard item and the biometric unlock item.
+pub fn clear(username: &str) {
+    clear_protected(username);
     clear_legacy(username);
 }
 
@@ -171,11 +173,11 @@ mod tests {
 
     struct FakeStore {
         protected: RefCell<Option<Vec<u8>>>,
-        legacy: Option<String>,
+        legacy: RefCell<Option<String>>,
+        deny_save: bool,
         deny_read_on: Option<usize>,
         reads: Cell<usize>,
         legacy_reads: Cell<usize>,
-        legacy_cleared: Cell<bool>,
     }
 
     impl CredentialStore for FakeStore {
@@ -192,60 +194,73 @@ mod tests {
 
         fn read_legacy(&self, _username: &str) -> Option<String> {
             self.legacy_reads.set(self.legacy_reads.get() + 1);
-            self.legacy.clone()
+            self.legacy.borrow().clone()
         }
 
-        fn save_protected(&self, _username: &str, password: &str) -> KeychainResult<()> {
-            *self.protected.borrow_mut() = Some(password.as_bytes().to_vec());
+        fn save_legacy(&self, _username: &str, password: &str) -> Result<(), String> {
+            if self.deny_save {
+                return Err("Keychain unavailable".into());
+            }
+            *self.legacy.borrow_mut() = Some(password.into());
             Ok(())
-        }
-
-        fn clear_legacy(&self, _username: &str) {
-            self.legacy_cleared.set(true);
         }
     }
 
-    #[test]
-    fn migration_must_read_back_through_protected_item() {
-        let store = FakeStore {
-            protected: RefCell::new(None),
-            legacy: Some("raw password".into()),
+    fn fake(legacy: Option<&str>, protected: Option<&str>) -> FakeStore {
+        FakeStore {
+            protected: RefCell::new(protected.map(|value| value.as_bytes().to_vec())),
+            legacy: RefCell::new(legacy.map(str::to_owned)),
+            deny_save: false,
             deny_read_on: None,
             reads: Cell::new(0),
             legacy_reads: Cell::new(0),
-            legacy_cleared: Cell::new(false),
-        };
+        }
+    }
+
+    #[test]
+    fn old_touch_id_session_migrates_after_successful_read() {
+        let store = fake(None, Some("raw password"));
         assert_eq!(load_from(&store, "alice"), Some("raw password".into()));
-        assert_eq!(store.reads.get(), 2);
-        assert!(store.legacy_cleared.get());
+        assert_eq!(store.reads.get(), 1);
+        assert_eq!(store.legacy.borrow().as_deref(), Some("raw password"));
+        assert_eq!(
+            store.protected.borrow().as_deref(),
+            Some(b"raw password".as_slice())
+        );
     }
 
     #[test]
-    fn canceled_touch_id_does_not_use_legacy_secret() {
-        let store = FakeStore {
-            protected: RefCell::new(Some(b"raw password".to_vec())),
-            legacy: Some("raw password".into()),
-            deny_read_on: Some(1),
-            reads: Cell::new(0),
-            legacy_reads: Cell::new(0),
-            legacy_cleared: Cell::new(false),
-        };
+    fn canceled_old_touch_id_session_falls_back_to_manual_login() {
+        let mut store = fake(None, Some("raw password"));
+        store.deny_read_on = Some(1);
         assert_eq!(load_from(&store, "alice"), None);
-        assert_eq!(store.legacy_reads.get(), 0);
+        assert!(store.legacy.borrow().is_none());
     }
 
     #[test]
-    fn migration_cannot_unlock_when_protected_read_is_denied() {
-        let store = FakeStore {
-            protected: RefCell::new(None),
-            legacy: Some("raw password".into()),
-            deny_read_on: Some(2),
-            reads: Cell::new(0),
-            legacy_reads: Cell::new(0),
-            legacy_cleared: Cell::new(false),
-        };
-        assert_eq!(load_from(&store, "alice"), None);
-        assert_eq!(store.reads.get(), 2);
-        assert!(store.legacy_cleared.get());
+    fn failed_save_keeps_old_touch_id_credential() {
+        let mut store = fake(None, Some("raw password"));
+        store.deny_save = true;
+        assert_eq!(load_from(&store, "alice"), Some("raw password".into()));
+        assert_eq!(
+            store.protected.borrow().as_deref(),
+            Some(b"raw password".as_slice())
+        );
+    }
+
+    #[test]
+    fn existing_standard_keychain_session_resumes_without_biometric_read() {
+        let mut store = fake(Some("raw password"), None);
+        store.deny_read_on = Some(1);
+        assert_eq!(load_from(&store, "alice"), Some("raw password".into()));
+        assert_eq!(store.reads.get(), 0);
+    }
+
+    #[test]
+    fn signing_in_saves_session_without_biometric_enrollment() {
+        let store = fake(None, None);
+        save_to(&store, "alice", "raw password");
+        assert_eq!(load_from(&store, "alice"), Some("raw password".into()));
+        assert_eq!(store.reads.get(), 0);
     }
 }
