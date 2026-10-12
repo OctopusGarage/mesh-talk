@@ -46,13 +46,19 @@ fn archive_component(raw: &std::ffi::OsStr, used: &mut HashSet<String>) -> Strin
         .filter(|index| *index > 0)
         .unwrap_or(base.len());
     let (stem, ext) = base.split_at(split);
-    let mut candidate = base.clone();
-    let mut counter = 1u32;
-    while !used.insert(candidate.to_lowercase()) {
-        candidate = format!("{stem} ({counter}){ext}");
-        counter += 1;
+    // pack limits a directory to MAX_ENTRIES, so a free suffix must exist in
+    // this range. Keep the search bounded even if collision logic regresses.
+    for counter in 0..=MAX_ENTRIES {
+        let candidate = if counter == 0 {
+            base.clone()
+        } else {
+            format!("{stem} ({counter}){ext}")
+        };
+        if used.insert(candidate.to_lowercase()) {
+            return candidate;
+        }
     }
-    candidate
+    unreachable!("directory entry limit guarantees a free archive name")
 }
 
 /// Pack a tree without following symlinks. The archive stays alive until staging ends.
@@ -304,6 +310,21 @@ fn extract(archive_path: &Path, target: &Path, archive_size: u64) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "directory entry limit guarantees a free archive name")]
+    fn archive_component_stops_when_every_suffix_is_taken() {
+        let mut used: HashSet<String> = (0..=MAX_ENTRIES)
+            .map(|counter| {
+                if counter == 0 {
+                    "report.txt".to_string()
+                } else {
+                    format!("report ({counter}).txt")
+                }
+            })
+            .collect();
+        archive_component(std::ffi::OsStr::new("report.txt"), &mut used);
+    }
 
     #[test]
     fn round_trip_nested_and_empty_folders() {
