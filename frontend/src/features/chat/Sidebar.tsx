@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LogOut,
+  LockKeyhole,
   Loader2,
   MoreHorizontal,
   Moon,
@@ -54,6 +55,7 @@ import { chat, diag } from "@/lib/api";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { convKey, useChat, type Conversation } from "@/store/chat";
 import { useSettings } from "@/store/settings";
+import { useAppLock } from "@/store/appLock";
 import {
   presenceLabel,
   presenceStatus,
@@ -361,6 +363,7 @@ function UtilityMenu() {
   const theme = useTheme((s) => s.theme);
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useAuth((s) => s.logout);
+  const lockApp = useAppLock((s) => s.lock);
   // The WebRTC self-test only makes sense for the calls feature, so it rides the same gate.
   const callsEnabled = useSettings((s) => s.callsEnabled);
 
@@ -415,6 +418,18 @@ function UtilityMenu() {
             {callsEnabled && <WebRtcTestDialog menuItem />}
             <AboutDialog menuItem />
             <div className="my-1 h-px bg-border" />
+            <button
+              type="button"
+              data-testid="sidebar-lock"
+              onClick={() => {
+                setOpen(false);
+                void lockApp();
+              }}
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+            >
+              <LockKeyhole className="h-4 w-4" />
+              <span>{t("settings.lockNow")}</span>
+            </button>
             <button
               type="button"
               data-testid="sidebar-theme-toggle"

@@ -163,6 +163,13 @@ export interface AppSettings {
   calls_enabled: boolean;
   /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */
   ringtone: string;
+  /** Preset name; custom means individual privacy controls differ from a preset. */
+  privacy_level: "balanced" | "private" | "strict" | "custom";
+  notification_preview: boolean;
+  auto_lock_seconds: number;
+  lock_when_hidden: boolean;
+  confirm_sensitive_copy: boolean;
+  clipboard_clear_seconds: number;
 }
 
 // --- Environment / About (src-tauri/src/diagnostics.rs) ---

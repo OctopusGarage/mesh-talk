@@ -32,6 +32,9 @@ impl OwnerAdmission {
         if lease.owner() != owner {
             return Err(CommandError::Authorization("session owner mismatch".into()));
         }
+        if app.app_lock().is_locked() {
+            return Err(CommandError::Authorization("app locked".into()));
+        }
         #[cfg(test)]
         if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
             let _ = entered.send("owner-entry");
@@ -51,6 +54,9 @@ impl OwnerAdmission {
         self.app
             .session()
             .matching(&self.lease, |_| {
+                if self.app.app_lock().is_locked() {
+                    return Err(CommandError::Authorization("app locked".into()));
+                }
                 if runtime.host_account_id() != Some(self.lease.owner()) {
                     return Err(CommandError::Authorization("runtime owner mismatch".into()));
                 }
@@ -219,8 +225,18 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<AcceptedFile, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
-    validate_account(&account)?;
+    let admission = match OwnerAdmission::capture(&app, &node, &owner) {
+        Ok(admission) => admission,
+        Err(error) => {
+            crate::chat_commands::cleanup_pasted_file(&handle, &path);
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_account(&account) {
+        crate::chat_commands::cleanup_pasted_file(&handle, &path);
+        return Err(error);
+    }
+    let cleanup_handle = handle.clone();
     let mut progress = crate::events::ProgressThrottle::new(
         handle,
         progress_key.unwrap_or_else(|| account.clone()),
@@ -236,7 +252,7 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                 };
                 #[cfg(test)]
                 let progress_hook = admission.app.owner_file_progress_hook.clone();
-                let (id, conv) = runtime
+                let result = runtime
                     .handle()
                     .enqueue_file_to_account_progress_if(
                         &account,
@@ -254,8 +270,9 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                         },
                         |accept| admission.authorize_accept(runtime, accept),
                     )
-                    .await
-                    .map_err(CommandError::from)?;
+                    .await;
+                crate::chat_commands::cleanup_pasted_file(&cleanup_handle, &path);
+                let (id, conv) = result.map_err(CommandError::from)?;
                 Ok(AcceptedFile {
                     id: hex::encode(id.as_bytes()),
                     file_conv: hex::encode(conv.as_bytes()),
@@ -266,7 +283,8 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub async fn owner_account_history(
+pub async fn owner_account_history<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
     owner: String,
     account: String,
     limit: usize,
@@ -275,7 +293,7 @@ pub async fn owner_account_history(
 ) -> Result<Vec<HistoryItem>, CommandError> {
     let admission = OwnerAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
-    admission
+    let history = admission
         .read(|runtime| {
             Ok(runtime
                 .account_history(&account, limit.min(500))
@@ -283,7 +301,9 @@ pub async fn owner_account_history(
                 .map(HistoryItem::from)
                 .collect())
         })
-        .await
+        .await?;
+    crate::app_lock::reject_if_locked(&handle)?;
+    Ok(history)
 }
 
 #[derive(Serialize)]

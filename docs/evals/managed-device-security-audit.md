@@ -2,6 +2,8 @@
 
 Date: 2026-10-12. Scope: the current `optimize/targeted` checkout, the shipped Tauri desktop app, and a Mac managed by an employer. This is a source review, not a test of any particular employer's monitoring software or policies. Platform facts and their limits are sourced in [the macOS monitoring research](../research/macos-managed-device-monitoring.md).
 
+> The risk table below records the **pre-hardening code** reviewed at the start of this work. The implementation status near the end of this document records the changes on this branch. Keeping the original findings makes the before/after comparison auditable.
+
 ## Answer and trust boundary
 
 **Yes, the app can be monitored on a managed Mac.** End-to-end encryption protects message content in transit and the app encrypts its main history and credentials at rest; neither protects plaintext while it is displayed, copied, notified, exported, or held in a running process. A device administrator may deploy screen observation, endpoint agents, network filters, and management profiles. Whether any specific employer actually does so cannot be determined from this repository. An app cannot reliably detect all such tools or prevent all screenshots, and it must not promise that a managed device is private.
@@ -37,11 +39,30 @@ The practical boundary is: Mesh-Talk can minimize what it reveals through its ow
 
 Three implementation paths are possible: (A) small exposure reduction (notification de-duplication and private defaults), (B) client boundary hardening (A plus capability/CSP audit), or (C) full local-data redesign (B plus encrypted media and session locking). **B is the best first milestone**: it removes a confirmed plaintext broadcast and excessive webview authority without changing the on-disk format. C should follow as a separately reviewed storage migration. None makes a company-managed Mac immune to observation.
 
-## Verification needed before claiming hardening
+## Implementation on `optimize/targeted`
+
+The user selected **Balanced** as the default to preserve the existing experience. It keeps notification previews, direct copying, and no automatic lock. **Private** uses generic notifications, a 10-minute idle lock, and a 60-second conditional clipboard clear. **Strict** uses generic notifications, a one-minute idle lock, immediate lock when hidden, copy confirmation, and a 30-second conditional clear. Every control can be edited independently; editing a preset marks it Custom. Existing settings JSON fields default to the old interaction pattern.
+
+Rust now owns the single native notification path. The frontend reports the visible conversation with a monotonic revision, and no longer sends a second browser notification. Locked sessions always use a generic notification and suppress plaintext Tauri chat events. The native lock blocks new app IPC except lock status, unlock, logout, and app-owned temp cleanup; the node stays online. macOS unlock reads the existing Touch ID protected Keychain credential only when Stay signed in is enabled, then verifies it against the active account without starting a second runtime. Password entry remains available. The native idle timer checks the saved policy even if the webview pauses; calls suspend automatic locking, while manual locking ends the call.
+
+Durable media uses a versioned, chunked AES-256-GCM format with local device owner, conversation, size, and chunk index authenticated as associated data. New copies are staged with owner-only permissions and atomically renamed after verification. Successful account unlock migrates legacy plaintext files; a failed migration retains a readable source and shows an in-app warning so a restart can retry. Local media is removed when its last local file card is erased. Pasted media staging uses private directories/files and is cleaned after send or on startup. Explicit user exports stay plaintext in the chosen destination. Existing backups and snapshots can still contain old plaintext.
+
+The webview no longer has recursive home filesystem grants, the unused filesystem and shell plugins, or the global Tauri API. A production CSP constrains scripts, assets, and network connections. The opener still has path permissions for user-selected download and reveal flows; that remains a renderer-compromise risk. Release logging is limited to warnings/errors in a private log directory. Conditional clipboard clearing skips the action when the clipboard cannot be read or has changed.
+
+The lock is an access gate for **new** app IPC, and the frontend invalidates old ownership leases when it hides chat state. An app IPC request already executing at the instant of lock may still finish its native work and deliver a response to the webview; the UI does not render it after lock. This is a residual exposure in renderer memory, especially for large media reads. Full native response-time rejection requires a Tauri response interception path or command-by-command post-work checks. Likewise, neither this lock nor the CSP protects against privileged OS screen, input, file, or process monitoring.
+
+## Validation on this branch
+
+- `./scripts/check-health.sh` passed on macOS: formatting, Clippy, spelling, cargo-deny, cargo-machete, gitleaks, shellcheck, actionlint, frontend typecheck/lint, 306 Vitest tests, 274 Playwright cases (2 skipped), the Rust workspace suite, npm audit, and workspace builds.
+- `cargo tauri build --bundles app` produced a macOS `.app` with the production CSP and narrowed capabilities.
+- Focused Playwright runs passed for privacy levels, settings recovery, pasted files, media lifecycle (7 cases), dialog layout, and visual regression (23 cases).
+- Native unit tests cover policy migration, notification payload decisions, encrypted media tampering and legacy migration, permissions and symlink handling, startup pruning, and lock admission. These tests do not simulate a managed Mac or a real Touch ID prompt.
+
+## Manual validation still needed
 
 - Run a packaged macOS app and inspect actual notification title/body on a locked screen, including DM/channel/file events and both focused/unfocused states.
-- Audit every Tauri plugin call and prove removed capabilities are unused; validate marketplace, downloads, logs, external links, capture, and calls with CSP enabled.
-- For storage changes, test old-to-new migration, crash recovery, permissions, symlink handling, multi-account isolation, retention, and logout; inspect new media files to confirm they are not readable plaintext.
+- Exercise the packaged app's marketplace, downloads, external links, capture, and calls with CSP enabled. Test Touch ID cancellation, password fallback, background delivery, and logout on a physical Mac; run Windows/Linux UI smoke checks. The automated build and browser mocks do not prove those native flows.
+- Inspect an upgraded real account's media after migration and confirm its existing previews and exports, including an interrupted migration restart. Unit fixtures cover the storage behavior, but no real user account was migrated here.
 - Treat any screen-capture exclusion experiment as a convenience only. Apple explicitly says `NSWindow.SharingType.none` is a legacy value that must not be used to hide content from capture.
 
 ## Selected primary sources

@@ -3,11 +3,93 @@
 
 use crate::settings::SettingsState;
 use mesh_talk_core::eventlog::event::EventId;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
+
+#[derive(Clone, Default)]
+pub struct NotificationContextState(Arc<Mutex<NotificationContext>>);
+
+#[derive(Clone, Default)]
+struct NotificationContext {
+    active_peer_devices: Vec<String>,
+    active_channel: Option<String>,
+    revision: u64,
+}
+
+enum NotificationTarget<'a> {
+    Dm(&'a str),
+    Channel(&'a str),
+    File,
+}
+
+#[tauri::command]
+pub fn set_notification_context(
+    state: tauri::State<'_, NotificationContextState>,
+    active_peer_devices: Vec<String>,
+    active_channel: Option<String>,
+    revision: u64,
+) -> Result<(), crate::commands::CommandError> {
+    if active_peer_devices.len() > 32
+        || active_peer_devices.iter().any(|id| id.len() > 64)
+        || active_channel.as_ref().is_some_and(|id| id.len() > 64)
+    {
+        return Err(crate::commands::CommandError::Validation(
+            "invalid notification context".into(),
+        ));
+    }
+    let mut context = state.0.lock().map_err(|_| {
+        crate::commands::CommandError::Internal("notification context unavailable".into())
+    })?;
+    if revision > context.revision {
+        *context = NotificationContext {
+            active_peer_devices,
+            active_channel,
+            revision,
+        };
+    }
+    Ok(())
+}
+
+fn notification_payload(
+    settings: &crate::settings::AppSettings,
+    focused: bool,
+    context: &NotificationContext,
+    target: NotificationTarget<'_>,
+    title: &str,
+    body: &str,
+) -> Option<(String, String)> {
+    if !settings.notifications {
+        return None;
+    }
+    if focused {
+        let active_known =
+            !context.active_peer_devices.is_empty() || context.active_channel.is_some();
+        let already_visible = match target {
+            NotificationTarget::Dm(device) => {
+                context.active_peer_devices.iter().any(|id| id == device)
+            }
+            NotificationTarget::Channel(channel) => {
+                context.active_channel.as_deref() == Some(channel)
+            }
+            NotificationTarget::File => true,
+        };
+        if already_visible || !active_known {
+            return None;
+        }
+    }
+    if !settings.notification_preview {
+        let generic = match target {
+            NotificationTarget::File => "New file",
+            _ => "New message",
+        };
+        return Some(("Mesh-Talk".into(), generic.into()));
+    }
+    Some((title.into(), preview(body)))
+}
 
 /// Fire a native notification for an incoming item, but only when it would
 /// actually be useful: notifications are enabled in settings AND the main window
@@ -16,28 +98,38 @@ const PREVIEW_LEN: usize = 80;
 ///
 /// `body` must contain only what the UI already shows (decoded plaintext / a
 /// generic "sent a file"); never raw ciphertext or anything more than the chat view.
-fn notify_if_unfocused<R: Runtime>(app_handle: &tauri::AppHandle<R>, title: &str, body: &str) {
-    // Respect the user's toggle.
-    let enabled = app_handle
+fn notify_if_unfocused<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    target: NotificationTarget<'_>,
+    title: &str,
+    body: &str,
+) {
+    let mut settings = app_handle
         .try_state::<SettingsState>()
-        .map(|s| s.get().notifications)
-        .unwrap_or(true);
-    if !enabled {
-        return;
+        .map(|s| s.get())
+        .unwrap_or_default();
+    if crate::app_lock::app_locked(app_handle) {
+        settings.notification_preview = false;
     }
-
-    // Skip when the window is focused — the message is already on screen.
-    if let Some(window) = app_handle.get_webview_window("main")
-        && window.is_focused().unwrap_or(false)
-    {
+    let context = app_handle
+        .try_state::<NotificationContextState>()
+        .and_then(|s| s.0.lock().ok().map(|context| context.clone()))
+        .unwrap_or_default();
+    let focused = !crate::app_lock::app_locked(app_handle)
+        && app_handle
+            .get_webview_window("main")
+            .is_some_and(|window| window.is_focused().unwrap_or(false));
+    let Some((title, body)) =
+        notification_payload(&settings, focused, &context, target, title, body)
+    else {
         return;
-    }
+    };
 
     if let Err(e) = app_handle
         .notification()
         .builder()
-        .title(title)
-        .body(body)
+        .title(&title)
+        .body(&body)
         .show()
     {
         log::warn!("Failed to show notification: {e}");
@@ -86,6 +178,9 @@ pub fn emit_profile_received<R: Runtime>(
         account_id,
         avatar: avatar.map(|a| String::from_utf8_lossy(&a).into_owned()),
     };
+    if crate::app_lock::app_locked(app_handle) {
+        return;
+    }
     if let Err(e) = app_handle.emit(EVENT_PROFILE_RECEIVED, event) {
         log::error!("Failed to emit profile event: {e}");
     }
@@ -110,6 +205,9 @@ pub fn emit_call_signal<R: Runtime>(
         from,
         payload: String::from_utf8_lossy(&payload).into_owned(),
     };
+    if crate::app_lock::app_locked(app_handle) {
+        return;
+    }
     if let Err(e) = app_handle.emit(EVENT_CALL_SIGNAL, event) {
         log::error!("Failed to emit call-signal event: {e}");
     }
@@ -169,6 +267,9 @@ impl<R: Runtime> ProgressThrottle<R> {
     }
 
     pub fn emit(&mut self, done: u32, total: u32) {
+        if crate::app_lock::app_locked(&self.app_handle) {
+            return;
+        }
         let terminal = done >= total;
         if !terminal && self.last.elapsed() < Self::MIN_INTERVAL {
             return;
@@ -212,7 +313,15 @@ pub fn emit_dm_received<R: Runtime>(
         text: String::from_utf8_lossy(&text).into_owned(),
         reply_to: reply_to.map(|id| hex::encode(id.as_bytes())),
     };
-    notify_if_unfocused(app_handle, &event.from_name, &preview(&event.text));
+    notify_if_unfocused(
+        app_handle,
+        NotificationTarget::Dm(&event.from),
+        &event.from_name,
+        &event.text,
+    );
+    if crate::app_lock::app_locked(app_handle) {
+        return;
+    }
     if let Err(e) = app_handle.emit(EVENT_DM_RECEIVED, event) {
         log::error!("Failed to emit dm event: {e}");
     }
@@ -235,9 +344,13 @@ pub fn emit_channel_message<R: Runtime>(
     };
     notify_if_unfocused(
         app_handle,
+        NotificationTarget::Channel(&event.channel_id),
         &format!("# {}", event.channel_name),
-        &preview(&event.text),
+        &event.text,
     );
+    if crate::app_lock::app_locked(app_handle) {
+        return;
+    }
     if let Err(e) = app_handle.emit(EVENT_CHANNEL_MESSAGE, event) {
         log::error!("Failed to emit channel event: {e}");
     }
@@ -264,8 +377,88 @@ pub fn emit_file_received<R: Runtime>(
         file_conv,
         media,
     };
-    notify_if_unfocused(app_handle, &event.from, "sent a file");
+    notify_if_unfocused(
+        app_handle,
+        NotificationTarget::File,
+        &event.from,
+        "sent a file",
+    );
+    if crate::app_lock::app_locked(app_handle) {
+        return;
+    }
     if let Err(e) = app_handle.emit(EVENT_FILE_RECEIVED, event) {
         log::error!("Failed to emit file event: {e}");
+    }
+}
+
+#[cfg(test)]
+mod notification_policy_tests {
+    use super::*;
+
+    #[test]
+    fn private_mode_never_places_sender_or_text_in_notification() {
+        let settings = crate::settings::AppSettings::default()
+            .with_privacy_level(crate::settings::PrivacyLevel::Private);
+        let payload = notification_payload(
+            &settings,
+            false,
+            &NotificationContext::default(),
+            NotificationTarget::Dm("peer-device"),
+            "Alice",
+            "Secret text",
+        )
+        .unwrap();
+        assert_eq!(payload, ("Mesh-Talk".into(), "New message".into()));
+    }
+
+    #[test]
+    fn focused_chat_suppresses_only_its_own_messages() {
+        let settings = crate::settings::AppSettings::default();
+        let context = NotificationContext {
+            active_peer_devices: vec!["active-device".into()],
+            active_channel: Some("active-channel".into()),
+            revision: 1,
+        };
+        assert!(
+            notification_payload(
+                &settings,
+                true,
+                &context,
+                NotificationTarget::Dm("active-device"),
+                "Alice",
+                "Hello",
+            )
+            .is_none()
+        );
+        assert!(
+            notification_payload(
+                &settings,
+                true,
+                &context,
+                NotificationTarget::Channel("other-channel"),
+                "Other",
+                "Hello",
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn notifications_toggle_suppresses_every_target() {
+        let settings = crate::settings::AppSettings {
+            notifications: false,
+            ..crate::settings::AppSettings::default()
+        };
+        assert!(
+            notification_payload(
+                &settings,
+                false,
+                &NotificationContext::default(),
+                NotificationTarget::File,
+                "Alice",
+                "sent a file",
+            )
+            .is_none()
+        );
     }
 }

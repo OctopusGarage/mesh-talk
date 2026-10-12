@@ -16,6 +16,7 @@ import {
   Play,
   Rocket,
   Settings,
+  ShieldCheck,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -31,7 +32,8 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
-import { useSettings } from "@/store/settings";
+import { balancedPrivacy, useSettings } from "@/store/settings";
+import type { AppSettings } from "@/lib/types";
 import { useTheme } from "@/lib/theme";
 import {
   DEFAULT_RINGTONE,
@@ -111,6 +113,17 @@ function Row({
 const SELECT_CLASS =
   "h-9 rounded-md border border-input bg-background px-2 text-[13px] transition-[border-color,box-shadow] duration-150 hover:border-ring/40 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/25 [@media(hover:none)]:min-h-11";
 
+function privacyFromSettings(settings: AppSettings) {
+  return {
+    privacy_level: settings.privacy_level,
+    notification_preview: settings.notification_preview,
+    auto_lock_seconds: settings.auto_lock_seconds,
+    lock_when_hidden: settings.lock_when_hidden,
+    confirm_sensitive_copy: settings.confirm_sensitive_copy,
+    clipboard_clear_seconds: settings.clipboard_clear_seconds,
+  };
+}
+
 const LANGUAGE_LABELS: Record<Language, string> = {
   en: "English",
   es: "Español",
@@ -145,6 +158,7 @@ export function SettingsDialog({
   const [retentionDays, setRetentionDays] = useState(0);
   const [callsEnabled, setCallsEnabled] = useState(false);
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
+  const [privacy, setPrivacy] = useState(balancedPrivacy);
   const settingsScroll = useRef<HTMLDivElement>(null);
   const [moreBelow, setMoreBelow] = useState(true);
   const [activeSection, setActiveSection] = useState("privacy");
@@ -173,6 +187,9 @@ export function SettingsDialog({
         setRetentionDays(s.retention_days);
         setCallsEnabled(s.calls_enabled);
         setRingtone(asRingtoneId(s.ringtone));
+        const policy = privacyFromSettings(s);
+        setPrivacy(policy);
+        useSettings.getState().setPrivacy(policy);
         setSettingsLoaded(true);
       },
       (e) => {
@@ -233,6 +250,17 @@ export function SettingsDialog({
     void saveSetting(
       () => settingsApi.update({ notifications: v }),
       () => setNotifications(v),
+    );
+  };
+  const savePrivacy = (patch: Partial<AppSettings>) => {
+    void saveSetting(
+      async () => {
+        await settingsApi.update(patch);
+        const saved = privacyFromSettings(await settingsApi.get());
+        setPrivacy(saved);
+        useSettings.getState().setPrivacy(saved);
+      },
+      () => {},
     );
   };
   // Toggling "stay signed in" off makes the backend immediately forget the saved
@@ -420,6 +448,149 @@ export function SettingsDialog({
             <div id="settings-privacy" className="scroll-mt-2">
               <PrivacySettings />
             </div>
+            <Section
+              id="settings-security"
+              title={t("settings.securitySection")}
+            >
+              <Row
+                id="setting-privacy-level"
+                icon={<ShieldCheck className="h-4 w-4" />}
+                title={t("settings.privacyLevel")}
+                desc={t("settings.privacyLevelDesc")}
+                control={
+                  <select
+                    id="setting-privacy-level"
+                    value={privacy.privacy_level}
+                    onChange={(event) =>
+                      savePrivacy({
+                        privacy_level: event.target
+                          .value as AppSettings["privacy_level"],
+                      })
+                    }
+                    disabled={!settingsLoaded || saving}
+                    className={SELECT_CLASS}
+                  >
+                    {(["balanced", "private", "strict", "custom"] as const).map(
+                      (level) => (
+                        <option key={level} value={level}>
+                          {t(`settings.level_${level}`)}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                }
+              />
+              <Row
+                id="setting-notification-preview"
+                icon={<Bell className="h-4 w-4" />}
+                title={t("settings.notificationPreview")}
+                desc={t("settings.notificationPreviewDesc")}
+                control={
+                  <Switch
+                    id="setting-notification-preview"
+                    checked={privacy.notification_preview}
+                    onCheckedChange={(notification_preview) =>
+                      savePrivacy({
+                        privacy_level: "custom",
+                        notification_preview,
+                      })
+                    }
+                    disabled={!settingsLoaded || saving}
+                  />
+                }
+              />
+              <Row
+                id="setting-auto-lock"
+                icon={<KeyRound className="h-4 w-4" />}
+                title={t("settings.autoLock")}
+                desc={t("settings.autoLockDesc")}
+                control={
+                  <select
+                    id="setting-auto-lock"
+                    value={privacy.auto_lock_seconds}
+                    onChange={(event) =>
+                      savePrivacy({
+                        privacy_level: "custom",
+                        auto_lock_seconds: Number(event.target.value),
+                      })
+                    }
+                    disabled={!settingsLoaded || saving}
+                    className={SELECT_CLASS}
+                  >
+                    <option value={0}>{t("settings.lockOff")}</option>
+                    <option value={60}>{t("settings.lockOneMinute")}</option>
+                    <option value={600}>{t("settings.lockTenMinutes")}</option>
+                  </select>
+                }
+              />
+              <Row
+                id="setting-lock-when-hidden"
+                icon={<KeyRound className="h-4 w-4" />}
+                title={t("settings.lockWhenHidden")}
+                desc={t("settings.lockWhenHiddenDesc")}
+                control={
+                  <Switch
+                    id="setting-lock-when-hidden"
+                    checked={privacy.lock_when_hidden}
+                    onCheckedChange={(lock_when_hidden) =>
+                      savePrivacy({ privacy_level: "custom", lock_when_hidden })
+                    }
+                    disabled={!settingsLoaded || saving}
+                  />
+                }
+              />
+              <Row
+                id="setting-confirm-copy"
+                icon={<ShieldCheck className="h-4 w-4" />}
+                title={t("settings.confirmCopy")}
+                desc={t("settings.confirmCopyDesc")}
+                control={
+                  <Switch
+                    id="setting-confirm-copy"
+                    checked={privacy.confirm_sensitive_copy}
+                    onCheckedChange={(confirm_sensitive_copy) =>
+                      savePrivacy({
+                        privacy_level: "custom",
+                        confirm_sensitive_copy,
+                      })
+                    }
+                    disabled={!settingsLoaded || saving}
+                  />
+                }
+              />
+              <Row
+                id="setting-clipboard-clear"
+                icon={<ShieldCheck className="h-4 w-4" />}
+                title={t("settings.clipboardClear")}
+                desc={t("settings.clipboardClearDesc")}
+                control={
+                  <select
+                    id="setting-clipboard-clear"
+                    value={privacy.clipboard_clear_seconds}
+                    onChange={(event) =>
+                      savePrivacy({
+                        privacy_level: "custom",
+                        clipboard_clear_seconds: Number(event.target.value),
+                      })
+                    }
+                    disabled={!settingsLoaded || saving}
+                    className={SELECT_CLASS}
+                  >
+                    <option value={0}>{t("settings.clearOff")}</option>
+                    <option value={30}>
+                      {t("settings.clearThirtySeconds")}
+                    </option>
+                    <option value={60}>{t("settings.clearOneMinute")}</option>
+                  </select>
+                }
+              />
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("settings.managedDeviceLimit")}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("settings.exportLimit")}
+              </p>
+            </Section>
             <Section
               id="settings-contacts"
               title={t("contactVisibility.section")}

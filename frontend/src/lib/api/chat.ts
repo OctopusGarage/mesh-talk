@@ -74,6 +74,15 @@ export const chat = {
   /** Set the OS app-icon unread badge (dock/taskbar); 0 clears it. */
   setBadge: (count: number, owner: string) =>
     invoke<void>("set_badge", { count, owner, revision: nextBadgeRevision() }),
+  setNotificationContext: (
+    activePeerDevices: string[],
+    activeChannel: string | null,
+  ) =>
+    invoke<void>("set_notification_context", {
+      activePeerDevices,
+      activeChannel,
+      revision: nextBadgeRevision(),
+    }),
 
   /** The current Wi-Fi network name (SSID), or null if unknown (wired / no Wi-Fi / OS withholds it). */
   networkName: () => invoke<string | null>("network_name"),
@@ -185,6 +194,7 @@ export const chat = {
     invoke<void>("save_file", { fileConv, dest }),
   fileStatuses: (fileConvs: string[]) =>
     invoke<FileStatus[]>("file_statuses", { fileConvs }),
+  mediaMigrationWarning: () => invoke<boolean>("media_migration_warning"),
   attachmentReceivePolicy: (account?: string) =>
     invoke<import("../types").AttachmentReceivePolicy>(
       "attachment_receive_policy",
@@ -212,6 +222,7 @@ export const chat = {
    *  survive; without it a `pasted-<ts>.<ext>` name is synthesized for clipboard bytes. */
   writeTempFile: (bytes: number[], ext: string, name?: string) =>
     invoke<string>("write_temp_file", { bytes, ext, name }),
+  deleteTempFile: (path: string) => invoke<void>("delete_temp_file", { path }),
   /**
    * Capture a screenshot as PNG bytes. When `hideWindow` is true the app window is hidden
    * during the capture and restored after. Resolves to empty bytes if the user cancels.

@@ -24,8 +24,6 @@ mesh-talk-core = { path = "../crates/mesh-talk-core" }
 tauri = { version = "2.12.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2.3"
 tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
-tauri-plugin-fs = "2"
 tauri-plugin-log = "2"
 tauri-plugin-autostart = "2"
 # Desktop integration: focus-existing-instance, restore window geometry, open/reveal files.

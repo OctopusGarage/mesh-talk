@@ -10,6 +10,16 @@ use crate::config_store;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyLevel {
+    #[default]
+    Balanced,
+    Private,
+    Strict,
+    Custom,
+}
+
 /// The persisted, user-facing toggles (both default on: a messenger should keep
 /// running in the background and tell you when something arrives).
 ///
@@ -56,6 +66,18 @@ pub struct AppSettings {
     /// preference; the backend only stores it. Defaults to the classic phone ring.
     #[serde(default = "default_ringtone")]
     pub ringtone: String,
+    #[serde(default)]
+    pub privacy_level: PrivacyLevel,
+    #[serde(default = "default_true")]
+    pub notification_preview: bool,
+    #[serde(default)]
+    pub auto_lock_seconds: u32,
+    #[serde(default)]
+    pub lock_when_hidden: bool,
+    #[serde(default)]
+    pub confirm_sensitive_copy: bool,
+    #[serde(default)]
+    pub clipboard_clear_seconds: u32,
 }
 
 /// The default ringtone id (the classic phone ring).
@@ -79,7 +101,44 @@ impl Default for AppSettings {
             retention_days: 0,
             calls_enabled: false,
             ringtone: default_ringtone(),
+            privacy_level: PrivacyLevel::Balanced,
+            notification_preview: true,
+            auto_lock_seconds: 0,
+            lock_when_hidden: false,
+            confirm_sensitive_copy: false,
+            clipboard_clear_seconds: 0,
         }
+    }
+}
+
+impl AppSettings {
+    pub fn with_privacy_level(mut self, level: PrivacyLevel) -> Self {
+        self.privacy_level = level;
+        match level {
+            PrivacyLevel::Balanced => {
+                self.notification_preview = true;
+                self.auto_lock_seconds = 0;
+                self.lock_when_hidden = false;
+                self.confirm_sensitive_copy = false;
+                self.clipboard_clear_seconds = 0;
+            }
+            PrivacyLevel::Private => {
+                self.notification_preview = false;
+                self.auto_lock_seconds = 600;
+                self.lock_when_hidden = false;
+                self.confirm_sensitive_copy = false;
+                self.clipboard_clear_seconds = 60;
+            }
+            PrivacyLevel::Strict => {
+                self.notification_preview = false;
+                self.auto_lock_seconds = 60;
+                self.lock_when_hidden = true;
+                self.confirm_sensitive_copy = true;
+                self.clipboard_clear_seconds = 30;
+            }
+            PrivacyLevel::Custom => {}
+        }
+        self
     }
 }
 
@@ -166,8 +225,10 @@ pub async fn set_app_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, SettingsState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
-    mut settings: AppSettings,
+    settings: AppSettings,
 ) -> Result<(), CommandError> {
+    let level = settings.privacy_level;
+    let mut settings = settings.with_privacy_level(level);
     let prev = state.get();
     if prev.stay_signed_in && !settings.stay_signed_in {
         if let Some(user) = prev.last_user.as_deref() {
@@ -234,5 +295,41 @@ mod tests {
     fn the_default_ringtone_is_classic() {
         assert_eq!(AppSettings::default().ringtone, "classic");
         assert!(!AppSettings::default().calls_enabled);
+    }
+
+    #[test]
+    fn old_settings_keep_balanced_privacy_behavior() {
+        let old = r#"{"minimize_to_tray":true,"notifications":true}"#;
+        let settings: AppSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(settings.privacy_level, PrivacyLevel::Balanced);
+        assert!(settings.notification_preview);
+        assert_eq!(settings.auto_lock_seconds, 0);
+        assert!(!settings.lock_when_hidden);
+        assert!(!settings.confirm_sensitive_copy);
+        assert_eq!(settings.clipboard_clear_seconds, 0);
+    }
+
+    #[test]
+    fn privacy_presets_apply_only_their_visible_controls() {
+        let original = AppSettings {
+            notifications: false,
+            retention_days: 30,
+            stay_signed_in: false,
+            ..AppSettings::default()
+        };
+        let private = original.clone().with_privacy_level(PrivacyLevel::Private);
+        assert!(!private.notifications);
+        assert_eq!(private.retention_days, 30);
+        assert!(!private.stay_signed_in);
+        assert!(!private.notification_preview);
+        assert_eq!(private.auto_lock_seconds, 600);
+        assert!(!private.confirm_sensitive_copy);
+        assert_eq!(private.clipboard_clear_seconds, 60);
+
+        let strict = original.with_privacy_level(PrivacyLevel::Strict);
+        assert_eq!(strict.auto_lock_seconds, 60);
+        assert!(strict.lock_when_hidden);
+        assert!(strict.confirm_sensitive_copy);
+        assert_eq!(strict.clipboard_clear_seconds, 30);
     }
 }

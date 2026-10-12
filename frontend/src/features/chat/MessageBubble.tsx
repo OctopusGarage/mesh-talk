@@ -34,6 +34,7 @@ import {
 } from "@/lib/directoryAttachment";
 import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
+import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { formatTime, humanSize, shortId } from "@/lib/format";
 import { fadeSlideUp } from "@/lib/motion";
 import { EMOJIS, renderWithMentions } from "@/lib/mentions";
@@ -343,7 +344,7 @@ export function MessageBubble({
     const lease = captureChatOwnership();
     if (!m.text) return;
     try {
-      await navigator.clipboard.writeText(m.text);
+      await copySensitiveText(m.text, t("settings.confirmCopyPrompt"));
     } catch (e) {
       if (lease.current()) setError(errorMessage(e));
     }

@@ -38,7 +38,8 @@ pub async fn send_call_signal(
 }
 
 #[tauri::command]
-pub async fn history(
+pub async fn history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, NodeState>,
     peer: String,
     limit: usize,
@@ -51,11 +52,13 @@ pub async fn history(
     let public = rt
         .peer_public(&peer)
         .ok_or_else(|| CommandError::Validation(format!("unknown peer: {peer}")))?;
-    Ok(rt
+    let history = rt
         .history(&public, limit)
         .into_iter()
         .map(HistoryItem::from)
-        .collect())
+        .collect();
+    crate::app_lock::reject_if_locked(&app)?;
+    Ok(history)
 }
 
 #[tauri::command]
@@ -106,7 +109,8 @@ pub async fn send_sticker(
 }
 
 #[tauri::command]
-pub async fn account_history(
+pub async fn account_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, NodeState>,
     account: String,
     limit: usize,
@@ -114,11 +118,13 @@ pub async fn account_history(
     let limit = limit.min(500);
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt
+    let history = rt
         .account_history(&account, limit)
         .into_iter()
         .map(HistoryItem::from)
-        .collect())
+        .collect();
+    crate::app_lock::reject_if_locked(&app)?;
+    Ok(history)
 }
 
 #[tauri::command]
@@ -260,7 +266,8 @@ pub struct SearchHitInfo {
 }
 
 #[tauri::command]
-pub async fn search(
+pub async fn search<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, NodeState>,
     query: String,
 ) -> Result<Vec<SearchHitInfo>, CommandError> {
@@ -271,6 +278,7 @@ pub async fn search(
     let hits = tokio::task::spawn_blocking(move || node.search(&query))
         .await
         .map_err(|e| format!("join error: {e}"))?;
+    crate::app_lock::reject_if_locked(&app)?;
     Ok(hits
         .into_iter()
         .map(|h| SearchHitInfo {

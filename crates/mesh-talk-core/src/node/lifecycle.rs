@@ -80,6 +80,13 @@ impl Node {
             .into_iter()
             .filter(|e| e.event_id == target)
             .collect::<Vec<_>>();
+        let media_to_remove: Vec<_> = file_rows
+            .iter()
+            .filter_map(|row| {
+                super::files::validated_manifest(&row.plaintext)
+                    .map(|manifest| manifest.file_conv())
+            })
+            .collect();
         let erased = (|| -> Result<(), NodeError> {
             for row in file_rows {
                 if delivery
@@ -106,6 +113,7 @@ impl Node {
             .remove_where(|e| e.conversation == conv && e.event_id == target)
             .map_err(NodeError::Log)?;
         self.reseed_live_file_book(&delivery);
+        self.remove_unreferenced_media(media_to_remove)?;
 
         // Sent plaintext sidecar: account entries carry the msg id in their envelope; plain
         // DM/channel sends are matched via the event log's seq -> id map (built in its own
@@ -197,6 +205,13 @@ impl Node {
                 .filter(|e| should_remove(e.conversation, e.wall_clock))
                 .collect::<Vec<_>>()
         };
+        let media_to_remove: Vec<_> = file_rows
+            .iter()
+            .filter_map(|row| {
+                super::files::validated_manifest(&row.plaintext)
+                    .map(|manifest| manifest.file_conv())
+            })
+            .collect();
         let erased = (|| -> Result<(), NodeError> {
             for row in file_rows {
                 if delivery
@@ -231,6 +246,7 @@ impl Node {
             .remove_where(|e| should_remove(e.conversation, e.wall_clock))
             .map_err(NodeError::Log)?;
         self.reseed_live_file_book(&delivery);
+        self.remove_unreferenced_media(media_to_remove)?;
         removed += self
             .sentlog
             .lock()
@@ -238,6 +254,31 @@ impl Node {
             .remove_where(|e| should_remove(e.conversation, e.wall_clock))
             .map_err(NodeError::Log)?;
         Ok(removed)
+    }
+
+    fn remove_unreferenced_media(&self, candidates: Vec<ConversationId>) -> Result<(), NodeError> {
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let records = self.received_files.lock().expect("files lock not poisoned");
+        let remaining: std::collections::HashSet<_> = records
+            .conversations()
+            .iter()
+            .flat_map(|conversation| records.entries(conversation))
+            .filter_map(|row| {
+                super::files::validated_manifest(&row.plaintext)
+                    .map(|manifest| manifest.file_conv())
+            })
+            .collect();
+        drop(records);
+        for file_conv in candidates {
+            if !remaining.contains(&file_conv) {
+                self.media
+                    .remove(file_conv)
+                    .map_err(|e| NodeError::File(format!("remove media: {e}")))?;
+            }
+        }
+        Ok(())
     }
 }
 

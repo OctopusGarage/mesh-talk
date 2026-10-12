@@ -471,7 +471,14 @@ export const test = base.extend({
         retention_days: 0,
         calls_enabled: false,
         ringtone: "classic",
+        privacy_level: "balanced",
+        notification_preview: true,
+        auto_lock_seconds: 0,
+        lock_when_hidden: false,
+        confirm_sensitive_copy: false,
+        clipboard_clear_seconds: 0,
       };
+      let nativeLocked = false;
       let attachmentGlobalAuto = false;
       const attachmentContactAuto: Record<string, boolean> = {};
       const attachmentDecisions: Record<string, boolean> = {};
@@ -633,7 +640,10 @@ export const test = base.extend({
             username: "tester",
             display_name: String(a.newDisplayName ?? "tester"),
           }),
-          logout: () => ({ success: true }),
+          logout: () => {
+            nativeLocked = false;
+            return { success: true };
+          },
           adopt_linked_account: ok,
 
           // identity
@@ -796,6 +806,7 @@ export const test = base.extend({
             ).__lastWrittenFileBytes = a.bytes as number[];
             return `/tmp/${String(a.name || "pasted.png")}`;
           },
+          delete_temp_file: ok,
           screenshot_available: () => dataMode !== "screenshot-unavailable",
           // A deterministic 320x180 PNG, generated in-browser so the mock always
           // supplies a decodable image for the selection and annotation flow.
@@ -934,12 +945,54 @@ export const test = base.extend({
 
           // persistent login: no saved session in the mock → show the login screen
           auto_login: () => null,
+          lock_app: () => {
+            nativeLocked = true;
+            return null;
+          },
+          note_activity: ok,
+          set_call_active: ok,
+          lock_status: () =>
+            nativeLocked
+              ? { id: "u_self", username: "tester", display_name: "tester" }
+              : null,
+          unlock_app: (a) => {
+            if (a.password && a.password !== "password123")
+              throw new Error("Invalid password");
+            nativeLocked = false;
+            return null;
+          },
           clear_saved_session: ok,
+          media_migration_warning: () => false,
 
           // settings
           get_app_settings: () => appSettings,
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});
+            if (appSettings.privacy_level === "balanced") {
+              Object.assign(appSettings, {
+                notification_preview: true,
+                auto_lock_seconds: 0,
+                lock_when_hidden: false,
+                confirm_sensitive_copy: false,
+                clipboard_clear_seconds: 0,
+              });
+            } else if (appSettings.privacy_level === "private") {
+              Object.assign(appSettings, {
+                notification_preview: false,
+                auto_lock_seconds: 600,
+                lock_when_hidden: false,
+                confirm_sensitive_copy: false,
+                clipboard_clear_seconds: 60,
+              });
+            } else if (appSettings.privacy_level === "strict") {
+              Object.assign(appSettings, {
+                notification_preview: false,
+                auto_lock_seconds: 60,
+                lock_when_hidden: true,
+                confirm_sensitive_copy: true,
+                clipboard_clear_seconds: 30,
+              });
+            }
             return null;
           },
 

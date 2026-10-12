@@ -13,14 +13,11 @@
     "notification:default",
     "log:default",
     "dialog:default",
-    "shell:default",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
-    "opener:default",
+    { "identifier": "opener:allow-open-url", "allow": [{ "url": "https://*" }, { "url": "http://*" }] },
     "opener:allow-open-path",
-    "opener:allow-reveal-item-in-dir",
-    "fs:allow-home-read-recursive",
-    "fs:allow-home-write-recursive"
+    "opener:allow-reveal-item-in-dir"
   ]
 }

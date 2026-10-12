@@ -23,6 +23,7 @@ use files::temp_file_basename;
 pub use account::*;
 pub use channels::*;
 pub use diagnostics::*;
+pub(crate) use files::cleanup_pasted_file;
 pub use files::*;
 pub use messaging::*;
 pub use models::*;

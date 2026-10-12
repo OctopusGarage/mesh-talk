@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { auth, chat } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
+import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
 import { useChat } from "@/store/chat";
 
@@ -96,7 +97,8 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     if (!code) return;
     setCopyStatus(null);
     try {
-      await navigator.clipboard.writeText(code);
+      if (!(await copySensitiveText(code, t("settings.confirmCopyPrompt"))))
+        return;
       setCopyStatus("copied");
       setTimeout(
         () =>
