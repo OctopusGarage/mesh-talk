@@ -379,7 +379,7 @@
     "lockedTitle": "Mesh-Talk está bloqueado",
     "lockedDescription": "Los mensajes estarán disponibles al desbloquear. La entrega en segundo plano continúa.",
     "unlock": "Desbloquear",
-    "useTouchId": "Usar Touch ID",
+    "useTouchId": "Usar Touch ID o la contraseña del Mac",
     "mediaMigrationWarning": "No se pudieron cifrar algunos archivos multimedia antiguos. Los originales siguen disponibles. Libera espacio o revisa los permisos y reinicia para reintentarlo. Las copias de seguridad pueden conservar texto sin cifrar.",
     "exportLimit": "Los archivos guardados y el texto copiado salen del almacén cifrado de la app; el sistema y otras apps pueden acceder a ellos.",
     "managedDeviceLimit": "Un dispositivo administrado por una empresa puede supervisar la pantalla, las entradas, los archivos y la red. Estas opciones reducen la exposición creada por la app, pero no impiden esa supervisión."

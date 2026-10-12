@@ -120,11 +120,12 @@ command names for Tauri registration. Commands clone a node handle from
   change a replacement session or runtime; startup uses the current matching name.
   Successful logout forgets the original login credential before awaiting teardown.
   On macOS, Stay signed in stores a password in the standard OS Keychain so a
-  previously unlocked desktop can resume the session on launch. A separate,
-  device-local Touch ID item supports biometric unlock of the in-app lock screen.
-  An item saved by the earlier Touch ID-only release can migrate to the standard
-  Keychain after one successful biometric read; if that read is unavailable,
-  password sign-in still works. Sign-out removes both item types. Windows and
+  previously unlocked desktop can resume the session on launch. The in-app lock
+  uses macOS device-owner authentication, which offers Touch ID or the current
+  Mac account password without exposing that password to Mesh-Talk. An item saved
+  by the earlier Touch ID-only release can migrate to the standard Keychain after
+  one successful biometric read; if that read is unavailable, app sign-in still
+  works. Sign-out removes both item types. Windows and
   Linux continue using their OS credential stores for remembered sessions.
 
   New `owner_*` delivery IPC captures the lease before waiting for the runtime

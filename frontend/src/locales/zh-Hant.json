@@ -379,7 +379,7 @@
     "lockedTitle": "Mesh-Talk 已鎖定",
     "lockedDescription": "解鎖後可以繼續查看訊息。背景接收訊息會繼續。",
     "unlock": "解鎖",
-    "useTouchId": "使用觸控 ID",
+    "useTouchId": "使用觸控 ID 或 Mac 密碼",
     "mediaMigrationWarning": "部分舊媒體未能加密，原檔仍可讀取。請檢查磁碟空間和權限，然後重新啟動重試。現有備份可能仍包含明文。",
     "exportLimit": "儲存的檔案和複製的文字會離開應用程式的加密儲存區；作業系統和其他應用程式可能存取它們。",
     "managedDeviceLimit": "公司管理的裝置可能監察螢幕、輸入、檔案和網絡活動。這些設定可減少應用程式主動暴露的資料，但不能阻止裝置層級監察。"

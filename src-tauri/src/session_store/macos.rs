@@ -1,15 +1,13 @@
-//! macOS saved-session credential. A standard Keychain item permits an already
-//! unlocked desktop to resume the session, as the Stay signed in control promises.
-//! The Touch ID item is also a migration source when no standard item exists.
+//! macOS saved-session credential. The standard Keychain item permits an already
+//! unlocked desktop to resume the session. The old Touch ID item is read only
+//! to migrate sessions saved by the previous release.
 
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::string::{CFString, CFStringRef};
-use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::base::Error;
 use security_framework::passwords::{
-    AccessControlOptions, PasswordOptions, delete_generic_password_options, generic_password,
-    set_generic_password_options,
+    PasswordOptions, delete_generic_password_options, generic_password,
 };
 use security_framework_sys::base::{errSecItemNotFound, errSecUnimplemented};
 
@@ -44,8 +42,6 @@ impl CredentialStore for MacKeychain {
 }
 
 const SERVICE: &str = "mesh-talk-touch-id";
-// This was the legacy item during the Touch ID-only release. It is again the
-// standard item for the user-facing Stay signed in setting.
 const LEGACY_SERVICE: &str = "mesh-talk";
 
 fn options(username: &str) -> Option<PasswordOptions> {
@@ -85,24 +81,6 @@ fn clear_legacy(username: &str) {
     }
 }
 
-fn save_protected(username: &str, password: &str) -> KeychainResult<()> {
-    let mut item_options =
-        options(username).ok_or_else(|| Error::from_code(errSecUnimplemented))?;
-    let access = SecAccessControl::create_with_protection(
-        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-        AccessControlOptions::BIOMETRY_CURRENT_SET.bits(),
-    )?;
-    item_options.set_access_control(access);
-    match delete_generic_password_options(
-        options(username).ok_or_else(|| Error::from_code(errSecUnimplemented))?,
-    ) {
-        Ok(()) => {}
-        Err(error) if error.code() == errSecItemNotFound => {}
-        Err(error) => return Err(error),
-    }
-    set_generic_password_options(password.as_bytes(), item_options)
-}
-
 fn clear_protected(username: &str) {
     if let Some(options) = options(username) {
         match delete_generic_password_options(options) {
@@ -116,23 +94,12 @@ fn clear_protected(username: &str) {
 /// Save the raw login password in the OS Keychain for the next launch.
 pub fn save(username: &str, password: &str) {
     save_to(&MacKeychain, username, password);
-    // The lock screen uses this second, biometric-only item. Its availability
-    // must not determine whether Stay signed in works on the next app launch.
-    if let Err(error) = save_protected(username, password) {
-        log::info!("Touch ID unlock credential unavailable: {error}");
-    }
 }
 
 fn save_to(store: &impl CredentialStore, username: &str, password: &str) {
     if let Err(error) = store.save_legacy(username, password) {
         log::warn!("failed to save stay-signed-in credential: {error}");
     }
-}
-
-/// Read only the biometric item when unlocking an already running session.
-pub fn load_for_unlock(username: &str) -> Option<String> {
-    let bytes = MacKeychain.read_protected(username).ok()?;
-    String::from_utf8(bytes).ok()
 }
 
 /// Read a standard Keychain item without prompting. An old Touch ID item can

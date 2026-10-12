@@ -1,5 +1,6 @@
 import { expect, test } from "./tauri-mock";
 import { enterChat, openBobDm } from "./helpers/session";
+import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
 test.describe("macOS overlay titlebar", () => {
   test.use({
@@ -45,6 +46,51 @@ test.describe("macOS overlay titlebar", () => {
       );
     });
   }
+
+  test("lock uses macOS authentication without asking for the app password", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.evaluate(() => {
+      const internals = (
+        window as unknown as {
+          __TAURI_INTERNALS__: {
+            invoke: (
+              command: string,
+              args?: Record<string, unknown>,
+            ) => Promise<unknown>;
+          };
+          __unlockArgs?: Record<string, unknown>;
+        }
+      ).__TAURI_INTERNALS__;
+      const original = internals.invoke;
+      internals.invoke = (command, args) => {
+        if (command === "unlock_app") {
+          (
+            window as unknown as { __unlockArgs?: Record<string, unknown> }
+          ).__unlockArgs = args;
+          return new Promise(() => {});
+        }
+        return original(command, args);
+      };
+    });
+
+    await openSidebarMenuAction(page, "sidebar-lock");
+    await expect(page.getByTestId("lock-screen")).toBeVisible();
+    await expect(page.getByPlaceholder("Password")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Use Touch ID or Mac password" }),
+    ).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __unlockArgs?: { password: unknown } })
+              .__unlockArgs?.password,
+        ),
+      )
+      .toBeNull();
+  });
 });
 
 for (const [platform, userAgent] of [

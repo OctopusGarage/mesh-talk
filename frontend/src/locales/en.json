@@ -379,7 +379,7 @@
     "lockedTitle": "Mesh-Talk is locked",
     "lockedDescription": "Messages stay available after you unlock. Background delivery continues.",
     "unlock": "Unlock",
-    "useTouchId": "Use Touch ID",
+    "useTouchId": "Use Touch ID or Mac password",
     "mediaMigrationWarning": "Some older media could not be encrypted. The original files remain readable. Free disk space or check permissions, then restart to retry. Existing backups may still hold plaintext.",
     "exportLimit": "Files you save and text you copy leave the encrypted app store; the operating system and other apps may access them.",
     "managedDeviceLimit": "A company-managed device may observe the screen, input, files, and network activity. These settings reduce app-created exposure; they cannot prevent device monitoring."
