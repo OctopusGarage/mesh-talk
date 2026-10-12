@@ -58,7 +58,7 @@ objc2 = "0.6"
 raw-window-handle = "0.6"
 
 [dev-dependencies]
-tauri-plugin-wdio-webdriver = "=1.4.0"
+tauri-plugin-wdio-webdriver = "=1.5.0"
 tauri = { version = "2", features = ["test"] }
 serde_json = "1"
 # Collapse the password KDFs (Argon2 + PBKDF2) to a trivial cost FOR TESTS ONLY. Cargo activates
