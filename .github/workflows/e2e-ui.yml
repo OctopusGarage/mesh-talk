@@ -61,6 +61,11 @@ jobs:
         run: node scripts/merge-e2e-coverage.mjs
 
       - name: Upload browser coverage
+        # Dependabot PRs to dev cannot read the Actions CODECOV_TOKEN secret.
+        if: >-
+          !(github.event_name == 'pull_request' &&
+            github.base_ref == 'dev' &&
+            github.event.pull_request.user.login == 'dependabot[bot]')
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5.5.1
         with:
           files: frontend/coverage/e2e.lcov
