@@ -46,13 +46,19 @@ fn archive_component(raw: &std::ffi::OsStr, used: &mut HashSet<String>) -> Strin
         .filter(|index| *index > 0)
         .unwrap_or(base.len());
     let (stem, ext) = base.split_at(split);
-    let mut candidate = base.clone();
-    let mut counter = 1u32;
-    while !used.insert(candidate.to_lowercase()) {
-        candidate = format!("{stem} ({counter}){ext}");
-        counter += 1;
+    // pack limits a directory to MAX_ENTRIES, so a free suffix must exist in
+    // this range. Keep the search bounded even if collision logic regresses.
+    for counter in 0..=MAX_ENTRIES {
+        let candidate = if counter == 0 {
+            base.clone()
+        } else {
+            format!("{stem} ({counter}){ext}")
+        };
+        if used.insert(candidate.to_lowercase()) {
+            return candidate;
+        }
     }
-    candidate
+    unreachable!("directory entry limit guarantees a free archive name")
 }
 
 /// Pack a tree without following symlinks. The archive stays alive until staging ends.
