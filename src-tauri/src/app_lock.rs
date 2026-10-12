@@ -186,7 +186,6 @@ pub async fn unlock_app(
     password: Option<String>,
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, AppLock>,
-    settings: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<(), CommandError> {
     let lease = app
         .session()
@@ -195,44 +194,75 @@ pub async fn unlock_app(
     if !state.is_locked() {
         return Err(CommandError::Authorization("app is not locked".into()));
     }
-    let info = app.session().get().ok_or_else(CommandError::not_started)?;
-    let username = info.user.name;
-    let supplied = if let Some(password) = password {
-        password
-    } else if settings.get().stay_signed_in {
-        #[cfg(target_os = "macos")]
-        {
-            let name = username.clone();
-            tokio::task::spawn_blocking(move || crate::session_store::load(&name))
+    #[cfg(target_os = "macos")]
+    {
+        let _ = password;
+        authenticate_device_owner().await?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let supplied = password
+            .ok_or_else(|| CommandError::Authentication("Enter password to unlock".into()))?;
+        let username = app
+            .session()
+            .get()
+            .ok_or_else(CommandError::not_started)?
+            .user
+            .name;
+        let auth = app.auth_service().clone();
+        let verified =
+            tokio::task::spawn_blocking(move || auth.verify_credentials(&username, &supplied))
                 .await
-                .map_err(|e| CommandError::Internal(format!("credential read: {e}")))?
-                .ok_or_else(|| {
-                    CommandError::Authentication("Touch ID unavailable; enter password".into())
-                })?
+                .map_err(|e| CommandError::Internal(format!("unlock verification: {e}")))?
+                .map_err(|_| CommandError::Authentication("Invalid password".into()))?;
+        if verified != lease.owner() {
+            return Err(CommandError::Authorization(
+                "account changed while locked".into(),
+            ));
         }
-        #[cfg(not(target_os = "macos"))]
-        return Err(CommandError::Authentication(
-            "Enter password to unlock".into(),
-        ));
-    } else {
-        return Err(CommandError::Authentication(
-            "Enter password to unlock".into(),
-        ));
-    };
-    let auth = app.auth_service().clone();
-    let verified =
-        tokio::task::spawn_blocking(move || auth.verify_credentials(&username, &supplied))
-            .await
-            .map_err(|e| CommandError::Internal(format!("unlock verification: {e}")))?
-            .map_err(|_| CommandError::Authentication("Invalid password".into()))?;
-    if verified != lease.owner() {
-        return Err(CommandError::Authorization(
-            "account changed while locked".into(),
-        ));
     }
     app.session()
         .matching(&lease, |_| state.unlock(&lease))
         .map_err(CommandError::Authorization)?
+}
+
+#[cfg(target_os = "macos")]
+async fn authenticate_device_owner() -> Result<(), CommandError> {
+    tokio::task::spawn_blocking(|| {
+        use block2::RcBlock;
+        use objc2::runtime::Bool;
+        use objc2_foundation::{NSError, NSString};
+        use objc2_local_authentication::{LAContext, LAPolicy};
+
+        let context = unsafe { LAContext::new() };
+        let policy = LAPolicy::DeviceOwnerAuthentication;
+        unsafe { context.canEvaluatePolicy_error(policy) }.map_err(|error| {
+            CommandError::Authentication(format!("Mac authentication unavailable: {error}"))
+        })?;
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let reply = RcBlock::new(move |success: Bool, _error: *mut NSError| {
+            let _ = sender.send(success.as_bool());
+        });
+        let reason = NSString::from_str("unlock Mesh-Talk");
+        // Keep the context alive until the system finishes its Touch ID or Mac
+        // account-password prompt. The reply runs on a private OS queue.
+        unsafe { context.evaluatePolicy_localizedReason_reply(policy, &reason, &reply) };
+        match receiver.recv_timeout(Duration::from_secs(120)) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(CommandError::Authentication(
+                "Mac authentication canceled or failed".into(),
+            )),
+            Err(_) => {
+                unsafe { context.invalidate() };
+                Err(CommandError::Authentication(
+                    "Mac authentication did not complete".into(),
+                ))
+            }
+        }
+    })
+    .await
+    .map_err(|error| CommandError::Internal(format!("Mac authentication task: {error}")))?
 }
 
 pub fn app_locked<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) -> bool {

@@ -188,21 +188,21 @@ export default function App() {
 function LockScreen() {
   const { t } = useTranslation();
   const [password, setPassword] = useState("");
-  const attemptedTouchId = useRef(false);
+  const attemptedMacAuth = useRef(false);
   const busy = useAppLock((s) => s.busy);
   const error = useAppLock((s) => s.error);
   const unlock = useAppLock((s) => s.unlock);
   const logout = useAuth((s) => s.logout);
   useEffect(() => {
-    if (!isMacOverlay() || busy || attemptedTouchId.current) return;
-    const tryTouchId = () => {
-      if (document.hidden || attemptedTouchId.current) return;
-      attemptedTouchId.current = true;
+    if (!isMacOverlay() || busy || attemptedMacAuth.current) return;
+    const tryMacAuth = () => {
+      if (document.hidden || attemptedMacAuth.current) return;
+      attemptedMacAuth.current = true;
       void unlock();
     };
-    tryTouchId();
-    document.addEventListener("visibilitychange", tryTouchId);
-    return () => document.removeEventListener("visibilitychange", tryTouchId);
+    tryMacAuth();
+    document.addEventListener("visibilitychange", tryMacAuth);
+    return () => document.removeEventListener("visibilitychange", tryMacAuth);
   }, [unlock, busy]);
   return (
     <main
@@ -213,7 +213,7 @@ function LockScreen() {
         className="w-full max-w-sm space-y-4 rounded-xl border border-border bg-card p-7 shadow-elevation"
         onSubmit={(event) => {
           event.preventDefault();
-          void unlock(password);
+          if (!isMacOverlay()) void unlock(password);
         }}
       >
         <LockKeyhole
@@ -224,26 +224,30 @@ function LockScreen() {
         <p className="text-sm text-muted-foreground">
           {t("settings.lockedDescription")}
         </p>
-        <input
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          placeholder={t("login.password")}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-        />
+        {!isMacOverlay() && (
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder={t("login.password")}
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          />
+        )}
         {error && (
           <p role="alert" className="text-sm text-destructive">
             {error}
           </p>
         )}
-        <button
-          type="submit"
-          disabled={busy || !password}
-          className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
-        >
-          {t("settings.unlock")}
-        </button>
+        {!isMacOverlay() && (
+          <button
+            type="submit"
+            disabled={busy || !password}
+            className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          >
+            {t("settings.unlock")}
+          </button>
+        )}
         {isMacOverlay() && (
           <button
             type="button"

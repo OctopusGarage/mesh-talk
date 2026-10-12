@@ -142,7 +142,9 @@ jobs:
       - name: Build Tauri app
         run: |
           cd src-tauri
-          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }}
+          # Local release builds use four codegen units for speed. Ship the
+          # smaller single-unit binary on every release target and edition.
+          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} -- --config profile.release.package.mesh-talk.codegen-units=1
 
       - name: Verify edition assets
         shell: bash

@@ -1,9 +1,8 @@
 //! "Stay signed in": persist the login password in the OS credential store so the app can
-//! reopen the encrypted stores on the next launch. macOS requires Touch ID to read it;
-//! canceling the prompt falls back to the app password form.
+//! reopen the encrypted stores on the next launch.
 //!
-//! On macOS the Keychain item is device-local and tied to the current enrolled
-//! fingerprints. Other platforms retain their existing OS credential providers.
+//! The macOS auto-login item uses the standard OS Keychain. The in-app lock
+//! screen separately uses macOS device-owner authentication.
 //! The password is never written to a plaintext file or localStorage. The feature
 //! remains gated behind the user-controllable "Stay signed in" toggle.
 //!
