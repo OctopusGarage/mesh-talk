@@ -114,10 +114,21 @@ try {
     const round = { target, before: geometry(), applicationPid: report.applicationPid, windowId: report.windowId };
     report.rounds.push(round);
     await screenshot(`${index}-before`);
-    const button = await request("POST", `/session/${session}/element`, {
-      using: "css selector", value: 'button[aria-label="Close"]',
-    });
-    await request("POST", `/session/${session}/element/${button["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
+    const button = await execute(`const button = document.querySelector('button[aria-label="Close"]');
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        viewportWidth: window.innerWidth, viewportHeight: window.innerHeight };`);
+    assert.ok(button && button.width > 0 && button.height > 0, "Close button must be visible");
+    const x = Math.round(round.before.x
+      + (button.x + button.width / 2) * round.before.width / button.viewportWidth);
+    const y = Math.round(round.before.y
+      + (button.y + button.height / 2) * round.before.height / button.viewportHeight);
+    assert.ok(x >= round.before.x && x < round.before.x + round.before.width);
+    assert.ok(y >= round.before.y && y < round.before.y + round.before.height);
+    round.click = { x, y, method: "X11 mouse" };
+    native("xdotool", ["mousemove", "--sync", String(x), String(y)]);
+    native("xdotool", ["click", "--clearmodifiers", "1"]);
     await until("production close-to-tray unmaps window", () => !geometry().mapped);
     round.hidden = geometry();
     await verifyOwner();
