@@ -54,7 +54,7 @@ const execute = script => request("POST", `/session/${session}/execute/sync`, { 
 async function invoke(command, args = {}) {
   const result = await request("POST", `/session/${session}/execute/async`, {
     script: `const done = arguments[arguments.length - 1];
-      window.__TAURI__.core.invoke(arguments[0], arguments[1]).then(
+      window.__TAURI_INTERNALS__.invoke(arguments[0], arguments[1]).then(
         value => done({ok:true,value}), error => done({ok:false,error:String(error)}));`,
     args: [command, args],
   });
@@ -92,7 +92,7 @@ try {
   session = created.sessionId;
   assert.ok(session);
   await request("POST", `/session/${session}/timeouts`, { script: 20000, implicit: 10000 });
-  await until("real application UI ready", () => execute("return !!window.__TAURI__ && !!document.querySelector('button[aria-label=\"Close\"]');"));
+  await until("real application UI ready", () => execute("return !!window.__TAURI_INTERNALS__ && !!document.querySelector('button[aria-label=\"Close\"]');"));
   // Match exact PID and only its mapped main window; do not rely on a globally matching title.
   report.applicationPid = Number(native("pgrep", ["-f", `^${application.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`]).trim());
   assert.ok(Number.isInteger(report.applicationPid) && report.applicationPid > 0);
