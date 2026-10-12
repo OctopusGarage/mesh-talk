@@ -117,6 +117,12 @@ The GUI version of Mesh-Talk provides a desktop application with a graphical int
    cargo tauri build
    ```
 
+The default edition bundles optional avatar, theme, and sticker assets. For the
+lite edition, set `MESH_TALK_VARIANT=lite` before `cargo tauri build`; it omits
+optional bundled packs and animated Noto sticker files. Both editions can install
+packs later and use the same app identity. See
+[`docs/CUSTOMIZATION_PACKS.md`](../docs/CUSTOMIZATION_PACKS.md).
+
 ### Build Options
 
 You can customize the build with the following options:
@@ -135,11 +141,14 @@ You can customize the build with the following options:
 
 ### Installation Packages
 
-After building, the installation packages will be located in `target/release/bundle/`:
+After building from `src-tauri/`, installation packages are under the workspace
+`target/release/bundle/` (or `target/<triple>/release/bundle/` for an explicit
+target). The release workflow packages each target and edition into a ZIP with
+checksums and verification artifacts:
 
 - macOS: `.app` bundle and `.dmg` disk image
-- Windows: `.msi` installer
-- Linux: `.deb` package (Debian/Ubuntu) and `.AppImage`
+- Windows: `.exe` (NSIS) and `.msi` installers
+- Linux: `.deb`, `.rpm`, and `.AppImage`
 
 ## Platform-Specific Instructions
 
@@ -240,8 +249,9 @@ node --version  # CI uses Node.js 22
    entitlement so the OS permits multicast
 
 #### Local Storage Issues
-Mesh-Talk stores data as encrypted files under `~/.mesh-talk` (no database). If a store
-appears corrupt:
+Mesh-Talk keeps protocol and account data as encrypted files under `~/.mesh-talk`.
+Optional installed packs are kept separately in the webview's IndexedDB, and some
+UI preferences use local storage. If an encrypted account store appears corrupt:
 1. Close the application
 2. Back up and remove the affected per-account directory under `~/.mesh-talk/accounts/`
 3. Restart the application to re-create the stores (history not held by a peer/post office is lost)

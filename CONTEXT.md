@@ -31,6 +31,7 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 | **Conversation** | A 1:1 DM (device-pair or account-pair) or a channel; history is the event log. |
 | **Outgoing intent** | A user's attempt to send text, a sticker, or a file to a Conversation. It can be pending or failed before acceptance assigns a stable Event ID. |
 | **Post office** | A deterministically-elected always-on peer that stores-and-forwards (still-encrypted) events for offline recipients. |
+| **Recovery archive** | A user-created encrypted snapshot (`.mtbackup`) unlocked with a separate recovery key; restore keeps the account identity but creates a new device identity. |
 
 ## Key invariants
 
@@ -40,6 +41,7 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 - DM crypto is forward-secret (Double Ratchet); channels use a per-sender sender-key ratchet
   that rotates on membership change.
 - A device never registers itself as a peer (self-filter by `user_id`).
+- Restoring an archive never copies old device keys or ratchets and does not revoke an old device.
 
 ## What Mesh-Talk does NOT own
 

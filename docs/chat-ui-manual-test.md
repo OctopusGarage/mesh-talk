@@ -85,6 +85,17 @@ HOME=/tmp/mesh-po cargo run -p mesh-talk-core --bin mesh-talk-node -- \
 16. **Presentation and input.** Open the sticker picker and avatar gallery; scroll through
     presets and confirm offscreen thumbnails load when reached. Repeat key flows at the
     minimum window size, with long Unicode names and with reduced motion enabled.
+17. **Privacy.** Switch among Balanced, Private, and Strict in **Privacy & security**;
+    confirm the controls update and a manual change shows Custom. Lock the app, confirm
+    background delivery continues, and unlock with a password. Enable Invisible mode,
+    allow one account under Reply permissions, and verify that an unapproved account
+    cannot start a DM. Hide a contact and confirm it leaves local lists while its
+    existing history and shared channels remain available.
+18. **Backup and restore.** In **Data and recovery**, create an encrypted backup and
+    save its recovery key separately. Sign out, inspect the archive from **Restore
+    from encrypted backup**, and restore it under a new local username. Check that
+    the account fingerprint matches, the device fingerprint differs, and recovered
+    channel history is read-only until a new invitation.
 
 ## Expected
 
@@ -92,3 +103,5 @@ HOME=/tmp/mesh-po cargo run -p mesh-talk-core --bin mesh-talk-node -- \
 - Messages, reactions, mentions, replies, and files flow both ways live.
 - Safety numbers match between paired instances; verification sticks.
 - Theme/language changes apply immediately; pinned and history survive restart.
+- Privacy settings persist; a restored account has a new device identity and cannot
+  send in archived channels until reinvited.

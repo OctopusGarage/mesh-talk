@@ -11,14 +11,6 @@ yanked = "warn"
 # Advisories with no available upstream fix / out of scope, justified per entry.
 # Real vulnerabilities not listed here still fail the check.
 ignore = [
-  # `rsa` Marvin Attack — RSA decryption timing side-channel. No fixed release of
-  # the `rsa` crate exists. In Mesh-Talk RSA only wraps the local at-rest
-  # contacts key (decrypted once at login); it is not exposed as a network
-  # timing oracle, so the practical risk is low. Revisit when `rsa` ships a fix.
-  "RUSTSEC-2023-0071",
-  # `rand` unsoundness when a custom global logger calls `rand::rng()` reentrantly.
-  # Mesh-Talk uses rand for key/nonce generation, not from inside a logger.
-  "RUSTSEC-2026-0097",
   # bincode 1.x unmaintained (direct dep, used for local at-rest serialization).
   # No vulnerability; migration to bincode 2.x is tracked separately.
   "RUSTSEC-2025-0141",

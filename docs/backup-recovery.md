@@ -32,7 +32,7 @@ channels requires a new secure invitation. File cards without locally managed
 bytes remain visible but their contents may be unavailable. Messages after the
 backup date may be missing until peers sync them.
 
-The first release includes visible message history, received peer avatars, file
+The backup includes visible message history, received peer avatars, file
 cards, and locally managed media referenced by those cards. It excludes local UI
 customizations (including your own avatar override), machine settings, pending
 deliveries, old device keys, and files outside Mesh-Talk's media store. It never
