@@ -105,6 +105,7 @@
     "createAccount": "Crear cuenta",
     "accountCreated": "Cuenta creada: ya puedes iniciar sesión.",
     "staySignedIn": "Mantener la sesión iniciada",
+    "macAuthGuidance": "Touch ID o la contraseña de inicio de sesión de tu Mac desbloquean Mesh-Talk cuando se bloquea. Configura Touch ID en Ajustes del Sistema de macOS; no hace falta configurarlo en la app.",
     "resuming": "Reanudando tu sesión…",
     "footer": "Tus claves nunca salen de este dispositivo. Los contactos se descubren en tu red local.",
     "signingIn": "Iniciando sesión…",

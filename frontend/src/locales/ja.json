@@ -105,6 +105,7 @@
     "createAccount": "アカウントを作成",
     "accountCreated": "アカウントを作成しました。サインインできます。",
     "staySignedIn": "サインインを維持",
+    "macAuthGuidance": "ロック後のMesh-Talkは、MacのTouch IDまたはログインパスワードで解除できます。Touch IDはmacOSのシステム設定で登録してください。アプリ内での設定は不要です。",
     "resuming": "セッションを再開しています…",
     "footer": "鍵がこの端末から出ることはありません。相手はLAN上で検出されます。",
     "signingIn": "サインインしています…",

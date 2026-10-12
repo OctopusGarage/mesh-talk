@@ -8,6 +8,19 @@ test.describe("macOS overlay titlebar", () => {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
   });
 
+  test("sign-in and registration explain where Touch ID is configured", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 760, height: 520 });
+    await page.goto("/");
+    const guidance = page.getByTestId("mac-auth-guidance");
+    await expect(guidance).toContainText("macOS System Settings");
+    await expect(page.getByTestId("login-submit")).toBeInViewport();
+    await page.getByTestId("login-tab-register").click();
+    await expect(guidance).toBeVisible();
+    await expect(page.getByTestId("login-submit")).toBeInViewport();
+  });
+
   for (const viewport of [
     { width: 760, height: 520 },
     { width: 1040, height: 720 },

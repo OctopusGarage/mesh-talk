@@ -105,6 +105,7 @@
     "createAccount": "Create account",
     "accountCreated": "Account created — you can sign in now.",
     "staySignedIn": "Stay signed in",
+    "macAuthGuidance": "Your Mac’s Touch ID or login password unlocks Mesh-Talk after it locks. Set up Touch ID in macOS System Settings; no separate app setup is needed.",
     "resuming": "Resuming your session…",
     "footer": "Your keys never leave this device. Peers are discovered on your LAN.",
     "signingIn": "Signing in…",

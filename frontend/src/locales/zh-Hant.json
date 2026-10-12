@@ -105,6 +105,7 @@
     "createAccount": "建立帳號",
     "accountCreated": "帳號已建立——現在可以登入了。",
     "staySignedIn": "保持登入",
+    "macAuthGuidance": "Mesh-Talk 鎖定後，可使用 Mac 的觸控 ID 或登入密碼解鎖。請在 macOS「系統設定」中設定觸控 ID，無須在 App 內另外設定。",
     "resuming": "正在恢復你的工作階段…",
     "footer": "你的金鑰永遠不會離開本裝置。對方會透過區域網路探索。",
     "signingIn": "正在登入…",
