@@ -1,6 +1,6 @@
 # Managed-device security audit (macOS)
 
-Date: 2026-10-12. Scope: the current `optimize/targeted` checkout, the shipped Tauri desktop app, and a Mac managed by an employer. This is a source review, not a test of any particular employer's monitoring software or policies. Platform facts and their limits are sourced in [the macOS monitoring research](../research/macos-managed-device-monitoring.md).
+Date: 2026-10-12. Scope: the `optimize/targeted` checkout at the time of review, the shipped Tauri desktop app, and a Mac managed by an employer. This is a source review, not a test of any particular employer's monitoring software or policies. For platform capabilities and limits, see Apple's [privacy settings](https://support.apple.com/en-au/guide/mac-help/mchl211c911f/mac), [Endpoint Security](https://developer.apple.com/documentation/EndpointSecurity), and [device management](https://developer.apple.com/documentation/devicemanagement) documentation. The initial findings below are historical; the implementation outcome and remaining limits follow them.
 
 > The risk table below records the **pre-hardening code** reviewed at the start of this work. The implementation status near the end of this document records the changes on this branch. Keeping the original findings makes the before/after comparison auditable.
 

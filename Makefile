@@ -66,16 +66,16 @@ check:
 	./scripts/check-health.sh
 
 lint:
-	cargo clippy --workspace -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 fix:
-	cd src-tauri && cargo clippy --fix --allow-dirty --allow-staged
-	cd src-tauri && cargo fmt
-	cd frontend && npx prettier --write src/
+	cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
+	cargo fmt --all
+	cd frontend && npm run format
 
 format:
-	cd src-tauri && cargo fmt
-	cd frontend && npx prettier --write src/
+	cargo fmt --all
+	cd frontend && npm run format
 
 # Tauri commands
 .PHONY: tauri-dev tauri-build

@@ -1,4 +1,14 @@
 fn main() {
+    // Tauri warns whenever this legacy variable is present, even on non-Windows
+    // builds. Remove it before tauri-build and preserve its Windows override.
+    println!("cargo:rerun-if-env-changed=STATIC_VCRUNTIME");
+    let legacy_static_vc_runtime =
+        std::env::var_os("STATIC_VCRUNTIME").map(|value| value != "false");
+    if legacy_static_vc_runtime.is_some() {
+        // SAFETY: This build script does not spawn threads before changing its own environment.
+        unsafe { std::env::remove_var("STATIC_VCRUNTIME") };
+    }
+
     // Expose the build target triple to the binary (cargo sets TARGET for build scripts
     // only) so the Diagnostics "Environment" section can show it via `option_env!("TARGET")`.
     if let Ok(target) = std::env::var("TARGET") {
@@ -17,8 +27,11 @@ fn main() {
         let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("windows.manifest");
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
-        let attributes = tauri_build::Attributes::new()
-            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+        let mut windows_attributes = tauri_build::WindowsAttributes::new_without_app_manifest();
+        if let Some(static_vc_runtime) = legacy_static_vc_runtime {
+            windows_attributes = windows_attributes.static_vc_runtime(static_vc_runtime);
+        }
+        let attributes = tauri_build::Attributes::new().windows_attributes(windows_attributes);
         tauri_build::try_build(attributes).expect("failed to build Windows application resources");
     } else {
         tauri_build::build();

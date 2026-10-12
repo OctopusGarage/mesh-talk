@@ -1,6 +1,6 @@
 # Mesh-Talk Documentation Map
 
-An index of every living doc in the repository, grouped by purpose. Mesh-Talk is a
+A map of current guides, references, and dated evaluations, grouped by purpose. Mesh-Talk is a
 serverless, end-to-end-encrypted, local-first P2P LAN messenger (Tauri + React desktop app
 plus a headless `mesh-talk-node` CLI over a shared Rust core).
 
@@ -16,6 +16,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
 | [`docs/backup-recovery.md`](backup-recovery.md) | Manual encrypted backup, offline restore, recovery key handling, and coverage limits. |
+| [`docs/privacy-controls.md`](privacy-controls.md) | Privacy presets, app lock, invisible mode, hidden contacts, and limits. |
 | [`docs/evals/architecture-score.md`](evals/architecture-score.md) | Fixed-rubric architecture review, before/after score, evidence, and remaining seams. |
 | [`specifications/TODO.md`](../specifications/TODO.md) | Implementation status (feature-complete) + deliberate design notes / external constraints. |
 
@@ -34,8 +35,6 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md) | Screenshot-assisted UI and UX review, browser evidence, and decisions. |
 | [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md) | File and image transfer audit, interaction states, and validation evidence. |
 | [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md) | Screenshot interaction evaluation, test evidence, and native release gate. |
-| [`docs/research/screenshot-platform-support.md`](research/screenshot-platform-support.md) | Windows and Linux screenshot capture feasibility, API limits, and validation plan. |
-| [`docs/research/2026-10-12-im-migration-recovery.md`](research/2026-10-12-im-migration-recovery.md) | First-party messenger migration and recovery patterns that inform Mesh-Talk's design. |
 | [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md) | Hidden-contact real mesh, three-platform native UI, evidence gates and usability rubric. |
 | [`docs/evals/quality-gates.md`](evals/quality-gates.md) | Scenario-based review, mutation evidence, six-platform artifact verification and controlled release publication. |
 | [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md) | Product workflow evaluation layers, three-platform real backend/native evidence, portable browser boundaries and fail-closed CI gating. |
@@ -60,7 +59,6 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`SECURITY.md`](../SECURITY.md) | Vulnerability-reporting policy and supported versions. |
 | [`docs/ARCHITECTURE.md` § Security posture](ARCHITECTURE.md#8-security-posture-summary) | Crypto primitives, domain separation, forward secrecy, and known limitations by design. |
 | [`docs/evals/managed-device-security-audit.md`](evals/managed-device-security-audit.md) | App-specific macOS managed-device exposure paths, risk ranking, and hardening sequence. |
-| [`docs/research/macos-managed-device-monitoring.md`](research/macos-managed-device-monitoring.md) | Apple primary-source research on screen, input, file, endpoint, and network monitoring limits. |
 | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Community conduct expectations. |
 
 ## Current design
@@ -70,3 +68,7 @@ The frontend visual and interaction system is documented in
 documented in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). Personal working plans under
 `docs/superpowers/` and the root `plans/` directory stay local and are not part of
 the committed documentation set.
+
+The `docs/evals/` files record dated evaluations and validation evidence. Read
+[`ARCHITECTURE.md`](ARCHITECTURE.md), the guides above, and the current code for
+the present implementation when an earlier evaluation describes a pre-fix state.

@@ -20,10 +20,15 @@ there is no central server. Key security properties:
   identity bound into the handshake. Relays only ever see ciphertext.
 - **Encryption at rest** — per-device/account keystores and the message stores are
   encrypted with a key derived from the user's password (PBKDF2-600k + AES-256-GCM);
-  they are unlocked only after login.
-- **No cloud account or telemetry** — local stores live under `~/.mesh-talk/`
-  (Windows: `%USERPROFILE%\.mesh-talk`). Messages and profile photos are sent to
-  intended peers; the optional post office stores only encrypted events.
+  they are unlocked only after login. Locally managed media uses authenticated
+  encryption; user-exported files remain readable in their chosen destination.
+- **Saved sessions and recovery** — optional saved login credentials live in the OS
+  credential store (Touch ID protected Keychain on supported macOS versions). Manual
+  `.mtbackup` exports use a separate recovery key that Mesh-Talk does not retain.
+- **No cloud account or telemetry** — protocol and account stores live under
+  `~/.mesh-talk/` (Windows: `%USERPROFILE%\.mesh-talk`). Optional packs and some
+  UI preferences live in webview storage. Messages and profile photos are sent
+  to intended peers; the optional post office stores only encrypted events.
 
 ## Known limitations
 
@@ -36,6 +41,12 @@ This is an experimental project. The following are tracked, not yet hardened:
 - LAN discovery does not provide a central identity directory. Verify a contact's
   safety number through a trusted channel before relying on that identity; the
   authenticated Noise connection protects subsequent transport.
+- A backup restore preserves the account identity but creates a new device. It does
+  not revoke a lost or compromised old device. Restored channels are read-only until
+  a new invitation; see [backup and recovery](docs/backup-recovery.md).
+- Encryption and app locking cannot hide content displayed, copied, notified, or
+  exported on a device controlled by someone else. Privacy presets reduce some of
+  those exposures but cannot prevent privileged screen or endpoint monitoring.
 
 Please mention any of these in a report only if you have a concrete exploit
 beyond the documented limitation.

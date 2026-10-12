@@ -26,6 +26,7 @@ message fans out to every device a user has linked.
 | [`postoffice`] | A durable store-and-forward relay for offline delivery (holds ciphertext only). |
 | [`file`] | Chunked, per-chunk-AEAD file transfer with resume + a versioned manifest (48 KiB chunks; files up to ~4 GiB). |
 | [`storage`] | At-rest crypto: PBKDF2/AES-GCM encryption and `EncryptedRecordLog` (`storage::record_log`), the generic append-only encrypted log every on-disk sidecar store is built on. |
+| [`recovery`] | Versioned, authenticated `.mtbackup` archive and logical snapshot primitives for manual backup and restore. |
 | [`node`] | The runtime that wires the above into a working peer (DMs, channels, files, history, sync). |
 
 Wire formats are `bincode` and versioned (magic byte + version) for forward-compatible parsing.
@@ -74,8 +75,8 @@ let node = Node::open_with_account(
 // (See the CLI for the discovery/listener/drain wiring.)
 ```
 
-The crate is async and built on Tokio; `node` spawns the accept loop, discovery, and the
-post-office drain as tasks.
+The crate is async and built on Tokio. `NodeRuntime` starts discovery, the accept
+loop, and delivery tasks when a host runs the node.
 
 ## CLI: `mesh-talk-node`
 
@@ -145,4 +146,5 @@ MIT. Part of the [Mesh-Talk](https://github.com/OctopusGarage/mesh-talk) workspa
 [`postoffice`]: src/postoffice
 [`file`]: src/file
 [`storage`]: src/storage
+[`recovery`]: src/recovery
 [`node`]: src/node
