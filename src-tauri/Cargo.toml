@@ -8,7 +8,7 @@ description = "Mesh-Talk desktop app (Tauri) — a thin UI shell over mesh-talk-
 default-run = "mesh-talk"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.2", features = [] }
 
 [features]
 default = ["custom-protocol"]
@@ -21,7 +21,7 @@ mesh-talk-core = { path = "../crates/mesh-talk-core" }
 # NOTE: do NOT enable the "devtools" feature — it ships the webview inspector (right-click
 # → Inspect / console) in RELEASE builds too. Debug builds still get devtools automatically
 # via debug_assertions, which is all lib.rs's open_devtools() needs.
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2.12.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2.3"
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
@@ -64,8 +64,8 @@ xcap = "0.9.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
-tauri-plugin-wdio-webdriver = "=1.4.0"
-tauri = { version = "2", features = ["test"] }
+tauri-plugin-wdio-webdriver = "=1.5.0"
+tauri = { version = "2.12.3", features = ["test"] }
 serde_json = "1"
 # Collapse the password KDFs (Argon2 + PBKDF2) to a trivial cost FOR TESTS ONLY. Cargo activates
 # a dev-dependency feature only when building test/example/bench targets, never for `cargo build`

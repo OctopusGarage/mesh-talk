@@ -127,6 +127,15 @@ pub fn run_tauri_configured(
     let avatars_state = crate::avatars::AvatarsState::default();
 
     let mut context = tauri::generate_context!();
+    #[cfg(target_os = "windows")]
+    if context.default_window_icon().is_none() {
+        // Tauri 2.12 reads the icon from the executable's resources on Windows.
+        // The native evaluation example does not embed those resources.
+        context.set_default_window_icon(Some(
+            tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+                .expect("bundled app icon is a valid PNG"),
+        ));
+    }
     if let Some(root) = configured_data_root() {
         let namespace = root
             .parent()
