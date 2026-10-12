@@ -2,7 +2,7 @@ name: Dependabot auto-merge
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -39,10 +39,13 @@ jobs:
           base="$(gh pr view "$pr_url" --json baseRefName --jq '.baseRefName')"
           is_draft="$(gh pr view "$pr_url" --json isDraft --jq '.isDraft')"
 
-          if [ "$author" != "dependabot[bot]" ]; then
-            echo "Skipping non-Dependabot PR from $author"
-            exit 0
-          fi
+          case "$author" in
+            'dependabot[bot]'|'app/dependabot') ;;
+            *)
+              echo "Skipping non-Dependabot PR from $author"
+              exit 0
+              ;;
+          esac
 
           if [ "$base" != "dev" ]; then
             echo "Skipping PR targeting $base"

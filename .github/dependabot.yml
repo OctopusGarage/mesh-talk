@@ -8,8 +8,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 10
     groups:
-      # One PR/week for minor+patch bumps. All Dependabot PRs target dev
-      # and auto-merge there once CI is green; main stays manually promoted.
+      # One PR/week for minor+patch bumps. Dependabot targets dev and
+      # auto-merges only after its required checks pass.
       cargo-minor-patch:
         update-types:
           - minor
