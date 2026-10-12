@@ -36,6 +36,14 @@ test("open the sticker panel and send an animated sticker", async ({
   await expect(panel).toBeVisible();
   // The bundled Noto set is present (thumbnails are real animated WebP).
   await expect(panel.locator("img").first()).toBeVisible();
+  await expect
+    .poll(() =>
+      panel
+        .locator("img")
+        .first()
+        .evaluate((img) => (img as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(0);
 
   // Send the "face with tears of joy" sticker (bundled id 1f602).
   await page.getByTestId("sticker-option-1f602").click();

@@ -82,15 +82,16 @@ Native builds reuse the Tauri CLI installed by `npm ci` from the committed lockf
 instead of compiling an unpinned latest CLI independently on every runner.
 
 The gate verifies signatures against the exact repository, workflow and source ref,
-and provenance against the exact source commit on GitHub-hosted runners. It inspects
-ZIPs without extracting them: duplicate/unsafe members, installer symlinks, unexpected
-formats, blank/partial/duplicate/wrong checksums and empty installers are rejected.
-Legitimate relative symlinks inside the macOS app must stay within that app.
+and provenance against the exact source commit on GitHub-hosted runners. It checks
+ZIP members before extracting individual installers for native inspection: duplicate
+or unsafe members, symlinks, unexpected formats, blank/partial/duplicate/wrong
+checksums and empty installers are rejected.
+The macOS ZIP contains the DMG and checksum manifest; the app is inside the DMG.
 
 Metadata inspection never executes or installs application binaries:
 
-- macOS: inspect actual DMG UDIF structure and embedded app with 7-Zip; check version,
-  architecture and equality of its executable to the separately packaged `.app`.
+- macOS: inspect actual DMG UDIF structure and embedded app with 7-Zip; check its
+  version and executable architecture.
 - Windows: inspect PE version and bootstrapper architecture, MSI ProductVersion and
   target-specific x64/Arm64 Template. An x86 NSIS bootstrapper installing a native app is valid.
 - Linux: inspect Debian/RPM version and architecture, AppImage format and embedded ELF.

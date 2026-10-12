@@ -9,7 +9,7 @@ import type { CustomizationPack } from "@/lib/pack";
 export interface Sticker {
   /** Stable id sent over the wire — the codepoint string, e.g. "1f602" / "2764_fe0f". */
   id: string;
-  /** Bundled animated-WebP URL. */
+  /** Artwork URL; empty for built-in stickers in the lite edition. */
   url: string;
   /** The emoji char this sticker depicts — the fallback shown if a peer lacks the file. */
   emoji: string;
