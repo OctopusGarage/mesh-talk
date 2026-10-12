@@ -63,6 +63,7 @@ function FileBubble({
   sendKey,
   messageId,
   isChannel,
+  readOnly,
 }: {
   file: NonNullable<ChatMessage["file"]>;
   mine: boolean;
@@ -71,6 +72,7 @@ function FileBubble({
   sendKey?: string;
   messageId?: string | null;
   isChannel: boolean;
+  readOnly: boolean;
 }) {
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
@@ -197,7 +199,9 @@ function FileBubble({
                     ? "message.fail.unknown"
                     : "message.delivery.metadataPending",
                 )
-              : humanSize(file.size)}
+              : readOnly && !available
+                ? t("recovery.mediaUnavailable")
+                : humanSize(file.size)}
           </div>
         </div>
         <button
@@ -212,7 +216,7 @@ function FileBubble({
             metadataPending
               ? t("transfer.sending")
               : !available
-                ? t("transfer.waiting")
+                ? t(readOnly ? "recovery.mediaUnavailable" : "transfer.waiting")
                 : savedPath
                   ? t("files.savedTo", { path: savedPath })
                   : t("common.save")
@@ -241,10 +245,10 @@ function FileBubble({
           waitingDirection={sendKey ? "send" : undefined}
         />
       )}
-      {!mine && !metadataPending && !savedPath && (
+      {!readOnly && !mine && !metadataPending && !savedPath && (
         <ReceiveProgress status={status} />
       )}
-      {approvalNeeded && !savedPath && (
+      {!readOnly && approvalNeeded && !savedPath && (
         <div className="mt-2 flex gap-2">
           <button
             type="button"
@@ -282,6 +286,7 @@ export function MessageBubble({
   grouped,
   showTime,
   isChannel,
+  readOnly = false,
   authorAvatarId,
   authorName,
   fresh,
@@ -305,6 +310,8 @@ export function MessageBubble({
   showTime?: boolean;
   /** Channel conversations show per-message author avatar + name; DMs don't. */
   isChannel: boolean;
+  /** Recovered channel history has no sender keys on this device. */
+  readOnly?: boolean;
   /** The author's ACCOUNT id (resolved from the roster) for avatar lookup; defaults to
    *  the device id (m.who) when unknown. Only used for the channel author glyph. */
   authorAvatarId?: string;
@@ -374,7 +381,11 @@ export function MessageBubble({
   const RECALL_WINDOW_MS = 2 * 60 * 1000;
   const [menuNow, setMenuNow] = useState(() => Date.now());
   const canRecall =
-    mine && !!m.id && !m.pending && menuNow - m.wallClock < RECALL_WINDOW_MS;
+    !readOnly &&
+    mine &&
+    !!m.id &&
+    !m.pending &&
+    menuNow - m.wallClock < RECALL_WINDOW_MS;
 
   // A recalled message is a centered system line ("X recalled a message") — no bubble,
   // actions or reactions. Deleting it locally is still offered via the context menu.
@@ -417,7 +428,7 @@ export function MessageBubble({
         </ContextMenu>
         {/* Re-edit: only for our own recalled TEXT messages (WeChat). Drops the original
             text back into the composer. */}
-        {mine && m.recalledText && (
+        {mine && m.recalledText && !readOnly && (
           <button
             type="button"
             data-testid="msg-reedit"
@@ -495,7 +506,7 @@ export function MessageBubble({
               pickerOpen={pickerOpen}
               setPickerOpen={setPickerOpen}
               onPick={(e) => m.id && onReact(m.id, e)}
-              disabled={!m.id}
+              disabled={!m.id || readOnly}
             />
           )}
 
@@ -568,6 +579,7 @@ export function MessageBubble({
                     sendKey={m.clientId}
                     messageId={m.id}
                     isChannel={isChannel}
+                    readOnly={readOnly}
                   />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
@@ -587,7 +599,7 @@ export function MessageBubble({
               </ContextMenuItem>
               <ContextMenuItem
                 data-testid="msg-reply"
-                disabled={!m.id}
+                disabled={!m.id || readOnly}
                 onSelect={() => onReply(m)}
               >
                 <CornerUpLeft className="h-3.5 w-3.5 opacity-70" />
@@ -595,7 +607,7 @@ export function MessageBubble({
               </ContextMenuItem>
               <ContextMenuItem
                 data-testid="msg-react"
-                disabled={!m.id}
+                disabled={!m.id || readOnly}
                 // Defer so the menu finishes closing before the picker popover opens
                 // (avoids a focus/layer fight between the two radix overlays).
                 onSelect={() => setTimeout(() => setPickerOpen(true), 0)}
@@ -630,7 +642,7 @@ export function MessageBubble({
               pickerOpen={pickerOpen}
               setPickerOpen={setPickerOpen}
               onPick={(e) => m.id && onReact(m.id, e)}
-              disabled={!m.id}
+              disabled={!m.id || readOnly}
             />
           )}
         </div>
@@ -652,6 +664,7 @@ export function MessageBubble({
                     { emoji: r.emoji },
                   )}
                   onClick={() => m.id && onReact(m.id, r.emoji)}
+                  disabled={readOnly}
                   className={cn(
                     "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     me
@@ -684,7 +697,7 @@ export function MessageBubble({
             <button
               type="button"
               onClick={() => m.clientId && onRetry(m.clientId)}
-              disabled={!m.clientId}
+              disabled={!m.clientId || readOnly}
               aria-label={t("message.retry")}
               className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-medium text-destructive underline-offset-2 hover:bg-destructive/10 hover:underline disabled:opacity-40"
             >

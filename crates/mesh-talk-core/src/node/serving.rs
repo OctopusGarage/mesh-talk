@@ -444,6 +444,16 @@ impl Node {
                 );
             let _ = self.channel_incoming.send(msg);
         }
+        if self
+            .log
+            .lock()
+            .expect("log mutex not poisoned")
+            .events(&conv)
+            .iter()
+            .any(|event| event.kind == EventKind::Delete)
+        {
+            self.recalled_targets_channel(conv);
+        }
     }
 
     /// Pull any DMs held for this node from the elected post office: dial it once,
@@ -546,6 +556,38 @@ impl Node {
                 continue;
             };
             let _ = self.accept_dm_event(&event, &proof, &mut delivery);
+        }
+        drop(delivery);
+        // A recall may arrive before its target is viewed. Persist verified
+        // tombstones while the old device and peer proofs are still available,
+        // so an offline backup cannot resurrect the recalled plaintext.
+        if self
+            .log
+            .lock()
+            .expect("log mutex not poisoned")
+            .events(&conv)
+            .iter()
+            .any(|event| event.kind == EventKind::Delete)
+        {
+            let my_account = self.account_id();
+            let peers = self.historical_dm_peers();
+            let matched: Vec<_> = peers
+                .iter()
+                .filter(|peer| {
+                    super::conversation::dm_conversation_id(&self.identity.public(), &peer.public())
+                        == conv
+                })
+                .filter_map(|peer| peer.account_id())
+                .collect();
+            for account in matched {
+                if account == my_account {
+                    for other in self.known_account_ids() {
+                        self.recalled_targets_account(&other);
+                    }
+                } else {
+                    self.recalled_targets_account(&account);
+                }
+            }
         }
     }
 }

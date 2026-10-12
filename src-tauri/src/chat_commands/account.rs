@@ -111,21 +111,53 @@ pub struct AccountInfo {
 pub async fn list_accounts(
     state: tauri::State<'_, NodeState>,
 ) -> Result<Vec<AccountInfo>, CommandError> {
-    use std::collections::BTreeMap;
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+    let live = rt
+        .peers()
+        .into_iter()
+        .filter_map(|p| p.account_id.map(|account_id| (account_id, p.name)))
+        .collect();
+    Ok(merge_account_rows(live, rt.known_account_ids()))
+}
+
+fn merge_account_rows(live: Vec<(String, String)>, known: Vec<String>) -> Vec<AccountInfo> {
+    use std::collections::BTreeMap;
     let mut by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for p in rt.peers() {
-        if let Some(acct) = p.account_id {
-            by_account.entry(acct).or_default().push(p.name);
-        }
+    for account_id in known {
+        by_account.entry(account_id).or_default();
     }
-    Ok(by_account
+    for (account_id, name) in live {
+        by_account.entry(account_id).or_default().push(name);
+    }
+    by_account
         .into_iter()
         .map(|(account_id, names)| AccountInfo {
             device_count: names.len(),
             names,
             account_id,
         })
-        .collect())
+        .collect()
+}
+
+#[cfg(test)]
+mod recovery_accounts_tests {
+    use super::merge_account_rows;
+
+    #[test]
+    fn offline_history_account_is_listed_with_zero_live_devices() {
+        let rows = merge_account_rows(vec![], vec!["abcd".into()]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id, "abcd");
+        assert_eq!(rows[0].device_count, 0);
+        assert!(rows[0].names.is_empty());
+    }
+
+    #[test]
+    fn live_and_history_accounts_are_not_duplicated() {
+        let rows = merge_account_rows(vec![("abcd".into(), "Alice".into())], vec!["abcd".into()]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].device_count, 1);
+        assert_eq!(rows[0].names, vec!["Alice"]);
+    }
 }

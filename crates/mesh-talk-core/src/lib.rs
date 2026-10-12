@@ -38,6 +38,7 @@ pub mod identity;
 pub mod node;
 pub mod postoffice;
 pub mod ratchet;
+pub mod recovery;
 pub mod storage;
 pub mod transport;
 pub mod util;

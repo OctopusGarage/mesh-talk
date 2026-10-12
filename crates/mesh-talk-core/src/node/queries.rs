@@ -21,6 +21,11 @@ impl Node {
         conversation: ConversationId,
     ) -> Vec<HistoryEntry> {
         let me = self.identity.public().user_id();
+        let recovered_me: std::collections::HashSet<_> = self
+            .recovery_origins
+            .iter()
+            .map(|author| author.user_id())
+            .collect();
         let delivery = self.delivery.lock().expect("delivery lock not poisoned");
         let mut entries = self
             .received_files
@@ -43,7 +48,7 @@ impl Node {
             .filter(|entry| !delivery.file_erased(entry.conversation, entry.event_id))
             .filter_map(|entry| {
                 let manifest = crate::file::decode_manifest(&entry.plaintext)?;
-                let from_me = entry.from == me;
+                let from_me = entry.from == me || recovered_me.contains(&entry.from);
                 Some(HistoryEntry {
                     id: entry.event_id,
                     from_me,
@@ -77,11 +82,12 @@ impl Node {
     /// IS the forward-secrecy property, not a limitation. Returns empty for an unknown
     /// channel.
     pub fn channel_history(&self, channel: ConversationId, limit: usize) -> Vec<HistoryEntry> {
+        if !self
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == channel)
         {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            if book.state(&channel).is_none() {
-                return Vec::new();
-            }
+            return Vec::new();
         }
         // A channel conversation's history is built exactly like a DM's (sent sidecar +
         // received store, seq->id mapped, wall-clock + id sorted) — so delegate to `history`
@@ -216,10 +222,14 @@ impl Node {
         // Tombstone recalled messages. Recall is only wired for channels (1:1 chats go
         // through `account_history`); a device-pair DM has no Delete events, so this is an
         // empty set there.
-        let is_channel = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.state(&conversation).is_some()
-        };
+        let is_channel = self
+            .archived_channels
+            .iter()
+            .any(|summary| summary.id == conversation)
+            || {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                book.state(&conversation).is_some()
+            };
         if is_channel {
             tombstone_recalled(&mut entries, &self.recalled_targets_channel(conversation));
         }

@@ -12,6 +12,7 @@ import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
+import { RestoreBackup } from "./RestoreBackup";
 
 /**
  * The hero. Opening on the most characteristic thing in mesh-talk's world: a
@@ -270,6 +271,17 @@ export function LoginScreen() {
             </TabsContent>
           </Tabs>
         </motion.div>
+
+        <div className="mt-3">
+          <RestoreBackup
+            onRestored={(restoredUsername) => {
+              setUsername(restoredUsername);
+              setTab("signin");
+              setNotice(t("recovery.signInNext"));
+            }}
+            onStartFresh={() => setTab("register")}
+          />
+        </div>
 
         {tab === "signin" && (
           <p className="mt-5 text-center text-xs leading-5 text-muted-foreground">

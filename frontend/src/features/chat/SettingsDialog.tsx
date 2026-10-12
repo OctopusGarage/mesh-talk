@@ -50,6 +50,7 @@ import {
 } from "@/lib/i18n";
 import { ThemePicker } from "./ThemePicker";
 import { HiddenContactsDialog } from "./HiddenContactsDialog";
+import { DataRecoverySettings } from "./DataRecoverySettings";
 import { PrivacySettings } from "./PrivacySettings";
 import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
 import {
@@ -405,6 +406,7 @@ export function SettingsDialog({
               ["appearance", t("settings.sectionAppearance")],
               ["background", t("redesign.appNotifications")],
               ["files", t("redesign.messagesFiles")],
+              ["recovery", t("recovery.section")],
               ["experimental", t("redesign.advanced")],
             ].map(([id, label]) => (
               <button
@@ -786,6 +788,15 @@ export function SettingsDialog({
                     </option>
                   </select>
                 }
+              />
+            </Section>
+
+            <Section id="settings-recovery" title={t("recovery.section")}>
+              <Row
+                icon={<KeyRound className="h-4 w-4" />}
+                title={t("recovery.createBackup")}
+                desc={t("recovery.exportIntro")}
+                control={<DataRecoverySettings />}
               />
             </Section>
 

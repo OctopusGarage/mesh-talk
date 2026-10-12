@@ -935,9 +935,22 @@ impl Node {
                 }
             }
         }
+        let recovered_ids = self
+            .recovered_sent_ids
+            .lock()
+            .expect("recovered sent ids mutex not poisoned");
         entries
             .into_iter()
-            .map(|e| (ids.get(&e.seq).copied().unwrap_or(EventId::new([0; 32])), e))
+            .map(|e| {
+                (
+                    recovered_ids
+                        .as_ref()
+                        .and_then(|saved| saved.id_for(&e))
+                        .or_else(|| ids.get(&e.seq).copied())
+                        .unwrap_or(EventId::new([0; 32])),
+                    e,
+                )
+            })
             .collect()
     }
 

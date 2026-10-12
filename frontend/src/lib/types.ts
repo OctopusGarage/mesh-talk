@@ -96,6 +96,7 @@ export interface ChannelInfo {
   // The owner's device user_id. Only the owner may rename the channel (synced to all
   // members); non-owners fall back to a local-only alias.
   owner: string;
+  archived?: boolean;
 }
 
 export interface SearchHitInfo {

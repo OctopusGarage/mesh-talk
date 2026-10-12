@@ -97,6 +97,23 @@ impl ProfileStore {
             .filter_map(|(id, e)| e.avatar.clone().map(|a| (id.clone(), a)))
             .collect()
     }
+
+    /// Current profile state including clear tombstones and their timestamps.
+    pub(crate) fn snapshot_entries(&self) -> Vec<(String, u64, Option<Vec<u8>>)> {
+        let mut entries: Vec<_> = self
+            .by_account
+            .values()
+            .map(|entry| {
+                (
+                    entry.account_id.clone(),
+                    entry.updated_at,
+                    entry.avatar.clone(),
+                )
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
 }
 
 #[cfg(test)]
@@ -130,6 +147,7 @@ mod tests {
         s.record("bob", 200, None).unwrap();
         assert_eq!(s.avatar("bob"), None);
         assert!(!s.all().contains_key("bob"));
+        assert_eq!(s.snapshot_entries(), vec![("bob".to_string(), 200, None)]);
     }
 
     #[test]
