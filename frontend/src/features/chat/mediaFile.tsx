@@ -113,6 +113,17 @@ export function fileGlyph(name: string, mime?: string) {
 const POSTER_CACHE = new Map<string, string>();
 const POSTER_FAILED = new Set<string>();
 const POSTER_CACHE_MAX = 64;
+const POSTER_MAX_EDGE = 1280;
+
+/** A chat thumbnail needs fewer pixels than the video frame it came from. */
+export function posterCanvasSize(width: number, height: number) {
+  const scale = Math.min(1, POSTER_MAX_EDGE / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
 function rememberPoster(key: string, data: string) {
   if (POSTER_CACHE.size >= POSTER_CACHE_MAX) {
     const oldest = POSTER_CACHE.keys().next().value;
@@ -188,11 +199,12 @@ export function useVideoPoster(
         const h = v.videoHeight;
         if (!w || !h) return fail();
         const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
+        const size = posterCanvasSize(w, h);
+        canvas.width = size.width;
+        canvas.height = size.height;
         const c2d = canvas.getContext("2d");
         if (!c2d) return fail();
-        c2d.drawImage(v, 0, 0, w, h);
+        c2d.drawImage(v, 0, 0, size.width, size.height);
         const data = canvas.toDataURL("image/jpeg", 0.7);
         finish(); // settle BEFORE setState so a release-triggered error can't undo it
         if (cacheKey) rememberPoster(cacheKey, data);
