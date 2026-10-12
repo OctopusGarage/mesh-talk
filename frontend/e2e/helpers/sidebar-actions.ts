@@ -2,7 +2,7 @@ import type { Page } from "@playwright/test";
 
 export async function openSidebarMenuAction(
   page: Page,
-  id: "sidebar-nav-connection" | "sidebar-nav-settings",
+  id: "sidebar-nav-connection" | "sidebar-nav-settings" | "sidebar-lock",
 ) {
   const item = page.getByTestId(id);
   if (!(await item.isVisible()))

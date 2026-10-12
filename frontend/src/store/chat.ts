@@ -2,7 +2,6 @@ import { create } from "zustand";
 import { chat, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
-import { notifyInbound } from "@/lib/notify";
 import { loadPendingUnread, loadUnread } from "@/lib/unreadStorage";
 import { useAvatars } from "@/store/avatars";
 import { useCalls } from "@/store/calls";
@@ -956,7 +955,6 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // would otherwise fire one roster refresh (3 invokes) per message. The 4s interval
     // poll also covers this.
     queueUnknownUnread(set, e.from);
-    void notifyInbound(e.from_name || "New message", e.text, false);
     const now = Date.now();
     if (now - lastUnknownSenderRefresh > 2000) {
       lastUnknownSenderRefresh = now;
@@ -973,7 +971,6 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
   bump(set, key, isActive && isConversationVisible());
-  void notifyInbound(conv.name || "New message", e.text, isActive);
 }
 
 function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
@@ -986,7 +983,6 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
   const isActive = get().active != null && convKey(get().active!) === key;
   if (isActive) void get().reload();
   bump(set, key, isActive && isConversationVisible());
-  void notifyInbound(e.channel_name, e.text, isActive);
 }
 
 function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {

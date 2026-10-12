@@ -112,7 +112,22 @@ async function settledDialog(id) {
 async function appKitKey(keyName) {
   assert.ok(owned.has(app), "AppKit input targets the owned native application");
   const nonce = randomBytes(8).toString("hex");
-  const result = await command("POST", "/execute/async", { script: "const key=arguments[0],nonce=arguments[1],done=arguments[arguments.length-1]; window.__TAURI__.event.listen('native-contact-key-result',e=>{if(e.payload.nonce===nonce){unlisten();done(e.payload);}}).then(fn=>{unlisten=fn; return window.__TAURI__.event.emit('native-contact-key',{key,nonce});}).catch(e=>done({error:String(e)})); let unlisten=()=>{};", args: [keyName, nonce] });
+  const result = await command("POST", "/execute/async", {
+    // The production app disables the broad window.__TAURI__ global. Use the
+    // same scoped event IPC that the bundled frontend uses instead.
+    script: `const key=arguments[0],nonce=arguments[1],done=arguments[arguments.length-1];
+      const ipc=window.__TAURI_INTERNALS__,event='native-contact-key-result';
+      let eventId;
+      const handler=ipc.transformCallback(e=>{
+        if(e.payload.nonce!==nonce)return;
+        ipc.invoke('plugin:event|unlisten',{event,eventId})
+          .then(()=>done(e.payload),error=>done({error:String(error)}));
+      });
+      ipc.invoke('plugin:event|listen',{event,target:{kind:'Any'},handler})
+        .then(id=>{eventId=id;return ipc.invoke('plugin:event|emit',{event:'native-contact-key',payload:{key,nonce}});})
+        .catch(error=>done({error:String(error)}));`,
+    args: [keyName, nonce],
+  });
   assert.equal(result.error, null, `native AppKit input failed: ${result.error}`);
   if (result.focus) report.nativeFocus = result.focus;
 }

@@ -46,6 +46,25 @@ use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+struct ChecksumWriter<'a> {
+    output: &'a mut std::fs::File,
+    checksum: &'a mut Sha256,
+    size: &'a mut u64,
+}
+
+impl Write for ChecksumWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.output.write_all(bytes)?;
+        self.checksum.update(bytes);
+        *self.size += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.output.flush()
+    }
+}
+
 pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
     use bincode::Options;
     if bytes.len() > crate::transport::MAX_PLAINTEXT {
@@ -847,6 +866,10 @@ impl Node {
         self.media.contains(file_conv)
     }
 
+    pub fn media_migration_warning(&self) -> bool {
+        self.media.migration_warning()
+    }
+
     /// Receive-complete persist for MEDIA: if `file_conv` is a media file (image/video by
     /// name) we hold ALL chunks of but haven't yet copied into the durable media store,
     /// reassemble + verify it (`read_file`) and write the bytes into the store. After this
@@ -1068,34 +1091,24 @@ impl Node {
         let candidates = self.completion_candidates(file_conv);
         let chunk_ids = self.chunk_ids(file_conv);
         if chunk_ids.len() as u32 != total {
-            if let Some(source) = self.managed_media_for_export(file_conv, &manifest) {
+            if self
+                .managed_media_for_export(file_conv, &manifest)
+                .is_some()
+            {
                 let part = part_path(dest);
                 let mut guard = PartFileGuard::new(part.clone());
-                let mut reader = std::io::BufReader::new(
-                    std::fs::File::open(source)
-                        .map_err(|e| NodeError::File(format!("open media: {e}")))?,
-                );
                 let mut output = std::fs::File::create(&part)
                     .map_err(|e| NodeError::File(format!("create part: {e}")))?;
                 let mut checksum = Sha256::new();
                 let mut size = 0u64;
-                let mut buffer = vec![0; 64 * 1024];
-                loop {
-                    let count = reader
-                        .read(&mut buffer)
-                        .map_err(|e| NodeError::File(format!("read media: {e}")))?;
-                    if count == 0 {
-                        break;
-                    }
-                    size += count as u64;
-                    if size > manifest.size() {
-                        return Err(NodeError::File("media size mismatch".into()));
-                    }
-                    checksum.update(&buffer[..count]);
-                    output
-                        .write_all(&buffer[..count])
-                        .map_err(|e| NodeError::File(format!("write media: {e}")))?;
-                }
+                let mut sink = ChecksumWriter {
+                    output: &mut output,
+                    checksum: &mut checksum,
+                    size: &mut size,
+                };
+                self.media
+                    .copy_decrypted(file_conv, &mut sink)
+                    .map_err(|e| NodeError::File(format!("decrypt media: {e}")))?;
                 let actual: [u8; 32] = checksum.finalize().into();
                 if actual != manifest.checksum() || size != manifest.size() {
                     return Err(NodeError::File("media checksum mismatch".into()));

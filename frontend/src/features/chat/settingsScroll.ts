@@ -6,7 +6,7 @@ export function settingsScrollBehavior(): ScrollBehavior {
 
 /** Related setting sections share one navigation destination. */
 export function settingsCategory(section: string): string {
-  if (section === "contacts") return "privacy";
+  if (section === "contacts" || section === "security") return "privacy";
   return section;
 }
 

@@ -119,6 +119,15 @@ command names for Tauri registration. Commands clone a node handle from
   and each inbound callback against the current lease/ticket. A late rename cannot
   change a replacement session or runtime; startup uses the current matching name.
   Successful logout forgets the original login credential before awaiting teardown.
+  On macOS, a remembered login password is stored in a device-local Keychain item
+  protected by the current Touch ID enrollment. Launch reads that item on a blocking
+  thread; Keychain prompts for Touch ID before releasing it, and cancellation or an
+  unavailable sensor leaves the app at the password form. A previously saved,
+  unprotected Keychain credential is migrated to the protected item before it can
+  resume a session. macOS 10.13–10.14 retains password sign-in because the
+  required data-protection Keychain API is unavailable. Sign-out removes both
+  item types. Windows and Linux continue using their OS credential stores for
+  remembered sessions.
 
   New `owner_*` delivery IPC captures the lease before waiting for the runtime
   lock. `OwnerAdmission` owns capture, checked reads, guarded local acceptance,
@@ -257,6 +266,28 @@ and own-device media use retained signed manifest/local-row references only for
 local export, never for a historical network probe or a delivery receipt. Legacy
 v1 exports keep their prior in-memory path and retain chunks rather than creating
 new completion proofs.
+
+The durable per-account `media/` store uses a versioned `MTMEDIA1` header and
+64 KiB AES-256-GCM chunks. One password-derived key uses a private store salt;
+each chunk authenticates the stable local device owner id, file conversation id, total length,
+chunk index, and plaintext length. New media is written to a private `.part`
+file, verified, synced, and atomically renamed. On account unlock, legacy
+plaintext media is migrated through that path. A failed migration leaves the
+source readable and surfaces a warning; old backups and snapshots remain out
+of the app's control. Export decrypts through the store and still checks the
+signed manifest checksum. Erasing the last local card referencing media removes
+its managed copy, not an explicit user export.
+
+The desktop host's privacy levels govern notification previews, automatic
+locking, and copying. Rust persists the typed policy and sends one native
+notification for each eligible inbound event. An `AppLock` gate blocks new app
+IPC and plaintext events while keeping the node runtime alive; a native timer
+checks idle and hidden policies even when the webview pauses. Unlock verifies
+the active account with a password or, on macOS when enabled, the existing Touch
+ID protected Keychain credential. Frontend ownership generations discard stale
+UI work. Requests that began before a lock may still deliver a native IPC
+response to the webview; do not treat the lock as a process-memory or OS capture
+boundary.
 
 Local file erasure reserves permanent bounded metadata before card acceptance.
 The erased immutable manifest ID remains suppressed across restart, sync and

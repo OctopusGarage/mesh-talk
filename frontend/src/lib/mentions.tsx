@@ -25,7 +25,9 @@ export function messageSegments(text: string): Segment[] {
 function openExternal(url: string) {
   // Open in the OS default browser, never the app webview. Lazy import so this module stays
   // importable in the node unit-test environment (no Tauri runtime there).
-  import("@tauri-apps/plugin-shell").then((m) => m.open(url)).catch(() => {});
+  import("@tauri-apps/plugin-opener")
+    .then((m) => m.openUrl(url))
+    .catch(() => {});
 }
 
 /** Render `text` with @mentions highlighted and URLs as external links. */

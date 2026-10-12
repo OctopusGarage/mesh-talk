@@ -54,7 +54,7 @@ const asyncExecute = (script) => request("POST", `/session/${session}/execute/as
 async function invoke(command, args = {}) {
   const result = await request("POST", `/session/${session}/execute/async`, {
     script: `const done = arguments[arguments.length - 1];
-      window.__TAURI__.core.invoke(arguments[0], arguments[1])
+      window.__TAURI_INTERNALS__.invoke(arguments[0], arguments[1])
         .then(value => done({ ok: true, value }), () => done({ ok: false }));`,
     args: [command, args],
   });
@@ -96,7 +96,7 @@ try {
   assert.ok(session, "Native session must be created");
   await request("POST", `/session/${session}/timeouts`, { script: 120000, implicit: 10000 });
   await until("real login UI", () => execute(`
-    return !!window.__TAURI__ && !!document.querySelector('[data-testid="login-form"]');
+    return !!window.__TAURI_INTERNALS__ && !!document.querySelector('[data-testid="login-form"]');
   `));
   const pids = await applicationPids();
   assert.equal(pids.length, 1, "Exactly one owned application process must run");
@@ -140,7 +140,7 @@ try {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     const suffix = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
     window.nativeCredentials = { username: 'native138-' + suffix.slice(0, 12), password: suffix };
-    window.__TAURI__.core.invoke('register', window.nativeCredentials)
+    window.__TAURI_INTERNALS__.invoke('register', window.nativeCredentials)
       .then(result => done(result.success === true), () => done(false));
   `);
   assert.equal(registered, true, "Ephemeral native account registration failed");

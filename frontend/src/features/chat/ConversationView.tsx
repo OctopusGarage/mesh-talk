@@ -591,10 +591,17 @@ export function ConversationView() {
     const lease = captureComposer();
     if (!lease()) return false;
     try {
-      const path = await chatApi.writeTempFile(Array.from(bytes), ext, name);
-      if (!lease()) return false;
+      const tempPath = await chatApi.writeTempFile(
+        Array.from(bytes),
+        ext,
+        name,
+      );
+      if (!lease()) {
+        await chatApi.deleteTempFile(tempPath).catch(() => {});
+        return false;
+      }
       // Image button / paste / screenshot → media intent (inline preview).
-      await sendFile(path, true);
+      await sendFile(tempPath, true);
       return true;
     } catch (e) {
       if (lease())
@@ -1038,7 +1045,10 @@ export function ConversationView() {
                 ext,
                 file.name || undefined,
               );
-              if (!current()) return;
+              if (!current()) {
+                await chatApi.deleteTempFile(path).catch(() => {});
+                return;
+              }
               await sendFile(
                 path,
                 file.type.startsWith("image/") ||

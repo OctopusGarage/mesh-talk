@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CircleAlert, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -23,6 +23,9 @@ export function ChatApp() {
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const ready = useChat((s) => s.ready);
+  const [mediaWarning, setMediaWarning] = useState(false);
+  const active = useChat((s) => s.active);
+  const peers = useChat((s) => s.peers);
   const accountId = useChat((s) => s.myAccountId);
   const unreadOwner = useChat((s) => s.unreadOwner);
   useEffect(() => {
@@ -60,6 +63,36 @@ export function ChatApp() {
     void ensureNotificationPermission();
     void loadSettings();
   }, [loadSettings]);
+
+  useEffect(() => {
+    if (!ready) return;
+    let current = true;
+    void chatApi
+      .mediaMigrationWarning()
+      .then((warning) => {
+        if (current) setMediaWarning(warning);
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [ready]);
+
+  useEffect(() => {
+    const activePeerDevices =
+      active?.kind === "account"
+        ? peers
+            .filter((peer) => peer.account_id === active.id)
+            .map((peer) => peer.user_id)
+        : [];
+    const activeChannel = active?.kind === "channel" ? active.id : null;
+    void chatApi
+      .setNotificationContext(activePeerDevices, activeChannel)
+      .catch(() => {});
+    return () => {
+      void chatApi.setNotificationContext([], null).catch(() => {});
+    };
+  }, [active, peers, generation]);
 
   useEffect(() => {
     if (!owner) return;
@@ -115,6 +148,14 @@ export function ChatApp() {
       <Sidebar />
       <ConversationView />
       <CallDialog />
+      {mediaWarning && (
+        <div
+          role="alert"
+          className="absolute inset-x-4 top-3 z-50 rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
+        >
+          {t("settings.mediaMigrationWarning")}
+        </div>
+      )}
       <AnimatePresence>
         {error && (
           <motion.div

@@ -68,7 +68,7 @@ const asyncExecute = (script, args = []) => request("POST", `/session/${session}
 async function invoke(command, args = {}) {
   const result = await asyncExecute(`
     const done = arguments[arguments.length - 1];
-    window.__TAURI__.core.invoke(arguments[0], arguments[1])
+    window.__TAURI_INTERNALS__.invoke(arguments[0], arguments[1])
       .then(value => done({ ok: true, value }), error => done({ ok: false, error: String(error) }));
   `, [command, args]);
   assert.ok(result.ok, `${command}: ${result.error}`);
@@ -107,7 +107,7 @@ try {
   assert.ok(session, "WebDriver must return a session id");
   await request("POST", `/session/${session}/timeouts`, { script: 20000, implicit: 10000 });
   await until("real Tauri UI ready", () => execute(`
-    return !!window.__TAURI__ && !!document.querySelector('button[aria-label="Close"]');
+    return !!window.__TAURI_INTERNALS__ && !!document.querySelector('button[aria-label="Close"]');
   `));
   const pids = await applicationPids();
   assert.equal(pids.length, 1, "Exactly one process must run the tested application binary");

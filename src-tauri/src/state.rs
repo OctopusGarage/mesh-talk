@@ -200,6 +200,7 @@ mod session_generation_tests {
 /// node runs out of [`crate::chat_commands::NodeState`].)
 #[derive(Clone)]
 pub struct AppState {
+    app_lock: crate::app_lock::AppLock,
     #[cfg(test)]
     pub(crate) rename_hot_gate: HostOperationGate,
     #[cfg(test)]
@@ -219,6 +220,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(auth_service: AuthService) -> Self {
         Self {
+            app_lock: crate::app_lock::AppLock::default(),
             #[cfg(test)]
             rename_hot_gate: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -238,6 +240,10 @@ impl AppState {
 
     pub fn auth_service(&self) -> &AuthService {
         &self.auth_service
+    }
+
+    pub fn app_lock(&self) -> &crate::app_lock::AppLock {
+        &self.app_lock
     }
 
     pub fn session(&self) -> &SessionState {

@@ -24,8 +24,6 @@ mesh-talk-core = { path = "../crates/mesh-talk-core" }
 tauri = { version = "2.12.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2.3"
 tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
-tauri-plugin-fs = "2"
 tauri-plugin-log = "2"
 tauri-plugin-autostart = "2"
 # Desktop integration: focus-existing-instance, restore window geometry, open/reveal files.
@@ -46,12 +44,19 @@ tempfile = { workspace = true } # atomic replacement of per-account contact poli
 # Windows Credential Manager, Linux Secret Service) — never on plaintext disk.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # macOS dock badge: set it directly via AppKit (NSApplication.dockTile) instead of tao's
 # WebviewWindow::set_badge_count — tao calls setBadgeLabel without forcing a dockTile refresh,
 # which silently fails to render in a bundled .app. We add display() to actually paint it.
 # objc2 0.6 is already in the tree via tao, so this reuses the compiled crate (no new version).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# Store resumable credentials in a Touch ID protected, device-local Keychain item.
+security-framework = { version = "3.6", features = ["OSX_10_15"] }
+security-framework-sys = "2.16"
+core-foundation = "0.10"
 
 # Inspect the real display backend; do not infer X11 from environment variables.
 [target.'cfg(target_os = "linux")'.dependencies]

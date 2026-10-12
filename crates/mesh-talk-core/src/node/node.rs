@@ -490,10 +490,21 @@ impl Node {
                 }
             }
         }
-        // Durable chat-media store under the per-account dir (sibling to the logs). Plaintext
-        // media bytes that survive chunk prune + restart; multi-account safe (per-account dir).
-        let media = crate::node::media_store::MediaStore::open(dir)
+        // Durable encrypted media survives chunk prune and restart.
+        let media = crate::node::media_store::MediaStore::open(dir, password, &identity.user_id())
             .map_err(|e| LogError::Io(std::io::Error::other(format!("media store open: {e}"))))?;
+        let live_media: std::collections::HashSet<_> = received_files
+            .conversations()
+            .iter()
+            .flat_map(|conversation| received_files.entries(conversation))
+            .filter_map(|row| {
+                super::files::validated_manifest(&row.plaintext)
+                    .map(|manifest| manifest.file_conv())
+            })
+            .collect();
+        media
+            .prune_unreferenced(&live_media)
+            .map_err(|e| LogError::Io(std::io::Error::other(format!("media prune: {e}"))))?;
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();

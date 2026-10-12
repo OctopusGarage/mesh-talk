@@ -57,6 +57,8 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 |-----|----------------|
 | [`SECURITY.md`](../SECURITY.md) | Vulnerability-reporting policy and supported versions. |
 | [`docs/ARCHITECTURE.md` § Security posture](ARCHITECTURE.md#8-security-posture-summary) | Crypto primitives, domain separation, forward secrecy, and known limitations by design. |
+| [`docs/evals/managed-device-security-audit.md`](evals/managed-device-security-audit.md) | App-specific macOS managed-device exposure paths, risk ranking, and hardening sequence. |
+| [`docs/research/macos-managed-device-monitoring.md`](research/macos-managed-device-monitoring.md) | Apple primary-source research on screen, input, file, endpoint, and network monitoring limits. |
 | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Community conduct expectations. |
 
 ## Current design

@@ -100,6 +100,13 @@ pub struct AuthService {
 static INSTANCE: std::sync::OnceLock<AuthService> = std::sync::OnceLock::new();
 
 impl AuthService {
+    /// Check a lock-screen credential without creating a new session or runtime.
+    pub fn verify_credentials(&self, name: &str, password: &str) -> AuthResult<String> {
+        self.identity_manager
+            .authenticate_user(name, password)
+            .map(|identity| identity.user_id)
+            .map_err(|_| AuthError::InvalidCredentials)
+    }
     /// Create a new authentication service
     pub fn new(identity_manager: Arc<IdentityManager>) -> Self {
         Self {

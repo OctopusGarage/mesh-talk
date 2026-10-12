@@ -13,10 +13,23 @@ use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 /// Maximum number of days to retain log files
 const MAX_LOG_RETENTION_DAYS: u64 = 7;
 
+fn configured_log_level(debug_build: bool) -> LogLevelFilter {
+    if debug_build {
+        LogLevelFilter::Debug
+    } else {
+        LogLevelFilter::Warn
+    }
+}
+
 /// Get the logs directory path (~/.mesh-talk/logs/)
 fn get_mesh_talk_logs_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let logs_dir = crate::data_dir().join("logs");
     fs::create_dir_all(&logs_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&logs_dir, fs::Permissions::from_mode(0o700))?;
+    }
     Ok(logs_dir)
 }
 
@@ -29,22 +42,20 @@ pub fn init_logging(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::er
     cleanup_old_logs(&logs_dir, MAX_LOG_RETENTION_DAYS)?;
 
     // Initialize tauri-plugin-log with file and console targets
+    let mut targets = vec![Target::new(TargetKind::Folder {
+        path: logs_dir.clone(),
+        file_name: Some("mesh-talk".into()),
+    })];
+    if cfg!(debug_assertions) {
+        targets.push(Target::new(TargetKind::Stdout));
+    }
     let log_plugin = tauri_plugin_log::Builder::new()
-        .targets([
-            Target::new(TargetKind::Stdout),
-            Target::new(TargetKind::Folder {
-                path: logs_dir.clone(),
-                file_name: Some("mesh-talk".into()),
-            }),
-        ])
-        .level(LogLevelFilter::Debug)
+        .targets(targets)
+        .level(configured_log_level(cfg!(debug_assertions)))
         .timezone_strategy(TimezoneStrategy::UseLocal)
         .build();
 
     app_handle.plugin(log_plugin)?;
-
-    println!("Logging initialized successfully");
-    println!("Logs directory: {:?}", logs_dir);
 
     Ok(())
 }
@@ -65,11 +76,7 @@ fn cleanup_old_logs(logs_dir: &Path, max_days: u64) -> Result<(), std::io::Error
                     && modified < cutoff_time
                 {
                     // Delete old log file
-                    if let Err(e) = fs::remove_file(&path) {
-                        println!("Failed to delete old log file {:?}: {}", path, e);
-                    } else {
-                        println!("Deleted old log file: {:?}", path);
-                    }
+                    let _ = fs::remove_file(&path);
                 }
             }
         }
@@ -154,6 +161,12 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn release_logging_keeps_only_warnings_and_errors() {
+        assert_eq!(configured_log_level(false), LogLevelFilter::Warn);
+        assert_eq!(configured_log_level(true), LogLevelFilter::Debug);
+    }
 
     #[test]
     fn test_cleanup_old_logs() {

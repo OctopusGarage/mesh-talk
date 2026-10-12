@@ -168,7 +168,8 @@ pub async fn send_channel_message(
 /// Map the UI's "sent via the media button?" flag to a manifest file kind, so the receiver
 /// categorizes media-vs-attachment by INTENT rather than the file extension.
 #[tauri::command]
-pub async fn channel_history(
+pub async fn channel_history<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     limit: usize,
@@ -177,11 +178,13 @@ pub async fn channel_history(
     let id = parse_channel_id(&channel_id)?;
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt
+    let history = rt
         .channel_history(id, limit)
         .into_iter()
         .map(HistoryItem::from)
-        .collect())
+        .collect();
+    crate::app_lock::reject_if_locked(&app)?;
+    Ok(history)
 }
 
 #[tauri::command]

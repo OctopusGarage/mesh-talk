@@ -61,6 +61,13 @@ pub async fn file_statuses(
         .collect())
 }
 
+#[tauri::command]
+pub async fn media_migration_warning(
+    state: tauri::State<'_, NodeState>,
+) -> Result<bool, CommandError> {
+    Ok(state.node_handle().await?.media_migration_warning())
+}
+
 #[derive(serde::Serialize)]
 pub struct AttachmentReceivePolicy {
     global_auto: bool,
@@ -130,16 +137,17 @@ pub async fn send_file_dm(
 ) -> Result<String, CommandError> {
     let node = state.node_handle().await?;
     // The legacy DM command has no optimistic message key; retain its recipient key.
-    let mut prog = crate::events::ProgressThrottle::new(app, recipient.clone(), "prepare");
-    let id = node
+    let mut prog = crate::events::ProgressThrottle::new(app.clone(), recipient.clone(), "prepare");
+    let result = node
         .send_file_dm_progress(
             &recipient,
             std::path::Path::new(&path),
             file_kind(media),
             move |p| prog.emit(p.done, p.total),
         )
-        .await
-        .map_err(CommandError::from)?;
+        .await;
+    cleanup_pasted_file(&app, &path);
+    let id = result.map_err(CommandError::from)?;
     Ok(hex::encode(id.as_bytes()))
 }
 
@@ -152,16 +160,17 @@ pub async fn send_file_to_account(
     media: bool,
 ) -> Result<String, CommandError> {
     let node = state.node_handle().await?;
-    let mut prog = crate::events::ProgressThrottle::new(app, account.clone(), "prepare");
-    let id = node
+    let mut prog = crate::events::ProgressThrottle::new(app.clone(), account.clone(), "prepare");
+    let result = node
         .send_file_to_account_progress(
             &account,
             std::path::Path::new(&path),
             file_kind(media),
             move |p| prog.emit(p.done, p.total),
         )
-        .await
-        .map_err(CommandError::from)?;
+        .await;
+    cleanup_pasted_file(&app, &path);
+    let id = result.map_err(CommandError::from)?;
     Ok(hex::encode(id.as_bytes()))
 }
 
@@ -177,19 +186,20 @@ pub async fn send_file_channel(
     let id = parse_channel_id(&channel_id)?;
     let node = state.node_handle().await?;
     let mut prog = crate::events::ProgressThrottle::new(
-        app,
+        app.clone(),
         progress_key.unwrap_or_else(|| channel_id.clone()),
         "prepare",
     );
-    let file_conv = node
+    let result = node
         .send_file_channel_progress(
             id,
             std::path::Path::new(&path),
             file_kind(media),
             move |p| prog.emit(p.done, p.total),
         )
-        .await
-        .map_err(CommandError::from)?;
+        .await;
+    cleanup_pasted_file(&app, &path);
+    let file_conv = result.map_err(CommandError::from)?;
     Ok(hex::encode(file_conv.as_bytes()))
 }
 
@@ -232,6 +242,33 @@ pub fn default_download_dir(app: tauri::AppHandle) -> Option<String> {
         .ok()
         .or_else(|| crate::user_home_dir().map(|h| h.join("Downloads")))
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Open only the configured download folder (or the OS default) in the file manager.
+/// The renderer cannot choose a different path for this command.
+#[tauri::command]
+pub fn open_download_dir(
+    app: tauri::AppHandle,
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+) -> Result<(), CommandError> {
+    let configured = settings.get().download_dir;
+    let dir = if configured.is_empty() {
+        default_download_dir(app)
+            .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
+    } else {
+        configured
+    };
+    let path = std::path::Path::new(&dir);
+    if !path.is_dir() {
+        return Err(CommandError::Validation(
+            "download folder unavailable".into(),
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    let opened = tauri_plugin_opener::open_path(path, Some("Finder"));
+    #[cfg(not(target_os = "macos"))]
+    let opened = tauri_plugin_opener::open_path(path, None::<&str>);
+    opened.map_err(|error| CommandError::Service(format!("open download folder: {error}")))
 }
 
 #[tauri::command]
@@ -291,11 +328,90 @@ fn write_temp_file_in_cache(
     let basename = temp_file_basename(ext, name, ts);
     // A unique per-write subdir, so keeping a REAL filename can't collide with (or overwrite)
     // another in-flight send of a same-named file — the displayed name is the basename.
-    let dir = cache.join("pasted").join(ts.to_string());
-    std::fs::create_dir_all(&dir).map_err(|e| CommandError::Validation(e.to_string()))?;
+    let root = cache.join("pasted");
+    std::fs::create_dir_all(&root).map_err(|e| CommandError::Validation(e.to_string()))?;
+    if !std::fs::symlink_metadata(&root)
+        .map_err(|e| CommandError::Validation(e.to_string()))?
+        .file_type()
+        .is_dir()
+    {
+        return Err(CommandError::Validation(
+            "pasted cache is not a directory".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| CommandError::Validation(e.to_string()))?;
+    }
+    let dir = root.join(format!("{ts}-{:016x}", rand::random::<u64>()));
+    std::fs::create_dir(&dir).map_err(|e| CommandError::Validation(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| CommandError::Validation(e.to_string()))?;
+    }
     let path = dir.join(basename);
-    std::fs::write(&path, bytes).map_err(|e| CommandError::Validation(e.to_string()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    use std::io::Write;
+    let mut file = options
+        .open(&path)
+        .map_err(|e| CommandError::Validation(e.to_string()))?;
+    file.write_all(bytes)
+        .map_err(|e| CommandError::Validation(e.to_string()))?;
     Ok(path)
+}
+
+pub(crate) fn cleanup_pasted_file<R: tauri::Runtime>(app: &tauri::AppHandle<R>, path: &str) {
+    let Ok(cache) = app.path().app_cache_dir() else {
+        return;
+    };
+    let root = cache.join("pasted");
+    let source = std::path::Path::new(path);
+    let Some(parent) = source.parent() else {
+        return;
+    };
+    if parent.parent() != Some(root.as_path()) {
+        return;
+    }
+    // Only our isolated staging dirs have the timestamp-random name.
+    if !parent
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.contains('-'))
+    {
+        return;
+    }
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_dir(parent);
+}
+
+#[tauri::command]
+pub fn delete_temp_file<R: tauri::Runtime>(app: tauri::AppHandle<R>, path: String) {
+    cleanup_pasted_file(&app, &path);
+}
+
+pub(crate) fn clean_stale_pasted_files(cache: &std::path::Path) {
+    let root = cache.join("pasted");
+    if !std::fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Choose the on-disk name for a written temp file. With a real `original` filename (the
@@ -325,7 +441,8 @@ pub(super) fn temp_file_basename(ext: &str, original: Option<&str>, ts: u128) ->
 /// Return a received file's decrypted bytes (for inline preview, e.g. images). Returned as a
 /// raw IPC response (ArrayBuffer in JS) to avoid the overhead of a JSON number array.
 #[tauri::command]
-pub async fn read_file(
+pub async fn read_file<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, NodeState>,
     file_conv: String,
 ) -> Result<tauri::ipc::Response, CommandError> {
@@ -335,6 +452,7 @@ pub async fn read_file(
         .await
         .map_err(|e| format!("join error: {e}"))?
         .map_err(CommandError::from)?;
+    crate::app_lock::reject_if_locked(&app)?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -344,7 +462,8 @@ pub async fn read_file(
 /// prune AND restart. Errors if no media is stored for `file_conv` (caller should not call
 /// it for a generic attachment). Returned as a raw IPC response (ArrayBuffer in JS).
 #[tauri::command]
-pub async fn read_media(
+pub async fn read_media<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, NodeState>,
     file_conv: String,
 ) -> Result<tauri::ipc::Response, CommandError> {
@@ -354,6 +473,7 @@ pub async fn read_media(
         .await
         .map_err(|e| format!("join error: {e}"))?
         .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))?;
+    crate::app_lock::reject_if_locked(&app)?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -369,7 +489,23 @@ mod tests {
             write_temp_file_in_cache(cache.path(), bytes, "png", Some("photo.png"), 42).unwrap();
         assert!(saved.starts_with(cache.path()));
         assert_eq!(saved.file_name().unwrap(), "photo.png");
-        assert_eq!(std::fs::read(saved).unwrap(), bytes);
+        assert_eq!(std::fs::read(&saved).unwrap(), bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&saved).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(saved.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
         assert!(
             write_temp_file_in_cache(
                 cache.path(),

@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { blobMime, isImage, isVideo, withinInlineCap } from "./mediaFile";
+import {
+  blobMime,
+  isImage,
+  isVideo,
+  posterCanvasSize,
+  withinInlineCap,
+} from "./mediaFile";
+
+it("bounds large video posters while preserving small frames and aspect ratio", () => {
+  expect(posterCanvasSize(3840, 2160)).toEqual({ width: 1280, height: 720 });
+  expect(posterCanvasSize(2160, 3840)).toEqual({ width: 720, height: 1280 });
+  expect(posterCanvasSize(640, 360)).toEqual({ width: 640, height: 360 });
+});
 
 describe("blobMime", () => {
   it("types a video/image blob from the name even when the manifest MIME is generic", () => {

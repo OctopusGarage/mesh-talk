@@ -40,7 +40,7 @@ async function effectiveGraphicsConfiguration() {
   // /proc/PID/environ reflects exec-time environment, not main()'s subsequent set_var.
   // Ask the running app for its bounded log tail and keep only allowlisted graphics rows.
   const result = await request("POST", `/session/${session}/execute/async`, {
-    script: 'const done = arguments[arguments.length - 1]; window.__TAURI__.core.invoke("read_log_tail").then(value => done({value}), error => done({error: String(error)}));',
+    script: 'const done = arguments[arguments.length - 1]; window.__TAURI_INTERNALS__.invoke("read_log_tail").then(value => done({value}), error => done({error: String(error)}));',
     args: [],
   });
   assert.equal(result.error, undefined, "running application log must be readable");
@@ -134,7 +134,7 @@ try {
   capture("initial");
   await request("POST", `/session/${session}/timeouts`, { script: 10000, implicit: 5000 });
   await until("production login DOM ready", () => execute(
-    'return !!window.__TAURI__ && !!document.querySelector("[data-testid=login-username]");'));
+    'return !!window.__TAURI_INTERNALS__ && !!document.querySelector("[data-testid=login-username]");'));
   if (launch.source === "dev") {
     report.effectiveConfiguration = await effectiveGraphicsConfiguration();
     // A compatibility launch must not silently reconfigure or replace an existing instance.

@@ -14,6 +14,7 @@
 
 // Protocol/core modules live in the `mesh_talk_core` crate; this crate is the
 // Tauri desktop shell over it.
+pub mod app_lock;
 pub mod avatars;
 pub mod chat_commands;
 pub mod commands;
@@ -108,7 +109,6 @@ pub fn run_tauri_configured(
     lazy_static::lazy_static! {
         static ref FILE_MANAGER: Arc<mesh_talk_core::storage::file_manager::FileManager> = {
             let data_path = data_dir();
-            log::info!("Data path: {}", data_path.display());
             Arc::new(mesh_talk_core::storage::file_manager::FileManager::new(data_path))
         };
     }
@@ -164,8 +164,6 @@ pub fn run_tauri_configured(
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
         // Launch-at-login. `--hidden` is passed on autostart so a login-time launch
         // comes up straight to the tray (see the WindowEvent handler / frontend boot).
         .plugin(tauri_plugin_autostart::init(
@@ -178,10 +176,22 @@ pub fn run_tauri_configured(
             if let Err(e) = crate::logger::init_logging(app.handle()) {
                 log::error!("Failed to initialize logging: {e}");
             }
+            if let Ok(cache) = app.path().app_cache_dir() {
+                crate::chat_commands::clean_stale_pasted_files(&cache);
+            }
             #[cfg(target_os = "linux")]
             crate::diagnostics::log_linux_graphics_configuration();
             // Seed the managed settings from disk before any window/notification logic runs.
             crate::settings::load_into_state(&app.handle().clone(), &app.state::<SettingsState>());
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        handle.state::<crate::app_lock::AppLock>().tick(&handle);
+                    }
+                });
+            }
             crate::trust::load_into_state(
                 &app.handle().clone(),
                 &app.state::<crate::trust::TrustState>(),
@@ -297,105 +307,134 @@ pub fn run_tauri_configured(
                 }
             }
         })
+        .manage(app_state.app_lock().clone())
         .manage(app_state)
         .manage(settings_state)
+        .manage(crate::events::NotificationContextState::default())
         .manage(trust_state)
         .manage(favorites_state)
         .manage(avatars_state)
         .manage(crate::contact_policy::HiddenContactsState::default())
         .manage(crate::chat_commands::NodeState::empty())
-        .invoke_handler(tauri::generate_handler![
-            owner_commands::owner_node_identity,
-            owner_commands::owner_enqueue_text,
-            owner_commands::owner_enqueue_sticker,
-            owner_commands::owner_enqueue_file,
-            owner_commands::owner_account_history,
-            owner_commands::owner_delivery_statuses,
-            commands::login,
-            crate::contact_policy::get_hidden_contacts,
-            crate::contact_policy::set_contact_hidden,
-            crate::privacy_commands::get_privacy,
-            crate::privacy_commands::set_invisible,
-            crate::privacy_commands::set_privacy_allowed,
-            crate::privacy_commands::initiate_privacy_contact,
-            commands::logout,
-            commands::register,
-            commands::rename_account,
-            commands::auto_login,
-            commands::clear_saved_session,
-            commands::adopt_linked_account,
-            crate::chat_commands::my_id,
-            crate::chat_commands::list_peers,
-            crate::chat_commands::send_dm,
-            crate::chat_commands::send_call_signal,
-            crate::chat_commands::history,
-            crate::chat_commands::account_id,
-            crate::chat_commands::publish_avatar,
-            crate::chat_commands::peer_avatars,
-            crate::chat_commands::send_to_account,
-            crate::chat_commands::account_history,
-            crate::chat_commands::start_linking,
-            crate::chat_commands::stop_linking,
-            crate::chat_commands::link_device,
-            crate::chat_commands::rekey_account,
-            crate::chat_commands::list_accounts,
-            crate::chat_commands::send_file_to_account,
-            crate::chat_commands::react_account,
-            crate::chat_commands::account_reactions,
-            crate::chat_commands::list_channels,
-            crate::chat_commands::create_channel,
-            crate::chat_commands::add_channel_member,
-            crate::chat_commands::remove_channel_member,
-            crate::chat_commands::rename_channel,
-            crate::chat_commands::channel_members,
-            crate::chat_commands::send_channel_message,
-            crate::chat_commands::channel_history,
-            crate::chat_commands::send_file_dm,
-            crate::chat_commands::send_file_channel,
-            crate::chat_commands::save_file,
-            crate::chat_commands::file_statuses,
-            crate::chat_commands::attachment_receive_policy,
-            crate::chat_commands::set_attachment_global_auto,
-            crate::chat_commands::set_attachment_contact_auto,
-            crate::chat_commands::decide_attachment,
-            crate::chat_commands::save_file_to_dir,
-            crate::chat_commands::default_download_dir,
-            crate::chat_commands::safety_number,
-            crate::chat_commands::read_file,
-            crate::chat_commands::read_media,
-            crate::chat_commands::react_dm,
-            crate::chat_commands::react_channel,
-            crate::chat_commands::reactions,
-            crate::chat_commands::channel_reactions,
-            crate::chat_commands::search,
-            crate::chat_commands::delete_message,
-            crate::chat_commands::recall_message,
-            crate::chat_commands::clear_conversation,
-            crate::chat_commands::send_sticker,
-            crate::chat_commands::diag_get_peers,
-            crate::chat_commands::diag_network_info,
-            crate::chat_commands::get_presence,
-            crate::chat_commands::rescan_peers,
-            crate::chat_commands::write_temp_file,
-            crate::chat_commands::capture_screen,
-            crate::chat_commands::screenshot_available,
-            crate::chat_commands::set_badge,
-            crate::chat_commands::network_name,
-            crate::logger::get_logs_dir,
-            crate::logger::get_log_file,
-            crate::logger::read_log_tail,
-            crate::logger::save_log_tail,
-            crate::diagnostics::env_info,
-            crate::settings::get_app_settings,
-            crate::settings::set_app_settings,
-            crate::trust::get_trust,
-            crate::trust::mark_verified,
-            crate::favorites::get_favorites,
-            crate::favorites::set_favorite,
-            crate::favorites::set_alias,
-            crate::avatars::get_avatars,
-            crate::avatars::set_avatar
-        ])
+        .invoke_handler({
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                owner_commands::owner_node_identity,
+                owner_commands::owner_enqueue_text,
+                owner_commands::owner_enqueue_sticker,
+                owner_commands::owner_enqueue_file,
+                owner_commands::owner_account_history,
+                owner_commands::owner_delivery_statuses,
+                commands::login,
+                crate::contact_policy::get_hidden_contacts,
+                crate::contact_policy::set_contact_hidden,
+                crate::privacy_commands::get_privacy,
+                crate::privacy_commands::set_invisible,
+                crate::privacy_commands::set_privacy_allowed,
+                crate::privacy_commands::initiate_privacy_contact,
+                commands::logout,
+                commands::register,
+                commands::rename_account,
+                commands::auto_login,
+                crate::app_lock::lock_app,
+                crate::app_lock::lock_status,
+                crate::app_lock::unlock_app,
+                crate::app_lock::note_activity,
+                crate::app_lock::set_call_active,
+                commands::clear_saved_session,
+                commands::adopt_linked_account,
+                crate::chat_commands::my_id,
+                crate::chat_commands::list_peers,
+                crate::chat_commands::send_dm,
+                crate::chat_commands::send_call_signal,
+                crate::chat_commands::history,
+                crate::chat_commands::account_id,
+                crate::chat_commands::publish_avatar,
+                crate::chat_commands::peer_avatars,
+                crate::chat_commands::send_to_account,
+                crate::chat_commands::account_history,
+                crate::chat_commands::start_linking,
+                crate::chat_commands::stop_linking,
+                crate::chat_commands::link_device,
+                crate::chat_commands::rekey_account,
+                crate::chat_commands::list_accounts,
+                crate::chat_commands::send_file_to_account,
+                crate::chat_commands::react_account,
+                crate::chat_commands::account_reactions,
+                crate::chat_commands::list_channels,
+                crate::chat_commands::create_channel,
+                crate::chat_commands::add_channel_member,
+                crate::chat_commands::remove_channel_member,
+                crate::chat_commands::rename_channel,
+                crate::chat_commands::channel_members,
+                crate::chat_commands::send_channel_message,
+                crate::chat_commands::channel_history,
+                crate::chat_commands::send_file_dm,
+                crate::chat_commands::send_file_channel,
+                crate::chat_commands::save_file,
+                crate::chat_commands::file_statuses,
+                crate::chat_commands::media_migration_warning,
+                crate::chat_commands::attachment_receive_policy,
+                crate::chat_commands::set_attachment_global_auto,
+                crate::chat_commands::set_attachment_contact_auto,
+                crate::chat_commands::decide_attachment,
+                crate::chat_commands::save_file_to_dir,
+                crate::chat_commands::default_download_dir,
+                crate::chat_commands::open_download_dir,
+                crate::chat_commands::safety_number,
+                crate::chat_commands::read_file,
+                crate::chat_commands::read_media,
+                crate::chat_commands::react_dm,
+                crate::chat_commands::react_channel,
+                crate::chat_commands::reactions,
+                crate::chat_commands::channel_reactions,
+                crate::chat_commands::search,
+                crate::chat_commands::delete_message,
+                crate::chat_commands::recall_message,
+                crate::chat_commands::clear_conversation,
+                crate::chat_commands::send_sticker,
+                crate::chat_commands::diag_get_peers,
+                crate::chat_commands::diag_network_info,
+                crate::chat_commands::get_presence,
+                crate::chat_commands::rescan_peers,
+                crate::chat_commands::write_temp_file,
+                crate::chat_commands::delete_temp_file,
+                crate::chat_commands::capture_screen,
+                crate::chat_commands::screenshot_available,
+                crate::chat_commands::set_badge,
+                crate::chat_commands::network_name,
+                crate::events::set_notification_context,
+                crate::logger::get_logs_dir,
+                crate::logger::get_log_file,
+                crate::logger::read_log_tail,
+                crate::logger::save_log_tail,
+                crate::diagnostics::env_info,
+                crate::settings::get_app_settings,
+                crate::settings::set_app_settings,
+                crate::trust::get_trust,
+                crate::trust::mark_verified,
+                crate::favorites::get_favorites,
+                crate::favorites::set_favorite,
+                crate::favorites::set_alias,
+                crate::avatars::get_avatars,
+                crate::avatars::set_avatar
+            ];
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                if invoke
+                    .message
+                    .webview_ref()
+                    .state::<crate::app_lock::AppLock>()
+                    .is_locked()
+                    && !crate::app_lock::allowed_while_locked(invoke.message.command())
+                {
+                    invoke
+                        .resolver
+                        .reject(commands::CommandError::Authorization("app locked".into()));
+                    true
+                } else {
+                    handler(invoke)
+                }
+            }
+        })
         .run(context)
         .unwrap_or_else(|e| {
             // A failed launch must be a non-zero exit, not a silent success.
