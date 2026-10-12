@@ -26,6 +26,7 @@ test.use({ viewport: { width: 1100, height: 800 } });
 test("open the sticker panel and send an animated sticker", async ({
   page,
 }) => {
+  test.skip(process.env.MESH_TALK_VARIANT === "lite", "Default edition only");
   await enterBobDm(page);
 
   await revealComposerTools(page);
@@ -41,6 +42,23 @@ test("open the sticker panel and send an animated sticker", async ({
   // Panel closes and the sticker lands as its own bubble-less message.
   await expect(panel).toBeHidden();
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
+});
+
+test("lite sends built-in stickers as emoji and shows their fallback", async ({
+  page,
+}) => {
+  test.skip(process.env.MESH_TALK_VARIANT !== "lite", "Lite edition only");
+  await enterBobDm(page);
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  const option = page.getByTestId("sticker-option-1f602");
+  await expect(option).toContainText("😂");
+  await expect(option.locator("img")).toHaveCount(0);
+  await option.click();
+  await expect(page.getByTestId("message-sticker-fallback").last()).toHaveText(
+    "😂",
+  );
 });
 
 test("the default edition installs the cat sticker collection", async ({

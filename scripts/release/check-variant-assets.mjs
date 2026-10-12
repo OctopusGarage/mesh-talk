@@ -9,9 +9,20 @@ assert.ok(variant === "default" || variant === "lite", "unknown edition");
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const packDirectory = resolve(root, "frontend/dist/builtin-packs");
+const stickerDirectory = resolve(root, "frontend/dist/stickers/noto");
 if (variant === "lite") {
   assert.equal(existsSync(packDirectory), false, "lite contains bundled packs");
+  assert.equal(
+    existsSync(stickerDirectory),
+    false,
+    "lite contains animated Noto stickers",
+  );
 } else {
+  assert.deepEqual(
+    readdirSync(stickerDirectory).sort(),
+    readdirSync(resolve(root, "frontend/src/assets/stickers/noto")).sort(),
+    "default Noto sticker assets differ from source",
+  );
   const catalog = JSON.parse(
     readFileSync(resolve(root, "site/market/catalog.json"), "utf8"),
   );

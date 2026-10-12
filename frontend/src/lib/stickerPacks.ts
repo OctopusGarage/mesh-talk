@@ -1,8 +1,8 @@
 import type { CustomizationPack } from "@/lib/pack";
 
-// Built-in animated stickers: Google's Noto Animated Emoji (open-source), bundled as
-// downscaled animated WebP. Vite discovers filenames at build time and serves the
-// images as static assets; each file is named by its emoji codepoint(s) joined with `_`
+// Built-in sticker IDs use Google's Noto Animated Emoji filenames. The default
+// edition bundles downscaled animated WebP; lite keeps IDs and emoji fallbacks.
+// Vite discovers filenames at build time; each is named by codepoints joined with `_`
 // (e.g. `1f602.webp`, `2764_fe0f.webp`), so the sticker id and its fallback emoji char
 // are both derived from the filename. Drop a `.webp` in the folder and it appears.
 
@@ -31,7 +31,8 @@ function idFromPath(path: string): string {
   return (path.split("/").pop() ?? "").replace(/\.[^.]+$/, "");
 }
 
-/** All bundled animated stickers, sorted by id for a stable picker order. */
+/** Built-in stickers, sorted by ID; lite uses emoji-only fallbacks. */
+const bundledNotoArtwork = import.meta.env.VITE_BUNDLED_NOTO_STICKERS;
 export const STICKERS: Sticker[] = Object.keys(
   import.meta.glob("../assets/stickers/noto/*.webp"),
 )
@@ -41,7 +42,9 @@ export const STICKERS: Sticker[] = Object.keys(
     const id = idFromPath(name);
     return {
       id,
-      url: `/stickers/noto/${encodeURIComponent(name)}`,
+      url: bundledNotoArtwork
+        ? `/stickers/noto/${encodeURIComponent(name)}`
+        : "",
       emoji: emojiFromId(id),
     };
   });
@@ -68,7 +71,10 @@ export function stickerById(
 ): Sticker | undefined {
   // Messages sent by the earlier bundled cat collection used unprefixed IDs.
   const lookupId = id.startsWith("cat-") ? `pack:cats:${id}` : id;
-  if (!lookupId.startsWith("pack:")) return BY_ID.get(lookupId);
+  if (!lookupId.startsWith("pack:")) {
+    const builtIn = BY_ID.get(lookupId);
+    return builtIn?.url ? builtIn : undefined;
+  }
   const separator = lookupId.lastIndexOf(":");
   if (separator <= 5) return undefined;
   const pack = packs.find(
