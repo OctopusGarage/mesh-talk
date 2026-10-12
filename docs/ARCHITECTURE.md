@@ -537,6 +537,10 @@ the UI sends users who suspect compromise to new identity creation.
   `src-tauri/` — the Tauri desktop shell, a thin layer that depends on the core. Shared
   dependency versions live in the root `[workspace.dependencies]`. The app references the
   core as `mesh_talk_core::…`; a third party can depend on `mesh-talk-core` alone (no Tauri).
+- **Windows runtime**: `src-tauri/tauri.conf.json` selects static Visual C++ runtime
+  linking with `build.windows.staticVCRuntime`. `src-tauri/build.rs` translates any
+  legacy `STATIC_VCRUNTIME` value to the supported Windows build attribute before
+  calling `tauri-build`, preserving the override without its deprecation warning.
 - **Local gate** (`scripts/check-health.sh`): delivery / AI regression smoke,
   fmt,
   `clippy --workspace --all-targets -D warnings`, ESLint, frontend tests (Vitest), full
@@ -562,8 +566,9 @@ the UI sends users who suspect compromise to new identity creation.
   - *Claude operations* (`.claude/`): `/bug-hunt` fans out read-only `bug-hunter` subagents
     (adversarial audit, verified findings only) over the core; `code-reviewer` reviews a diff;
     `/e2e` runs the `e2e-runner` over the real multi-process integration suite.
-- **Crypto primitives**: ed25519-dalek, x25519-dalek (need rand_core 0.6 — keep `rand` at
-  0.8), aes-gcm, snow (Noise), sha2, hkdf, pbkdf2, bincode.
+- **Crypto primitives**: ed25519-dalek and x25519-dalek use `rand_core` 0.6
+  directly; the desktop shell uses its own `rand` 0.10. Other primitives include
+  aes-gcm, snow (Noise), sha2, hkdf, pbkdf2, and bincode.
 
 ## 8. Security posture (summary)
 

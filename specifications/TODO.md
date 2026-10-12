@@ -17,15 +17,20 @@ pickers, consistent focus/touch feedback, optional wallpaper, and lazy avatar-ga
 thumbnails. These are presentation and interaction changes; the protocol semantics above
 remain the same. Experimental calling remains labeled as such in Settings.
 
+Subsequent v0.3.0 work added default/lite desktop editions, local customization
+packs, privacy presets and invisible mode, manual encrypted backup with signed-out
+recovery, and own-presence display. Recovery retains the account identity but
+creates a new device and cannot revoke an old device; see
+[`docs/backup-recovery.md`](../docs/backup-recovery.md).
+
 Architecture: **[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)**. The current
 frontend visual system is in **[`frontend/DESIGN.md`](../frontend/DESIGN.md)**.
 Detailed task history lives in git; personal working plans under `docs/superpowers/`
 and the root `plans/` directory are intentionally untracked.
 
-## Design notes & external constraints (not open work)
+## Design notes & external constraints
 
-No actionable correctness/feature work is open. The items below are deliberate design
-choices or upstream-gated dependencies, not unfinished tasks:
+The items below are deliberate design choices or upstream-gated dependencies:
 
 - **Device-linking authentication is the one-time code, by design.** The pairing
   authenticator is `SHA-256(code ‖ linker_ed ‖ joiner_ed)` — it binds *both* device keys,

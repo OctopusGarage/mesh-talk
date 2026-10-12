@@ -7,9 +7,11 @@ This document describes the platform-specific permissions and configurations imp
 > Noise-encrypted TCP on an OS-assigned port. The host firewall must permit UDP 47474
 > and the chosen TCP port.
 >
-> **At-rest secrets (all platforms):** identity/account keystores and every store are
-> encrypted with PBKDF2-HMAC-SHA256 (600k rounds) + AES-256-GCM under the login password
-> and held as files under `~/.mesh-talk/` — Mesh-Talk does **not** use OS keychains.
+> **At-rest secrets (all platforms):** identity/account keystores and protocol stores
+> are encrypted with PBKDF2-HMAC-SHA256 (600k rounds) + AES-256-GCM under the login
+> password and held as files under `~/.mesh-talk/`. If **Stay signed in** is enabled,
+> the resumable login credential is saved separately in the OS credential store.
+> On macOS, reading it requires Touch ID on supported systems.
 
 ## Windows
 
@@ -25,8 +27,8 @@ This document describes the platform-specific permissions and configurations imp
 
 ### Secure Storage
 
-Secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the at-rest note above),
-not via DPAPI.
+Protocol secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the
+at-rest note above). Optional saved-session credentials use Windows Credential Manager.
 
 ### Notifications
 
@@ -41,8 +43,8 @@ Windows toast system).
 
 ### Secure Storage
 
-Secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the at-rest note above),
-not via the Secret Service API.
+Protocol secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the
+at-rest note above). Optional saved-session credentials use the Secret Service API.
 
 ### Notifications
 
@@ -69,8 +71,9 @@ notifications).
 
 ### Secure Storage
 
-Secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the at-rest note above),
-not via Keychain Services.
+Protocol secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the
+at-rest note above). Optional saved-session credentials use a device-local Keychain
+item protected by the current Touch ID enrollment on supported macOS versions.
 
 ### Notifications
 

@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { describe, it, expect, vi } from "vitest";
 import { messageSegments, mentionsName, renderWithMentions } from "./mentions";
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe("messageSegments", () => {
   it("splits a mention out of surrounding text", () => {
@@ -57,6 +62,16 @@ describe("mentionsName", () => {
 });
 
 describe("renderWithMentions", () => {
+  it("opens a clicked URL through the native opener", () => {
+    const link = renderWithMentions("https://example.com")[0];
+    const preventDefault = vi.fn();
+
+    link.props.onClick({ preventDefault });
+
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(openUrl).toHaveBeenCalledWith("https://example.com");
+  });
+
   it("uses the regular primary link color outside own bubbles", () => {
     const parts = renderWithMentions("see https://example.com");
     const link = parts.find((part) => part.type === "a");

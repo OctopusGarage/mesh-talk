@@ -116,22 +116,15 @@ jobs:
           path: frontend/node_modules
           key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
 
-      # 9️⃣ Build frontend to generate `dist` folder
-      - name: Build frontend
+      # The health gate builds the frontend before Tauri checks.
+      - name: Install frontend dependencies
         run: |
           make frontend-install
-          cd frontend
-          npm run build
 
       - name: Install Playwright system dependencies (Linux)
         if: runner.os == 'Linux'
         working-directory: frontend
         run: npx playwright install-deps chromium
-
-      # 8️⃣ Install project dependencies
-      - name: Install project dependencies
-        run: |
-          make install-deps
 
       # 🔟 Run unified health check
       - name: Run unified health check

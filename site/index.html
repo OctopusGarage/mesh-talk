@@ -8,13 +8,13 @@
     </title>
     <meta
       name="description"
-      content="Mesh-Talk is a local-first desktop messenger. Create a local account, discover peers on your LAN, and exchange end-to-end-encrypted messages without a cloud service. Free and open source for macOS, Windows, and Linux."
+      content="Mesh-Talk is a local-first desktop messenger for macOS, Windows, and Linux. Chat directly on your LAN with end-to-end encryption, optional offline relay, and manual encrypted backup."
     />
     <meta name="theme-color" content="#08141a" />
     <meta property="og:title" content="Mesh-Talk" />
     <meta
       property="og:description"
-      content="A local-first, end-to-end-encrypted desktop messenger. Local accounts, direct LAN chat, and optional peer-operated offline relay."
+      content="A local-first, end-to-end-encrypted desktop messenger with direct LAN chat, optional peer-operated offline relay, and manual encrypted backup."
     />
     <meta property="og:type" content="website" />
     <link
@@ -613,7 +613,9 @@
           <a class="hide-sm" href="#how">How it works</a>
           <a class="hide-sm" href="#security">Security</a>
           <a class="hide-sm" href="#features">Features</a>
-          <a class="hide-sm" href="https://octopusgarage.github.io/marketplace/">Marketplace</a>
+          <a class="hide-sm" href="https://octopusgarage.github.io/marketplace/"
+            >Marketplace</a
+          >
           <a class="ghost" href="https://github.com/OctopusGarage/mesh-talk"
             >GitHub</a
           >
@@ -768,7 +770,7 @@
       <section class="section" id="features">
         <div class="wrap">
           <div class="section__head reveal">
-            <h2>Everything you'd expect — kept on your network.</h2>
+            <h2>Everyday chat, with control over your local data.</h2>
           </div>
           <div class="caps reveal">
             <div class="cap">
@@ -811,6 +813,40 @@
               <p>
                 Link your own devices to one account with a code-authorized
                 pairing.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Recovery</div>
+              <b>Encrypted backup</b>
+              <p>
+                Export a manual backup with a separate recovery key. Restore an
+                account on a new device after a loss; old devices are not
+                revoked.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Privacy</div>
+              <b>Choose your exposure</b>
+              <p>
+                Privacy presets control previews, app locking, and copying.
+                Invisible mode stops public announcements while approved
+                accounts can still reach you.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Personalization</div>
+              <b>Installable packs</b>
+              <p>
+                Add avatar, theme, and sticker packs from a local ZIP or the
+                curated marketplace.
+              </p>
+            </div>
+            <div class="cap">
+              <div class="cap__k">Availability</div>
+              <b>Live presence</b>
+              <p>
+                See online and last-seen status for nearby contacts. Your own
+                row in a channel member list shows online.
               </p>
             </div>
             <div class="cap">
@@ -889,7 +925,8 @@
             </figure>
           </div>
           <p class="shot-note">
-            Current v0.3.0 interface with deterministic football-themed demo identities and messages.
+            v0.3.0 interface examples with deterministic football-themed demo
+            identities and messages.
           </p>
         </div>
       </section>
@@ -923,7 +960,7 @@
                 />
               </svg>
               <b>Windows</b>
-              <span>x64 installer</span>
+              <span>x64 · ARM64 installers</span>
             </a>
             <a
               class="platform"
@@ -939,9 +976,11 @@
             </a>
           </div>
           <p class="note">
-            Builds are unsigned by a commercial CA — the release notes walk you
-            through the one-time first-run step on each OS. Prefer to build it
-            yourself?
+            Releases include default and lite editions. Lite omits bundled
+            optional packs and animated sticker assets; both editions can
+            install packs later. Builds are unsigned by a commercial CA — the
+            release notes explain the first-run steps and artifact verification.
+            Prefer to build it yourself?
             <a
               href="https://github.com/OctopusGarage/mesh-talk#build-from-source"
               >Build from source.</a

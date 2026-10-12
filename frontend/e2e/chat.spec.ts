@@ -238,12 +238,41 @@ test.describe("Mesh-Talk UI flow", () => {
   test("URLs in messages render as clickable links", async ({ page }) => {
     await enterChat(page);
     await openBobDm(page);
+    await page.evaluate(() => {
+      const tauri = (
+        window as unknown as {
+          __TAURI_INTERNALS__: {
+            invoke: (
+              cmd: string,
+              args: Record<string, unknown>,
+            ) => Promise<unknown>;
+          };
+        }
+      ).__TAURI_INTERNALS__;
+      const invoke = tauri.invoke.bind(tauri);
+      (window as unknown as { __openedUrls: string[] }).__openedUrls = [];
+      tauri.invoke = async (cmd, args) => {
+        if (cmd === "plugin:opener|open_url")
+          (window as unknown as { __openedUrls: string[] }).__openedUrls.push(
+            String(args.url),
+          );
+        return invoke(cmd, args);
+      };
+    });
     const box = page.getByTestId("composer-input");
     await box.fill("visit https://example.com today");
     await page.getByTestId("composer-send").click();
-    await expect(
-      page.getByRole("link", { name: "https://example.com" }),
-    ).toBeVisible();
+    const link = page.getByRole("link", { name: "https://example.com" });
+    await expect(link).toBeVisible();
+    await link.click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as unknown as { __openedUrls: string[] }).__openedUrls,
+        ),
+      )
+      .toEqual(["https://example.com"]);
+    await expect(page).toHaveURL(/localhost/);
   });
 
   test("emoji picker inserts into the composer", async ({ page }) => {

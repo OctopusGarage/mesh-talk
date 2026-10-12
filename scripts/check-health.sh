@@ -113,10 +113,18 @@ if ! command_exists node || ! command_exists npm; then
     exit 1
 fi
 
-# Install dependencies if not already installed
-print_status "success" "Installing dependencies..."
-make install-deps >/dev/null 2>&1 || true
-make frontend-install >/dev/null 2>&1 || true
+# Cargo resolves dependencies during Clippy, tests, and builds below; an eager
+# `cargo build` here compiled the app twice. Install frontend dependencies only
+# on a fresh checkout, and surface installation failures instead of hiding them.
+if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
+   [ "frontend/package-lock.json" -nt "frontend/node_modules/.package-lock.json" ]; then
+    print_status "success" "Installing frontend dependencies..."
+    if ! { cd frontend && npm ci; }; then
+        print_status "error" "Frontend dependency installation failed."
+        exit 1
+    fi
+    cd ..
+fi
 
 # Tauri's `generate_context!` validates that `frontendDist` exists even during clippy/test
 # compilation. FAST mode intentionally skips the real frontend build, so create the ignored
@@ -146,24 +154,11 @@ if ! cargo fmt --all -- --check; then
     exit 1
 fi
 
-# Apply automatic code formatting fixes (Rust)
-print_status "success" "Applying automatic Rust code formatting fixes..."
-if ! cargo fmt --all; then
-    print_status "warning" "Failed to apply some Rust code formatting fixes automatically."
-fi
-
 # Check code formatting (Frontend)
 print_status "success" "Checking frontend code formatting..."
 if ! { cd frontend && npx prettier --check src/; }; then
     print_status "error" "Frontend code formatting issues found. Run 'npx prettier --write src/' to fix."
     exit 1
-fi
-cd ..
-
-# Apply automatic code formatting fixes (Frontend)
-print_status "success" "Applying automatic frontend code formatting fixes..."
-if ! { cd frontend && npx prettier --write src/; }; then
-    print_status "warning" "Failed to apply some frontend code formatting fixes automatically."
 fi
 cd ..
 
@@ -173,13 +168,6 @@ print_status "success" "Running Rust linter (Clippy)..."
 if ! { cd src-tauri && cargo clippy --workspace --all-targets -- -D warnings; }; then
     print_status "error" "Rust linting issues found. Please fix Clippy warnings."
     exit 1
-fi
-cd ..
-
-# Apply automatic Clippy fixes
-print_status "success" "Applying automatic Clippy fixes..."
-if ! { cd src-tauri && cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged; }; then
-    print_status "warning" "Failed to apply some Clippy fixes automatically."
 fi
 cd ..
 
