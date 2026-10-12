@@ -15,6 +15,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`PROJECT.md`](../PROJECT.md) | Top-level context pointer for AI tools / new contributors. |
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
+| [`docs/backup-recovery.md`](backup-recovery.md) | Manual encrypted backup, offline restore, recovery key handling, and coverage limits. |
 | [`docs/evals/architecture-score.md`](evals/architecture-score.md) | Fixed-rubric architecture review, before/after score, evidence, and remaining seams. |
 | [`specifications/TODO.md`](../specifications/TODO.md) | Implementation status (feature-complete) + deliberate design notes / external constraints. |
 
@@ -34,6 +35,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md) | File and image transfer audit, interaction states, and validation evidence. |
 | [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md) | Screenshot interaction evaluation, test evidence, and native release gate. |
 | [`docs/research/screenshot-platform-support.md`](research/screenshot-platform-support.md) | Windows and Linux screenshot capture feasibility, API limits, and validation plan. |
+| [`docs/research/2026-10-12-im-migration-recovery.md`](research/2026-10-12-im-migration-recovery.md) | First-party messenger migration and recovery patterns that inform Mesh-Talk's design. |
 | [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md) | Hidden-contact real mesh, three-platform native UI, evidence gates and usability rubric. |
 | [`docs/evals/quality-gates.md`](evals/quality-gates.md) | Scenario-based review, mutation evidence, six-platform artifact verification and controlled release publication. |
 | [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md) | Product workflow evaluation layers, three-platform real backend/native evidence, portable browser boundaries and fail-closed CI gating. |

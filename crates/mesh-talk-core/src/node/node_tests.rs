@@ -8,6 +8,639 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+#[test]
+fn recovery_snapshot_carries_history_without_reusing_device_identity() {
+    use crate::eventlog::event::{ConversationId, EventId};
+    use crate::recovery::snapshot::{SnapshotRecordV1, read_snapshot};
+    use std::io::Cursor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let old_device_id = me.public().user_id();
+    let account_id =
+        crate::identity::account::Account::from_secret_bytes(me.secret_bytes().0).account_id();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "password",
+    )
+    .unwrap();
+    let conversation = ConversationId::new([3; 32]);
+    node.sentlog
+        .lock()
+        .unwrap()
+        .record(conversation, 1, 11, b"sent")
+        .unwrap();
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            "peer".into(),
+            12,
+            b"received",
+            EventId::new([4; 32]),
+        )
+        .unwrap();
+    let media_id = ConversationId::new([9; 32]);
+    node.media
+        .store_bytes(media_id, "photo.png", b"image bytes")
+        .unwrap();
+    // Locally retained media without a visible file card must stay out of backup.
+    node.media
+        .store_bytes(
+            ConversationId::new([10; 32]),
+            "orphan.png",
+            b"deleted bytes",
+        )
+        .unwrap();
+    node.recalls
+        .lock()
+        .unwrap()
+        .record(conversation, EventId::new([5; 32]), 15)
+        .unwrap();
+    node.profiles
+        .lock()
+        .unwrap()
+        .record("peer", 16, Some(b"avatar".to_vec()))
+        .unwrap();
+    let signed = crate::eventlog::event::Event::new(
+        &node.identity,
+        ConversationId::new([6; 32]),
+        1,
+        vec![],
+        1,
+        17,
+        crate::eventlog::event::EventKind::Message,
+        b"sealed".to_vec(),
+    );
+    node.log.lock().unwrap().append(signed.clone()).unwrap();
+    let file_manifest = crate::file::FileManifest {
+        name: "photo.png".into(),
+        size: 11,
+        mime: "image/png".into(),
+        checksum: crate::file::file_checksum(b"image bytes"),
+        file_key: [3; 32],
+        file_conv: media_id,
+        chunk_count: 1,
+    };
+    let file_event = crate::eventlog::event::Event::new(
+        &node.identity,
+        conversation,
+        2,
+        vec![],
+        2,
+        18,
+        crate::eventlog::event::EventKind::FileManifest,
+        b"sealed file card".to_vec(),
+    );
+    node.log.lock().unwrap().append(file_event.clone()).unwrap();
+    node.received_files
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            node.user_id(),
+            18,
+            &file_manifest.encode(),
+            file_event.id,
+        )
+        .unwrap();
+
+    let mut snapshot = Vec::new();
+    node.write_recovery_snapshot(&mut snapshot, 100).unwrap();
+    let mut records = Vec::new();
+    let header = read_snapshot(Cursor::new(snapshot.as_slice()), |record| {
+        records.push(record);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(header.account_id, account_id);
+    assert_eq!(records.len(), 9);
+    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::SentDm { plaintext, .. } if plaintext == b"sent")));
+    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::ReceivedDm { plaintext, .. } if plaintext == b"received")));
+    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::MediaDescriptor { file_conv, size, .. } if *file_conv == [9; 32] && *size == 11)));
+    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::MediaChunk { file_conv, bytes, .. } if *file_conv == [9; 32] && bytes == b"image bytes")));
+    assert!(records.iter().any(
+        |record| matches!(record, SnapshotRecordV1::Recall { target, .. } if *target == [5; 32])
+    ));
+    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::Profile { account_id, avatar, .. } if account_id == "peer" && avatar.as_deref() == Some(b"avatar"))));
+    assert!(records.iter().any(
+        |record| matches!(record, SnapshotRecordV1::SignedEvent { event } if event.id == signed.id)
+    ));
+    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::FileCard { event_id, .. } if *event_id == *file_event.id.as_bytes())));
+
+    let restored = Node::install_recovery_snapshot(
+        Cursor::new(snapshot),
+        &dir.path().join("restored"),
+        "new password",
+    )
+    .unwrap();
+    assert_eq!(restored.account_id(), account_id);
+    assert_ne!(restored.user_id(), old_device_id);
+    assert_eq!(restored.history(conversation, 10).len(), 3);
+    assert!(
+        restored
+            .history(conversation, 10)
+            .iter()
+            .find(|entry| entry.id == file_event.id)
+            .unwrap()
+            .from_me,
+        "a file sent from the backed-up device remains mine after restore"
+    );
+    assert_eq!(restored.peer_avatar("peer"), Some(b"avatar".to_vec()));
+    assert_eq!(restored.media.read(media_id), Some(b"image bytes".to_vec()));
+    assert_eq!(
+        restored.media.path(media_id).unwrap().extension().unwrap(),
+        "png"
+    );
+    assert!(!restored.media.contains(ConversationId::new([10; 32])));
+    let mut second_snapshot = Vec::new();
+    restored
+        .write_recovery_snapshot(&mut second_snapshot, 200)
+        .unwrap();
+    let twice_restored = Node::install_recovery_snapshot(
+        Cursor::new(second_snapshot),
+        &dir.path().join("twice-restored"),
+        "third password",
+    )
+    .unwrap();
+    assert!(
+        twice_restored
+            .history(conversation, 10)
+            .iter()
+            .find(|entry| entry.id == file_event.id)
+            .unwrap()
+            .from_me,
+        "file ownership survives another backup and restore"
+    );
+    drop(restored);
+    let restored_dir = dir.path().join("restored");
+    assert!(
+        crate::identity::keystore::load(&restored_dir.join("identity.keystore"), "old password")
+            .is_err()
+    );
+    let identity =
+        crate::identity::keystore::load(&restored_dir.join("identity.keystore"), "new password")
+            .unwrap();
+    let account = crate::identity::account_keystore::load(
+        &restored_dir.join("account.keystore"),
+        "new password",
+    )
+    .unwrap();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let reopened = Node::open_with_account(
+        identity,
+        account,
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &restored_dir.join("messages.log"),
+        &restored_dir.join("sent.log"),
+        "new password",
+    )
+    .unwrap();
+    assert_eq!(reopened.account_id(), account_id);
+    assert_eq!(reopened.history(conversation, 10).len(), 3);
+    assert!(reopened.log.lock().unwrap().has(&signed.id));
+    assert!(reopened.log.lock().unwrap().has(&file_event.id));
+    assert_eq!(
+        reopened
+            .received_files
+            .lock()
+            .unwrap()
+            .entries(&conversation)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn account_history_keeps_a_contact_visible_after_discovery_expires() {
+    use crate::eventlog::event::{ConversationId, EventId};
+    use crate::node::DmEnvelope;
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let saved_device_secret = me.secret_bytes();
+    let own =
+        crate::identity::account::Account::from_secret_bytes(me.secret_bytes().0).account_id();
+    let peer = crate::identity::account::Account::generate().account_id();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "password",
+    )
+    .unwrap();
+    let envelope = DmEnvelope::new(peer.clone(), own, [7; 32], b"hello".to_vec());
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            ConversationId::new([3; 32]),
+            peer.clone(),
+            1,
+            &envelope.encode(),
+            EventId::new([8; 32]),
+        )
+        .unwrap();
+    assert_eq!(node.known_account_ids(), vec![peer.clone()]);
+    drop(node);
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let reopened = Node::open(
+        DeviceIdentity::from_secret_bytes(saved_device_secret.0, saved_device_secret.1),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "password",
+    )
+    .unwrap();
+    assert_eq!(reopened.known_account_ids(), vec![peer]);
+}
+
+#[test]
+fn recovery_rejects_a_snapshot_changed_between_validation_and_install() {
+    use crate::recovery::snapshot::{SnapshotError, SnapshotHeaderV1, write_snapshot};
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    struct SwapOnRewind {
+        first: Cursor<Vec<u8>>,
+        second: Cursor<Vec<u8>>,
+        switched: bool,
+    }
+    impl Read for SwapOnRewind {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.switched {
+                self.second.read(bytes)
+            } else {
+                self.first.read(bytes)
+            }
+        }
+    }
+    impl Seek for SwapOnRewind {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            if position == SeekFrom::Start(0) {
+                self.switched = true;
+            }
+            if self.switched {
+                self.second.seek(position)
+            } else {
+                self.first.seek(position)
+            }
+        }
+    }
+
+    let snapshot_for = |secret: [u8; 32]| {
+        let mut bytes = Vec::new();
+        write_snapshot(
+            &mut bytes,
+            &SnapshotHeaderV1 {
+                schema_version: 1,
+                account_secret: secret,
+                account_id: crate::identity::account::Account::from_secret_bytes(secret)
+                    .account_id(),
+                source_device_ed25519_pubs: vec![[1; 32]],
+                created_at_ms: 1,
+                record_count: 0,
+            },
+            [],
+        )
+        .unwrap();
+        bytes
+    };
+    let source = SwapOnRewind {
+        first: Cursor::new(snapshot_for([1; 32])),
+        second: Cursor::new(snapshot_for([2; 32])),
+        switched: false,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("restored");
+    assert!(matches!(
+        Node::install_recovery_snapshot(source, &destination, "new password"),
+        Err(SnapshotError::InvalidAccount)
+    ));
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
+    use std::io::Cursor;
+    let dir = tempfile::tempdir().unwrap();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let source = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "old password",
+    )
+    .unwrap();
+    let channel = source.create_channel("Archive", vec![]).await.unwrap();
+    source
+        .send_channel_message(channel, b"group history")
+        .await
+        .unwrap();
+    let original_id = source.channel_history(channel, 10)[0].id;
+    source.recall_channel(channel, original_id).await.unwrap();
+    let mut snapshot = Vec::new();
+    source.write_recovery_snapshot(&mut snapshot, 100).unwrap();
+    let restored_dir = dir.path().join("restored");
+    let restored =
+        Node::install_recovery_snapshot(Cursor::new(snapshot), &restored_dir, "new password")
+            .unwrap();
+    drop(restored);
+    let identity =
+        crate::identity::keystore::load(&restored_dir.join("identity.keystore"), "new password")
+            .unwrap();
+    let account = crate::identity::account_keystore::load(
+        &restored_dir.join("account.keystore"),
+        "new password",
+    )
+    .unwrap();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let reopened = Node::open_with_account(
+        identity,
+        account,
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &restored_dir.join("messages.log"),
+        &restored_dir.join("sent.log"),
+        "new password",
+    )
+    .unwrap();
+    assert!(
+        reopened
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == channel)
+    );
+    assert!(
+        reopened
+            .channel_history(channel, 10)
+            .iter()
+            .any(|entry| { entry.id == original_id && entry.recalled })
+    );
+    let mut second_snapshot = Vec::new();
+    reopened
+        .write_recovery_snapshot(&mut second_snapshot, 200)
+        .unwrap();
+    let twice_restored = Node::install_recovery_snapshot(
+        Cursor::new(second_snapshot),
+        &dir.path().join("twice-restored"),
+        "third password",
+    )
+    .unwrap();
+    assert!(
+        twice_restored
+            .channel_history(channel, 10)
+            .iter()
+            .any(|entry| entry.id == original_id && entry.recalled),
+        "the original message ID and recall survive another backup and restore"
+    );
+    assert_eq!(
+        reopened
+            .delete_message(channel, original_id, false)
+            .unwrap(),
+        1
+    );
+    assert!(
+        reopened
+            .channel_history(channel, 10)
+            .iter()
+            .all(|entry| entry.id != original_id)
+    );
+}
+
+#[tokio::test]
+async fn recovered_channel_can_rejoin_send_and_reopen_without_sent_sequence_conflict() {
+    use std::io::Cursor;
+    let dir = tempfile::tempdir().unwrap();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let source = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "old password",
+    )
+    .unwrap();
+    let channel = source.create_channel("Archive", vec![]).await.unwrap();
+    source
+        .send_channel_message(channel, b"before recovery")
+        .await
+        .unwrap();
+    let mut snapshot = Vec::new();
+    source.write_recovery_snapshot(&mut snapshot, 100).unwrap();
+    let restored_dir = dir.path().join("restored");
+    let restored =
+        Node::install_recovery_snapshot(Cursor::new(snapshot), &restored_dir, "new password")
+            .unwrap();
+    source
+        .add_channel_member(channel, restored.identity.public())
+        .await
+        .unwrap();
+    let invitation = (*source.log.lock().unwrap().events(&channel).last().unwrap()).clone();
+    restored.log.lock().unwrap().append(invitation).unwrap();
+    drop(restored);
+    let rejoined = Node::open_recovery_profile(&restored_dir, "new password").unwrap();
+    assert!(!rejoined.list_channels()[0].archived);
+    rejoined
+        .send_channel_message(channel, b"after recovery one")
+        .await
+        .unwrap();
+    rejoined
+        .send_channel_message(channel, b"after recovery two")
+        .await
+        .unwrap();
+    drop(rejoined);
+    let reopened = Node::open_recovery_profile(&restored_dir, "new password").unwrap();
+    assert_eq!(reopened.channel_history(channel, 10).len(), 3);
+}
+
+#[test]
+fn file_only_account_contact_remains_visible_after_recovery() {
+    use crate::identity::account::Account;
+    use crate::node::conversation::account_conversation_id;
+    use std::io::Cursor;
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let peer = DeviceIdentity::generate();
+    let peer_account = Account::generate();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    add_account_peer(
+        &roster,
+        &peer,
+        &peer_account,
+        "peer",
+        47474,
+        &me.public().user_id(),
+    );
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let source = Node::open(
+        me,
+        roster,
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "password",
+    )
+    .unwrap();
+    let contact = peer_account.account_id();
+    let conversation = account_conversation_id(&source.account_id(), &contact);
+    let manifest = crate::file::FileManifest {
+        name: "file.txt".into(),
+        size: 4,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(b"file"),
+        file_key: [7; 32],
+        file_conv: ConversationId::new([8; 32]),
+        chunk_count: 1,
+    };
+    let event = crate::eventlog::event::Event::new(
+        &peer,
+        conversation,
+        1,
+        vec![],
+        1,
+        100,
+        crate::eventlog::event::EventKind::FileManifest,
+        b"sealed file card".to_vec(),
+    );
+    source.log.lock().unwrap().append(event.clone()).unwrap();
+    source
+        .received_files
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            peer.public().user_id(),
+            100,
+            &manifest.encode(),
+            event.id,
+        )
+        .unwrap();
+    let mut snapshot = Vec::new();
+    source.write_recovery_snapshot(&mut snapshot, 101).unwrap();
+    let restored = Node::install_recovery_snapshot(
+        Cursor::new(snapshot),
+        &dir.path().join("restored"),
+        "new password",
+    )
+    .unwrap();
+    assert!(restored.known_account_ids().contains(&contact));
+    assert_eq!(restored.history(conversation, 10).len(), 1);
+    let mut second_snapshot = Vec::new();
+    restored
+        .write_recovery_snapshot(&mut second_snapshot, 102)
+        .unwrap();
+    let twice_restored = Node::install_recovery_snapshot(
+        Cursor::new(second_snapshot),
+        &dir.path().join("twice-restored"),
+        "third password",
+    )
+    .unwrap();
+    assert!(twice_restored.known_account_ids().contains(&contact));
+}
+
+#[test]
+fn encrypted_recovery_requires_the_matching_key_before_installation() {
+    use crate::recovery::{BackupError, archive::ArchiveError, key::RecoveryKey};
+    use std::io::Cursor;
+    let dir = tempfile::tempdir().unwrap();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let source = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "old password",
+    )
+    .unwrap();
+    let key = RecoveryKey::generate();
+    let mut encrypted = Vec::new();
+    source
+        .write_encrypted_recovery_archive(&mut encrypted, &key, 1234)
+        .unwrap();
+    let wrong = RecoveryKey::generate();
+    let destination = dir.path().join("restored");
+    assert!(matches!(
+        Node::install_encrypted_recovery_archive(
+            Cursor::new(&encrypted),
+            &wrong,
+            dir.path(),
+            &destination,
+            "new password"
+        ),
+        Err(BackupError::Archive(ArchiveError::InvalidArchive))
+    ));
+    assert!(!destination.exists());
+    let preview =
+        Node::inspect_encrypted_recovery_archive(Cursor::new(&encrypted), &key, dir.path())
+            .unwrap();
+    assert_eq!(preview.account_id, source.account_id());
+    assert_eq!(preview.created_at_ms, 1234);
+    let (restored, installed_preview) = Node::install_encrypted_recovery_archive(
+        Cursor::new(&encrypted),
+        &key,
+        dir.path(),
+        &destination,
+        "new password",
+    )
+    .unwrap();
+    assert_eq!(restored.account_id(), source.account_id());
+    assert_eq!(installed_preview.account_id, preview.account_id);
+    assert_ne!(
+        restored.identity.public().user_id(),
+        source.identity.public().user_id()
+    );
+}
+
 fn seed_roster(
     peer: &DeviceIdentity,
     name: &str,
@@ -2880,6 +3513,41 @@ async fn channel_recall_by_member_is_visible_and_survives_removal() {
 
     // Bob recalls his own message; it distributes to Alice.
     bob_node.recall_channel(channel, bob_msg_id).await.unwrap();
+    let mut recall_persisted = false;
+    for _ in 0..50 {
+        if alice_node
+            .recalls
+            .lock()
+            .unwrap()
+            .targets(&channel)
+            .contains(&bob_msg_id)
+        {
+            recall_persisted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        recall_persisted,
+        "peer channel recall persisted before backup"
+    );
+    let mut snapshot = Vec::new();
+    alice_node
+        .write_recovery_snapshot(&mut snapshot, 100)
+        .unwrap();
+    let restored = Node::install_recovery_snapshot(
+        std::io::Cursor::new(snapshot),
+        &dir.path().join("recovered-alice"),
+        "new password",
+    )
+    .unwrap();
+    assert!(
+        restored
+            .channel_history(channel, 20)
+            .iter()
+            .any(|entry| entry.id == bob_msg_id && entry.recalled),
+        "an unseen peer channel recall must survive recovery"
+    );
 
     let tombstoned = |node: &Arc<Node>| {
         node.channel_history(channel, 20)
@@ -3463,6 +4131,43 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
         .recall_account(&alice_acct.account_id(), bob_msg_id)
         .await
         .unwrap();
+    let dm_conv = dm_conversation_id(&alice_node.identity.public(), &bob_node.identity.public());
+    let mut delete_arrived = false;
+    for _ in 0..50 {
+        if alice_node
+            .log
+            .lock()
+            .unwrap()
+            .events(&dm_conv)
+            .iter()
+            .any(|event| event.kind == crate::eventlog::EventKind::Delete)
+        {
+            delete_arrived = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        delete_arrived,
+        "alice received the signed recall before backup"
+    );
+    let mut snapshot = Vec::new();
+    alice_node
+        .write_recovery_snapshot(&mut snapshot, 100)
+        .unwrap();
+    let restored = Node::install_recovery_snapshot(
+        std::io::Cursor::new(snapshot),
+        &dir.path().join("recovered-alice"),
+        "new password",
+    )
+    .unwrap();
+    assert!(
+        restored
+            .account_history(&bob_acct.account_id(), 10)
+            .iter()
+            .any(|entry| entry.id == bob_msg_id && entry.recalled),
+        "an unseen verified peer recall must survive recovery without old device keys"
+    );
     let mut tombstoned = false;
     for _ in 0..50 {
         let h = alice_node.account_history(&bob_acct.account_id(), 10);

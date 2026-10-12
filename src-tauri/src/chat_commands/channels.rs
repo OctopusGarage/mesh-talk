@@ -14,6 +14,7 @@ pub struct ChannelInfo {
     /// The owner's device `user_id` — only the owner may rename the channel. The UI gates
     /// the synced-rename action on this (non-owners fall back to a local alias).
     pub owner: String,
+    pub archived: bool,
 }
 
 #[tauri::command]
@@ -30,6 +31,7 @@ pub async fn list_channels(
             name: c.name,
             member_count: c.member_count,
             owner: c.owner,
+            archived: c.archived,
         })
         .collect())
 }

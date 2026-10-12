@@ -16,6 +16,11 @@ pub struct NodeState(
 );
 
 impl NodeState {
+    /// Serialize offline recovery with runtime startup and retirement.
+    pub(crate) async fn lock_profile_lifecycle(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.1.clone().lock_owned().await
+    }
+
     #[cfg(test)]
     pub(crate) fn test_startup_gate(&self) -> &Arc<Mutex<()>> {
         &self.1

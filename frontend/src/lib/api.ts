@@ -7,3 +7,4 @@ export { calls } from "./api/calls";
 export { diag, presence, obs } from "./api/diagnostics";
 export { contactPolicy, favorites, avatars } from "./api/contacts";
 export { settings } from "./api/settings";
+export { recovery } from "./api/recovery";

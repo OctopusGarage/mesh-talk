@@ -52,10 +52,50 @@ async function settings(page: import("@playwright/test").Page) {
   await page.getByTestId("login-submit").click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
 }
+test("profile presence waits for the node before loading visibility", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const ipc = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            command: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const original = ipc.invoke;
+    let nodeReady = false;
+    ipc.invoke = async (command, args) => {
+      if (command === "owner_node_identity") {
+        const identity = await original(command, args);
+        nodeReady = true;
+        return identity;
+      }
+      if (command === "get_privacy" && !nodeReady)
+        throw new Error("Node not started");
+      return original(command, args);
+    };
+  });
+  await page.goto("/");
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("a strong password");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await expect(
+    page.getByTestId("open-profile").locator('[role="status"]'),
+  ).toHaveAttribute("aria-label", "online");
+});
 test("invisible mode requires confirmation and survives reload", async ({
   page,
 }) => {
   await settings(page);
+  const ownPresence = page
+    .getByTestId("open-profile")
+    .locator('[role="status"]');
+  await expect(ownPresence).toHaveAttribute("aria-label", "online");
   const toggle = page.getByTestId("invisible-switch");
   await expect(toggle).toHaveAttribute("aria-checked", "false");
   await toggle.click();
@@ -71,8 +111,14 @@ test("invisible mode requires confirmation and survives reload", async ({
   await toggle.click();
   await page.getByTestId("invisible-confirm").click();
   await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await expect(ownPresence).toHaveAttribute("aria-label", "offline");
   await page.reload();
-  await settings(page);
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("a strong password");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await expect(ownPresence).toHaveAttribute("aria-label", "offline");
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
   await expect(page.getByTestId("invisible-switch")).toHaveAttribute(
     "aria-checked",
     "true",
@@ -152,12 +198,17 @@ test("failed mode save keeps the old state and supports retry", async ({
     };
   });
   await settings(page);
+  const ownPresence = page
+    .getByTestId("open-profile")
+    .locator('[role="status"]');
+  await expect(ownPresence).toHaveAttribute("aria-label", "online");
   await page.getByTestId("invisible-switch").click();
   await page.getByTestId("invisible-confirm").click();
   await expect(page.getByTestId("invisible-switch")).toHaveAttribute(
     "aria-checked",
     "false",
   );
+  await expect(ownPresence).toHaveAttribute("aria-label", "online");
   await expect(page.getByTestId("invisible-confirm")).toBeVisible();
   await expect(
     page
@@ -171,6 +222,7 @@ test("failed mode save keeps the old state and supports retry", async ({
     "aria-checked",
     "true",
   );
+  await expect(ownPresence).toHaveAttribute("aria-label", "offline");
 });
 
 test("offline initiated permissions remain manageable in a narrow layout", async ({

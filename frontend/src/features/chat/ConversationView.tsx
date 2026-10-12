@@ -337,10 +337,12 @@ function ChannelHeader({
   id,
   name,
   memberCount,
+  archived,
 }: {
   id: string;
   name: string;
   memberCount: number;
+  archived: boolean;
 }) {
   const { t } = useTranslation();
   const presence = usePresenceFor(id);
@@ -355,11 +357,13 @@ function ChannelHeader({
         >
           <GroupAvatar channelId={id} size={36} title={name} />
         </AvatarEditMenu>
-        <PresenceDot
-          status={status}
-          size="md"
-          className="absolute -bottom-0.5 -right-0.5"
-        />
+        {!archived && (
+          <PresenceDot
+            status={status}
+            size="md"
+            className="absolute -bottom-0.5 -right-0.5"
+          />
+        )}
       </div>
       <div className="min-w-0">
         <div
@@ -369,9 +373,11 @@ function ChannelHeader({
           {name}
         </div>
         <div className="truncate text-xs text-muted-foreground">
-          {memberCount
-            ? t("conversation.members", { count: memberCount })
-            : t("conversation.channel")}
+          {archived
+            ? t("conversation.archivedChannel")
+            : memberCount
+              ? t("conversation.members", { count: memberCount })
+              : t("conversation.channel")}
         </div>
       </div>
     </div>
@@ -388,6 +394,7 @@ export function ConversationView() {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
+  const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
   const retry = useChat((s) => s.retry);
@@ -470,21 +477,27 @@ export function ConversationView() {
   // active conversation / sendFile through refs (avoids re-subscribing on every change).
   const [dragOver, setDragOver] = useState(false);
   const activeRef = useRef(active);
+  const archivedRef = useRef(false);
   const sendFileRef = useRef(sendFile);
   const setErrorRef = useRef(setError);
   activeRef.current = active;
+  archivedRef.current =
+    active?.kind === "channel" &&
+    channels.some(
+      (channel) => channel.channel_id === active.id && channel.archived,
+    );
   sendFileRef.current = sendFile;
   setErrorRef.current = setError;
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
       if (p.type === "over") {
-        setDragOver(activeRef.current != null);
+        setDragOver(activeRef.current != null && !archivedRef.current);
       } else if (p.type === "leave") {
         setDragOver(false);
       } else if (p.type === "drop") {
         setDragOver(false);
-        if (!activeRef.current) return;
+        if (!activeRef.current || archivedRef.current) return;
         const lease = captureChatOwnership();
         const key = convKey(activeRef.current);
         const current = () =>
@@ -638,6 +651,11 @@ export function ConversationView() {
   }
 
   const isChannel = active.kind === "channel";
+  const archived =
+    isChannel &&
+    channels.some(
+      (channel) => channel.channel_id === active.id && channel.archived,
+    );
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -696,6 +714,7 @@ export function ConversationView() {
             id={active.id}
             name={headerName}
             memberCount={members.length}
+            archived={archived}
           />
         ) : (
           <DmHeader id={active.id} name={headerName} />
@@ -704,7 +723,7 @@ export function ConversationView() {
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
-        {isChannel ? (
+        {isChannel && !archived ? (
           <MembersDialog />
         ) : (
           active.kind === "account" && (
@@ -845,6 +864,7 @@ export function ConversationView() {
                     grouped={grouped}
                     showTime={showTime}
                     isChannel={isChannel}
+                    readOnly={archived}
                     authorAvatarId={accountByDevice.get(m.who) ?? m.who}
                     authorName={nameByDevice.get(m.who)}
                     fresh={motionOK && isFresh(m, i)}
@@ -943,147 +963,155 @@ export function ConversationView() {
         </DialogContent>
       </Dialog>
 
-      <Composer
-        screenshotAvailable={screenshotAvailable}
-        key={key}
-        initialDraft={drafts.current.get(key) ?? ""}
-        onDraftChange={(text) => {
-          if (text) drafts.current.set(key, text);
-          else drafts.current.delete(key);
-        }}
-        placeholder={
-          isChannel
-            ? t("conversation.messageChannel", { name: headerName })
-            : t("conversation.messageContact", { name: headerName })
-        }
-        mentionNames={mentionNames}
-        myName={myName}
-        replyTo={replyTo}
-        prefill={prefill?.key === key ? prefill : null}
-        onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
-        onCancelReply={() => setReply(null)}
-        onAttach={async () => {
-          const current = captureComposer();
-          if (!current()) return;
-          try {
-            const path = await openFileDialog({ multiple: false });
-            // Attach button → generic attachment (lands in the received-files tray).
-            if (current() && typeof path === "string")
-              await sendFile(path, false);
-          } catch (e) {
-            if (current())
-              setError(
-                t("composer.couldntOpenFile", { error: errorMessage(e) }),
-              );
+      {archived ? (
+        <div
+          className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
+          role="status"
+        >
+          {t("conversation.archivedChannelHint")}
+        </div>
+      ) : (
+        <Composer
+          screenshotAvailable={screenshotAvailable}
+          key={key}
+          initialDraft={drafts.current.get(key) ?? ""}
+          onDraftChange={(text) => {
+            if (text) drafts.current.set(key, text);
+            else drafts.current.delete(key);
+          }}
+          placeholder={
+            isChannel
+              ? t("conversation.messageChannel", { name: headerName })
+              : t("conversation.messageContact", { name: headerName })
           }
-        }}
-        onAttachDirectory={async () => {
-          const current = captureComposer();
-          if (!current()) return;
-          try {
-            const path = await openFileDialog({
-              directory: true,
-              multiple: false,
-            });
-            if (current() && typeof path === "string")
-              await sendFile(path, false);
-          } catch (e) {
-            if (current())
-              setError(
-                t("composer.couldntOpenFile", { error: errorMessage(e) }),
-              );
-          }
-        }}
-        onImage={async () => {
-          const current = captureComposer();
-          if (!current()) return;
-          // Image button → the NATIVE file dialog (a JS `<input type=file>` is flaky in
-          // WKWebView and silently no-ops), filtered to media, sent with `media: true` so it
-          // previews inline. Path-based, so no multi-MB bytes round-trip over IPC.
-          try {
-            const path = await openFileDialog({
-              multiple: false,
-              filters: [
-                {
-                  name: "Images & Video",
-                  extensions: [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS],
-                },
-              ],
-            });
-            if (current() && typeof path === "string")
-              await sendFile(path, true);
-          } catch (e) {
-            if (current())
-              setError(
-                t("composer.couldntOpenFile", { error: errorMessage(e) }),
-              );
-          }
-        }}
-        onSend={(t) => {
-          const accepted = admitText(t, replyTo?.id ?? null);
-          if (accepted) {
-            setReply(null);
-            setPrefill(null);
-          }
-          return accepted;
-        }}
-        onPasteFiles={async (files) => {
-          const current = captureComposer();
-          for (const file of files) {
+          mentionNames={mentionNames}
+          myName={myName}
+          replyTo={replyTo}
+          prefill={prefill?.key === key ? prefill : null}
+          onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
+          onCancelReply={() => setReply(null)}
+          onAttach={async () => {
+            const current = captureComposer();
             if (!current()) return;
             try {
-              // The temp-file IPC accepts at most 64 MiB. Reject before materializing a
-              // large File as a JSON byte array in the webview.
-              if (file.size > 64 * 1024 * 1024)
-                throw new Error(
-                  "Copied file exceeds 64 MB; use Attach instead",
-                );
-              const ext =
-                file.name.split(".").pop() || file.type.split("/")[1] || "bin";
-              const path = await chatApi.writeTempFile(
-                Array.from(new Uint8Array(await file.arrayBuffer())),
-                ext,
-                file.name || undefined,
-              );
-              if (!current()) {
-                await chatApi.deleteTempFile(path).catch(() => {});
-                return;
-              }
-              await sendFile(
-                path,
-                file.type.startsWith("image/") ||
-                  isImage(file.name) ||
-                  isVideo(file.name),
-              );
+              const path = await openFileDialog({ multiple: false });
+              // Attach button → generic attachment (lands in the received-files tray).
+              if (current() && typeof path === "string")
+                await sendFile(path, false);
             } catch (e) {
               if (current())
                 setError(
                   t("composer.couldntOpenFile", { error: errorMessage(e) }),
                 );
-              throw e;
             }
-          }
-        }}
-        onScreenshot={async (hideWindow) => {
-          const current = captureComposer();
-          if (!current()) return;
-          try {
-            const bytes = await chatApi.captureScreen(hideWindow);
-            // Empty bytes = the user cancelled the capture: send nothing.
-            if (current() && bytes.length > 0) setScreenshotBytes(bytes);
-          } catch (e) {
+          }}
+          onAttachDirectory={async () => {
+            const current = captureComposer();
             if (!current()) return;
-            const msg = errorMessage(e);
-            // The backend returns this sentinel when macOS Screen Recording isn't granted
-            // (otherwise screencapture silently yields only the desktop wallpaper).
-            setError(
-              msg.includes("screen-recording-permission")
-                ? t("screenshot.permission")
-                : t("screenshot.failed", { error: msg }),
-            );
-          }
-        }}
-      />
+            try {
+              const path = await openFileDialog({
+                directory: true,
+                multiple: false,
+              });
+              if (current() && typeof path === "string")
+                await sendFile(path, false);
+            } catch (e) {
+              if (current())
+                setError(
+                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
+                );
+            }
+          }}
+          onImage={async () => {
+            const current = captureComposer();
+            if (!current()) return;
+            // Image button → the NATIVE file dialog (a JS `<input type=file>` is flaky in
+            // WKWebView and silently no-ops), filtered to media, sent with `media: true` so it
+            // previews inline. Path-based, so no multi-MB bytes round-trip over IPC.
+            try {
+              const path = await openFileDialog({
+                multiple: false,
+                filters: [
+                  {
+                    name: "Images & Video",
+                    extensions: [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS],
+                  },
+                ],
+              });
+              if (current() && typeof path === "string")
+                await sendFile(path, true);
+            } catch (e) {
+              if (current())
+                setError(
+                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
+                );
+            }
+          }}
+          onSend={(t) => {
+            const accepted = admitText(t, replyTo?.id ?? null);
+            if (accepted) {
+              setReply(null);
+              setPrefill(null);
+            }
+            return accepted;
+          }}
+          onPasteFiles={async (files) => {
+            const current = captureComposer();
+            for (const file of files) {
+              if (!current()) return;
+              try {
+                // The temp-file IPC accepts at most 64 MiB. Reject before materializing a
+                // large File as a JSON byte array in the webview.
+                if (file.size > 64 * 1024 * 1024)
+                  throw new Error(
+                    "Copied file exceeds 64 MB; use Attach instead",
+                  );
+                const ext =
+                  file.name.split(".").pop() ||
+                  file.type.split("/")[1] ||
+                  "bin";
+                const path = await chatApi.writeTempFile(
+                  Array.from(new Uint8Array(await file.arrayBuffer())),
+                  ext,
+                  file.name || undefined,
+                );
+                if (!current()) return;
+                await sendFile(
+                  path,
+                  file.type.startsWith("image/") ||
+                    isImage(file.name) ||
+                    isVideo(file.name),
+                );
+              } catch (e) {
+                if (current())
+                  setError(
+                    t("composer.couldntOpenFile", { error: errorMessage(e) }),
+                  );
+                throw e;
+              }
+            }
+          }}
+          onScreenshot={async (hideWindow) => {
+            const current = captureComposer();
+            if (!current()) return;
+            try {
+              const bytes = await chatApi.captureScreen(hideWindow);
+              // Empty bytes = the user cancelled the capture: send nothing.
+              if (current() && bytes.length > 0) setScreenshotBytes(bytes);
+            } catch (e) {
+              if (!current()) return;
+              const msg = errorMessage(e);
+              // The backend returns this sentinel when macOS Screen Recording isn't granted
+              // (otherwise screencapture silently yields only the desktop wallpaper).
+              setError(
+                msg.includes("screen-recording-permission")
+                  ? t("screenshot.permission")
+                  : t("screenshot.failed", { error: msg }),
+              );
+            }
+          }}
+        />
+      )}
       {screenshotBytes && (
         <ScreenshotEditor
           bytes={screenshotBytes}

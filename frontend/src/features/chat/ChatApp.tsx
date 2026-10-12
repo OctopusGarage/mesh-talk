@@ -35,6 +35,9 @@ export function ChatApp() {
       usePrivacy.getState().reset();
     };
   }, [owner, generation]);
+  useEffect(() => {
+    if (owner && ready) void usePrivacy.getState().load(owner);
+  }, [owner, generation, ready]);
   const startPresence = usePresence((s) => s.start);
   const loadSettings = useSettings((s) => s.load);
   const error = useChat((s) => s.error);

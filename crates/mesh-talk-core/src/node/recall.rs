@@ -119,6 +119,44 @@ impl RecallLog {
             .map(|v| v.iter().map(|m| m.target).collect())
             .unwrap_or_default()
     }
+
+    /// Own recall tombstones retained for a portable snapshot.
+    pub(crate) fn snapshot_marks(&self) -> Vec<RecallMark> {
+        let mut marks: Vec<_> = self.by_conversation.values().flatten().cloned().collect();
+        marks.sort_by(|a, b| {
+            a.conversation
+                .as_bytes()
+                .cmp(b.conversation.as_bytes())
+                .then_with(|| a.target.cmp(&b.target))
+        });
+        marks
+    }
+}
+
+#[cfg(test)]
+mod recovery_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn own_recall_marks_can_be_enumerated_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recalls.log");
+        let conversation = ConversationId::new([1; 32]);
+        let target = EventId::new([2; 32]);
+        RecallLog::open(&path, "pw")
+            .unwrap()
+            .record(conversation, target, 42)
+            .unwrap();
+        let reopened = RecallLog::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.snapshot_marks(),
+            vec![RecallMark {
+                conversation,
+                target,
+                wall_clock: 42
+            }]
+        );
+    }
 }
 
 impl Node {
@@ -271,12 +309,8 @@ impl Node {
                 })
             }
             .or_else(|| {
-                let roster = self.roster.lock().expect("roster mutex not poisoned");
-                roster
-                    .peers()
-                    .into_iter()
-                    .find(|p| p.public.user_id() == author_uid)
-                    .map(|p| p.public.x25519_pub)
+                self.historical_author(event.author.ed25519_pub())
+                    .map(|proof| proof.public().x25519_pub)
             });
             let plaintext = author_x.and_then(|ax| {
                 crate::node::channel::SealedPayload::decode(&event.ciphertext)
@@ -286,13 +320,21 @@ impl Node {
                 continue;
             };
             // Only the message's own author may recall it.
-            let authorized = {
+            let target_wall_clock = {
                 let log = self.log.lock().expect("log mutex not poisoned");
                 log.get(&p.target)
-                    .map(|t| t.author == event.author)
-                    .unwrap_or(false)
+                    .filter(|target| target.author == event.author)
+                    .map(|target| target.wall_clock)
             };
-            if authorized {
+            if let Some(wall_clock) = target_wall_clock {
+                if let Err(error) = self
+                    .recalls
+                    .lock()
+                    .expect("recalls mutex not poisoned")
+                    .record(conv, p.target, wall_clock)
+                {
+                    log::warn!("could not persist verified channel recall: {error}");
+                }
                 out.insert(p.target);
             }
         }
@@ -322,20 +364,20 @@ impl Node {
         // (mirrors `account_reactions`): ours-with-each-target-device and ours-with-each-own-
         // other-device.
         let convs: Vec<(ConversationId, [u8; 32], Option<String>)> = {
-            let roster = self.roster.lock().expect("roster mutex not poisoned");
-            roster
-                .peers()
+            self.historical_dm_peers()
                 .into_iter()
                 .filter(|p| {
-                    let a = p.account_id.as_deref();
+                    let account = p.account_id();
+                    let a = account.as_deref();
                     a == Some(peer_account_id)
-                        || (a == Some(my_account.as_str()) && p.public.user_id() != me)
+                        || (a == Some(my_account.as_str()) && p.public().user_id() != me)
                 })
                 .map(|p| {
+                    let public = p.public();
                     (
-                        dm_conversation_id(&self.identity.public(), &p.public),
-                        p.public.x25519_pub,
-                        p.account_id.clone(),
+                        dm_conversation_id(&self.identity.public(), &public),
+                        public.x25519_pub,
+                        p.account_id(),
                     )
                 })
                 .collect()
@@ -373,14 +415,17 @@ impl Node {
 
         // Who authored each logical message in this account conversation (to authorise
         // peer recalls): our sends are ours, received entries carry the sender account.
-        let mut author_of: HashMap<EventId, String> = HashMap::new();
+        let mut author_of: HashMap<EventId, (String, u64)> = HashMap::new();
         for e in self
             .sentlog
             .lock()
             .expect("sentlog mutex not poisoned")
             .entries(&acct_conv)
         {
-            author_of.insert(decode_account_entry(&e.plaintext).0, my_account.clone());
+            author_of.insert(
+                decode_account_entry(&e.plaintext).0,
+                (my_account.clone(), e.wall_clock),
+            );
         }
         for e in self
             .received
@@ -388,11 +433,26 @@ impl Node {
             .expect("received mutex not poisoned")
             .entries(&acct_conv)
         {
-            author_of.insert(decode_account_entry(&e.plaintext).0, e.from.clone());
+            author_of.insert(
+                decode_account_entry(&e.plaintext).0,
+                (e.from.clone(), e.wall_clock),
+            );
         }
         // Only the message's own author account may recall it.
         for (target, sender_account) in claims {
-            if author_of.get(&target).is_some_and(|a| a == &sender_account) {
+            if let Some((author, wall_clock)) = author_of.get(&target)
+                && author == &sender_account
+            {
+                // Keep the verified tombstone even after the old device keys and
+                // peer roster disappear during recovery.
+                if let Err(error) = self
+                    .recalls
+                    .lock()
+                    .expect("recalls mutex not poisoned")
+                    .record(acct_conv, target, *wall_clock)
+                {
+                    log::warn!("could not persist verified peer recall: {error}");
+                }
                 out.insert(target);
             }
         }

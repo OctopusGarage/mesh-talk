@@ -56,6 +56,7 @@ import { GroupAvatar } from "@/components/GroupAvatar";
 import { convKey, useChat, type Conversation } from "@/store/chat";
 import { useSettings } from "@/store/settings";
 import { useAppLock } from "@/store/appLock";
+import { usePrivacy } from "@/store/privacy";
 import {
   presenceLabel,
   presenceStatus,
@@ -475,6 +476,9 @@ export function Sidebar() {
   const policyLoaded = useContactPolicy((s) => s.loaded);
   const policyError = useContactPolicy((s) => s.error);
   const owner = useAuth((s) => s.user?.id);
+  const publiclyVisible = usePrivacy(
+    (s) => s.owner === owner && s.loaded && s.snapshot?.invisible === false,
+  );
   const accounts = useMemo(
     () =>
       policyLoaded
@@ -705,7 +709,9 @@ export function Sidebar() {
         id,
         conv: channelConv(c, name),
         pinned: favorites[id]?.pinned ?? false,
-        subtitle: t("conversation.members", { count: c.member_count }),
+        subtitle: c.archived
+          ? t("conversation.archivedChannel")
+          : t("conversation.members", { count: c.member_count }),
       };
     });
 
@@ -1037,11 +1043,18 @@ export function Sidebar() {
           aria-label={t("profile.open")}
           className="mb-1 flex min-h-10 w-full items-center gap-2.5 rounded-md px-1 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <IdentityGlyph
-            seed={myAccountId || myId || username}
-            size={34}
-            title={displayName}
-          />
+          <span className="relative shrink-0">
+            <IdentityGlyph
+              seed={myAccountId || myId || username}
+              size={34}
+              title={displayName}
+            />
+            <PresenceDot
+              status={ready && publiclyVisible ? "online" : "offline"}
+              size="md"
+              className="pointer-events-none absolute -bottom-0.5 -right-0.5"
+            />
+          </span>
           <span className="min-w-0 flex-1">
             <span
               data-testid="sidebar-own-name"

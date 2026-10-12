@@ -70,6 +70,51 @@ pub struct ChannelSummary {
     /// The channel owner's device `user_id` — only the owner may rename the channel or
     /// change its membership. The UI gates the rename action on this.
     pub owner: String,
+    /// Restored history from a previous device; this device has no sender key.
+    pub archived: bool,
+}
+
+fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> Vec<ChannelSummary> {
+    let mut channels = Vec::new();
+    for id in log.conversations() {
+        if book.state(&id).is_some() {
+            continue;
+        }
+        let mut archived: Option<ChannelSummary> = None;
+        for event in log.events(&id) {
+            if event.kind == EventKind::MembershipChange {
+                if let Some(meta) = crate::channel::ChannelMeta::decode(&event.ciphertext) {
+                    let author = event.author.user_id();
+                    match &mut archived {
+                        None if author == meta.owner && meta.is_member(&meta.owner) => {
+                            archived = Some(ChannelSummary {
+                                id,
+                                name: meta.name,
+                                member_count: meta.members.len(),
+                                owner: meta.owner,
+                                archived: true,
+                            });
+                        }
+                        Some(summary) if author == summary.owner && meta.owner == summary.owner => {
+                            summary.name = meta.name;
+                            summary.member_count = meta.members.len();
+                        }
+                        _ => {}
+                    }
+                }
+            } else if event.kind == EventKind::ChannelRename
+                && let Some(summary) = &mut archived
+                && event.author.user_id() == summary.owner
+                && let Ok(name) = std::str::from_utf8(&event.ciphertext)
+            {
+                summary.name = name.to_string();
+            }
+        }
+        if let Some(summary) = archived {
+            channels.push(summary);
+        }
+    }
+    channels
 }
 
 /// A search match: a message whose text contains the query, with enough context to
@@ -210,6 +255,14 @@ pub struct Node {
     pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
     pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
+    /// Fixed read-only summaries recovered from previous devices at open time.
+    pub(in crate::node) archived_channels: Vec<ChannelSummary>,
+    /// Public author of the device that produced a restored local history.
+    /// Never contains the retired device's private key.
+    pub(in crate::node) recovery_origins: Vec<crate::eventlog::Author>,
+    pub(in crate::node) recovery_contacts: Vec<String>,
+    pub(in crate::node) recovered_sent_ids:
+        Mutex<Option<super::recovered_sent_ids::RecoveredSentIds>>,
     /// Durable, encrypted store of this node's per-channel sending keys (`my_sender`).
     /// `my_sender` is in-memory only and rebuilt empty on restart; persisting it here
     /// lets us resume our sending chains so receivers (first-wins on chains they hold)
@@ -358,6 +411,9 @@ impl Node {
             profiles_res,
             recalls_res,
             consent_res,
+            origin_res,
+            contacts_res,
+            recovered_ids_res,
         ) = std::thread::scope(|s| {
             let h_log = s.spawn(|| PersistentEventLog::open(log_path, password));
             let h_sent = s.spawn(|| SentLog::open(sent_path, password));
@@ -384,6 +440,23 @@ impl Node {
                     password,
                 )
             });
+            let h_origin = s.spawn(|| {
+                super::recovery::load_recovery_origins(&dir.join("recovery-origin.log"), password)
+            });
+            let h_contacts = s.spawn(|| {
+                super::recovery::load_recovery_contacts(
+                    &dir.join("recovery-contacts.log"),
+                    password,
+                )
+            });
+            let h_recovered_ids = s.spawn(|| {
+                let path = dir.join("recovery-sent-ids.log");
+                if path.exists() {
+                    super::recovered_sent_ids::RecoveredSentIds::open(&path, password).map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
             (
                 h_log.join(),
                 h_sent.join(),
@@ -394,6 +467,9 @@ impl Node {
                 h_profiles.join(),
                 h_recalls.join(),
                 h_consent.join(),
+                h_origin.join(),
+                h_contacts.join(),
+                h_recovered_ids.join(),
             )
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
@@ -407,6 +483,14 @@ impl Node {
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let recovery_origins = origin_res
+            .unwrap_or_else(|e| std::panic::resume_unwind(e))?
+            .into_iter()
+            .map(crate::eventlog::Author::from_ed25519)
+            .collect();
+        let recovery_contacts = contacts_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let recovered_sent_ids =
+            recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
         let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
         delivery.bind_profile(
@@ -447,6 +531,7 @@ impl Node {
             let events = log.events(&conv);
             let _ = channels.process(&identity, conv, &events);
         }
+        let archived_channels = archived_channel_summaries(&log, &channels);
         // Restore our persisted sending chains into each channel state. The event log
         // only carries OTHER members' sender keys, so `my_sender` rebuilds empty above;
         // without this, a post-restart send would mint a fresh chain that receivers
@@ -540,6 +625,10 @@ impl Node {
             incoming,
             channel_incoming,
             channels: Mutex::new(channels),
+            archived_channels,
+            recovery_origins,
+            recovery_contacts,
+            recovered_sent_ids: Mutex::new(recovered_sent_ids),
             channel_senders: Mutex::new(channel_senders),
             emitted: Mutex::new(emitted),
             file_incoming,
@@ -632,7 +721,8 @@ impl Node {
     /// Summaries of all channels this node is a member of.
     pub fn list_channels(&self) -> Vec<ChannelSummary> {
         let book = self.channels.lock().expect("channels mutex not poisoned");
-        book.channel_ids()
+        let mut channels: Vec<_> = book
+            .channel_ids()
             .into_iter()
             .filter_map(|id| {
                 book.state(&id).map(|s| ChannelSummary {
@@ -640,9 +730,17 @@ impl Node {
                     name: s.name().to_string(),
                     member_count: s.members().len(),
                     owner: s.owner().to_string(),
+                    archived: false,
                 })
             })
-            .collect()
+            .collect();
+        channels.extend(
+            self.archived_channels
+                .iter()
+                .filter(|archive| book.state(&archive.id).is_none())
+                .cloned(),
+        );
+        channels
     }
 
     /// The current members of `channel` (empty if the channel is unknown).

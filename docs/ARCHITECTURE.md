@@ -464,6 +464,51 @@ roots and a dev-only embedded WebDriver. The normal entry point has no driver pl
 storage override. Three-platform native scenarios and the usability rubric are documented
 in [the hidden-contact evaluation runbook](evals/hidden-contacts.md).
 
+### Manual encrypted backup and recovery
+
+`recovery/{snapshot,archive,key}.rs` defines a versioned logical snapshot inside
+an authenticated `MTBACK1` stream. Every export uses a fresh 256-bit recovery key;
+the user saves that key separately from the `.mtbackup` file. The application never
+stores the key. Archive chunks are bounded, encrypted with AES-256-GCM using an
+HKDF-derived key, and closed by a separately keyed authenticated digest. A missing
+final seal, wrong key, altered frame, duplicate record, or invalid signed event is
+rejected before a restored profile can be published.
+
+The desktop export command takes the same consuming runtime barrier as account
+replacement: it stops producers and drains admitted work, opens the existing
+profile offline, streams the snapshot to a restrictive sibling temporary file,
+verifies it, then atomically publishes it without overwriting an existing file.
+It restarts the runtime even when export fails or the IPC caller disappears.
+The local last-export summary is password encrypted; it contains the path, time,
+size, and counts, but never the key.
+
+Restore is available while signed out. Inspection decrypts to private scratch,
+checks the full archive and snapshot, and returns only a preview. Installation
+creates fresh local auth credentials and a fresh device identity in an unpublished
+directory, re-encrypts supported stores under the new password, then reopens both
+auth and node stores for verification. A publication marker makes the two directory
+renames recoverable: startup removes an incomplete pair or retains a completed pair
+before auth initializes. Startup also removes orphan staging and decrypted scratch.
+The recovered account fingerprint remains the same; the new device fingerprint
+differs. Restored channels are read-only archives because their old sender keys
+are excluded. Offline DM peers are discovered from durable account history.
+
+Snapshots include visible plaintext history, signed event provenance, file cards,
+managed media referenced by visible cards, received peer avatars, and recall marks.
+Verified peer recall marks are persisted before export so a restored device does not
+redisplay recalled plaintext it cannot decrypt from the old device's events. A
+password-encrypted local index retains original IDs for restored outgoing messages;
+the snapshot carries those IDs and the public author lineage needed to keep outgoing
+file ownership correct through later backups and restores.
+File-only account conversations carry their account association as a validated
+snapshot record, retained in an encrypted local contact index after recovery.
+They exclude local UI customizations (including the user's own avatar override),
+old device keys, ratchets, channel sender chains, pending deliveries, routes,
+global machine settings, and files managed outside Mesh-Talk. Each file card without local bytes remains
+visible and is counted as missing media in the preview. Messages newer than the
+backup require a later peer sync. Recovery cannot revoke an old certified device;
+the UI sends users who suspect compromise to new identity creation.
+
 ## 6. Binaries
 
 - `mesh-talk` (`main.rs` → `lib.rs::run_tauri`) — the desktop app.

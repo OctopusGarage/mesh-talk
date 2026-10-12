@@ -131,6 +131,10 @@ impl Node {
             }
             Some(m)
         };
+        let recovered_ids = self
+            .recovered_sent_ids
+            .lock()
+            .expect("recovered sent ids mutex not poisoned");
         removed += self
             .sentlog
             .lock()
@@ -142,9 +146,10 @@ impl Node {
                 let id = if account {
                     decode_account_entry(&e.plaintext).0
                 } else {
-                    seq_to_id
+                    recovered_ids
                         .as_ref()
-                        .and_then(|m| m.get(&e.seq).copied())
+                        .and_then(|saved| saved.id_for(e))
+                        .or_else(|| seq_to_id.as_ref().and_then(|m| m.get(&e.seq).copied()))
                         .unwrap_or(EventId::new([0u8; 32]))
                 };
                 id == target

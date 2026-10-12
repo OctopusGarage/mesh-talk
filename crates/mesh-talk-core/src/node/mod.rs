@@ -46,6 +46,8 @@ pub(crate) mod reaction;
 pub(crate) mod reactions;
 pub(crate) mod recall;
 pub(crate) mod received_log;
+pub(crate) mod recovered_sent_ids;
+pub(crate) mod recovery;
 pub(crate) mod runtime;
 mod runtime_work;
 pub(crate) mod sentlog;

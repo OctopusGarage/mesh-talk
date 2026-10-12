@@ -154,6 +154,39 @@ impl MediaStore {
         Ok(store)
     }
 
+    /// Enumerate only regular files named for a managed file conversation.
+    /// Symlinks and incomplete `.part` writes are never backup sources.
+    pub(in crate::node) fn managed_files(&self) -> std::io::Result<Vec<(ConversationId, PathBuf)>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if stem.len() != 64 {
+                continue;
+            }
+            let mut id = [0u8; 32];
+            if hex::decode_to_slice(stem, &mut id).is_err() {
+                continue;
+            }
+            if files.insert(id, path).is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "duplicate managed media ID",
+                ));
+            }
+        }
+        Ok(files
+            .into_iter()
+            .map(|(id, path)| (ConversationId::new(id), path))
+            .collect())
+    }
+
     /// The on-disk path a `file_conv` of media `name` is stored at: `<dir>/<hex>.<ext>`.
     pub(in crate::node) fn path_for(&self, file_conv: ConversationId, name: &str) -> PathBuf {
         let hex = hex::encode(file_conv.as_bytes());
@@ -648,6 +681,18 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn managed_media_listing_excludes_partial_and_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MediaStore::open(dir.path()).unwrap();
+        let id = conv(4);
+        store.store_bytes(id, "photo.png", b"image").unwrap();
+        std::fs::write(dir.path().join("media").join("orphan.part"), b"no").unwrap();
+        let files = store.managed_files().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, id);
     }
 
     #[test]

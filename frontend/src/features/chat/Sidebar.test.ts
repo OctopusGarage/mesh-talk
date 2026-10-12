@@ -17,6 +17,7 @@ const { chatState, policyState } = vi.hoisted(() => ({
       name: string;
       owner: string;
       member_count: number;
+      archived?: boolean;
     }>,
     peers: [],
     favorites: {} as Record<
@@ -145,4 +146,19 @@ it("falls back to presence and member count when conversations have no messages"
 
   expect(html).toContain('aria-label="Alice, Offline"');
   expect(html).toContain('aria-label="Study, 3 members"');
+});
+
+it("labels a recovered channel as an archive", () => {
+  chatState.messages = {};
+  chatState.channels = [
+    {
+      channel_id: "group",
+      name: "Study",
+      owner: "old-device",
+      member_count: 3,
+      archived: true,
+    },
+  ];
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html).toContain('aria-label="Study, Archived channel"');
 });

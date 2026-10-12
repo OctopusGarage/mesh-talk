@@ -614,6 +614,12 @@ impl NodeRuntime {
         }
     }
 
+    /// Account conversations retained locally, including contacts with no
+    /// currently discoverable device.
+    pub fn known_account_ids(&self) -> Vec<String> {
+        self.node.known_account_ids()
+    }
+
     /// The display name for a device `user_id`: the live roster's (freshest) if the peer is
     /// currently around, else the last name we durably recorded — so a member that went
     /// offline (and was evicted from the roster) still resolves to a name instead of a raw id.

@@ -27,6 +27,7 @@ pub mod logger;
 pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
+pub mod recovery;
 pub mod services;
 pub mod session_store;
 pub mod settings;
@@ -113,6 +114,10 @@ pub fn run_tauri_configured(
         };
     }
     let _file_manager = FILE_MANAGER.clone();
+
+    // Resolve an interrupted restore before auth can expose either new profile.
+    crate::recovery::recover_interrupted_publication(&data_dir())
+        .expect("recovery publication marker must be resolved before auth starts");
 
     // Auth (login/register) is the only stateful service the shell needs; the
     // node manages its own per-account stores out of `NodeState`.
@@ -342,6 +347,11 @@ pub fn run_tauri_configured(
                 crate::app_lock::set_call_active,
                 commands::clear_saved_session,
                 commands::adopt_linked_account,
+                recovery::create_backup,
+                recovery::prepare_backup_key,
+                recovery::backup_status,
+                recovery::inspect_backup,
+                recovery::restore_backup,
                 crate::chat_commands::my_id,
                 crate::chat_commands::list_peers,
                 crate::chat_commands::send_dm,
