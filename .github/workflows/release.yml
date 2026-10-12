@@ -159,7 +159,6 @@ jobs:
             target/*/release/bundle/nsis/*.exe \
             target/*/release/bundle/msi/*.msi \
             target/*/release/bundle/dmg/*.dmg \
-            target/*/release/bundle/macos/*.app \
             target/*/release/bundle/appimage/*.AppImage \
             target/*/release/bundle/deb/*.deb \
             target/*/release/bundle/rpm/*.rpm
@@ -168,11 +167,7 @@ jobs:
               [ -e "$file" ] || continue
               BASENAME=$(basename "$file")
               NEWNAME=$(echo "$BASENAME" | sed -E "s/_[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?/_${TAG}/")
-              if [[ "$file" == *.app ]]; then
-                cp -R "$file" "release/$NEWNAME"
-              else
-                cp "$file" "release/$NEWNAME"
-              fi
+              cp "$file" "release/$NEWNAME"
             done
           done
 
@@ -272,7 +267,7 @@ jobs:
 
           case "$OS_NAME" in
             macos)
-              zip -r "$ZIP_NAME" release/*.app release/*.dmg release/SHA256SUMS -x "*.DS_Store"
+              zip -r "$ZIP_NAME" release/*.dmg release/SHA256SUMS
               ;;
             windows)
               zip -r "$ZIP_NAME" release/*.exe release/*.msi release/SHA256SUMS

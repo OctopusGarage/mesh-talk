@@ -60,6 +60,13 @@ lazy_static = "1.4"
 # Dev
 tempfile = "3.8"
 
+# Keep the default speed-oriented opt-level while reducing duplicate native code and
+# shipping symbols. Thin LTO limits release build time compared with fat LTO.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 # Dev-build ergonomics: full-strength Argon2/PBKDF2 are unbearably slow in an unoptimized
 # debug build — `tauri dev` keystore unlock ("unlocking your encrypted stores") can take
 # minutes and looks like a hang. Optimize ONLY the crypto crates so unlock is fast, while our

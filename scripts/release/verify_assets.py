@@ -10,7 +10,6 @@ import hashlib
 import io
 import json
 import plistlib
-import posixpath
 import re
 import stat
 import shutil
@@ -42,9 +41,20 @@ def archive_member(path, suffix):
     tool = shutil.which("7zz") or shutil.which("7z")
     require(tool, "7-Zip is required to inspect installer contents")
     listing = subprocess.check_output([tool, "l", "-slt", str(path)], text=True, timeout=60)
-    members = [line.removeprefix("Path = ") for line in listing.splitlines() if line.startswith("Path = ") and line.endswith(suffix)]
+    members = []
+    for block in re.split(r"\r?\n\s*\r?\n", listing):
+        fields = dict(line.split(" = ", 1) for line in block.splitlines() if " = " in line)
+        name = fields.get("Path", "")
+        if name.endswith(suffix) and fields.get("Folder") == "-":
+            size = fields.get("Size", "")
+            require(size.isdecimal(), "invalid installer archive member size")
+            members.append((name, int(size)))
     require(len(members) == 1, "missing or ambiguous installer archive member")
-    return subprocess.check_output([tool, "x", "-so", str(path), members[0]], timeout=60)
+    name, size = members[0]
+    data = subprocess.check_output([tool, "x", "-so", str(path), name], timeout=60)
+    require(len(data) >= size, "truncated installer archive member")
+    # macOS 7zz can append bytes after the listed HFS file length on stdout.
+    return data[:size]
 
 
 def normalize_bundle_markers(section):
@@ -156,7 +166,7 @@ def native_metadata(path, extension, version, platform=None):
         binary = archive_member(path, "mesh-talk.app/Contents/MacOS/mesh-talk")
         expected_cpu = 0x0100000C if platform == "macos_arm64" else 0x01000007
         require(binary[:8] == b"\xcf\xfa\xed\xfe" + expected_cpu.to_bytes(4, "little"), "DMG embedded application architecture")
-        return {"binary": hashlib.sha256(binary).hexdigest()}
+        return {}
     return {}
 
 
@@ -172,12 +182,7 @@ def verify_archive(path, platform, version, check_installers):
             parts = PurePosixPath(name).parts
             require(name.startswith("release/") and "\\" not in name and "\0" not in name and not any(part in ("..", ".") for part in name.rstrip("/").split("/")) and all(parts), "unsafe archive path")
             mode = entry.external_attr >> 16
-            if stat.S_ISLNK(mode):
-                require(platform.startswith("macos") and name.startswith("release/mesh-talk.app/"), "installer symlink")
-                target = archive.read(entry).decode("utf8")
-                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
-                require(not target.startswith("/") and "\\" not in target and resolved.startswith("release/mesh-talk.app/"), "unsafe app symlink")
-                continue
+            require(not stat.S_ISLNK(mode), "installer symlink")
             require(not mode or stat.S_IFMT(mode) in (0, stat.S_IFREG, stat.S_IFDIR), "special archive member")
             if not entry.is_dir():
                 files[name] = entry
@@ -210,25 +215,9 @@ def verify_archive(path, platform, version, check_installers):
                     with archive.open(top[name]) as source, installer.open("wb") as destination:
                         shutil.copyfileobj(source, destination)
                     installer_metadata[extension] = native_metadata(installer, extension, version, platform)
-        if platform.startswith("macos"):
-            prefix = "release/mesh-talk.app/Contents/"
-            require(prefix + "Info.plist" in files, "missing macOS application metadata")
-            metadata = plistlib.loads(archive.read(files[prefix + "Info.plist"]))
-            require(metadata.get("CFBundleShortVersionString") == version, "macOS application version")
-            require(metadata.get("CFBundleExecutable") == "mesh-talk", "unexpected macOS executable")
-            binary_name = prefix + "MacOS/mesh-talk"
-            require(binary_name in files, "missing macOS executable")
-            with archive.open(files[binary_name]) as binary:
-                header = binary.read(8)
-            cpu = 0x0100000C if platform.endswith("arm64") else 0x01000007
-            require(header == b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little"), "macOS application architecture")
-            if check_installers:
-                require(installer_metadata["dmg"]["binary"] == hashlib.sha256(archive.read(files[binary_name])).hexdigest(), "DMG/application executable mismatch")
-            require(all(name.startswith("release/mesh-talk.app/") or name.count("/") == 1 for name in files), "unexpected app archive content")
-        else:
-            require(all(name.count("/") == 1 for name in files), "unexpected installer archive content")
-            if check_installers and platform.startswith("linux_"):
-                require(installer_metadata["AppImage"]["elf"] == installer_metadata["deb"]["elf"], "AppImage/versioned Debian executable mismatch")
+        require(all(name.count("/") == 1 for name in files), "unexpected installer archive content")
+        if check_installers and platform.startswith("linux_"):
+            require(installer_metadata["AppImage"]["elf"] == installer_metadata["deb"]["elf"], "AppImage/versioned Debian executable mismatch")
 
 
 def verify_directory(root, tag, version, *, check_installers=True):

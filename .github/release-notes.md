@@ -8,8 +8,8 @@ replies, @mentions, search, and multi-device.
 ### What's new in v0.3.0
 
 - Install and remove avatar, theme, and sticker ZIP libraries, including your own packs.
-- Choose the default edition with 14 optional packs preinstalled or the lite edition with
-  no optional packs. Both editions keep light, dark, OLED, and built-in Noto stickers.
+- Choose the default edition with 14 optional packs and animated Noto stickers, or the lite
+  edition with no optional packs and emoji-only built-in stickers. Both keep light, dark, and OLED.
 - Browse and install shared packs from the [OctopusGarage Marketplace](https://octopusgarage.github.io/marketplace/),
   with versioned downloads and SHA-256 verification. The [Pack Studio](https://octopusgarage.github.io/marketplace/studio/)
   builds and checks packs locally in your browser.
@@ -31,8 +31,9 @@ replies, @mentions, search, and multi-device.
 Pick the zip for your platform. Each zip contains the installer(s) **plus** a `SHA256SUMS`
 file, and ships alongside a cosign signature (`.zip.bundle`) and a SLSA build-provenance
 attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
+The macOS zip contains a DMG; the app is inside that DMG.
 
-Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
+Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Lite shows emoji fallbacks for built-in Noto stickers without bundling their animations. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
 
 | Platform | Asset |
 |----------|-------|
