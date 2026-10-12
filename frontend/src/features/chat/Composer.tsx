@@ -111,7 +111,7 @@ function StickerThumb({
   const [thumb, setThumb] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!reducedMotion) return;
+    if (!reducedMotion || !src) return;
     let active = true;
     setThumb(null);
 
@@ -140,7 +140,14 @@ function StickerThumb({
     };
   }, [reducedMotion, src]);
 
-  return reducedMotion ? (
+  return !src ? (
+    <div
+      className="flex h-12 w-12 items-center justify-center text-2xl leading-none"
+      aria-hidden="true"
+    >
+      {fallback}
+    </div>
+  ) : reducedMotion ? (
     thumb ? (
       <img
         src={thumb}

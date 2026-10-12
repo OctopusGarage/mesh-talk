@@ -148,8 +148,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
 Grab the `.zip` for your OS/arch from the [**Releases**](https://github.com/OctopusGarage/mesh-talk/releases)
 page (e.g. `mesh-talk_vX.Y.Z_macos_arm64.zip`) and **unzip it** — inside are the installer(s) for
-your platform plus a `SHA256SUMS` file. The builds are **free and unsigned** (no paid Apple/Windows
-code-signing certificate), so macOS and Windows show a one-time "unidentified developer" /
+your platform plus a `SHA256SUMS` file. The macOS zip contains a DMG with the app inside. The
+builds are **free and unsigned** (no paid Apple/Windows code-signing certificate), so macOS and
+Windows show a one-time "unidentified developer" /
 SmartScreen prompt the first time — this is expected for unsigned open-source software and does
 **not** mean the app is unsafe. Every release also ships a `SHA256SUMS` list, a Sigstore `cosign`
 signature, and a SLSA build-provenance attestation; the **release page documents the exact verify

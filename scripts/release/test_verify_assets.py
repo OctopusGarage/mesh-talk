@@ -9,7 +9,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from verify_assets import elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory
+from verify_assets import archive_member, elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory
 
 
 class ReleaseAssetsTests(unittest.TestCase):
@@ -26,11 +26,6 @@ class ReleaseAssetsTests(unittest.TestCase):
             "linux_aarch64": ["deb", "rpm", "AppImage"],
         }.items():
             entries = {f"release/installer 0.1.5.{ext}": b"installer bytes" for ext in extensions}
-            if platform.startswith("macos"):
-                app = "release/mesh-talk.app/Contents/"
-                entries[app + "Info.plist"] = plistlib.dumps({"CFBundleShortVersionString": "0.1.5", "CFBundleExecutable": "mesh-talk"})
-                cpu = 0x0100000C if platform.endswith("arm64") else 0x01000007
-                entries[app + "MacOS/mesh-talk"] = b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little") + b"\0" * 24
             self.entries[platform] = entries
             for variant in ("default", "lite"):
                 self.write_archive(platform, variant=variant)
@@ -57,6 +52,15 @@ class ReleaseAssetsTests(unittest.TestCase):
         return verify_directory(self.root, "v0.1.5", "0.1.5", check_installers=False)
 
     def test_complete_release(self):
+        self.assertEqual(len(self.verify()), 12)
+
+    def test_macos_archive_needs_only_the_dmg(self):
+        for platform in ("macos_arm64", "macos_x86_64"):
+            with zipfile.ZipFile(self.root / self.name(platform)) as archive:
+                self.assertEqual(
+                    {name for name in archive.namelist() if not name.endswith("SHA256SUMS")},
+                    {"release/installer 0.1.5.dmg"},
+                )
         self.assertEqual(len(self.verify()), 12)
 
     def test_missing_lite_variant(self):
@@ -137,16 +141,10 @@ class ReleaseAssetsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "symlink"):
             self.verify()
 
-    def test_wrong_macos_version(self):
-        self.entries["macos_arm64"]["release/mesh-talk.app/Contents/Info.plist"] = plistlib.dumps({"CFBundleShortVersionString": "0.1.4", "CFBundleExecutable": "mesh-talk"})
+    def test_duplicate_macos_app_is_rejected(self):
+        self.entries["macos_arm64"]["release/mesh-talk.app/Contents/MacOS/mesh-talk"] = b"app"
         self.write_archive("macos_arm64")
-        with self.assertRaisesRegex(ValueError, "version"):
-            self.verify()
-
-    def test_wrong_macos_architecture(self):
-        self.entries["macos_arm64"]["release/mesh-talk.app/Contents/MacOS/mesh-talk"] = b"\xcf\xfa\xed\xfe" + (0x01000007).to_bytes(4, "little")
-        self.write_archive("macos_arm64")
-        with self.assertRaisesRegex(ValueError, "architecture"):
+        with self.assertRaisesRegex(ValueError, "unexpected installer archive content"):
             self.verify()
 
     def test_empty_sbom(self):
@@ -228,6 +226,14 @@ class ReleaseAssetsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "architecture"):
                 native_metadata(path, "dmg", "0.1.5", "macos_arm64")
 
+    def test_dmg_member_ignores_7zip_trailing_bytes(self):
+        from unittest.mock import patch
+        listing = "Path = mesh-talk/mesh-talk.app/Contents/Info.plist\nFolder = -\nSize = 5\n"
+        with patch("verify_assets.shutil.which", return_value="7zz"), patch(
+            "verify_assets.subprocess.check_output", side_effect=[listing, b"helloextra"]
+        ):
+            self.assertEqual(archive_member(self.root / "test.dmg", "mesh-talk.app/Contents/Info.plist"), b"hello")
+
     def test_invalid_appimage_is_rejected(self):
         path = self.root / "fake.AppImage"
         path.write_bytes(b"not an AppImage")
@@ -296,21 +302,15 @@ class ReleaseAssetsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "architecture"):
             elf_fingerprint(self.elf_fixture(), "linux_aarch64")
 
-    def test_native_packages_must_match_companion_applications(self):
+    def test_linux_packages_must_match_companion_applications(self):
         from unittest.mock import patch
         original = elf_fingerprint(self.elf_fixture())
         def metadata(path, extension, version, platform):
             if extension == "dmg":
-                binary = self.entries[platform]["release/mesh-talk.app/Contents/MacOS/mesh-talk"]
-                return {"binary": hashlib.sha256(binary).hexdigest()}
+                return {}
             return {"elf": original}
         with patch("verify_assets.native_metadata", side_effect=metadata):
             verify_directory(self.root, "v0.1.5", "0.1.5")
-        def wrong_dmg(path, extension, version, platform):
-            return {"binary": "0" * 64} if extension == "dmg" else metadata(path, extension, version, platform)
-        with patch("verify_assets.native_metadata", side_effect=wrong_dmg):
-            with self.assertRaisesRegex(ValueError, "DMG/application"):
-                verify_directory(self.root, "v0.1.5", "0.1.5")
         for binary in [self.elf_fixture(text=b"changed"), self.elf_fixture(constants=b"different version")]:
             def wrong_appimage(path, extension, version, platform):
                 return {"elf": elf_fingerprint(binary)} if extension == "AppImage" else metadata(path, extension, version, platform)

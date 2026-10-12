@@ -101,10 +101,22 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - name: Verify lite build has no bundled packs
         run: npm run build:lite && node ../scripts/release/check-variant-assets.mjs lite
-      - name: Run lite installation flow
-        run: npx playwright test e2e/packs-lite.spec.ts --workers=1 --retries=0
+      - name: Prepare coverable line map
+        run: npm run test:coverage
+      - name: Run lite sticker and installation flows
+        run: npx playwright test e2e/stickers.spec.ts e2e/packs-lite.spec.ts --grep "lite sends built-in stickers|lite starts without" --workers=1 --retries=0
         env:
           MESH_TALK_VARIANT: lite
+          MESH_TALK_E2E_COVERAGE: "1"
+      - name: Merge lite browser coverage
+        run: node scripts/merge-e2e-coverage.mjs
+      - name: Upload lite browser coverage
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5.5.1
+        with:
+          files: frontend/coverage/e2e.lcov
+          flags: ui-e2e-lite
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
 
   portable:
     name: Portable UI (${{ matrix.os }}, ${{ matrix.browser }})
