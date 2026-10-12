@@ -84,7 +84,7 @@ jobs:
 
       # 6️⃣ Install Node.js
       - name: Install Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -95,7 +95,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install required Rust and shell scanners
-        uses: taiki-e/install-action@v2.87.20
+        uses: taiki-e/install-action@v2.87.27
         with:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
       - uses: actions/setup-go@v7

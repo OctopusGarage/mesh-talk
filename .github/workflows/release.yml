@@ -29,7 +29,7 @@ jobs:
       version: ${{ steps.inputs.outputs.version }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
       - name: Validate source, version and draft state
@@ -86,7 +86,7 @@ jobs:
 
       # 2️⃣ Setup Node.js
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
 
@@ -333,7 +333,7 @@ jobs:
       SOURCE_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
       - name: Install installer metadata tools
@@ -400,7 +400,7 @@ jobs:
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
       - name: Require successful checks for this exact source
