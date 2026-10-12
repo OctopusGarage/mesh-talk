@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -58,10 +58,21 @@ export function MediaPreview({
   const [lightbox, setLightbox] = useState(false);
   const [saving, setSaving] = useState(false);
   const playerRef = useRef<HTMLVideoElement>(null);
-  const closeLightbox = () => {
+  const closeLightbox = useCallback(() => {
     playerRef.current?.pause();
     setLightbox(false);
-  };
+  }, []);
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeLightbox();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [lightbox, closeLightbox]);
   const layoutId = motionOK ? `media-${fileConv}` : undefined;
   const layoutTransition = { duration: 0.22, ease };
   const backdropTransition = { duration: motionOK ? 0.16 : 0.08, ease };
