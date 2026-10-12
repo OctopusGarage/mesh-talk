@@ -57,7 +57,7 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         if: steps.probe.outputs.lifted == 'true'
         with:
           node-version: 22
