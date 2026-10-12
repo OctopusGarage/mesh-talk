@@ -374,7 +374,19 @@ async function profileLayout(c) {
   assert.equal(layout.topEdgeHit, true, "own avatar top edge receives pointer input");
   layout.chrome = null;
   if (process.platform === "darwin") {
-    const payload = await c.command("POST", "/execute/async", { script: "const done=arguments[arguments.length-1];let off=()=>{};window.__TAURI__.event.listen('native-contact-chrome-result',e=>{off();done(e.payload.result);}).then(fn=>{off=fn;return window.__TAURI__.event.emit('native-contact-chrome','bounds');}).catch(e=>done({Err:String(e)}));", args: [] });
+    const payload = await c.command("POST", "/execute/async", {
+      script: `const done=arguments[arguments.length-1];
+        const ipc=window.__TAURI_INTERNALS__,event='native-contact-chrome-result';
+        let eventId;
+        const handler=ipc.transformCallback(e=>{
+          ipc.invoke('plugin:event|unlisten',{event,eventId})
+            .then(()=>done(e.payload.result),error=>done({Err:String(error)}));
+        });
+        ipc.invoke('plugin:event|listen',{event,target:{kind:'Any'},handler})
+          .then(id=>{eventId=id;return ipc.invoke('plugin:event|emit',{event:'native-contact-chrome',payload:'bounds'});})
+          .catch(error=>done({Err:String(error)}));`,
+      args: [],
+    });
     assert.ok(payload.Ok, `actual AppKit chrome observation failed: ${payload.Err}`);
     layout.chrome = payload.Ok;
     assert.equal(layout.chrome.buttons.length, 3);
