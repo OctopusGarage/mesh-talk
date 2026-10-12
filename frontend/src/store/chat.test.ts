@@ -478,6 +478,24 @@ beforeEach(() => {
   reset();
 });
 
+it("persists contact pins and aliases under the signed-in owner", async () => {
+  invoke.mockImplementation((command: string) =>
+    command === "get_favorites" ? Promise.resolve([]) : Promise.resolve(),
+  );
+  await useChat.getState().togglePinned("peer", true);
+  expect(invoke).toHaveBeenCalledWith("set_favorite", {
+    owner: "host",
+    id: "peer",
+    pinned: true,
+  });
+  await useChat.getState().setAlias("peer", " Friend ");
+  expect(invoke).toHaveBeenCalledWith("set_alias", {
+    owner: "host",
+    id: "peer",
+    alias: "Friend",
+  });
+});
+
 it("projects recipient-confirmed upload progress onto only the matching outgoing file", async () => {
   let delivered = false;
   invoke.mockImplementation((cmd: string) => {

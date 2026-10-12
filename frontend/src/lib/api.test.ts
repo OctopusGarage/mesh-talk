@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { auth, chat, contactPolicy, settings } from "./api";
+import { auth, avatars, chat, contactPolicy, favorites, settings } from "./api";
 import { useAuth } from "@/store/auth";
 
 beforeEach(() => {
@@ -26,6 +26,44 @@ describe("contact visibility command mapping", () => {
       account: "account",
       hidden: true,
       name: "Name",
+    });
+  });
+});
+
+describe("account contact metadata command mapping", () => {
+  it("binds pin, alias, and avatar writes to the explicit owner", async () => {
+    await favorites.setFavorite("alice", "peer", true);
+    expect(invoke).toHaveBeenCalledWith("set_favorite", {
+      owner: "alice",
+      id: "peer",
+      pinned: true,
+    });
+    await favorites.setAlias("alice", "peer", "Friend");
+    expect(invoke).toHaveBeenCalledWith("set_alias", {
+      owner: "alice",
+      id: "peer",
+      alias: "Friend",
+    });
+    await avatars.set("alice", "peer", "data:image/png;base64,AA==");
+    expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      owner: "alice",
+      id: "peer",
+      dataUrl: "data:image/png;base64,AA==",
+    });
+  });
+
+  it("binds verification reads and writes to the explicit owner", async () => {
+    await chat.getTrust("alice", "peer", "fingerprint");
+    expect(invoke).toHaveBeenCalledWith("get_trust", {
+      owner: "alice",
+      accountId: "peer",
+      currentFingerprint: "fingerprint",
+    });
+    await chat.markVerified("alice", "peer", "fingerprint");
+    expect(invoke).toHaveBeenCalledWith("mark_verified", {
+      owner: "alice",
+      accountId: "peer",
+      fingerprint: "fingerprint",
     });
   });
 });

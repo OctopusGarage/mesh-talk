@@ -78,3 +78,53 @@ it("archives unowned download locations instead of showing them to a new login",
   );
   vi.unstubAllGlobals();
 });
+
+it("keeps an existing legacy archive when another unowned value appears", () => {
+  useAuth.setState({ user: null });
+  expect(savedDownloadPath("file")).toBeUndefined();
+  const store = new Map<string, string>([
+    ["mesh-talk-downloads", '{"file":"/later/private"}'],
+    ["mesh-talk-downloads:legacy-unassigned", '{"file":"/earlier/private"}'],
+  ]);
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => store.set(key, value),
+    removeItem: (key: string) => store.delete(key),
+  });
+  useAuth.setState({
+    user: { id: "carol", username: "carol", display_name: "Carol" },
+  });
+  expect(savedDownloadPath("file")).toBeUndefined();
+  expect(store.get("mesh-talk-downloads:legacy-unassigned")).toBe(
+    '{"file":"/earlier/private"}',
+  );
+  expect(store.get("mesh-talk-downloads:legacy-unassigned:1")).toBe(
+    '{"file":"/later/private"}',
+  );
+  vi.unstubAllGlobals();
+});
+
+it("does not load or write saved paths without an owner", () => {
+  useAuth.setState({ user: null });
+  expect(savedDownloadPath("file")).toBeUndefined();
+  const setItem = vi.fn();
+  vi.stubGlobal("localStorage", { setItem });
+  rememberSavedDownload("file", "/private/file");
+  expect(savedDownloadPath("file")).toBeUndefined();
+  expect(setItem).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+it("ignores malformed saved paths for an account", () => {
+  useAuth.setState({ user: null });
+  expect(savedDownloadPath("file")).toBeUndefined();
+  const store = new Map([["mesh-talk-downloads:alice", "{invalid"]]);
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+  });
+  useAuth.setState({
+    user: { id: "alice", username: "alice", display_name: "Alice" },
+  });
+  expect(savedDownloadPath("file")).toBeUndefined();
+  vi.unstubAllGlobals();
+});
