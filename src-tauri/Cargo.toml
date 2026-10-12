@@ -52,6 +52,11 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # objc2 0.6 is already in the tree via tao, so this reuses the compiled crate (no new version).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# Store resumable credentials in a Touch ID protected, device-local Keychain item.
+security-framework = { version = "3.6", features = ["OSX_10_15"] }
+security-framework-sys = "2.16"
+core-foundation = "0.10"
+libc = "0.2"
 
 # Inspect the real display backend; do not infer X11 from environment variables.
 [target.'cfg(target_os = "linux")'.dependencies]

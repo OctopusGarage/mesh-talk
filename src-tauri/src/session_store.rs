@@ -1,26 +1,30 @@
-//! "Stay signed in": persist the login password in the OS keychain so the app can
-//! auto-unlock the encrypted stores on the next launch without re-prompting.
+//! "Stay signed in": persist the login password in the OS credential store so the app can
+//! reopen the encrypted stores on the next launch. macOS requires Touch ID to read it;
+//! canceling the prompt falls back to the app password form.
 //!
-//! SECURITY: storing the password in the OS keychain (macOS Keychain, Windows
-//! Credential Manager, Linux Secret Service) means anyone with access to the
-//! *already-unlocked* OS user account can open the app and read the user's
-//! messages. This is the standard desktop-messenger tradeoff (Signal Desktop and
-//! Slack persist a session secret the same way). The password is NEVER written to
-//! a plaintext file or to localStorage — the keychain (which is itself encrypted
-//! and unlocked alongside the OS login) is the only store. The whole feature is
-//! gated behind a user-controllable "Stay signed in" toggle.
+//! On macOS the Keychain item is device-local and tied to the current enrolled
+//! fingerprints. Other platforms retain their existing OS credential providers.
+//! The password is never written to a plaintext file or localStorage. The feature
+//! remains gated behind the user-controllable "Stay signed in" toggle.
 //!
 //! Every operation here is best-effort: a keychain that's locked, unavailable, or
 //! returns an error must degrade to manual login rather than break sign-in. So all
 //! functions log and swallow errors instead of propagating them.
 
-/// The keychain service name; the account is the mesh-talk username.
-#[cfg(not(test))]
+#[cfg(target_os = "macos")]
+// Unit tests exercise migration with a fake provider; they must not touch the real Keychain.
+#[cfg_attr(test, allow(dead_code))]
+mod macos;
+#[cfg(all(not(test), target_os = "macos"))]
+pub use macos::{clear, load, save};
+
+/// The credential service name; the account is the mesh-talk username.
+#[cfg(all(not(test), not(target_os = "macos")))]
 const SERVICE: &str = "mesh-talk";
 
 /// Build the keychain entry for a username, or `None` if the platform keyring
 /// can't be reached (e.g. no Secret Service on a headless Linux box).
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_os = "macos")))]
 fn entry(username: &str) -> Option<keyring::Entry> {
     match keyring::Entry::new(SERVICE, username) {
         Ok(e) => Some(e),
@@ -33,7 +37,7 @@ fn entry(username: &str) -> Option<keyring::Entry> {
 
 /// Persist the password for `username` in the OS keychain (best-effort). Overwrites
 /// any existing secret for that account.
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_os = "macos")))]
 pub fn save(username: &str, password: &str) {
     let Some(entry) = entry(username) else { return };
     if let Err(e) = entry.set_password(password) {
@@ -43,7 +47,7 @@ pub fn save(username: &str, password: &str) {
 
 /// Load the saved password for `username`, or `None` if there is no entry, the
 /// keychain is unavailable, or the read failed (any failure → manual login).
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_os = "macos")))]
 pub fn load(username: &str) -> Option<String> {
     let entry = entry(username)?;
     match entry.get_password() {
@@ -57,7 +61,7 @@ pub fn load(username: &str) -> Option<String> {
 }
 
 /// Clear any saved password for `username` (best-effort; a missing entry is fine).
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_os = "macos")))]
 pub fn clear(username: &str) {
     let Some(entry) = entry(username) else { return };
     match entry.delete_credential() {

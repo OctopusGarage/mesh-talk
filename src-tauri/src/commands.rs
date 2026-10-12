@@ -253,7 +253,16 @@ pub async fn auto_login<R: tauri::Runtime>(
     let Some(username) = settings.last_user else {
         return Ok(None);
     };
-    let Some(password) = crate::session_store::load(&username) else {
+    // A Touch ID protected Keychain read can wait for user interaction. Keep it
+    // off Tokio's worker threads while the native authentication sheet is open.
+    let credential_user = username.clone();
+    let saved = tokio::task::spawn_blocking(move || crate::session_store::load(&credential_user))
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("saved-session credential read failed: {error}");
+            None
+        });
+    let Some(password) = saved else {
         return Ok(None);
     };
     #[cfg(test)]

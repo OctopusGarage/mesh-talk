@@ -3049,10 +3049,12 @@ name = "mesh-talk"
 version = "0.3.0"
 dependencies = [
  "ashpd",
+ "core-foundation 0.10.1",
  "hex",
  "image",
  "keyring",
  "lazy_static",
+ "libc",
  "log",
  "mesh-talk-core",
  "objc2 0.6.4",
@@ -3060,6 +3062,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "rand 0.10.3",
  "raw-window-handle",
+ "security-framework 3.6.0",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "tauri",
