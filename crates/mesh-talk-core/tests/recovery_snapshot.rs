@@ -45,10 +45,130 @@ fn account_fingerprint_must_match_secret() {
 }
 
 #[test]
+fn incompatible_or_ambiguous_snapshot_header_is_rejected() {
+    let mut future = header();
+    future.schema_version += 1;
+    assert_eq!(
+        SnapshotValidator::new(future).unwrap_err(),
+        SnapshotError::UnsupportedVersion
+    );
+
+    let mut no_author = header();
+    no_author.source_device_ed25519_pubs.clear();
+    assert_eq!(
+        SnapshotValidator::new(no_author).unwrap_err(),
+        SnapshotError::InvalidAccount
+    );
+
+    let mut duplicate_author = header();
+    duplicate_author.source_device_ed25519_pubs.push([1; 32]);
+    assert_eq!(
+        SnapshotValidator::new(duplicate_author).unwrap_err(),
+        SnapshotError::InvalidAccount
+    );
+
+    let mut excessive = header();
+    excessive.record_count = u64::MAX;
+    assert_eq!(
+        SnapshotValidator::new(excessive).unwrap_err(),
+        SnapshotError::SizeLimit
+    );
+}
+
+#[test]
+fn file_only_contact_requires_valid_identity_and_a_matching_file_card() {
+    let contact = SnapshotRecordV1::AccountContact {
+        account_id: "a".repeat(32),
+    };
+    let mut validator = SnapshotValidator::new(header()).unwrap();
+    validator.accept(&contact).unwrap();
+    assert_eq!(validator.finish(), Err(SnapshotError::InvalidFileCard));
+
+    let mut validator = SnapshotValidator::new(header()).unwrap();
+    assert_eq!(
+        validator.accept(&SnapshotRecordV1::AccountContact {
+            account_id: "bad".into()
+        }),
+        Err(SnapshotError::InvalidAccount)
+    );
+
+    let mut duplicate_header = header();
+    duplicate_header.record_count = 2;
+    let mut validator = SnapshotValidator::new(duplicate_header).unwrap();
+    validator.accept(&contact).unwrap();
+    assert_eq!(
+        validator.accept(&contact),
+        Err(SnapshotError::DuplicateRecord)
+    );
+}
+
+#[test]
+fn duplicate_profile_and_media_descriptors_cannot_replace_restored_data() {
+    use sha2::Digest;
+    let mut two_records = header();
+    two_records.record_count = 2;
+    let profile = SnapshotRecordV1::Profile {
+        account_id: "peer".into(),
+        updated_at: 1,
+        avatar: None,
+    };
+    let mut validator = SnapshotValidator::new(two_records.clone()).unwrap();
+    validator.accept(&profile).unwrap();
+    assert_eq!(
+        validator.accept(&profile),
+        Err(SnapshotError::DuplicateRecord)
+    );
+
+    let media = SnapshotRecordV1::MediaDescriptor {
+        file_conv: [8; 32],
+        size: 0,
+        sha256: sha2::Sha256::digest([]).into(),
+    };
+    let mut validator = SnapshotValidator::new(two_records).unwrap();
+    validator.accept(&media).unwrap();
+    assert_eq!(
+        validator.accept(&media),
+        Err(SnapshotError::DuplicateRecord)
+    );
+}
+
+#[test]
+fn out_of_order_or_oversized_media_chunks_are_rejected() {
+    let mut two_records = header();
+    two_records.record_count = 2;
+    let descriptor = SnapshotRecordV1::MediaDescriptor {
+        file_conv: [8; 32],
+        size: 2,
+        sha256: [0; 32],
+    };
+    let mut validator = SnapshotValidator::new(two_records.clone()).unwrap();
+    validator.accept(&descriptor).unwrap();
+    assert_eq!(
+        validator.accept(&SnapshotRecordV1::MediaChunk {
+            file_conv: [8; 32],
+            index: 1,
+            bytes: b"a".to_vec()
+        }),
+        Err(SnapshotError::InvalidMedia)
+    );
+
+    let mut validator = SnapshotValidator::new(two_records).unwrap();
+    validator.accept(&descriptor).unwrap();
+    assert_eq!(
+        validator.accept(&SnapshotRecordV1::MediaChunk {
+            file_conv: [8; 32],
+            index: 0,
+            bytes: b"too long".to_vec()
+        }),
+        Err(SnapshotError::InvalidMedia)
+    );
+}
+
+#[test]
 fn duplicate_message_id_is_rejected() {
-    let mut header = header();
-    header.record_count = 2;
-    let mut validator = SnapshotValidator::new(header).unwrap();
+    let mut first_header = header();
+    first_header.record_count = 2;
+    let mut validator = SnapshotValidator::new(first_header).unwrap();
     validator.accept(&received()).unwrap();
     assert_eq!(
         validator.accept(&received()),
@@ -112,6 +232,54 @@ fn snapshot_trailing_bytes_are_rejected() {
         read_snapshot(Cursor::new(encoded), |_| Ok(())).unwrap_err(),
         SnapshotError::InvalidEncoding
     );
+}
+
+#[test]
+fn malformed_snapshot_lengths_are_rejected_before_allocation() {
+    let mut encoded = Vec::new();
+    write_snapshot(&mut encoded, &header(), [received()]).unwrap();
+
+    let mut oversized_header = encoded.clone();
+    oversized_header[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert_eq!(
+        read_snapshot(Cursor::new(oversized_header), |_| Ok(())).unwrap_err(),
+        SnapshotError::SizeLimit
+    );
+
+    let header_len = u32::from_be_bytes(encoded[8..12].try_into().unwrap()) as usize;
+    let record_length_offset = 12 + header_len;
+    let mut oversized_record = encoded;
+    oversized_record[record_length_offset..record_length_offset + 4]
+        .copy_from_slice(&u32::MAX.to_be_bytes());
+    assert_eq!(
+        read_snapshot(Cursor::new(oversized_record), |_| Ok(())).unwrap_err(),
+        SnapshotError::SizeLimit
+    );
+}
+
+#[test]
+fn recovery_errors_have_distinct_public_messages() {
+    use std::collections::HashSet;
+    let errors = [
+        SnapshotError::UnsupportedVersion,
+        SnapshotError::InvalidAccount,
+        SnapshotError::InvalidEncoding,
+        SnapshotError::SizeLimit,
+        SnapshotError::DuplicateRecord,
+        SnapshotError::RecordCount,
+        SnapshotError::InvalidMedia,
+        SnapshotError::InvalidEvent,
+        SnapshotError::InvalidFileCard,
+        SnapshotError::Conflict,
+        SnapshotError::Io,
+    ];
+    let messages: Vec<_> = errors.iter().map(ToString::to_string).collect();
+    assert!(messages.iter().all(|message| !message.is_empty()));
+    assert_eq!(
+        messages.iter().collect::<HashSet<_>>().len(),
+        messages.len()
+    );
+    assert!(messages.iter().all(|message| !message.contains("secret")));
 }
 
 #[test]
@@ -260,9 +428,9 @@ fn file_card_must_match_its_signed_event_author_and_time() {
         file_conv: ConversationId::new([9; 32]),
         chunk_count: 1,
     };
-    let mut header = header();
-    header.record_count = 2;
-    let mut validator = SnapshotValidator::new(header).unwrap();
+    let mut first_header = header();
+    first_header.record_count = 2;
+    let mut validator = SnapshotValidator::new(first_header).unwrap();
     validator
         .accept(&SnapshotRecordV1::SignedEvent {
             event: event.clone(),
@@ -273,6 +441,25 @@ fn file_card_must_match_its_signed_event_author_and_time() {
             conversation: [1; 32],
             event_id: *event.id.as_bytes(),
             from: "forged-author".into(),
+            wall_clock: event.wall_clock,
+            manifest: manifest.encode(),
+        })
+        .unwrap();
+    assert_eq!(validator.finish(), Err(SnapshotError::InvalidFileCard));
+
+    let mut matched_header = header();
+    matched_header.record_count = 2;
+    let mut validator = SnapshotValidator::new(matched_header).unwrap();
+    validator
+        .accept(&SnapshotRecordV1::SignedEvent {
+            event: event.clone(),
+        })
+        .unwrap();
+    validator
+        .accept(&SnapshotRecordV1::FileCard {
+            conversation: [2; 32],
+            event_id: *event.id.as_bytes(),
+            from: event.author.user_id(),
             wall_clock: event.wall_clock,
             manifest: manifest.encode(),
         })

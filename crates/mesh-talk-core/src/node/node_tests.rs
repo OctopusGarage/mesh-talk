@@ -138,6 +138,18 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     ));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::FileCard { event_id, .. } if *event_id == *file_event.id.as_bytes())));
 
+    let key = crate::recovery::key::RecoveryKey::generate();
+    let mut archive = Vec::new();
+    node.write_encrypted_recovery_archive(&mut archive, &key, 101)
+        .unwrap();
+    let preview =
+        Node::inspect_encrypted_recovery_archive(Cursor::new(archive), &key, dir.path()).unwrap();
+    assert_eq!(preview.messages, 2);
+    assert_eq!(preview.channels, 0);
+    assert_eq!(preview.file_cards, 1);
+    assert_eq!(preview.media_files, 1);
+    assert_eq!(preview.missing_media, 0);
+
     let restored = Node::install_recovery_snapshot(
         Cursor::new(snapshot),
         &dir.path().join("restored"),
@@ -368,8 +380,25 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         .send_channel_message(channel, b"group history")
         .await
         .unwrap();
+    let key = crate::recovery::key::RecoveryKey::generate();
+    let mut archive = Vec::new();
+    source
+        .write_encrypted_recovery_archive(&mut archive, &key, 90)
+        .unwrap();
+    let preview =
+        Node::inspect_encrypted_recovery_archive(Cursor::new(archive), &key, dir.path()).unwrap();
+    assert_eq!(preview.channels, 1);
+    assert_eq!(preview.messages, 1);
     let original_id = source.channel_history(channel, 10)[0].id;
     source.recall_channel(channel, original_id).await.unwrap();
+    source
+        .add_channel_member(channel, DeviceIdentity::generate().public())
+        .await
+        .unwrap();
+    source
+        .rename_channel(channel, "Renamed archive")
+        .await
+        .unwrap();
     let mut snapshot = Vec::new();
     source.write_recovery_snapshot(&mut snapshot, 100).unwrap();
     let restored_dir = dir.path().join("restored");
@@ -400,12 +429,12 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         "new password",
     )
     .unwrap();
-    assert!(
-        reopened
-            .list_channels()
-            .iter()
-            .any(|summary| summary.id == channel)
-    );
+    assert!(reopened.list_channels().iter().any(|summary| {
+        summary.id == channel
+            && summary.archived
+            && summary.member_count == 2
+            && summary.name == "Renamed archive"
+    }));
     assert!(
         reopened
             .channel_history(channel, 10)
@@ -562,6 +591,17 @@ fn file_only_account_contact_remains_visible_after_recovery() {
         .unwrap();
     let mut snapshot = Vec::new();
     source.write_recovery_snapshot(&mut snapshot, 101).unwrap();
+    let key = crate::recovery::key::RecoveryKey::generate();
+    let mut archive = Vec::new();
+    source
+        .write_encrypted_recovery_archive(&mut archive, &key, 101)
+        .unwrap();
+    let preview =
+        Node::inspect_encrypted_recovery_archive(Cursor::new(archive), &key, dir.path()).unwrap();
+    assert_eq!(preview.messages, 0);
+    assert_eq!(preview.file_cards, 1);
+    assert_eq!(preview.media_files, 0);
+    assert_eq!(preview.missing_media, 1);
     let restored = Node::install_recovery_snapshot(
         Cursor::new(snapshot),
         &dir.path().join("restored"),

@@ -690,9 +690,28 @@ mod tests {
         let id = conv(4);
         store.store_bytes(id, "photo.png", b"image").unwrap();
         std::fs::write(dir.path().join("media").join("orphan.part"), b"no").unwrap();
+        std::fs::write(
+            dir.path()
+                .join("media")
+                .join(format!("{}.png", "z".repeat(64))),
+            b"not a managed ID",
+        )
+        .unwrap();
         let files = store.managed_files().unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0, id);
+
+        std::fs::write(
+            dir.path()
+                .join("media")
+                .join(format!("{}.jpg", hex::encode(id.as_bytes()))),
+            b"ambiguous duplicate",
+        )
+        .unwrap();
+        assert_eq!(
+            store.managed_files().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

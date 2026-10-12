@@ -1,4 +1,5 @@
 use mesh_talk_core::recovery::archive::{ArchiveError, ArchiveWriter, read_archive, write_archive};
+use mesh_talk_core::recovery::{BackupError, snapshot::SnapshotError};
 use std::io::{Cursor, Write};
 
 const KEY: [u8; 32] = [0x5a; 32];
@@ -25,6 +26,46 @@ fn wrong_key_cannot_complete_restore() {
     let archive = encrypted(b"private history");
     let error = read_archive(Cursor::new(archive), &mut Vec::new(), &[0x11; 32]).unwrap_err();
     assert_eq!(error, ArchiveError::InvalidArchive);
+}
+
+#[test]
+fn changed_version_or_frame_metadata_is_rejected_before_publication() {
+    let archive = encrypted(b"private history");
+    let mut future = archive.clone();
+    future[8] = 2;
+    assert_eq!(
+        read_archive(Cursor::new(future), &mut Vec::new(), &KEY).unwrap_err(),
+        ArchiveError::UnsupportedVersion
+    );
+
+    for offset in [25usize, 33, 37] {
+        let mut changed = archive.clone();
+        changed[offset] ^= 0x7f;
+        assert_eq!(
+            read_archive(Cursor::new(changed), &mut Vec::new(), &KEY).unwrap_err(),
+            ArchiveError::InvalidArchive
+        );
+    }
+}
+
+#[test]
+fn failed_private_staging_write_aborts_archive_read() {
+    struct RejectWrites;
+    impl Write for RejectWrites {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("staging disk full"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let archive = encrypted(b"private history");
+    assert_eq!(
+        read_archive(Cursor::new(archive), RejectWrites, &KEY).unwrap_err(),
+        ArchiveError::Io
+    );
 }
 
 #[test]
@@ -77,4 +118,38 @@ fn abandoned_streaming_writer_leaves_invalid_archive() {
         read_archive(Cursor::new(archive), &mut Vec::new(), &KEY).unwrap_err(),
         ArchiveError::InvalidArchive
     );
+}
+
+#[test]
+fn public_backup_errors_keep_authentication_failures_ambiguous() {
+    use std::collections::HashSet;
+    let errors = [
+        ArchiveError::InvalidArchive,
+        ArchiveError::UnsupportedVersion,
+        ArchiveError::SizeLimit,
+        ArchiveError::Io,
+    ];
+    let messages: Vec<_> = errors.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        messages.iter().collect::<HashSet<_>>().len(),
+        messages.len()
+    );
+    assert!(
+        ArchiveError::InvalidArchive
+            .to_string()
+            .contains("archive or recovery key")
+    );
+
+    let wrapped: BackupError = ArchiveError::InvalidArchive.into();
+    assert_eq!(
+        wrapped.to_string(),
+        ArchiveError::InvalidArchive.to_string()
+    );
+    let wrapped: BackupError = SnapshotError::UnsupportedVersion.into();
+    assert_eq!(
+        wrapped.to_string(),
+        SnapshotError::UnsupportedVersion.to_string()
+    );
+    let wrapped: BackupError = std::io::Error::other("disk full").into();
+    assert_eq!(wrapped.to_string(), "disk full");
 }

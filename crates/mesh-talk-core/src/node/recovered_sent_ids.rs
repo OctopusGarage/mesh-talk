@@ -75,3 +75,43 @@ impl RecoveredSentIds {
         self.ids.get(&SentFingerprint::of(entry)).copied()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovered_id_index_is_idempotent_and_rejects_conflicts_on_write_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recovery-sent-ids.log");
+        let entry = SentEntry {
+            conversation: ConversationId::new([3; 32]),
+            seq: 7,
+            wall_clock: 42,
+            plaintext: b"original text".to_vec(),
+        };
+        let original = EventId::new([4; 32]);
+        let conflicting = EventId::new([5; 32]);
+        let mut index = RecoveredSentIds::open(&path, "password").unwrap();
+        index.record(&entry, original).unwrap();
+        index.record(&entry, original).unwrap();
+        assert!(index.record(&entry, conflicting).is_err());
+        drop(index);
+        assert_eq!(
+            RecoveredSentIds::open(&path, "password")
+                .unwrap()
+                .id_for(&entry),
+            Some(original)
+        );
+
+        let (mut raw, _) =
+            EncryptedRecordLog::<RecoveredSentId>::open(&path, "password", MAGIC).unwrap();
+        raw.append_durable(&RecoveredSentId {
+            fingerprint: SentFingerprint::of(&entry),
+            id: conflicting,
+        })
+        .unwrap();
+        drop(raw);
+        assert!(RecoveredSentIds::open(&path, "password").is_err());
+    }
+}
