@@ -312,6 +312,21 @@ mod tests {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "directory entry limit guarantees a free archive name")]
+    fn archive_component_stops_when_every_suffix_is_taken() {
+        let mut used: HashSet<String> = (0..=MAX_ENTRIES)
+            .map(|counter| {
+                if counter == 0 {
+                    "report.txt".to_string()
+                } else {
+                    format!("report ({counter}).txt")
+                }
+            })
+            .collect();
+        archive_component(std::ffi::OsStr::new("report.txt"), &mut used);
+    }
+
+    #[test]
     fn round_trip_nested_and_empty_folders() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("photos");
