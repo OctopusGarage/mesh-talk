@@ -41,7 +41,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "fflate": "^0.8.3",
-    "framer-motion": "^13.5.0",
+    "framer-motion": "^14.0.0",
     "i18next": "^26.4.2",
     "lucide-react": "^1.49.0",
     "qrcode.react": "^4.2.0",
