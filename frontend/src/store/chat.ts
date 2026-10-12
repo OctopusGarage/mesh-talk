@@ -319,7 +319,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const request = get().favoritesRequest + 1;
     set({ favoritesRequest: request });
     try {
-      const list = await favoritesApi.get();
+      const list = await favoritesApi.get(lease.owner!);
       if (!lease.current() || get().favoritesRequest !== request) return;
       const map: Record<string, FavoriteInfo> = {};
       for (const f of list) map[f.id] = f;
@@ -345,7 +345,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       };
     });
     try {
-      await favoritesApi.setFavorite(id, pinned);
+      await favoritesApi.setFavorite(lease.owner!, id, pinned);
     } catch (e) {
       set({ error: `Couldn't update pin: ${errorMessage(e)}` });
     }
@@ -367,7 +367,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       };
     });
     try {
-      await favoritesApi.setAlias(id, trimmed);
+      await favoritesApi.setAlias(lease.owner!, id, trimmed);
     } catch (e) {
       set({ error: `Couldn't rename contact: ${errorMessage(e)}` });
     }

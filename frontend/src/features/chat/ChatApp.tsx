@@ -64,8 +64,11 @@ export function ChatApp() {
   // work out of the box (rather than requiring the user to enable it in System Settings).
   useEffect(() => {
     void ensureNotificationPermission();
-    void loadSettings();
-  }, [loadSettings]);
+  }, []);
+  useEffect(() => {
+    useSettings.getState().setOwner(owner ?? null);
+    if (owner) void loadSettings();
+  }, [loadSettings, owner, generation]);
 
   useEffect(() => {
     if (!ready) return;

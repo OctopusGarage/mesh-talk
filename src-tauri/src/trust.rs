@@ -13,6 +13,7 @@
 
 use crate::commands::CommandError;
 use crate::config_store;
+use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -34,10 +35,9 @@ struct TrustFile {
     contacts: HashMap<String, TrustRecord>,
 }
 
-/// Managed Tauri state: the in-memory trust table behind a `Mutex`, seeded from disk
-/// on setup and written through on every change.
+/// Serializes trust table read/modify/write operations within the process.
 #[derive(Clone, Default)]
-pub struct TrustState(Arc<Mutex<TrustFile>>);
+pub struct TrustState(Arc<Mutex<()>>);
 
 /// Trust state returned to the UI for one contact, including the live change signal.
 #[derive(Clone, Debug, Serialize)]
@@ -53,18 +53,8 @@ pub struct TrustInfo {
     pub known: bool,
 }
 
-/// The persistence file for the trust table, under the app config dir.
+/// The persistence file inside the host account's profile.
 const TRUST_FILE: &str = "trust.json";
-
-/// Load the persisted trust table (empty if missing/unreadable) into managed state.
-pub fn load_into_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &TrustState) {
-    *state.0.lock().unwrap() = config_store::load::<R, TrustFile>(app, TRUST_FILE);
-}
-
-/// Persist the trust table to disk (best-effort; logged on failure).
-fn save<R: tauri::Runtime>(app: &tauri::AppHandle<R>, file: &TrustFile) {
-    config_store::save(app, TRUST_FILE, "trust table", file);
-}
 
 /// Pure TOFU evaluation over the trust table. On first sight of `account_id`, pins
 /// `current_fingerprint` as the first-seen value (mutating `file`) and returns
@@ -129,19 +119,21 @@ fn set_verified(file: &mut TrustFile, account_id: String, fingerprint: String) {
 /// contact comes back `known: false, verified: false, fingerprint_changed: false`.
 #[tauri::command]
 pub fn get_trust(
-    app: tauri::AppHandle,
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, TrustState>,
+    owner: String,
     account_id: String,
     current_fingerprint: String,
 ) -> Result<TrustInfo, CommandError> {
-    let mut file = state.0.lock().unwrap();
-    let (info, pinned_now) = evaluate(&mut file, account_id, current_fingerprint);
-    if pinned_now {
-        let snapshot = file.clone();
-        drop(file);
-        save(&app, &snapshot);
-    }
-    Ok(info)
+    config_store::with_account(&app, &owner, TRUST_FILE, |path| {
+        let _guard = state.0.lock().unwrap();
+        let mut file: TrustFile = config_store::read_account(path);
+        let (info, pinned_now) = evaluate(&mut file, account_id, current_fingerprint);
+        if pinned_now {
+            config_store::write_account(path, &file)?;
+        }
+        Ok(info)
+    })
 }
 
 /// Mark a contact verified. The user is asserting they compared the safety number
@@ -149,18 +141,18 @@ pub fn get_trust(
 /// verifying after a legitimate fingerprint change clears the warning.
 #[tauri::command]
 pub fn mark_verified(
-    app: tauri::AppHandle,
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, TrustState>,
+    owner: String,
     account_id: String,
     fingerprint: String,
 ) -> Result<(), CommandError> {
-    let snapshot = {
-        let mut file = state.0.lock().unwrap();
+    config_store::with_account(&app, &owner, TRUST_FILE, |path| {
+        let _guard = state.0.lock().unwrap();
+        let mut file: TrustFile = config_store::read_account(path);
         set_verified(&mut file, account_id, fingerprint);
-        file.clone()
-    };
-    save(&app, &snapshot);
-    Ok(())
+        config_store::write_account(path, &file)
+    })
 }
 
 #[cfg(test)]

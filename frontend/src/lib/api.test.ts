@@ -6,10 +6,12 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { auth, chat, contactPolicy, settings } from "./api";
+import { useAuth } from "@/store/auth";
 
 beforeEach(() => {
   invoke.mockReset();
   invoke.mockResolvedValue(undefined);
+  useAuth.setState({ user: null });
 });
 
 describe("contact visibility command mapping", () => {
@@ -29,6 +31,30 @@ describe("contact visibility command mapping", () => {
 });
 
 describe("settings updates", () => {
+  it("captures the owner before a queued update crosses a login", async () => {
+    useAuth.setState({
+      user: { id: "alice", username: "alice", display_name: "Alice" },
+    });
+    let release!: () => void;
+    invoke.mockImplementation((command: string) =>
+      command === "get_app_settings"
+        ? new Promise((resolve) => {
+            release = () => resolve({ notifications: true });
+          })
+        : Promise.resolve(),
+    );
+    const pending = settings.update({ notifications: false });
+    await vi.waitFor(() => expect(release).toBeDefined());
+    useAuth.setState({
+      user: { id: "bob", username: "bob", display_name: "Bob" },
+    });
+    release();
+    await pending;
+    expect(invoke).toHaveBeenCalledWith("set_app_settings", {
+      owner: "alice",
+      settings: { notifications: false },
+    });
+  });
   it("preserves both fields when two updates are requested before the first write finishes", async () => {
     const persisted = { calls_enabled: false, notifications: true };
     let releaseFirst!: () => void;
@@ -167,6 +193,12 @@ describe("chat command mapping", () => {
     expect(invoke).toHaveBeenCalledWith("save_file", {
       fileConv: "fc",
       dest: "/tmp/out",
+    });
+  });
+  it("opens only the current owner's configured download folder", async () => {
+    await chat.openDownloadDir("alice");
+    expect(invoke).toHaveBeenCalledWith("open_download_dir", {
+      owner: "alice",
     });
   });
   it("maps per-file sender keys and batch receive status to the Tauri IPC contract", async () => {

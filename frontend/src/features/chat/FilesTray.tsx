@@ -143,7 +143,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
         setFolderOpenError(t("files.folderUnknown"));
         return;
       }
-      await chat.openDownloadDir();
+      await chat.openDownloadDir(lease.owner!);
     } catch (e) {
       if (lease.current())
         setFolderOpenError(t("files.couldntOpen", { error: errorMessage(e) }));

@@ -15,21 +15,22 @@ export const contactPolicy = {
 
 export const favorites = {
   /** Every favorites entry the user has set (pin and/or alias), keyed by id. */
-  get: () => invoke<FavoriteInfo[]>("get_favorites"),
+  get: (owner: string) => invoke<FavoriteInfo[]>("get_favorites", { owner }),
   /** Pin or unpin a contact by id. */
-  setFavorite: (id: string, pinned: boolean) =>
-    invoke<void>("set_favorite", { id, pinned }),
+  setFavorite: (owner: string, id: string, pinned: boolean) =>
+    invoke<void>("set_favorite", { owner, id, pinned }),
   /** Set or clear (null/blank) a contact's custom alias. */
-  setAlias: (id: string, alias: string | null) =>
-    invoke<void>("set_alias", { id, alias }),
+  setAlias: (owner: string, id: string, alias: string | null) =>
+    invoke<void>("set_alias", { owner, id, alias }),
 };
 
 export const avatars = {
   /** Every custom avatar the user has set LOCALLY, as a map of `id -> data-URL`. */
-  get: () => invoke<Record<string, string>>("get_avatars"),
+  get: (owner: string) =>
+    invoke<Record<string, string>>("get_avatars", { owner }),
   /** Set (data-URL) or clear (null) a LOCAL custom avatar for an identity by id. */
-  set: (id: string, dataUrl: string | null) =>
-    invoke<void>("set_avatar", { id, dataUrl }),
+  set: (owner: string, id: string, dataUrl: string | null) =>
+    invoke<void>("set_avatar", { owner, id, dataUrl }),
   /**
    * Every avatar peers PROPAGATED to us, as `account_id -> data-URL`. Merged under local
    * overrides so a received avatar survives a relaunch (the node persists it).

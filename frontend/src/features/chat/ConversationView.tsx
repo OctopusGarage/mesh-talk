@@ -292,6 +292,7 @@ function DaySeparator({ label }: { label: string }) {
  *  safety number reachable via the verify dialog rendered alongside in the header. */
 function DmHeader({ id, name }: { id: string; name: string }) {
   const { t } = useTranslation();
+  const owner = useAuth((s) => s.user?.id);
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(id);
   const status = presenceStatus(presence);
@@ -299,21 +300,38 @@ function DmHeader({ id, name }: { id: string; name: string }) {
   // Verified state for the crest: a single trust read for the active account (not per-row,
   // so no fan-out), refreshed when the conversation or its presenting device changes.
   const fingerprint = peers.find((p) => p.account_id === id)?.user_id ?? "";
-  const [verified, setVerified] = useState(false);
+  const [trustResult, setTrustResult] = useState<{
+    owner: string;
+    id: string;
+    fingerprint: string;
+    verified: boolean;
+  } | null>(null);
+  const verified =
+    trustResult !== null &&
+    trustResult.owner === owner &&
+    trustResult.id === id &&
+    trustResult.fingerprint === fingerprint &&
+    trustResult.verified;
   useEffect(() => {
-    if (!fingerprint) {
-      setVerified(false);
-      return;
-    }
+    if (!fingerprint || !owner) return;
     let live = true;
     void chatApi
-      .getTrust(id, fingerprint)
-      .then((tr) => live && setVerified(tr.verified && !tr.fingerprint_changed))
+      .getTrust(owner, id, fingerprint)
+      .then(
+        (tr) =>
+          live &&
+          setTrustResult({
+            owner,
+            id,
+            fingerprint,
+            verified: tr.verified && !tr.fingerprint_changed,
+          }),
+      )
       .catch(() => {});
     return () => {
       live = false;
     };
-  }, [id, fingerprint]);
+  }, [owner, id, fingerprint]);
 
   return (
     <div className="flex min-w-0 flex-col gap-0.5">

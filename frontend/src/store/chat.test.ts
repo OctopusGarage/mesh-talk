@@ -18,6 +18,7 @@ import { useChat, convKey } from "./chat";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
+import { useAvatars } from "./avatars";
 
 it("old roster identity failure cannot undo newer readiness", async () => {
   let reject!: (e: Error) => void;
@@ -464,6 +465,8 @@ it("preacceptance failure and retry retain exact deletion protection outside the
 
 beforeEach(() => {
   invoke.mockReset();
+  useAvatars.getState().setOwner(null);
+  useAvatars.getState().setOwner("host");
   useTransfers.getState().reset();
   useAuth.setState({
     user: { id: "host", username: "alice", display_name: "Alice" },

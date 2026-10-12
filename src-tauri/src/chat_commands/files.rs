@@ -249,26 +249,30 @@ pub fn default_download_dir(app: tauri::AppHandle) -> Option<String> {
 #[tauri::command]
 pub fn open_download_dir(
     app: tauri::AppHandle,
+    app_state: tauri::State<'_, crate::state::AppState>,
     settings: tauri::State<'_, crate::settings::SettingsState>,
+    owner: String,
 ) -> Result<(), CommandError> {
-    let configured = settings.get().download_dir;
-    let dir = if configured.is_empty() {
-        default_download_dir(app)
-            .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
-    } else {
-        configured
-    };
-    let path = std::path::Path::new(&dir);
-    if !path.is_dir() {
-        return Err(CommandError::Validation(
-            "download folder unavailable".into(),
-        ));
-    }
-    #[cfg(target_os = "macos")]
-    let opened = tauri_plugin_opener::open_path(path, Some("Finder"));
-    #[cfg(not(target_os = "macos"))]
-    let opened = tauri_plugin_opener::open_path(path, None::<&str>);
-    opened.map_err(|error| CommandError::Service(format!("open download folder: {error}")))
+    crate::config_store::with_account(&app_state, &owner, "settings.json", |_| {
+        let configured = settings.get_for_owner(&owner)?.download_dir;
+        let dir = if configured.is_empty() {
+            default_download_dir(app)
+                .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
+        } else {
+            configured
+        };
+        let path = std::path::Path::new(&dir);
+        if !path.is_dir() {
+            return Err(CommandError::Validation(
+                "download folder unavailable".into(),
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        let opened = tauri_plugin_opener::open_path(path, Some("Finder"));
+        #[cfg(not(target_os = "macos"))]
+        let opened = tauri_plugin_opener::open_path(path, None::<&str>);
+        opened.map_err(|error| CommandError::Service(format!("open download folder: {error}")))
+    })
 }
 
 #[tauri::command]

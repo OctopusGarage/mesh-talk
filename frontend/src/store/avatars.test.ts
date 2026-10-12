@@ -13,7 +13,18 @@ beforeEach(() => {
     generation: 0,
   });
   useChat.setState({ runEpoch: 0, identityEpoch: 0, ready: true });
-  useAvatars.setState({ ownId: "own", local: {}, received: {} });
+  useAvatars.setState({ owner: "host", ownId: "own", local: {}, received: {} });
+});
+
+it("clears local and received avatars when the signed-in owner changes", () => {
+  useAvatars.setState({
+    local: { contact: "alice-local" },
+    received: { contact: "alice-peer" },
+  });
+  useAvatars.getState().setOwner("bob");
+  expect(useAvatars.getState().local).toEqual({});
+  expect(useAvatars.getState().received).toEqual({});
+  expect(useAvatars.getState().ownId).toBe("");
 });
 
 it("current own-avatar success publishes and current failure reconciles", async () => {

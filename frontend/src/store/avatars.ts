@@ -1,13 +1,14 @@
 import { create } from "zustand";
 import { avatars as avatarsApi } from "@/lib/api";
 import { captureRuntimeOwner } from "./ownership";
+import { useAuth } from "./auth";
 
 /**
  * Custom avatars slice. A user can set a profile photo for themselves or any contact,
  * replacing the deterministic IdentityGlyph wherever that identity renders.
  *
  * Two sources, by id (account_id / channel_id):
- * - `local`: photos the user set on THIS device (persisted as `avatars.json`). These are
+ * - `local`: photos the user set on THIS device (persisted per host account). These are
  *   local overrides — a contact photo you chose for someone, or your own photo.
  * - `received`: avatars peers PROPAGATED to us via signed profiles (persisted by the node,
  *   keyed by account id). These let `useAvatar(account_id)` show a contact's chosen photo.
@@ -18,6 +19,8 @@ import { captureRuntimeOwner } from "./ownership";
  */
 
 interface AvatarsState {
+  owner: string | null;
+  setOwner: (owner: string | null) => void;
   /** Locally-set overrides: id -> data-URL. */
   local: Record<string, string>;
   /** Received peer avatars: account_id -> data-URL. */
@@ -56,6 +59,13 @@ const pendingEdits = new Map<
 >();
 
 export const useAvatars = create<AvatarsState>((set, get) => ({
+  owner: null,
+  setOwner: (owner) => {
+    if (get().owner === owner) return;
+    localRevision++;
+    pendingEdits.clear();
+    set({ owner, local: EMPTY, received: EMPTY, ownId: "" });
+  },
   local: EMPTY,
   received: EMPTY,
   ownId: "",
@@ -67,8 +77,13 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     const revision = localRevision;
     if (!lease.current() || !current()) return;
     try {
-      const local = (await avatarsApi.get()) ?? EMPTY;
-      if (lease.current() && current() && revision === localRevision) {
+      const local = (await avatarsApi.get(lease.owner!)) ?? EMPTY;
+      if (
+        lease.current() &&
+        current() &&
+        get().owner === lease.owner &&
+        revision === localRevision
+      ) {
         const merged = { ...local };
         for (const [id, edit] of pendingEdits) {
           if (!edit.current()) continue;
@@ -87,7 +102,8 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     if (!lease.current() || !current()) return;
     try {
       const received = (await avatarsApi.peers()) ?? EMPTY;
-      if (lease.current() && current()) set({ received });
+      if (lease.current() && current() && get().owner === lease.owner)
+        set({ received });
     } catch {
       // the node may not be ready yet; the live event still fills `received`.
     }
@@ -104,7 +120,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
   setAvatar: async (id, dataUrl) => {
     const lease = captureRuntimeOwner();
     const ownId = get().ownId;
-    if (!lease.current()) return;
+    if (!lease.current() || get().owner !== lease.owner) return;
     const revision = ++localRevision;
     pendingEdits.set(id, { revision, dataUrl, current: lease.current });
     // Optimistic: update the local mirror immediately so every identity spot re-renders.
@@ -121,7 +137,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     const task = pendingWrite.then(async () => {
       if (!lease.current()) return;
       try {
-        await avatarsApi.set(id, dataUrl);
+        await avatarsApi.set(lease.owner!, id, dataUrl);
         // Setting/clearing OUR OWN avatar propagates it to peers (signed profile).
         if (currentEdit() && id === ownId) await avatarsApi.publish(dataUrl);
       } catch {
@@ -167,5 +183,8 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
  * this id's photo actually changes.
  */
 export function useAvatar(id: string | undefined): string | undefined {
-  return useAvatars((s) => (id ? (s.local[id] ?? s.received[id]) : undefined));
+  const owner = useAuth((s) => s.user?.id);
+  return useAvatars((s) =>
+    id && s.owner === owner ? (s.local[id] ?? s.received[id]) : undefined,
+  );
 }

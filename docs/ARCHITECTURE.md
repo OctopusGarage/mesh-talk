@@ -289,6 +289,21 @@ UI work. Requests that began before a lock may still deliver a native IPC
 response to the webview; do not treat the lock as a process-memory or OS capture
 boundary.
 
+Contact aliases, pins, trust records, local avatar overrides, and account settings
+live in separate `accounts/<host user id>/{favorites,trust,avatars,settings}.json`
+files. Their IPC commands
+require the current host owner and keep session authority through each disk
+operation, so a delayed command cannot follow a replacement login. The browser
+keeps saved download locations under an owner-specific key and clears avatar
+and settings mirrors on account changes. Installation-wide settings contain only
+window behavior and saved-login bookkeeping; the saved username stays inside the
+backend and is omitted from settings IPC responses. Older app-wide contact files are
+moved to a private `legacy-unassigned` folder; their records contain no owner
+that could support a safe automatic migration. Old unowned download locations
+are similarly archived under a separate browser-storage key. Mixed legacy settings
+are preserved in the private archive before account fields are removed from the
+global settings file; those fields cannot be assigned to an account automatically.
+
 Local file erasure reserves permanent bounded metadata before card acceptance.
 The erased immutable manifest ID remains suppressed across restart, sync and
 account adoption, without a wire tombstone or remote recall. File keys and private

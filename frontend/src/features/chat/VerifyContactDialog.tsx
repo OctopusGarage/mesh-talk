@@ -21,6 +21,7 @@ import { chat } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { fadeSlideUp, useMotionOK } from "@/lib/motion";
 import { useChat } from "@/store/chat";
+import { useAuth } from "@/store/auth";
 import { presenceStatus, usePresenceFor } from "@/store/presence";
 import type { SafetyNumber as SafetyNumberInfo, TrustInfo } from "@/lib/types";
 
@@ -42,6 +43,7 @@ export function VerifyContactDialog({
   name: string;
 }) {
   const { t } = useTranslation();
+  const owner = useAuth((s) => s.user?.id);
   const motionOK = useMotionOK();
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(accountId);
@@ -52,21 +54,28 @@ export function VerifyContactDialog({
 
   const [open, setOpen] = useState(false);
   const [trustState, setTrustState] = useState<{
+    owner: string;
     accountId: string;
     fingerprint: string;
     value: TrustInfo;
   } | null>(null);
   const [safetyState, setSafetyState] = useState<{
+    owner: string;
     fingerprint: string;
     value: SafetyNumberInfo;
   } | null>(null);
   const trust =
+    trustState?.owner === owner &&
     trustState?.accountId === accountId &&
     trustState.fingerprint === fingerprint
       ? trustState.value
       : null;
   const sn =
-    safetyState?.fingerprint === fingerprint ? safetyState.value : null;
+    safetyState !== null &&
+    safetyState.owner === owner &&
+    safetyState.fingerprint === fingerprint
+      ? safetyState.value
+      : null;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -74,28 +83,28 @@ export function VerifyContactDialog({
   // when the dialog opens), so the header shield reflects an already-verified contact
   // WITHOUT having to open the dialog first. (`open` is a dep only to refresh on open.)
   useEffect(() => {
-    if (!fingerprint) return;
+    if (!fingerprint || !owner) return;
     let active = true;
     void chat
-      .getTrust(accountId, fingerprint)
+      .getTrust(owner, accountId, fingerprint)
       .then((tr) => {
-        if (active) setTrustState({ accountId, fingerprint, value: tr });
+        if (active) setTrustState({ owner, accountId, fingerprint, value: tr });
       })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, [accountId, fingerprint, open]);
+  }, [owner, accountId, fingerprint, open]);
 
   // The safety number is only shown inside the open dialog, so fetch it lazily.
   useEffect(() => {
-    if (!open || !fingerprint) return;
+    if (!open || !fingerprint || !owner) return;
     let active = true;
     setErr(null);
     void chat
       .safetyNumber(fingerprint)
       .then((s) => {
-        if (active) setSafetyState({ fingerprint, value: s });
+        if (active) setSafetyState({ owner, fingerprint, value: s });
       })
       .catch((e) => {
         if (active) setErr(errorMessage(e));
@@ -103,18 +112,19 @@ export function VerifyContactDialog({
     return () => {
       active = false;
     };
-  }, [open, fingerprint]);
+  }, [open, owner, fingerprint]);
 
   const verify = async () => {
-    if (!fingerprint) return;
+    if (!fingerprint || !owner) return;
     setBusy(true);
     setErr(null);
     try {
-      await chat.markVerified(accountId, fingerprint);
+      await chat.markVerified(owner, accountId, fingerprint);
       setTrustState({
+        owner,
         accountId,
         fingerprint,
-        value: await chat.getTrust(accountId, fingerprint),
+        value: await chat.getTrust(owner, accountId, fingerprint),
       });
     } catch (e) {
       setErr(errorMessage(e));

@@ -21,6 +21,7 @@ const ChatApp = lazy(() =>
 export default function App() {
   const { t } = useTranslation();
   const user = useAuth((s) => s.user);
+  const owner = user?.id ?? null;
   const booting = useAuth((s) => s.booting);
   const tryAutoLogin = useAuth((s) => s.tryAutoLogin);
   const loadAvatars = useAvatars((s) => s.load);
@@ -33,8 +34,7 @@ export default function App() {
 
   // On app start, attempt a "stay signed in" resume from the OS keychain BEFORE deciding
   // whether to show the login screen. While it's in flight we show a brief unlocking
-  // splash so a remembered session never flashes the login form. Also load the locally
-  // stored custom avatars (no node needed — pure local UI personalization).
+  // splash so a remembered session never flashes the login form.
   useEffect(() => {
     void (async () => {
       try {
@@ -49,8 +49,13 @@ export default function App() {
       }
       await tryAutoLogin();
     })();
-    void loadAvatars();
-  }, [tryAutoLogin, loadAvatars]);
+  }, [tryAutoLogin]);
+
+  useEffect(() => {
+    useAvatars.getState().setOwner(owner);
+    useSettings.getState().setOwner(owner);
+    if (owner && !locked) void loadAvatars();
+  }, [owner, locked, loadAvatars]);
 
   useEffect(() => {
     let active = true;
