@@ -30,7 +30,7 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: "npm run dev",
+    command: `npm run dev -- --port ${port}`,
     env: { MESH_TALK_E2E: "1" },
     url,
     reuseExistingServer: !process.env.CI,
