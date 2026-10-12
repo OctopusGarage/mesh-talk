@@ -51,8 +51,9 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
         )
         .unwrap();
     let media_id = ConversationId::new([9; 32]);
+    let media_bytes = vec![0x42; 70_000];
     node.media
-        .store_bytes(media_id, "photo.png", b"image bytes")
+        .store_bytes(media_id, "photo.png", &media_bytes)
         .unwrap();
     // Locally retained media without a visible file card must stay out of backup.
     node.media
@@ -85,12 +86,12 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     node.log.lock().unwrap().append(signed.clone()).unwrap();
     let file_manifest = crate::file::FileManifest {
         name: "photo.png".into(),
-        size: 11,
+        size: media_bytes.len() as u64,
         mime: "image/png".into(),
-        checksum: crate::file::file_checksum(b"image bytes"),
+        checksum: crate::file::file_checksum(&media_bytes),
         file_key: [3; 32],
         file_conv: media_id,
-        chunk_count: 1,
+        chunk_count: crate::file::chunk_count_for(media_bytes.len() as u64),
     };
     let file_event = crate::eventlog::event::Event::new(
         &node.identity,
@@ -124,11 +125,22 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     })
     .unwrap();
     assert_eq!(header.account_id, account_id);
-    assert_eq!(records.len(), 9);
+    assert_eq!(records.len(), 10);
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::SentDm { plaintext, .. } if plaintext == b"sent")));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::ReceivedDm { plaintext, .. } if plaintext == b"received")));
-    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::MediaDescriptor { file_conv, size, .. } if *file_conv == [9; 32] && *size == 11)));
-    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::MediaChunk { file_conv, bytes, .. } if *file_conv == [9; 32] && bytes == b"image bytes")));
+    assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::MediaDescriptor { file_conv, size, .. } if *file_conv == [9; 32] && *size == media_bytes.len() as u64)));
+    let recovered_media: Vec<u8> = records
+        .iter()
+        .filter_map(|record| match record {
+            SnapshotRecordV1::MediaChunk {
+                file_conv, bytes, ..
+            } if *file_conv == [9; 32] => Some(bytes.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    assert_eq!(recovered_media, media_bytes);
     assert!(records.iter().any(
         |record| matches!(record, SnapshotRecordV1::Recall { target, .. } if *target == [5; 32])
     ));
@@ -169,7 +181,14 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
         "a file sent from the backed-up device remains mine after restore"
     );
     assert_eq!(restored.peer_avatar("peer"), Some(b"avatar".to_vec()));
-    assert_eq!(restored.media.read(media_id), Some(b"image bytes".to_vec()));
+    let mut restored_media = Vec::new();
+    restored
+        .media
+        .copy_decrypted(media_id, &mut restored_media)
+        .unwrap();
+    assert_eq!(restored_media.len(), media_bytes.len());
+    assert!(restored_media == media_bytes);
+    assert!(restored.media.read(media_id).is_some());
     assert_eq!(
         restored.media.path(media_id).unwrap().extension().unwrap(),
         "png"

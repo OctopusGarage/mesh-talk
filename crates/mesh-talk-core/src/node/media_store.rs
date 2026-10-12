@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn managed_media_listing_excludes_partial_and_unrelated_files() {
         let dir = tempfile::tempdir().unwrap();
-        let store = MediaStore::open(dir.path()).unwrap();
+        let store = MediaStore::open(dir.path(), "password", "account").unwrap();
         let id = conv(4);
         store.store_bytes(id, "photo.png", b"image").unwrap();
         std::fs::write(dir.path().join("media").join("orphan.part"), b"no").unwrap();

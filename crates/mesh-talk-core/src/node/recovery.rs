@@ -23,6 +23,65 @@ const MEDIA_CHUNK_BYTES: usize = 64 * 1024;
 const RECOVERY_ORIGIN_MAGIC: &[u8; 6] = b"MTORIG";
 const RECOVERY_CONTACT_MAGIC: &[u8; 6] = b"MTRACC";
 
+struct MediaDigest(Sha256);
+
+impl Write for MediaDigest {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct MediaRecordSink<'a, W: Write> {
+    writer: &'a mut SnapshotWriter<W>,
+    file_conv: ConversationId,
+    buffer: Vec<u8>,
+    index: u32,
+}
+
+impl<W: Write> MediaRecordSink<'_, W> {
+    fn push_buffer(&mut self) -> Result<(), SnapshotError> {
+        self.writer.push(&SnapshotRecordV1::MediaChunk {
+            file_conv: *self.file_conv.as_bytes(),
+            index: self.index,
+            bytes: std::mem::take(&mut self.buffer),
+        })?;
+        self.index = self.index.checked_add(1).ok_or(SnapshotError::SizeLimit)?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), SnapshotError> {
+        if !self.buffer.is_empty() {
+            self.push_buffer()?;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for MediaRecordSink<'_, W> {
+    fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+        let total = bytes.len();
+        while !bytes.is_empty() {
+            let available = MEDIA_CHUNK_BYTES - self.buffer.len();
+            let take = available.min(bytes.len());
+            self.buffer.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.buffer.len() == MEDIA_CHUNK_BYTES {
+                self.push_buffer().map_err(std::io::Error::other)?;
+            }
+        }
+        Ok(total)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 pub(in crate::node) fn load_recovery_contacts(
     path: &Path,
     password: &str,
@@ -555,34 +614,24 @@ impl Node {
         .map_err(|_| SnapshotError::SizeLimit)?;
         let media_files = self.media.managed_files().map_err(|_| SnapshotError::Io)?;
         let mut media = Vec::with_capacity(media_files.len());
-        for (file_conv, path) in media_files {
+        for (file_conv, _) in media_files {
             if !visible_media.contains(&file_conv) {
                 continue;
             }
-            let mut file = std::fs::File::open(&path).map_err(|_| SnapshotError::Io)?;
-            let size = file.metadata().map_err(|_| SnapshotError::Io)?.len();
-            let mut hasher = Sha256::new();
-            let mut buffer = [0u8; MEDIA_CHUNK_BYTES];
-            let mut seen = 0u64;
-            loop {
-                let count = file.read(&mut buffer).map_err(|_| SnapshotError::Io)?;
-                if count == 0 {
-                    break;
-                }
-                seen = seen
-                    .checked_add(count as u64)
-                    .ok_or(SnapshotError::SizeLimit)?;
-                hasher.update(&buffer[..count]);
-            }
-            if seen != size {
-                return Err(SnapshotError::InvalidMedia);
-            }
+            // MediaStore authenticates and decrypts each chunk before it reaches the
+            // archive. The archive is encrypted separately and remains portable across
+            // account passwords and media-store salts.
+            let mut digest = MediaDigest(Sha256::new());
+            let size = self
+                .media
+                .copy_decrypted(file_conv, &mut digest)
+                .map_err(|_| SnapshotError::InvalidMedia)?;
             let chunks = size.div_ceil(MEDIA_CHUNK_BYTES as u64);
             record_count = record_count
                 .checked_add(1)
                 .and_then(|count| count.checked_add(chunks))
                 .ok_or(SnapshotError::SizeLimit)?;
-            media.push((file_conv, path, size, <[u8; 32]>::from(hasher.finalize())));
+            media.push((file_conv, size, <[u8; 32]>::from(digest.0.finalize())));
         }
         let mut source_device_ed25519_pubs: Vec<_> = self
             .recovery_origins
@@ -690,27 +739,26 @@ impl Node {
                 avatar,
             })?;
         }
-        for (file_conv, path, size, digest) in media {
+        for (file_conv, size, digest) in media {
             writer.push(&SnapshotRecordV1::MediaDescriptor {
                 file_conv: *file_conv.as_bytes(),
                 size,
                 sha256: digest,
             })?;
-            let mut file = std::fs::File::open(path).map_err(|_| SnapshotError::Io)?;
-            let mut buffer = [0u8; MEDIA_CHUNK_BYTES];
-            let mut index = 0u32;
-            loop {
-                let count = file.read(&mut buffer).map_err(|_| SnapshotError::Io)?;
-                if count == 0 {
-                    break;
-                }
-                writer.push(&SnapshotRecordV1::MediaChunk {
-                    file_conv: *file_conv.as_bytes(),
-                    index,
-                    bytes: buffer[..count].to_vec(),
-                })?;
-                index = index.checked_add(1).ok_or(SnapshotError::SizeLimit)?;
+            let mut sink = MediaRecordSink {
+                writer: &mut writer,
+                file_conv,
+                buffer: Vec::with_capacity(MEDIA_CHUNK_BYTES),
+                index: 0,
+            };
+            let written = self
+                .media
+                .copy_decrypted(file_conv, &mut sink)
+                .map_err(|_| SnapshotError::InvalidMedia)?;
+            if written != size {
+                return Err(SnapshotError::InvalidMedia);
             }
+            sink.finish()?;
         }
         writer.finish()
     }
