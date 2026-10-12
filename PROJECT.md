@@ -2,8 +2,8 @@
 
 This is the main context file for AI tools. For the authoritative technical reference see
 **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**; for the domain model see
-**[`CONTEXT.md`](CONTEXT.md)**. The `specifications/` directory holds the project overview
-and the process/convention docs linked below.
+**[`CONTEXT.md`](CONTEXT.md)**. The `specifications/` directory holds the
+process and convention docs linked below.
 
 ## Project Overview
 
@@ -16,14 +16,16 @@ forwards (still-encrypted) events for offline recipients.
 ### Technology Stack
 - **Language**: Rust 2024 · **Desktop**: Tauri 2.x · **Frontend**: React 19 + TypeScript + Tailwind + Radix primitives (Vite)
 - **Async**: Tokio · **Serialization**: bincode (wire/at-rest), serde_json (IPC)
-- **Crypto**: Ed25519 + X25519 (dalek; keeps `rand` 0.8), Noise_XX (snow), Double Ratchet
+- **Crypto**: Ed25519 + X25519 (dalek with `rand_core` 0.6), Noise_XX (snow), Double Ratchet
   + sender-key group ratchet, AES-256-GCM + ChaChaPoly, SHA-256/HKDF, PBKDF2-600k at rest
 - **CLI**: clap (the `mesh-talk-node` headless / `--post-office` relay binary)
 
 ### Features
 1:1 DMs + group channels with forward secrecy, file sharing, reactions, replies/threads,
 @mentions, search, multi-device (one account across devices via device linking +
-account-addressed fan-out), system-tray integration, encrypted local storage.
+account-addressed fan-out), system-tray integration, encrypted local storage,
+manual encrypted backup and signed-out recovery, privacy presets and invisible
+mode, and installable customization packs.
 
 ## AI Tool Compatibility
 

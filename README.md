@@ -40,7 +40,7 @@ encrypted events for offline peers.
        alt="Mesh-Talk Barcelona theme showing a football team chat with Lionel Messi, Neymar Jr., player avatars, and a message composer">
 </p>
 
-<p align="center"><sub>Barcelona × Argentina demo, captured from the current v0.3.0 interface with deterministic sample messages.</sub></p>
+<p align="center"><sub>Barcelona × Argentina demo, captured with deterministic sample messages.</sub></p>
 
 ---
 
@@ -62,6 +62,7 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 - Large-file transfer (up to ~4 GiB) — chunked, encrypted per chunk, with progress and resume
 - Persistent, offline-capable history; a "post office" relay delivers to peers that are away
 - Message recall, configurable history retention, per-contact visibility controls, and automatic delivery confirmation (not read receipts)
+- Manual encrypted `.mtbackup` exports and signed-out recovery with a separate recovery key; restored channels remain read-only until reinvited
 
 **Security & privacy**
 
@@ -69,6 +70,7 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 - Ed25519 device identities (your ID is your key fingerprint), X25519 key agreement, Noise-encrypted transport
 - Safety-number contact verification with trust-on-first-use and key-change warnings
 - Encrypted-at-rest keystores and message logs; no servers, no telemetry, no central account
+- Balanced, Private, and Strict privacy presets for notification previews, app locking, and sensitive copying; invisible mode stops public presence announcements and lets approved accounts reach you
 
 **Network**
 
@@ -78,10 +80,11 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 **Desktop experience**
 
 - Multi-device accounts with QR/code device linking
-- Live presence (online / last-seen), pinned contacts, and an in-app diagnostics panel
+- Live presence (online / last-seen), your own online indicator in channel member lists, pinned contacts, and an in-app diagnostics panel
 - Resizable conversation sidebar, keyboard navigation, and dialogs with focus and reduced-motion support
 - Built-in avatar gallery, custom profile and channel photos, optional conversation wallpaper
-- Tray icon, launch-at-login, native notifications, six themes, and English, Spanish, Japanese, Mandarin (Simplified/Traditional), and Cantonese
+- Tray icon, launch-at-login, native notifications, seven themes in the default edition, and English, Spanish, Japanese, Mandarin (Simplified/Traditional), and Cantonese
+- Default and lite desktop editions; optional avatar, theme, and sticker packs can be installed locally or from the marketplace
 
 ## Screenshots
 
@@ -99,7 +102,7 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
   <tr>
     <td width="50%" align="center">
       <img src="docs/screenshots/stickers.webp" alt="The sticker panel open in a direct message">
-      <br><sub><b>Built-in animated stickers</b></sub>
+      <br><sub><b>Animated stickers (default edition)</b></sub>
     </td>
     <td width="50%" align="center">
       <img src="docs/screenshots/themes.webp" alt="The settings theme picker with Barcelona selected alongside dark, light, OLED, and other palettes">
@@ -112,8 +115,8 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
       <br><sub><b>End-to-end verification (safety number)</b></sub>
     </td>
     <td align="center">
-      <img src="docs/screenshots/settings.webp" alt="The settings dialog: background behavior and privacy toggles">
-      <br><sub><b>Background &amp; privacy settings</b></sub>
+      <img src="docs/screenshots/settings.webp" alt="The settings dialog showing invisible mode and privacy level controls">
+      <br><sub><b>Privacy &amp; security settings</b></sub>
     </td>
   </tr>
   <tr>
@@ -146,10 +149,14 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
 ## Download & first run
 
-Grab the `.zip` for your OS/arch from the [**Releases**](https://github.com/OctopusGarage/mesh-talk/releases)
+Grab the `.zip` for your OS/arch and edition from the [**Releases**](https://github.com/OctopusGarage/mesh-talk/releases)
 page (e.g. `mesh-talk_vX.Y.Z_macos_arm64.zip`) and **unzip it** — inside are the installer(s) for
 your platform plus a `SHA256SUMS` file. The macOS zip contains a DMG with the app inside. The
-builds are **free and unsigned** (no paid Apple/Windows code-signing certificate), so macOS and
+default edition includes optional packs and animated Noto stickers; ZIPs ending in `_lite.zip`
+omit those bundled assets while retaining the core messaging features. Both editions can install
+packs later. See the [pack guide](docs/CUSTOMIZATION_PACKS.md).
+
+The builds are **free and unsigned** (no paid Apple/Windows code-signing certificate), so macOS and
 Windows show a one-time "unidentified developer" /
 SmartScreen prompt the first time — this is expected for unsigned open-source software and does
 **not** mean the app is unsafe. Every release also ships a `SHA256SUMS` list, a Sigstore `cosign`
@@ -249,6 +256,7 @@ Everything is indexed in the **[documentation map](docs/README.md)** — start t
 - [Contributing](CONTRIBUTING.md) — dev setup, commands, and conventions
 - [Domain model](CONTEXT.md) and [repo conventions](AGENTS.md)
 - [Deployment](specifications/deployment_guide.md) · [Troubleshooting](specifications/troubleshooting_guide.md) · [Security](SECURITY.md)
+- [Backup and recovery](docs/backup-recovery.md) · [Privacy controls](docs/privacy-controls.md) · [Customization packs](docs/CUSTOMIZATION_PACKS.md)
 
 ## Development
 
@@ -261,7 +269,7 @@ make check        # the full local health gate
 ```
 
 The UI flow is covered by a Playwright suite (`cd frontend && npm run e2e`), including
-worst-case content, six themes, keyboard and touch interactions, and automated WCAG A/AA scans
+worst-case content, seven default-edition themes, keyboard and touch interactions, and automated WCAG A/AA scans
 of representative states. These scans complement manual accessibility review. Quality is enforced in
 CI across macOS/Windows/Linux — formatting, Clippy (`-D warnings`), tests + coverage, the frontend
 build + ESLint, supply-chain policy (`cargo deny`), unused-dep and spelling checks — plus fuzzing,

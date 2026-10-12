@@ -327,7 +327,7 @@ not needed.
 
 **Solutions:**
 1. **Update Node.js**
-   - Ensure you're using Node.js 16 or higher
+   - Ensure you're using Node.js 22 or higher
    ```bash
    node --version
    ```
@@ -335,8 +335,8 @@ not needed.
 2. **Reinstall Dependencies**
    ```bash
    cd frontend
-   rm -rf node_modules package-lock.json
-   npm install
+   rm -rf node_modules
+   npm ci
    ```
 
 3. **Clear npm Cache**

@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export const EMOJIS = ["👍", "❤️", "😂", "🎉", "🙏", "🔥", "😮", "😢"];
 
@@ -23,11 +24,8 @@ export function messageSegments(text: string): Segment[] {
 }
 
 function openExternal(url: string) {
-  // Open in the OS default browser, never the app webview. Lazy import so this module stays
-  // importable in the node unit-test environment (no Tauri runtime there).
-  import("@tauri-apps/plugin-opener")
-    .then((m) => m.openUrl(url))
-    .catch(() => {});
+  // Open in the OS default browser, never the app webview.
+  void openUrl(url).catch(() => {});
 }
 
 /** Render `text` with @mentions highlighted and URLs as external links. */
