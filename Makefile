@@ -84,7 +84,7 @@ tauri-dev:
 	cd src-tauri && cargo tauri dev
 
 tauri-build:
-	cd src-tauri && cargo tauri build
+	cd src-tauri && node ../frontend/node_modules/@tauri-apps/cli/tauri.js build
 
 # Help
 .PHONY: help
