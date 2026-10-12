@@ -44,6 +44,9 @@ tempfile = { workspace = true } # atomic replacement of per-account contact poli
 # Windows Credential Manager, Linux Secret Service) — never on plaintext disk.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # macOS dock badge: set it directly via AppKit (NSApplication.dockTile) instead of tao's
 # WebviewWindow::set_badge_count — tao calls setBadgeLabel without forcing a dockTile refresh,
 # which silently fails to render in a bundled .app. We add display() to actually paint it.
@@ -54,7 +57,6 @@ objc2 = "0.6"
 security-framework = { version = "3.6", features = ["OSX_10_15"] }
 security-framework-sys = "2.16"
 core-foundation = "0.10"
-libc = "0.2"
 
 # Inspect the real display backend; do not infer X11 from environment variables.
 [target.'cfg(target_os = "linux")'.dependencies]
