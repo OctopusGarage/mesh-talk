@@ -305,11 +305,16 @@ pub async fn download_update(
     tokio::fs::create_dir_all(&downloads)
         .await
         .map_err(|_| "Could not create the Downloads folder")?;
-    let existing = downloads.join(&name);
-    if verified_existing(&existing, asset, &cancel_receiver).await? {
+    if let Some(existing) =
+        find_verified_existing(&downloads, &name, asset, &cancel_receiver).await?
+    {
         return Ok(DownloadedUpdate {
             path: existing.to_string_lossy().into_owned(),
-            file_name: name,
+            file_name: existing
+                .file_name()
+                .expect("verified package has a name")
+                .to_string_lossy()
+                .into_owned(),
         });
     }
     let final_path = destination(&downloads, &name);
@@ -325,20 +330,16 @@ pub async fn download_update(
         .await
         .map_err(|_| "Could not create the temporary download file")?;
 
+    let publish_cancel = cancel_receiver.clone();
     let result = download_and_verify(asset, &mut file, &on_progress, cancel_receiver).await;
     drop(file);
     if let Err(error) = result {
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(error);
     }
-    if let Err(error) = publish_verified(&temporary, &final_path).await {
+    if let Err(error) = publish_verified_or_cancel(&temporary, &final_path, &publish_cancel).await {
         let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
-            "The download destination changed. Try again"
-        } else {
-            "Could not move the verified update into Downloads"
-        }
-        .into());
+        return Err(error);
     }
     Ok(DownloadedUpdate {
         path: final_path.to_string_lossy().into_owned(),
@@ -348,6 +349,74 @@ pub async fn download_update(
             .to_string_lossy()
             .into_owned(),
     })
+}
+
+async fn find_verified_existing(
+    downloads: &std::path::Path,
+    name: &str,
+    asset: &ReleaseAsset,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+) -> Result<Option<PathBuf>, String> {
+    let existing = downloads.join(name);
+    if verified_existing(&existing, asset, cancel).await? {
+        return Ok(Some(existing));
+    }
+    let base = name.strip_suffix(".zip").expect("validated asset name");
+    let prefix = format!("{base} (");
+    let mut entries = tokio::fs::read_dir(downloads)
+        .await
+        .map_err(|_| "Could not inspect the Downloads folder")?;
+    let mut numbered = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|_| "Could not inspect the Downloads folder")?
+    {
+        let file_name = entry.file_name();
+        let Some(digits) = file_name
+            .to_str()
+            .and_then(|file_name| file_name.strip_prefix(&prefix))
+            .and_then(|remainder| remainder.strip_suffix(").zip"))
+        else {
+            continue;
+        };
+        if !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit()) {
+            numbered.push(entry.path());
+        }
+    }
+    numbered.sort();
+    for path in numbered {
+        if verified_existing(&path, asset, cancel).await? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+async fn publish_verified_or_cancel(
+    temporary: &std::path::Path,
+    final_path: &std::path::Path,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    if *cancel.borrow() {
+        return Err("Download canceled".into());
+    }
+    publish_verified(temporary, final_path)
+        .await
+        .map_err(|error| {
+            String::from(if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "The download destination changed. Try again"
+            } else {
+                "Could not move the verified update into Downloads"
+            })
+        })?;
+    if *cancel.borrow() {
+        tokio::fs::remove_file(final_path)
+            .await
+            .map_err(|_| "Could not remove the canceled update")?;
+        return Err("Download canceled".into());
+    }
+    Ok(())
 }
 
 async fn publish_verified(
@@ -568,6 +637,58 @@ mod tests {
         assert!(verified_existing(&path, &asset, &cancel).await.unwrap());
         tokio::fs::write(&path, b"tampered").await.unwrap();
         assert!(!verified_existing(&path, &asset, &cancel).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn numbered_verified_package_is_reused_when_canonical_name_is_occupied() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::write(directory.path().join("package.zip"), b"invalid")
+            .await
+            .unwrap();
+        let numbered = directory.path().join("package (1).zip");
+        tokio::fs::write(&numbered, b"package").await.unwrap();
+        let asset = ReleaseAsset {
+            name: "package.zip".into(),
+            browser_download_url: String::new(),
+            digest: Some(format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(b"package"))
+            )),
+            size: 7,
+            state: "uploaded".into(),
+        };
+        let (_, cancel) = tokio::sync::watch::channel(false);
+
+        assert_eq!(
+            find_verified_existing(directory.path(), "package.zip", &asset, &cancel)
+                .await
+                .unwrap(),
+            Some(numbered)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_publish_keeps_verified_bytes_temporary() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join("verified.part");
+        let final_path = directory.path().join("update.zip");
+        tokio::fs::write(&temporary, b"verified package")
+            .await
+            .unwrap();
+        let (sender, cancel) = tokio::sync::watch::channel(false);
+        sender.send(true).unwrap();
+
+        assert_eq!(
+            publish_verified_or_cancel(&temporary, &final_path, &cancel)
+                .await
+                .unwrap_err(),
+            "Download canceled"
+        );
+        assert!(!final_path.exists());
+        assert_eq!(
+            tokio::fs::read(&temporary).await.unwrap(),
+            b"verified package"
+        );
     }
 
     #[tokio::test]
