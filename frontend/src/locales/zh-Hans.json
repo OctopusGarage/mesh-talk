@@ -175,7 +175,7 @@
     "snapshotDate": "创建于 {{date}}",
     "previewCounts": "{{messages}} 条消息 · {{channels}} 个群聊 · {{files}} 个文件卡片",
     "missingMedia": "{{count}} 个文件卡片缺少本地媒体内容",
-    "newerMissing": "备份之后的新消息可能缺失，直到与联系人重新同步。",
+    "newerMissing": "备份之后的消息可能缺失。与其他成员同步无法恢复备份中没有的群聊消息。",
     "oldDeviceRisk": "旧设备可能丢失或落入他人手中。",
     "compromiseWarning": "恢复后仍沿用旧账号身份，无法撤销旧设备。如果旧设备可能被控制，请创建新身份，并请联系人重新核验。",
     "startFresh": "创建新身份",
@@ -190,7 +190,7 @@
   },
   "conversation": {
     "archivedChannel": "已归档群聊",
-    "archivedChannelHint": "这是旧设备恢复的只读群聊记录，无法在此发送新消息。",
+    "archivedChannelHint": "这是从备份恢复的只读记录。请群主邀请这台新设备，以接收后续消息。其他成员无法为它解密缺失的旧群聊记录。",
     "dissolvedChannel": "已解散群聊",
     "dissolvedChannelHint": "群主已解散此群聊。你仍可查看历史记录，但不能发送新消息。",
     "leftChannel": "已退出频道",
@@ -239,9 +239,9 @@
       "metadataPending": "等待文件信息"
     },
     "custody": {
-      "local": "仅在此设备",
-      "one": "1 位成员有副本",
-      "multiple": "2 位或更多成员有副本",
+      "local": "尚未确认成员副本",
+      "one": "上次确认：1 位成员有副本",
+      "multiple": "上次确认：2 位或更多成员有副本",
       "help": "在线成员曾确认持久保存。副本之后可能丢失；这不是送达或已读回执。"
     },
     "sending": "发送中…",

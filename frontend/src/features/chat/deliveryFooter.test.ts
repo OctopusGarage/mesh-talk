@@ -73,6 +73,8 @@ describe("automatic delivery footer", () => {
       expect(markup).toContain(`data-custody="${copies}"`);
       expect(markup).not.toContain("data-delivery=");
       expect(markup).toContain("not a delivery or read receipt");
+      if (copies > 0) expect(markup).toContain("Last confirmed");
+      else expect(markup).toContain("No member copy confirmed");
     }
   });
   it("has explicit automatic-receipt wording in all six locales and hides guessed file metadata", async () => {

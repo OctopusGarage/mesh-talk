@@ -175,7 +175,7 @@
     "snapshotDate": "建立於 {{date}}",
     "previewCounts": "{{messages}} 則訊息 · {{channels}} 個群聊 · {{files}} 個檔案卡片",
     "missingMedia": "{{count}} 個檔案卡片缺少本機媒體內容",
-    "newerMissing": "備份之後的新訊息可能缺失，直到與聯絡人重新同步。",
+    "newerMissing": "備份之後的訊息可能缺失。與其他成員同步無法還原備份中沒有的群聊訊息。",
     "oldDeviceRisk": "舊裝置可能遺失或落入他人手中。",
     "compromiseWarning": "復原後仍沿用舊帳號身分，無法撤銷舊裝置。若舊裝置可能遭控制，請建立新身分並請聯絡人重新驗證。",
     "startFresh": "建立新身分",
@@ -190,7 +190,7 @@
   },
   "conversation": {
     "archivedChannel": "已封存群聊",
-    "archivedChannelHint": "這是從舊裝置還原的唯讀群聊記錄，無法在此傳送新訊息。",
+    "archivedChannelHint": "這是從備份還原的唯讀記錄。請群主邀請這台新裝置，以接收後續訊息。其他成員無法為它解密缺失的舊群聊記錄。",
     "dissolvedChannel": "已解散群聊",
     "dissolvedChannelHint": "群主已解散此群聊。你仍可查看歷史記錄，但無法傳送新訊息。",
     "leftChannel": "已退出頻道",
@@ -239,9 +239,9 @@
       "metadataPending": "等待檔案資訊"
     },
     "custody": {
-      "local": "僅在此裝置",
-      "one": "1 位成員有副本",
-      "multiple": "2 位或更多成員有副本",
+      "local": "尚未確認成員副本",
+      "one": "上次確認：1 位成員有副本",
+      "multiple": "上次確認：2 位或更多成員有副本",
       "help": "線上成員曾確認持久儲存。副本之後可能遺失；這不是送達或已讀回執。"
     },
     "sending": "傳送中…",

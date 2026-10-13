@@ -27,6 +27,8 @@ pub struct EventLog {
     /// orders incrementally as events are indexed). `(lamport, id)` is stable per event
     /// (both are content-addressed), so no duplicate/aliasing.
     by_conversation: HashMap<ConversationId, BTreeSet<(u64, EventId)>>,
+    /// Channels containing a wire kind that older peers cannot decode.
+    replica_v2: HashSet<ConversationId>,
     /// Per-conversation frontier: events not (yet) referenced as a parent.
     heads: HashMap<ConversationId, HashSet<EventId>>,
     /// Per-conversation version vector: author → highest seq seen.
@@ -135,6 +137,9 @@ impl EventLog {
                 count,
             );
         }
+        if event.kind == EventKind::ChannelReplica {
+            self.replica_v2.insert(conv);
+        }
         self.events.insert(id, event);
     }
 
@@ -149,6 +154,10 @@ impl EventLog {
 
     pub fn has(&self, id: &EventId) -> bool {
         self.events.contains_key(id)
+    }
+
+    pub fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        self.replica_v2.contains(conversation)
     }
 
     /// All event ids currently held, in arbitrary order.

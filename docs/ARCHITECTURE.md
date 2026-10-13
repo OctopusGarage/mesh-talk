@@ -135,18 +135,36 @@ command names for Tauri registration. Commands clone a node handle from
   reconciliation while preserving incoming pushes and the member's local history.
   The latest local preference is retried as a control event, so a member that was
   offline when it changed can learn the status after reconnecting.
-  Because event-kind indices are positional in bincode, peers must run a build
-  that understands kind 14 before exchanging this preference event.
+  Because event-kind indices are positional in bincode, sync preflights the
+  channel version before transferring kind 14. A requester that holds a replica
+  preference starts with appended v2 sync frames; an older peer rejects those
+  frames and the exchange closes before the preference is transferred. A newer
+  responder with kind 14 answers a legacy fingerprint/request with an appended
+  `UpgradeRequired` frame; a newer requester retries using v2, while an older
+  requester closes. Channels without kind 14 keep their legacy sync frames.
+  A mixed-version group can therefore stop syncing that channel after a
+  replica preference is published. Upgrade all members before using the
+  replica toggle; this is a safe compatibility failure, not seamless interop.
   Channel message sends ask each seeded member for an authenticated, exact
   `DurableHave` response after synchronization. The sender records distinct
   confirmations in a local password-encrypted `channel.custody` log. Its own
   signed message events are the durable retry queue: after restart and on
   discovery, a bounded recovery tick retries messages with fewer than two
   confirmed, currently sharing members (or fewer if the group is smaller).
-  The UI shows local-only, one-copy, or two-or-more-copy status for the sender's
-  message. This is the last confirmed custody state, not proof that a peer still
-  has the event, nor a delivery or read receipt. Post offices are not counted as
-  group-member copies.
+  The UI shows no-confirmed-copy, last-confirmed one-copy, or last-confirmed
+  two-or-more-copy status for the sender's message. Every 20 recovery ticks,
+  one historical claim is probed without first sending the event; a negative
+  durable answer is recorded as a revocation and normal retry can restore it.
+  An offline peer cannot be rechecked, so the count is still historical evidence,
+  not proof that a peer currently has the event, nor a delivery or read receipt.
+  Post offices are not counted as group-member copies.
+  The ignored `channel_replica_scale_rehearsal` test runs a repeatable 5/20/50
+  member Noise duplex exercise with every fifth recipient initially offline,
+  then recovers them from another member after the origin exits. It reports
+  contact count, serialized event payload estimate, and convergence time.
+  This protocol rehearsal does not measure real LAN discovery, TCP overhead,
+  or sustained throughput; use the sync-cost debug metrics and a real LAN trial
+  before deciding whether a fuller gossip protocol is needed.
   Locally saved channel attachments are then reclaimed instead of kept as replicas.
   Direct-message files and inline media keep their existing completion and
   cleanup paths.

@@ -1,6 +1,7 @@
 //! Locally encrypted evidence that an authenticated channel member reported durable
 //! possession of an exact event. These are historical custody confirmations, not
 //! delivery or read receipts; a peer can later delete its copy or lose its device.
+//! Revocations use a reserved `!` prefix so old records remain readable.
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::EventId;
@@ -27,7 +28,11 @@ impl ChannelCustodyStore {
         let (file, records) = EncryptedRecordLog::<CustodyRecord>::open(path, password, MAGIC)?;
         let mut confirmed: HashMap<EventId, HashSet<String>> = HashMap::new();
         for row in records {
-            confirmed.entry(row.event).or_default().insert(row.peer);
+            if let Some(peer) = row.peer.strip_prefix('!') {
+                confirmed.entry(row.event).or_default().remove(peer);
+            } else {
+                confirmed.entry(row.event).or_default().insert(row.peer);
+            }
         }
         Ok(Self { file, confirmed })
     }
@@ -37,6 +42,7 @@ impl ChannelCustodyStore {
     }
 
     pub fn confirm(&mut self, event: EventId, peer: &str) -> Result<(), LogError> {
+        debug_assert!(!peer.starts_with('!'));
         if self
             .confirmed
             .get(&event)
@@ -52,6 +58,26 @@ impl ChannelCustodyStore {
             .entry(event)
             .or_default()
             .insert(peer.to_owned());
+        Ok(())
+    }
+
+    /// A fresh authenticated probe reported that the member no longer holds
+    /// this event. Append the revocation before changing the in-memory view.
+    pub fn revoke(&mut self, event: EventId, peer: &str) -> Result<(), LogError> {
+        if !self
+            .confirmed
+            .get(&event)
+            .is_some_and(|set| set.contains(peer))
+        {
+            return Ok(());
+        }
+        self.file.append(&CustodyRecord {
+            event,
+            peer: format!("!{peer}"),
+        })?;
+        if let Some(set) = self.confirmed.get_mut(&event) {
+            set.remove(peer);
+        }
         Ok(())
     }
 }
@@ -74,5 +100,20 @@ mod tests {
         let store = ChannelCustodyStore::open(&path, "pw").unwrap();
         assert_eq!(store.peers(event).len(), 2);
         assert!(store.peers(EventId::new([8; 32])).is_empty());
+    }
+
+    #[test]
+    fn negative_recheck_revokes_old_confirmation_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custody.log");
+        let event = EventId::new([7; 32]);
+        let mut store = ChannelCustodyStore::open(&path, "pw").unwrap();
+        store.confirm(event, "bob").unwrap();
+        store.revoke(event, "bob").unwrap();
+        drop(store);
+        let mut store = ChannelCustodyStore::open(&path, "pw").unwrap();
+        assert!(store.peers(event).is_empty());
+        store.confirm(event, "bob").unwrap();
+        assert_eq!(store.peers(event).len(), 1);
     }
 }

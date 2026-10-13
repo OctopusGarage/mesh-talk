@@ -145,6 +145,9 @@ impl PersistentEventLog {
     pub fn has(&self, id: &EventId) -> bool {
         self.log.has(id)
     }
+    pub fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v2(conversation)
+    }
     pub fn get(&self, id: &EventId) -> Option<&Event> {
         self.log.get(id)
     }
@@ -377,6 +380,9 @@ const COMPACT_PROFILE_MIN: usize = 8;
 // NOTE: this impl is structurally identical to `impl SyncStore for EventLog`
 // in sync.rs — keep the two in sync.
 impl SyncStore for PersistentEventLog {
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        PersistentEventLog::requires_channel_v2(self, conversation)
+    }
     fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
         PersistentEventLog::fingerprint_and_len(self, conversation)
     }

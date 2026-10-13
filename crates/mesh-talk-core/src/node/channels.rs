@@ -21,6 +21,7 @@ const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
 const SMALL_CHANNEL_MEMBER_LIMIT: usize = 5;
 const LARGE_CHANNEL_INITIAL_FANOUT: usize = 2;
 const CHANNEL_CUSTODY_SCAN_PER_TICK: usize = 128;
+const CHANNEL_CUSTODY_RECHECK_TICKS: usize = 20;
 
 /// Members in canonical order: sorted by `user_id` and de-duplicated. `ChannelMeta` encodes
 /// the membership Vec positionally, and the same-epoch convergence tie-break in
@@ -74,6 +75,10 @@ impl Node {
                 cursor = cursor.wrapping_add(1);
             }
             self.retry_one_channel_custody(custody_cursor).await;
+            if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
+                self.recheck_one_channel_custody(custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS)
+                    .await;
+            }
             custody_cursor = custody_cursor.wrapping_add(1);
         }
     }
@@ -767,6 +772,75 @@ impl Node {
                 .lock()
                 .expect("channel_custody mutex not poisoned")
                 .confirm(event_id, &peer.public.user_id());
+        }
+    }
+
+    /// Periodically verify one old claim without first syncing the missing
+    /// event back to that peer. A negative answer retracts the displayed copy;
+    /// the normal retry queue may subsequently restore and reconfirm it.
+    async fn recheck_one_channel_custody(&self, cursor: usize) {
+        let me = self.user_id();
+        let author =
+            crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
+        let candidates: Vec<_> = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            let log = self.log.lock().expect("log mutex not poisoned");
+            book.channel_ids()
+                .into_iter()
+                .filter(|channel| {
+                    book.state(channel)
+                        .is_some_and(|state| state.is_member(&me) && !state.is_dissolved())
+                })
+                .flat_map(|channel| {
+                    log.events(&channel)
+                        .into_iter()
+                        .filter(|event| event.author == author && event.kind == EventKind::Message)
+                        .map(move |event| (channel, event.id))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let (channel, event_id) = candidates[cursor % candidates.len()];
+        let confirmed = self
+            .channel_custody
+            .lock()
+            .expect("channel_custody mutex not poisoned")
+            .peers(event_id);
+        let peer = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            book.state(&channel).and_then(|state| {
+                state
+                    .members()
+                    .iter()
+                    .filter(|member| {
+                        confirmed.contains(&member.user_id())
+                            && book.replica_enabled(channel, &member.user_id())
+                    })
+                    .find_map(|member| {
+                        self.routing_peer(&member.user_id())
+                            .filter(|peer| peer.public == *member)
+                    })
+            })
+        };
+        let Some(peer) = peer else { return };
+        let check = async {
+            let mut conn = self.privacy_dial(peer.addr, &peer.public).await.ok()?;
+            request_durable_have(&mut conn, channel, event_id)
+                .await
+                .ok()
+        };
+        if matches!(
+            tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, check).await,
+            Ok(Some(false))
+        ) {
+            let _ = self
+                .channel_custody
+                .lock()
+                .expect("channel_custody mutex not poisoned")
+                .revoke(event_id, &peer.public.user_id());
         }
     }
 

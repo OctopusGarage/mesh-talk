@@ -806,6 +806,22 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        // Inspect the peer's projection: a hidden event must not affect the
+        // compatibility response or reveal that it exists.
+        if !self
+            .node
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .requires_channel_v2(conversation)
+        {
+            return false;
+        }
+        self.visible(conversation)
+            .iter()
+            .any(|event| event.kind == EventKind::ChannelReplica)
+    }
     fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
         if (!self.inbound || self.node.shares_replica(conversation))
             && self
