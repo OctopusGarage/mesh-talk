@@ -169,7 +169,8 @@ command names for Tauri registration. Commands clone a node handle from
   This protocol rehearsal does not measure real LAN discovery, TCP overhead,
   or sustained throughput; use the sync-cost debug metrics and a real LAN trial
   before deciding whether a fuller gossip protocol is needed.
-  Locally saved channel attachments are then reclaimed instead of kept as replicas.
+  Locally saved channel attachments remain available as bounded complete-file
+  replicas until the channel-file budget evicts older files.
   Direct-message files and inline media keep their existing completion and
   cleanup paths.
   A public channel's whole-set fingerprint is cached in the durable log and
@@ -257,6 +258,12 @@ command names for Tauri registration. Commands clone a node handle from
   recipients' rounds then forward the signed log to other members. Smaller
   channels and membership controls retain direct fanout. File manifests retain
   direct fanout until chunk replication has an explicit retention policy.
+  Initial text/sticker contacts run concurrently (at most four for a small channel,
+  two for a larger one), so a stalled handshake cannot delay another member.
+  Membership and key controls contact every routed member with a four-connection
+  concurrency cap and a per-peer deadline. Sync rounds may share one authenticated
+  connection sequentially, but there is no global persistent connection pool or
+  one-socket-per-device invariant; independent operations may dial concurrently.
   Each channel send emits a debug metric with member count, seeded peer count,
   confirmed member copies, and elapsed milliseconds. The sync layer separately
   logs have-set size, applied and pushed events, and round count. These provide

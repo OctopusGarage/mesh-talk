@@ -8,6 +8,8 @@ use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
 use crate::node::session::{request_durable_have, request_round};
+use futures_util::future::join_all;
+use futures_util::stream::{self, StreamExt};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +22,7 @@ const CHANNEL_RECOVERY_INTERVAL: Duration = Duration::from_secs(3);
 const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
 const SMALL_CHANNEL_MEMBER_LIMIT: usize = 5;
 const LARGE_CHANNEL_INITIAL_FANOUT: usize = 2;
+const CHANNEL_CONTROL_FANOUT_CONCURRENCY: usize = 4;
 const CHANNEL_CUSTODY_SCAN_PER_TICK: usize = 128;
 const CHANNEL_CUSTODY_RECHECK_TICKS: usize = 20;
 
@@ -697,16 +700,20 @@ impl Node {
             LARGE_CHANNEL_INITIAL_FANOUT,
         );
         let seeded = targets.len();
-        let mut sent_frame_bytes = 0u64;
-        for peer in targets {
-            let bytes = tokio::time::timeout(
+        // There are at most four targets (a small channel's other members) or
+        // two (a large channel's seed replicas). Start them together so a
+        // stalled handshake cannot block delivery to another reachable member.
+        let sent_frame_bytes = join_all(targets.iter().map(|peer| async {
+            tokio::time::timeout(
                 CHANNEL_RECOVERY_PEER_TIMEOUT,
-                self.sync_and_confirm_custody(channel, event_id, &peer),
+                self.sync_and_confirm_custody(channel, event_id, peer),
             )
             .await
-            .unwrap_or(0);
-            sent_frame_bytes = sent_frame_bytes.saturating_add(bytes);
-        }
+            .unwrap_or(0)
+        }))
+        .await
+        .into_iter()
+        .fold(0u64, u64::saturating_add);
         let _ = self.replicate_to_post_office(channel).await;
         #[cfg(test)]
         {
@@ -961,12 +968,19 @@ impl Node {
         } else {
             peers
         };
-        for peer in targets {
-            if let Ok(mut ch) = self.privacy_dial(peer.addr, &peer.public).await {
-                let store = self.sync_store(ch.peer_identity());
-                let _ = request_round(&mut ch, &store, channel).await;
-            }
-        }
+        // Controls still reach every routed member, but a stalled route must
+        // neither block healthy members nor create an unbounded dial burst.
+        stream::iter(targets)
+            .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| async move {
+                let _ = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                    if let Ok(mut ch) = self.privacy_dial(peer.addr, &peer.public).await {
+                        let store = self.sync_store(ch.peer_identity());
+                        let _ = request_round(&mut ch, &store, channel).await;
+                    }
+                })
+                .await;
+            })
+            .await;
         if replicate_to_post_office {
             let _ = self.replicate_to_post_office(channel).await;
         }

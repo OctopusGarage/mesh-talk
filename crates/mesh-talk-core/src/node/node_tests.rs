@@ -1725,6 +1725,103 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     assert_eq!(alice_node.channel_owner(channel), owner);
 }
 
+#[tokio::test]
+async fn stalled_channel_peer_does_not_delay_healthy_member() {
+    let alice = DeviceIdentity::generate();
+    let mut slow = DeviceIdentity::generate();
+    let mut fast = DeviceIdentity::generate();
+    if slow.public().user_id() > fast.public().user_id() {
+        std::mem::swap(&mut slow, &mut fast);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let slow_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let slow_port = slow_listener.local_addr().unwrap().port();
+    let fast_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let fast_port = fast_listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&slow, "Slow", slow_port, &alice.public().user_id());
+    add_peer(
+        &alice_roster,
+        &fast,
+        "Fast",
+        fast_port,
+        &alice.public().user_id(),
+    );
+    let open = |identity, roster, name: &str| {
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, ch_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
+    let (fast_node, mut fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
+    let fast_task = tokio::spawn(Arc::clone(&fast_node).run_accept_loop(fast_listener));
+    let channel = alice_node
+        .create_channel(
+            "stalled-peer",
+            vec![slow_node.identity.public(), fast_node.identity.public()],
+        )
+        .await
+        .unwrap();
+
+    slow_task.abort();
+    let _ = slow_task.await;
+    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
+        .await
+        .unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let stalled_task = tokio::spawn(async move {
+        let (socket, _) = stalled_listener.accept().await.unwrap();
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        drop(socket);
+    });
+
+    let sender = tokio::spawn({
+        let node = Arc::clone(&alice_node);
+        async move {
+            node.send_channel_message(channel, b"healthy peer first")
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+        .await
+        .expect("sender contacted the stalled peer")
+        .expect("stalled listener accepted a connection");
+    let received = tokio::time::timeout(Duration::from_secs(5), fast_rx.recv())
+        .await
+        .expect("healthy peer must receive before the stalled handshake times out")
+        .expect("channel stream open");
+    assert_eq!(received.text, b"healthy peer first");
+    let status_sender = tokio::spawn({
+        let node = Arc::clone(&alice_node);
+        async move { node.set_channel_replica_enabled(channel, false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fast_node.channel_replica_enabled(channel, &alice_node.user_id()) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("healthy peer must receive a control event despite the stalled peer");
+    stalled_task.abort();
+    sender.await.unwrap().unwrap();
+    status_sender.await.unwrap().unwrap();
+    fast_task.abort();
+}
+
 /// A restarted member recovers from another member when the author and post office
 /// are unavailable. Discovery of the serving member wakes recovery immediately.
 #[tokio::test]
