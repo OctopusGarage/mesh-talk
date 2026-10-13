@@ -398,6 +398,22 @@ impl ChannelBook {
             .collect()
     }
 
+    pub fn pending_replica_preferences(
+        &self,
+        own: &str,
+    ) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
+        self.states
+            .iter()
+            .filter(|(id, state)| {
+                state.is_accepted_member(own)
+                    && self
+                        .replica_preferences
+                        .contains_key(&(**id, own.to_string()))
+            })
+            .map(|(id, state)| (*id, state.members().to_vec()))
+            .collect()
+    }
+
     /// Replay `events` (a channel's events, in log/causal order) for the node `me`.
     /// Updates membership + keys and returns the channel `Message`s that are newly
     /// decryptable and authored by someone other than `me`. Events we can't act on

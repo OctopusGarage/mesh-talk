@@ -537,6 +537,7 @@ impl Node {
                 .into_iter()
                 .chain(book.pending_acceptances(&own))
                 .chain(book.pending_transfers(&own))
+                .chain(book.pending_replica_preferences(&own))
             {
                 controls.insert(id, members);
             }

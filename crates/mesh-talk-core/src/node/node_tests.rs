@@ -1950,12 +1950,26 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
         bob_port,
         &dana_node.user_id(),
     );
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&dana_node.identity.public());
 
     bob_node
         .set_channel_replica_enabled(channel, false)
         .await
         .unwrap();
     assert!(!bob_node.channel_replica_enabled(channel, &bob_node.user_id()));
+    assert!(dana_node.channel_replica_enabled(channel, &bob_node.user_id()));
+    add_peer(
+        &bob_node.roster,
+        &dana_node.identity,
+        "Dana",
+        dana_port,
+        &bob_id,
+    );
+    bob_node.retry_channel_controls().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while dana_node.channel_replica_enabled(channel, &bob_node.user_id()) {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1963,6 +1977,11 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
     })
     .await
     .expect("Dana sees Bob's signed replica preference");
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&dana_node.identity.public());
     alice_node
         .send_channel_message(channel, b"Bob does not relay")
         .await
@@ -1972,11 +1991,6 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
 
     // Bob resumes sharing, but has no direct address for Dana: only Dana's pull
     // from Bob can deliver the missed second message.
-    bob_node
-        .roster
-        .lock()
-        .unwrap()
-        .forget(&dana_node.identity.public());
     bob_node
         .set_channel_replica_enabled(channel, true)
         .await

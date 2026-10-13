@@ -133,6 +133,8 @@ command names for Tauri registration. Commands clone a node handle from
   kind 14, one-byte enabled flag). Peers show the signed status in the member list.
   Disabling sharing hides the local channel and channel-file logs from inbound
   reconciliation while preserving incoming pushes and the member's local history.
+  The latest local preference is retried as a control event, so a member that was
+  offline when it changed can learn the status after reconnecting.
   Because event-kind indices are positional in bincode, peers must run a build
   that understands kind 14 before exchanging this preference event.
   Locally saved channel attachments are then reclaimed instead of kept as replicas.
