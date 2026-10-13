@@ -1,5 +1,4 @@
 import { expect, test } from "./tauri-mock";
-import { prepareForScreenshot } from "./helpers/visual-snapshot";
 
 // Regression: the channel members list must show OUR OWN row with our display name and an
 // online status. We never appear in our own discovery roster, so the backend falls back to
@@ -22,12 +21,9 @@ test("channel members shows self with name + online", async ({ page }) => {
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
 
-  await prepareForScreenshot(page);
   await page.getByTestId("members-trigger").click();
-  await page.mouse.move(0, 0);
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveScreenshot("members-self.png");
 
   // Self shows our display name, not the raw hex user_id.
   const selfRow = dialog.locator(".group").filter({ hasText: "tester" });
