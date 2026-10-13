@@ -174,11 +174,14 @@ export async function receiptRestartScenario(c, state, cold) {
   await receiptPhase(c, state, "receipt-source-restart-durable", "delivered", true, cold);
 }
 
-export async function signedPeerObservation({ peer, userId, peerName, observe, until }) {
+export async function signedPeerObservation({ peer, userId, peerName, observe, until, publiclyVisible = true }) {
   // Sign-out/sign-in creates a fresh node. Discovery is asynchronous: the old
   // CLI output is not proof that the replacement UI node has rediscovered it.
   const rawPeer = await until("restarted UI rediscovers signed CLI identity", async () =>
     (await observe("list_peers")).find(p => p.name === peerName));
+  // A private UI node keeps its route available without joining the CLI's
+  // public roster. The caller verifies the return route with a real DM.
+  if (!publiclyVisible) return rawPeer;
   let outputStart = peer.output.length;
   await until("fresh CLI roster sees UI node", async () => {
     if (peer.output.slice(outputStart).includes(`peer ${userId}`)) return true;

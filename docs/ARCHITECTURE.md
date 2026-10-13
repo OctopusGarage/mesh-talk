@@ -373,8 +373,12 @@ Noise XX exposes its static key and previously transmitted presence remains know
 
 Explicit DM/file/contact actions durably grant the verified destination account;
 background profiles, file pulls, calls and relay retries never grant permission.
-Manual permission publishes signed listening presence inside a pinned encrypted
-connection, without requiring a message or a UDP announcement. Policy changes
+Manual permission publishes a signed listening route inside a pinned encrypted
+connection, without requiring a message or a UDP announcement. The session-bound
+private proof carries an authenticated visibility marker; receivers retain its
+account proof and route but remove the peer from the online roster. Private
+connections and periodic route probes never refresh visible presence. Older
+clients that cannot verify the private proof reject the connection. Policy changes
 invalidate existing channels; bounded per-send/handshake operation guards finish
 before revocation acknowledges. The actual event log is projected separately for
 each principal and conversation, including event authors and dependency closure.
@@ -394,7 +398,8 @@ identity. A private listening-port preference lets permitted invisible peers
 reconnect after both restart, subject to port availability and network changes.
 Loaded routes never create online roster entries. Delivery can use eligible
 verified cached routes after discovery expires; tracked, bounded authenticated
-probes refresh online presence only when the pinned peer actually responds.
+probes refresh online presence only when a publicly visible pinned peer responds.
+Private responses keep routing available without refreshing online presence.
 Failed probes leave normal offline expiry intact and never create permissions.
 Conflicting passive remote device/account proofs fail closed. An explicit user
 contact/grant may accept a newly device-signed account binding for the same full

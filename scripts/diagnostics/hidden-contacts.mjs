@@ -350,7 +350,7 @@ try {
   await login(userName);
   const coldReceiptCheckpoint = await receiptColdRestartCheckpoint(coreContext, receiptState);
   await coreContext.restartPeer();
-  await signedPeerObservation(coreContext);
+  await signedPeerObservation({ ...coreContext, publiclyVisible: false });
   await until("same account rediscovered after receiver restart", async () => (await observe("list_accounts")).some(a => a.account_id === account && a.names.includes(peerName)));
   await receiptRestartScenario(coreContext, receiptState, coldReceiptCheckpoint);
   await restartedCoreScenarios(coreContext, coreState);

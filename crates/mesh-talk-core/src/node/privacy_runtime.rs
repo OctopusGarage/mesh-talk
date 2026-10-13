@@ -667,11 +667,22 @@ impl Node {
             .as_ref()
             .map(|s| s.own.clone())
     }
+    #[cfg(test)]
     pub(in crate::node) fn remember_peer(
         &self,
         public: &PublicIdentity,
         announce: Option<&Announce>,
         ip: std::net::IpAddr,
+    ) -> Result<(), TransportError> {
+        self.remember_peer_with_visibility(public, announce, ip, true)
+    }
+
+    pub(in crate::node) fn remember_peer_with_visibility(
+        &self,
+        public: &PublicIdentity,
+        announce: Option<&Announce>,
+        ip: std::net::IpAddr,
+        publicly_visible: bool,
     ) -> Result<(), TransportError> {
         let ip = crate::transport::net::canonical_peer_ip(ip);
         let Some(announce) = announce else {
@@ -711,10 +722,12 @@ impl Node {
                 }
             }
         }
-        self.roster
-            .lock()
-            .expect("roster lock not poisoned")
-            .update(announce, ip, &self.user_id());
+        let mut roster = self.roster.lock().expect("roster lock not poisoned");
+        if publicly_visible {
+            roster.update(announce, ip, &self.user_id());
+        } else {
+            roster.forget(public);
+        }
         Ok(())
     }
 
@@ -819,10 +832,11 @@ impl Node {
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
         let mut addr = addr;
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
-        let own = self.own_presence();
         #[cfg(test)]
         timing.phase("dial-privacy-gate");
         let _operation = self.privacy.gate.read().await;
+        let own = self.own_presence();
+        let publicly_visible = !self.privacy_snapshot().invisible;
         #[cfg(test)]
         timing.phase("dial-admission");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
@@ -845,11 +859,12 @@ impl Node {
                 timing.phase("dial-noise-presence");
             }
             stream.set_nodelay(true)?;
-            SecureChannel::connect_with_presence(
+            SecureChannel::connect_with_visibility(
                 stream,
                 &self.identity,
                 Some(expected),
                 own.as_ref(),
+                publicly_visible,
             )
             .await
         })
@@ -872,10 +887,11 @@ impl Node {
         }
         #[cfg(test)]
         timing.phase("dial-remember-peer");
-        self.remember_peer(
+        self.remember_peer_with_visibility(
             channel.peer_identity(),
             channel.peer_announcement(),
             addr.ip(),
+            channel.peer_publicly_visible(),
         )?;
         self.guard_channel(&mut channel, generation);
         #[cfg(test)]
@@ -894,24 +910,34 @@ impl Node {
         stream.set_nodelay(true)?;
         #[cfg(test)]
         timing.phase("accept-own-presence");
-        let own = self.own_presence();
         #[cfg(test)]
         timing.phase("accept-privacy-gate");
         let _operation = self.privacy.gate.read().await;
+        let own = self.own_presence();
+        let publicly_visible = !self.privacy_snapshot().invisible;
         #[cfg(test)]
         timing.phase("accept-noise-presence");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         let mut channel = tokio::time::timeout(
             super::transport::HANDSHAKE_TIMEOUT,
-            SecureChannel::accept_with_presence(stream, &self.identity, own.as_ref(), |peer| {
-                self.admitted(peer)
-            }),
+            SecureChannel::accept_with_visibility(
+                stream,
+                &self.identity,
+                own.as_ref(),
+                publicly_visible,
+                |peer| self.admitted(peer),
+            ),
         )
         .await
         .map_err(|_| TransportError::Noise("accept timed out".into()))??;
         #[cfg(test)]
         timing.phase("accept-remember-peer");
-        self.remember_peer(channel.peer_identity(), channel.peer_announcement(), ip)?;
+        self.remember_peer_with_visibility(
+            channel.peer_identity(),
+            channel.peer_announcement(),
+            ip,
+            channel.peer_publicly_visible(),
+        )?;
         self.guard_channel(&mut channel, generation);
         #[cfg(test)]
         timing.finish();
