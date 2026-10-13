@@ -191,9 +191,10 @@ test.describe("Mesh-Talk UI flow", () => {
         log.evaluate((element) => element.scrollHeight - element.clientHeight),
       )
       .toBeGreaterThan(48);
-    await log.evaluate((element) => {
-      element.scrollTop = 0;
-    });
+    // Use a reader's wheel gesture so Virtuoso receives the scroll interaction
+    // before the jump control is clicked.
+    await log.hover();
+    await page.mouse.wheel(0, -10_000);
     await expect
       .poll(() =>
         log.evaluate(
