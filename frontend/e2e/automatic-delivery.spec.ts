@@ -5,10 +5,12 @@ import {
   revealComposerTools,
   BOB,
 } from "./helpers/session";
+import { seedMarketPacks } from "./helpers/packs";
 
 test("text, sticker and file card stay Awaiting until explicit authoritative mock projection", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["cats"]);
   await enterChat(page);
   await openBobDm(page);
   await page.evaluate(() => {
@@ -35,7 +37,8 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
-  await page.getByTestId("sticker-option-pack:google-noto:1f602").click();
+  await page.getByTestId("sticker-pack-cats").click();
+  await page.getByTestId("sticker-option-pack:cats:cat-01-01").click();
   await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(2);
   await revealComposerTools(page);
   await page.getByTestId("composer-attach").click();
