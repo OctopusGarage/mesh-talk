@@ -59,6 +59,7 @@ export interface SearchTarget {
 
 export interface ChatMessage {
   delivery?: "awaiting" | "delivered";
+  replicas?: number;
   metadataPending?: boolean;
   id: string | null; // hex EventId; null while pending
   fromMe: boolean;

@@ -66,6 +66,15 @@ describe("automatic delivery footer", () => {
       "data-delivery=",
     );
   });
+  it("shows channel custody separately from delivery", async () => {
+    await i18n.changeLanguage("en");
+    for (const copies of [0, 1, 2]) {
+      const markup = render({ ...base, replicas: copies }, true);
+      expect(markup).toContain(`data-custody="${copies}"`);
+      expect(markup).not.toContain("data-delivery=");
+      expect(markup).toContain("not a delivery or read receipt");
+    }
+  });
   it("has explicit automatic-receipt wording in all six locales and hides guessed file metadata", async () => {
     for (const language of ["en", "es", "ja", "yue", "zh-Hans", "zh-Hant"]) {
       for (const key of [

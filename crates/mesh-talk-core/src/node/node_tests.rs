@@ -1730,6 +1730,7 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
 #[tokio::test]
 async fn channel_member_recovers_missed_message_from_peer() {
     let alice = DeviceIdentity::generate();
+    let alice_secrets = alice.secret_bytes();
     let bob = DeviceIdentity::generate();
     let carol = DeviceIdentity::generate();
     let carol_secrets = carol.secret_bytes();
@@ -1794,6 +1795,23 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .send_channel_message(channel, b"recover from Bob")
         .await
         .unwrap();
+    let sent_id = alice_node.channel_history(channel, 10)[0].id;
+    assert_eq!(alice_node.channel_custody_count(channel, sent_id), Some(1));
+    assert_eq!(
+        alice_node.channel_custody_count(channel, EventId::new([0; 32])),
+        None
+    );
+    drop(alice_node);
+    let (reopened_alice, _alice_rx) = open(
+        DeviceIdentity::from_secret_bytes(alice_secrets.0, alice_secrets.1),
+        Arc::new(Mutex::new(Roster::default())),
+        "alice",
+    );
+    assert_eq!(
+        reopened_alice.channel_custody_count(channel, sent_id),
+        Some(1)
+    );
+    drop(reopened_alice);
     tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
         .await
         .expect("Bob received the original push");
@@ -1820,6 +1838,52 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .expect("channel stream open");
     assert_eq!(recovered.text, b"recover from Bob");
     assert_eq!(carol_node.channel_history(channel, 10).len(), 1);
+    let resumed_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, carol_port))
+        .await
+        .unwrap();
+    let resumed_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(resumed_listener));
+    let (reopened_alice, _alice_rx) = open(
+        DeviceIdentity::from_secret_bytes(alice_secrets.0, alice_secrets.1),
+        Arc::new(Mutex::new(Roster::default())),
+        "alice",
+    );
+    let alice_changes = reopened_alice.roster.lock().unwrap().changes();
+    let alice_recovery =
+        tokio::spawn(Arc::clone(&reopened_alice).run_channel_recovery_loop(alice_changes));
+    add_peer(
+        &reopened_alice.roster,
+        &carol_node.identity,
+        "Carol",
+        carol_port,
+        &alice_id,
+    );
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while reopened_alice.channel_custody_count(channel, sent_id) != Some(2) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("restart retries the missing second member copy");
+    alice_recovery.abort();
+    resumed_task.abort();
+    reopened_alice
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&carol_node.identity.public());
+    reopened_alice
+        .send_channel_message(channel, b"local only")
+        .await
+        .unwrap();
+    let local_id = reopened_alice
+        .channel_history(channel, 10)
+        .last()
+        .unwrap()
+        .id;
+    assert_eq!(
+        reopened_alice.channel_custody_count(channel, local_id),
+        Some(0)
+    );
     recovery_task.abort();
     bob_task.abort();
 }

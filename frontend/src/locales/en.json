@@ -238,6 +238,12 @@
       "fileHelp": "File card delivered. File download and reading are separate.",
       "metadataPending": "File details pending"
     },
+    "custody": {
+      "local": "Only on this device",
+      "one": "1 member copy",
+      "multiple": "2+ member copies",
+      "help": "Confirmed when an online member reported durable storage. Copies can later be lost; this is not a delivery or read receipt."
+    },
     "sending": "sending…",
     "reply": "Reply",
     "react": "React",

@@ -238,6 +238,12 @@
       "fileHelp": "Tarjeta del archivo entregada. La descarga y la lectura son independientes.",
       "metadataPending": "Detalles del archivo pendientes"
     },
+    "custody": {
+      "local": "Solo en este dispositivo",
+      "one": "1 copia de un miembro",
+      "multiple": "2 o más copias de miembros",
+      "help": "Confirmado cuando un miembro informó que guardó el mensaje. Las copias pueden perderse; no confirma entrega ni lectura."
+    },
     "sending": "enviando…",
     "reply": "Responder",
     "react": "Reaccionar",

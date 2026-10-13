@@ -102,6 +102,46 @@ pub async fn set_channel_replica_enabled(
 }
 
 #[derive(Serialize)]
+pub struct ChannelCustodyInfo {
+    id: String,
+    replicas: usize,
+}
+
+/// Historical, authenticated durable-copy confirmations for this device's own
+/// channel messages. These counts do not imply recipient delivery or reading.
+#[tauri::command]
+pub async fn channel_custody_statuses<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    ids: Vec<String>,
+) -> Result<Vec<ChannelCustodyInfo>, CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    if ids.len() > 256 {
+        return Err(CommandError::InvalidInput(
+            "at most 256 message ids are allowed".into(),
+        ));
+    }
+    let ids = ids
+        .iter()
+        .map(|id| parse_event_id(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let node = state.node_handle().await?;
+    let statuses = ids
+        .into_iter()
+        .filter_map(|id| {
+            node.channel_custody_count(channel, id)
+                .map(|replicas| ChannelCustodyInfo {
+                    id: id.to_hex(),
+                    replicas,
+                })
+        })
+        .collect();
+    crate::app_lock::reject_if_locked(&app)?;
+    Ok(statuses)
+}
+
+#[derive(Serialize)]
 pub struct ChannelActivityInfo {
     pub kind: String,
     pub actor: String,

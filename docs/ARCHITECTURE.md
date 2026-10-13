@@ -137,6 +137,16 @@ command names for Tauri registration. Commands clone a node handle from
   offline when it changed can learn the status after reconnecting.
   Because event-kind indices are positional in bincode, peers must run a build
   that understands kind 14 before exchanging this preference event.
+  Channel message sends ask each seeded member for an authenticated, exact
+  `DurableHave` response after synchronization. The sender records distinct
+  confirmations in a local password-encrypted `channel.custody` log. Its own
+  signed message events are the durable retry queue: after restart and on
+  discovery, a bounded recovery tick retries messages with fewer than two
+  confirmed, currently sharing members (or fewer if the group is smaller).
+  The UI shows local-only, one-copy, or two-or-more-copy status for the sender's
+  message. This is the last confirmed custody state, not proof that a peer still
+  has the event, nor a delivery or read receipt. Post offices are not counted as
+  group-member copies.
   Locally saved channel attachments are then reclaimed instead of kept as replicas.
   Direct-message files and inline media keep their existing completion and
   cleanup paths.
@@ -225,6 +235,9 @@ command names for Tauri registration. Commands clone a node handle from
   recipients' rounds then forward the signed log to other members. Smaller
   channels and membership controls retain direct fanout. File manifests retain
   direct fanout until chunk replication has an explicit retention policy.
+  Member copy counts are historical confirmations. To make a current durability
+  guarantee, the protocol would need renewable leases or periodic exact probes
+  and a policy for peers that permanently leave; the UI does not claim one.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
 
@@ -575,7 +588,12 @@ renames recoverable: startup removes an incomplete pair or retains a completed p
 before auth initializes. Startup also removes orphan staging and decrypted scratch.
 The recovered account fingerprint remains the same; the new device fingerprint
 differs. Restored channels are read-only archives because their old sender keys
-are excluded. Offline DM peers are discovered from durable account history.
+are excluded. A new device must be invited into an active channel as a new member
+to receive fresh sender keys and participate in future messages. Peer replicas
+can restore signed ciphertext events but cannot give the new device the retired
+device's sender chains or decrypt past channel history. Users who need readable
+past history must restore a backup containing its plaintext archive. Offline DM
+peers are discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
 managed media referenced by visible cards, received peer avatars, and recall marks.

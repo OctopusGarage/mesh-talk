@@ -743,6 +743,44 @@ it("projects recipient-confirmed upload progress onto only the matching outgoing
   expect(useTransfers.getState().transfers["file-id"]?.delivered).toBe(true);
 });
 
+it("projects channel custody without treating member copies as delivery", async () => {
+  invoke.mockImplementation((cmd: string, args: unknown) => {
+    if (cmd === "channel_custody_statuses") {
+      expect(args).toEqual({ channelId: "team", ids: ["own-id"] });
+      return Promise.resolve([{ id: "own-id", replicas: 2 }]);
+    }
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "channel", id: "team", name: "Team" },
+    messages: {
+      "channel:team": [
+        {
+          id: "own-id",
+          fromMe: true,
+          who: "me",
+          text: "hello",
+          replyTo: null,
+          wallClock: 1,
+        },
+        {
+          id: "other-id",
+          fromMe: false,
+          who: "peer",
+          text: "hi",
+          replyTo: null,
+          wallClock: 2,
+        },
+      ],
+    },
+  });
+  await useChat.getState().refreshStatuses();
+  const [own, incoming] = useChat.getState().messages["channel:team"];
+  expect(own.replicas).toBe(2);
+  expect(own.delivery).toBeUndefined();
+  expect(incoming.replicas).toBeUndefined();
+});
+
 describe("convKey", () => {
   it("namespaces by kind + id", () => {
     expect(convKey({ kind: "account", id: "a1", name: "x" })).toBe(

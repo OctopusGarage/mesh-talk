@@ -7,7 +7,7 @@ use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
-use crate::node::session::request_round;
+use crate::node::session::{request_durable_have, request_round};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +20,7 @@ const CHANNEL_RECOVERY_INTERVAL: Duration = Duration::from_secs(3);
 const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
 const SMALL_CHANNEL_MEMBER_LIMIT: usize = 5;
 const LARGE_CHANNEL_INITIAL_FANOUT: usize = 2;
+const CHANNEL_CUSTODY_SCAN_PER_TICK: usize = 128;
 
 /// Members in canonical order: sorted by `user_id` and de-duplicated. `ChannelMeta` encodes
 /// the membership Vec positionally, and the same-epoch convergence tie-break in
@@ -55,6 +56,7 @@ impl Node {
         let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
+        let mut custody_cursor = 0usize;
         let mut startup = true;
         loop {
             let discovered = tokio::select! {
@@ -71,6 +73,8 @@ impl Node {
                 self.pull_one_channel_from_member(cursor).await;
                 cursor = cursor.wrapping_add(1);
             }
+            self.retry_one_channel_custody(custody_cursor).await;
+            custody_cursor = custody_cursor.wrapping_add(1);
         }
     }
 
@@ -637,7 +641,18 @@ impl Node {
             .lock()
             .expect("sentlog mutex not poisoned")
             .record(channel, seq, now_millis(), &wrapped);
-        self.distribute_channel_message(channel, &members).await;
+        let event_id = {
+            let log = self.log.lock().expect("log mutex not poisoned");
+            let author =
+                crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
+            log.events(&channel)
+                .into_iter()
+                .find(|event| event.author == author && event.seq == seq)
+                .map(|event| event.id)
+                .expect("just-appended channel message")
+        };
+        self.distribute_channel_message(channel, &members, event_id)
+            .await;
         Ok(())
     }
 
@@ -658,9 +673,166 @@ impl Node {
         &self,
         channel: ConversationId,
         members: &[PublicIdentity],
+        event_id: EventId,
     ) {
-        self.distribute_channel_targets(channel, members, Some(LARGE_CHANNEL_INITIAL_FANOUT), true)
+        let me = self.user_id();
+        let peers: Vec<_> = members
+            .iter()
+            .filter(|member| member.user_id() != me)
+            .filter_map(|member| {
+                self.routing_peer(&member.user_id())
+                    .filter(|peer| peer.public == *member)
+            })
+            .collect();
+        let targets = select_channel_targets(
+            peers,
+            members.len(),
+            usize::from(event_id.as_bytes()[0]),
+            LARGE_CHANNEL_INITIAL_FANOUT,
+        );
+        for peer in targets {
+            let _ = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                self.sync_and_confirm_custody(channel, event_id, &peer)
+                    .await;
+            })
             .await;
+        }
+        let _ = self.replicate_to_post_office(channel).await;
+    }
+
+    /// Number of current member devices that previously proved durable custody of
+    /// one of this device's messages. A historical confirmation is not a guarantee
+    /// that the peer still has its copy, and is never a recipient delivery receipt.
+    pub fn channel_custody_count(&self, channel: ConversationId, id: EventId) -> Option<usize> {
+        let me = crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
+        let own_message = self
+            .log
+            .lock()
+            .expect("log mutex not poisoned")
+            .get(&id)
+            .is_some_and(|event| {
+                event.conversation_id == channel
+                    && event.author == me
+                    && event.kind == EventKind::Message
+            });
+        if !own_message {
+            return None;
+        }
+        let members: HashSet<_> = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            book.state(&channel)?
+                .members()
+                .iter()
+                .map(|member| member.user_id())
+                .filter(|member| book.replica_enabled(channel, member))
+                .collect()
+        };
+        let confirmed = self
+            .channel_custody
+            .lock()
+            .expect("channel_custody mutex not poisoned")
+            .peers(id);
+        Some(confirmed.intersection(&members).count())
+    }
+
+    async fn sync_and_confirm_custody(
+        &self,
+        channel: ConversationId,
+        event_id: EventId,
+        peer: &PeerRecord,
+    ) {
+        let Ok(mut conn) = self.privacy_dial(peer.addr, &peer.public).await else {
+            return;
+        };
+        let store = self.sync_store(conn.peer_identity());
+        if request_round(&mut conn, &store, channel).await.is_ok()
+            && matches!(
+                request_durable_have(&mut conn, channel, event_id).await,
+                Ok(true)
+            )
+        {
+            let _ = self
+                .channel_custody
+                .lock()
+                .expect("channel_custody mutex not poisoned")
+                .confirm(event_id, &peer.public.user_id());
+        }
+    }
+
+    /// Retry one insufficiently replicated own message per tick. The event log is
+    /// the durable pending queue, so a restart cannot forget local-only messages.
+    async fn retry_one_channel_custody(&self, cursor: usize) {
+        let me = self.user_id();
+        let channels: Vec<_> = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            book.channel_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    let state = book.state(&id)?;
+                    (state.is_member(&me) && !state.is_dissolved())
+                        .then(|| (id, state.members().to_vec()))
+                })
+                .collect()
+        };
+        let author =
+            crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
+        let candidates: Vec<_> = {
+            let log = self.log.lock().expect("log mutex not poisoned");
+            channels
+                .iter()
+                .flat_map(|(channel, _)| {
+                    log.events(channel)
+                        .into_iter()
+                        .filter(move |event| {
+                            event.author == author && event.kind == EventKind::Message
+                        })
+                        .map(move |event| (*channel, event.id))
+                })
+                .collect()
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let start = cursor.wrapping_mul(CHANNEL_CUSTODY_SCAN_PER_TICK) % candidates.len();
+        for offset in 0..candidates.len().min(CHANNEL_CUSTODY_SCAN_PER_TICK) {
+            let (channel, event_id) = candidates[(start + offset) % candidates.len()];
+            let Some((_, members)) = channels.iter().find(|(id, _)| *id == channel) else {
+                continue;
+            };
+            let target = members
+                .iter()
+                .filter(|member| {
+                    member.user_id() != me
+                        && self.channel_replica_enabled(channel, &member.user_id())
+                })
+                .count()
+                .min(2);
+            if target == 0 || self.channel_custody_count(channel, event_id).unwrap_or(0) >= target {
+                continue;
+            }
+            let confirmed = self
+                .channel_custody
+                .lock()
+                .expect("channel_custody mutex not poisoned")
+                .peers(event_id);
+            if let Some(peer) = members
+                .iter()
+                .filter(|member| member.user_id() != me && !confirmed.contains(&member.user_id()))
+                .filter(|member| self.channel_replica_enabled(channel, &member.user_id()))
+                .filter_map(|member| {
+                    self.routing_peer(&member.user_id())
+                        .filter(|peer| peer.public == *member)
+                })
+                .next()
+            {
+                let _ = tokio::time::timeout(
+                    CHANNEL_RECOVERY_PEER_TIMEOUT,
+                    self.sync_and_confirm_custody(channel, event_id, &peer),
+                )
+                .await;
+                break;
+            }
+        }
     }
 
     async fn distribute_channel_targets(

@@ -149,11 +149,41 @@ export async function refreshDeliveryStatuses(
     if (lease.current()) rawSet(partial);
   };
   const c = conversation ?? get().active;
-  if (!lease.current() || !c || c.kind !== "account" || get().statusBusy)
-    return;
+  if (!lease.current() || !c || get().statusBusy) return;
   const key = convKey(c);
   set({ statusBusy: true });
   try {
+    if (c.kind === "channel") {
+      const ids = [
+        ...new Set(
+          (get().messages[key] ?? [])
+            .filter((m) => m.fromMe && m.id && !m.file)
+            .map((m) => m.id!),
+        ),
+      ];
+      const replicas = new Map<string, number>();
+      for (let i = 0; i < ids.length; i += 256) {
+        const rows = await chat.channelCustodyStatuses(
+          c.id,
+          ids.slice(i, i + 256),
+        );
+        if (!lease.current()) return;
+        for (const row of rows) replicas.set(row.id, row.replicas);
+      }
+      set((s) => ({
+        messages: s.messages[key]
+          ? {
+              ...s.messages,
+              [key]: s.messages[key].map((m) =>
+                m.id && replicas.has(m.id)
+                  ? { ...m, replicas: replicas.get(m.id) }
+                  : m,
+              ),
+            }
+          : s.messages,
+      }));
+      return;
+    }
     // The shared serial ticker also recovers capacity-fallback accepted intents.
     // reload's status refresh sees statusBusy and cannot recursively poll.
     if (
