@@ -718,16 +718,24 @@ impl Node {
             let peer = &peers[(start + offset) % peers.len()];
             let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
                 let Ok(mut conn) = self.privacy_dial(peer.addr, &peer.public).await else {
-                    return false;
+                    return None;
                 };
                 let store = self.sync_store(conn.peer_identity());
-                request_round(&mut conn, &store, *channel_id).await.is_ok()
+                request_round(&mut conn, &store, *channel_id)
+                    .await
+                    .ok()
+                    .map(|report| report.applied)
             })
             .await;
-            if matches!(result, Ok(true)) {
+            if let Ok(Some(applied)) = result {
                 self.process_channel(*channel_id);
                 self.process_file_events(*channel_id);
-                break;
+                // A reachable peer can itself be behind. Try another replica in this
+                // tick if it had nothing new, instead of treating connectivity as
+                // evidence that this channel is current.
+                if applied > 0 {
+                    break;
+                }
             }
         }
     }

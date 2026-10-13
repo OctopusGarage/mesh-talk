@@ -124,6 +124,10 @@ command names for Tauri registration. Commands clone a node handle from
   `Response(missing + responder have)` → `Followup(what responder lacks)`, bounded by
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is
   re-verified (hash + signature) on ingest.
+  Channel recovery asks up to three online members per turn and continues past a
+  reachable but stale member. A completed channel file remains available from a
+  receiver after local save; complete channel chunk conversations are retained
+  newest-first within a 64 MiB ciphertext budget, then whole old files are evicted.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance

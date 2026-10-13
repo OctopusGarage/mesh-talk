@@ -3727,9 +3727,10 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     .await
     .expect("bob saved the channel file within 5s");
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
-    assert!(
-        bob_node.log.lock().unwrap().events(&file_conv).is_empty(),
-        "untracked channel export reclaims completed chunks"
+    assert_eq!(
+        bob_node.log.lock().unwrap().events(&file_conv).len(),
+        rf.size.div_ceil(crate::file::CHUNK_SIZE as u64) as usize,
+        "a saved channel file stays available as a bounded peer replica"
     );
 
     // Reverse direction: Bob -> Alice. Bob is a non-creator member; his
@@ -3768,6 +3769,125 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     .await
     .expect("alice saved Bob's channel file within 5s");
     assert_eq!(std::fs::read(&dest2).unwrap(), payload2);
+}
+
+#[tokio::test]
+async fn saved_channel_file_remains_downloadable_from_member_after_author_disconnects() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let carol = DeviceIdentity::generate();
+    let alice_id = alice.public().user_id();
+    let carol_id = carol.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+    let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_port = alice_listener.local_addr().unwrap().port();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&bob, "Bob", bob_port, &alice_id);
+    let bob_roster = seed_roster(&alice, "Alice", alice_port, &bob.public().user_id());
+    let carol_roster = seed_roster(&alice, "Alice", alice_port, &carol_id);
+    let open = |identity, roster, name: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &path.join("messages.log"),
+            &path.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        (node, file_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
+    let (carol_node, mut carol_rx) = open(carol, carol_roster, "carol");
+    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let carol_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let carol_port = carol_listener.local_addr().unwrap().port();
+    let carol_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
+    add_peer(
+        &alice_node.roster,
+        &carol_node.identity,
+        "Carol",
+        carol_port,
+        &alice_id,
+    );
+    let channel = alice_node
+        .create_channel(
+            "files",
+            vec![bob_node.identity.public(), carol_node.identity.public()],
+        )
+        .await
+        .unwrap();
+    let payload = vec![0xA5; crate::file::CHUNK_SIZE + 17];
+    let source = dir.path().join("source.bin");
+    std::fs::write(&source, &payload).unwrap();
+    let file = alice_node
+        .send_file_channel(channel, &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    bob_node.decide_attachment(file, true).unwrap();
+    let bob_dest = dir.path().join("bob.bin");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            bob_node.pull_pending_files().await;
+            if bob_node.save_file(file, &bob_dest).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&bob_dest).unwrap(), payload);
+    assert_eq!(bob_node.log.lock().unwrap().events(&file).len(), 2);
+
+    alice_task.abort();
+    alice_task.await.unwrap_err();
+    carol_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&alice_node.identity.public());
+    add_peer(
+        &carol_node.roster,
+        &bob_node.identity,
+        "Bob",
+        bob_port,
+        &carol_id,
+    );
+    carol_node.decide_attachment(file, true).unwrap();
+    let carol_dest = dir.path().join("carol.bin");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            carol_node.pull_pending_files().await;
+            if carol_node.save_file(file, &carol_dest).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Carol downloaded from Bob after Alice disconnected");
+    assert_eq!(std::fs::read(&carol_dest).unwrap(), payload);
+    bob_task.abort();
+    carol_task.abort();
 }
 
 /// Channel reactions over the wire. They use a per-member `SealedPayload`
