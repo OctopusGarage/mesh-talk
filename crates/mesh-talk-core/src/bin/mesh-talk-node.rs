@@ -2,7 +2,7 @@
 //! persistent identity, runs signed-announce LAN discovery and a TCP listener,
 //! and drives 1:1 DMs, channels, and file transfers from a line-based REPL
 //! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
-//! `/channel-new <name> <member-prefix>`, `/channel-msg <chan-id-prefix> <text>`,
+//! `/channel-new <name> <member-prefix>...`, `/channel-msg <chan-id-prefix> <text>`,
 //! `/sendfile <peer-prefix> <path>`, `/quit`), printing inbound DMs, channel
 //! messages, and files as they arrive.
 
@@ -393,7 +393,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if !line.is_empty() {
             emit(
-                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
             );
         }
     }
@@ -536,42 +536,48 @@ fn handle_history(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
     }
 }
 
-/// Parse and dispatch `/channel-new <name> <member-prefix>`: resolve one peer to
-/// include as a member, create the channel (the creator is added automatically),
+/// Parse and dispatch `/channel-new <name> <member-prefix>...`: resolve peers to
+/// include as members, create the channel (the creator is added automatically),
 /// then print the new channel id (hex). Runs on a spawned task (create distributes
 /// sender keys to members over the network).
 fn handle_channel_new(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
     let mut parts = rest.split_whitespace();
     let name = parts.next().unwrap_or("").to_string();
-    let prefix = parts.next().unwrap_or("").to_string();
-    if name.is_empty() || prefix.is_empty() {
-        emit("usage: /channel-new <name> <member-prefix>");
+    let prefixes: Vec<_> = parts.collect();
+    if name.is_empty() || prefixes.is_empty() {
+        emit("usage: /channel-new <name> <member-prefix>...");
         return;
     }
-    // Resolve the member under the roster lock, then DROP it before the async call
+    // Resolve members under the roster lock, then DROP it before the async call
     // (the node locks the roster again; std Mutex is not reentrant).
-    let member = {
+    let members = {
         let roster = roster.lock().expect("roster mutex not poisoned");
         let peers = roster.peers();
-        match resolve_recipient(&peers, &prefix) {
-            Ok(uid) => roster.get(&uid).map(|p| p.public.clone()),
-            Err(ResolveError::NotFound) => {
-                emit(&format!("no peer matches prefix '{prefix}'"));
-                return;
-            }
-            Err(ResolveError::Ambiguous(n)) => {
-                emit(&format!("'{prefix}' matches {n} peers; be more specific"));
-                return;
+        let mut members = Vec::new();
+        for prefix in prefixes {
+            match resolve_recipient(&peers, prefix) {
+                Ok(uid) => {
+                    let Some(peer) = roster.get(&uid) else {
+                        emit("peer vanished from roster");
+                        return;
+                    };
+                    members.push(peer.public.clone());
+                }
+                Err(ResolveError::NotFound) => {
+                    emit(&format!("no peer matches prefix '{prefix}'"));
+                    return;
+                }
+                Err(ResolveError::Ambiguous(n)) => {
+                    emit(&format!("'{prefix}' matches {n} peers; be more specific"));
+                    return;
+                }
             }
         }
-    };
-    let Some(member) = member else {
-        emit("peer vanished from roster");
-        return;
+        members
     };
     let node = Arc::clone(node);
     tokio::spawn(async move {
-        match node.create_channel(&name, vec![member]).await {
+        match node.create_channel(&name, members).await {
             Ok(id) => emit(&format!("channel {} created", hex::encode(id.as_bytes()))),
             Err(e) => emit(&format!("channel create failed: {e}")),
         }
