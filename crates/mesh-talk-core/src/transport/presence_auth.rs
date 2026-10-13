@@ -16,6 +16,7 @@ use std::io::Cursor;
 
 const MAGIC: &[u8; 4] = b"MTPA";
 const VERSION: u8 = 1;
+const PRIVATE_VERSION: u8 = 2;
 const MAX_EXTENSION: usize = 4096;
 const DOMAIN: &[u8] = b"mesh-talk-transport-presence-v1";
 
@@ -26,6 +27,7 @@ const DOMAIN: &[u8] = b"mesh-talk-transport-presence-v1";
 pub struct VerifiedPeer {
     public: PublicIdentity,
     announcement: Option<Announce>,
+    publicly_visible: bool,
 }
 impl VerifiedPeer {
     /// The exact Ed25519/X25519 pair authenticated by this connection.
@@ -35,6 +37,9 @@ impl VerifiedPeer {
     /// Verified device-signed account proof; does not establish endpoint freshness.
     pub fn announcement(&self) -> Option<&Announce> {
         self.announcement.as_ref()
+    }
+    pub fn publicly_visible(&self) -> bool {
+        self.publicly_visible
     }
 }
 
@@ -73,17 +78,34 @@ fn valid(announce: &Announce, public: &PublicIdentity) -> bool {
         && announce.public() == *public
         && announce.verify()
 }
+#[cfg(test)]
 pub(super) fn build(
     identity: &DeviceIdentity,
     hash: &[u8; 32],
     presence: Option<&Announce>,
 ) -> Result<Vec<u8>, TransportError> {
+    build_with_visibility(identity, hash, presence, true)
+}
+
+pub(super) fn build_with_visibility(
+    identity: &DeviceIdentity,
+    hash: &[u8; 32],
+    presence: Option<&Announce>,
+    publicly_visible: bool,
+) -> Result<Vec<u8>, TransportError> {
     validate_own(identity, presence)?;
+    if !publicly_visible && presence.is_none() {
+        return Err(TransportError::IdentityMismatch);
+    }
     let mut bytes = bincode::serialize(&build_auth(identity, hash))
         .map_err(|e| TransportError::Serialization(e.to_string()))?;
     if let Some(announce) = presence {
         let encoded = encode(announce);
-        let signature = identity.sign(&context(hash, &encoded)).to_vec();
+        let mut signed = context(hash, &encoded);
+        if !publicly_visible {
+            signed.push(0);
+        }
+        let signature = identity.sign(&signed).to_vec();
         let body = codec()
             .serialize(&Extension {
                 announce: encoded,
@@ -94,7 +116,11 @@ pub(super) fn build(
             return Err(TransportError::IdentityMismatch);
         }
         bytes.extend(MAGIC);
-        bytes.push(VERSION);
+        bytes.push(if publicly_visible {
+            VERSION
+        } else {
+            PRIVATE_VERSION
+        });
         bytes.extend(body);
     }
     Ok(bytes)
@@ -118,16 +144,17 @@ pub(super) fn verify(
         .map_err(|_| TransportError::IdentityMismatch)?;
     let public = verify_auth(&legacy, hash, remote)?;
     let remaining = &bytes[cursor.position() as usize..];
-    let announcement = if remaining.is_empty() {
-        None
+    let (announcement, publicly_visible) = if remaining.is_empty() {
+        (None, true)
     } else {
         if remaining.len() > MAX_EXTENSION
             || remaining.len() < MAGIC.len() + 1
             || &remaining[..MAGIC.len()] != MAGIC
-            || remaining[MAGIC.len()] != VERSION
+            || ![VERSION, PRIVATE_VERSION].contains(&remaining[MAGIC.len()])
         {
             return Err(TransportError::IdentityMismatch);
         }
+        let publicly_visible = remaining[MAGIC.len()] == VERSION;
         let extension: Extension = codec()
             .deserialize(&remaining[MAGIC.len() + 1..])
             .map_err(|_| TransportError::IdentityMismatch)?;
@@ -140,18 +167,19 @@ pub(super) fn verify(
             .as_slice()
             .try_into()
             .map_err(|_| TransportError::IdentityMismatch)?;
-        if !DeviceIdentity::verify(
-            &public.ed25519_pub,
-            &context(hash, &extension.announce),
-            &signature,
-        ) {
+        let mut signed = context(hash, &extension.announce);
+        if !publicly_visible {
+            signed.push(0);
+        }
+        if !DeviceIdentity::verify(&public.ed25519_pub, &signed, &signature) {
             return Err(TransportError::IdentityMismatch);
         }
-        Some(announce)
+        (Some(announce), publicly_visible)
     };
     Ok(VerifiedPeer {
         public,
         announcement,
+        publicly_visible,
     })
 }
 
@@ -236,6 +264,25 @@ mod tests {
                 .announcement()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn private_account_proof_is_authenticated_without_advertising_online_presence() {
+        let id = DeviceIdentity::generate();
+        let account = Account::generate();
+        let announce = Announce::new_with_account(&id, &account, "Alice", 1234);
+        let hash = [42; 32];
+        let bytes = build_with_visibility(&id, &hash, Some(&announce), false).unwrap();
+        let verified = verify(&bytes, &hash, &id.public().x25519_pub).unwrap();
+        assert_eq!(verified.announcement(), Some(&announce));
+        assert!(!verified.publicly_visible());
+        let mut downgrade = bytes;
+        let marker = downgrade
+            .windows(MAGIC.len())
+            .position(|w| w == MAGIC)
+            .unwrap();
+        downgrade[marker + MAGIC.len()] = VERSION;
+        assert!(verify(&downgrade, &hash, &id.public().x25519_pub).is_err());
     }
 
     #[test]

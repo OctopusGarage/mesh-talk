@@ -30,7 +30,7 @@ async fn start(
 }
 
 #[tokio::test]
-async fn manual_allow_publishes_private_return_presence_without_sending_dm() {
+async fn manual_allow_publishes_private_route_without_online_presence() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, mut arx) = start(dir.path(), "alice", 0).await;
     let (bob, _) = start(dir.path(), "bob", 0).await;
@@ -43,15 +43,13 @@ async fn manual_allow_publishes_private_return_presence_without_sending_dm() {
     );
     assert!(bob.peer_public(alice.user_id()).is_none());
     alice.set_allowed(bob.account_id(), true).await.unwrap();
-    assert_eq!(
+    assert!(
         bob.peers()
-            .into_iter()
-            .find(|p| p.public.user_id() == alice.user_id())
-            .unwrap()
-            .addr
-            .port(),
-        alice.listen_tcp_port()
+            .iter()
+            .all(|p| p.public.user_id() != alice.user_id()),
+        "an allowed account must not see invisible Alice online"
     );
+    assert!(bob.peer_public(alice.user_id()).is_some());
     bob.send_dm(alice.user_id(), b"first message is the return message")
         .await
         .unwrap();
@@ -197,7 +195,7 @@ async fn offline_cached_route_is_not_fresh_online_presence_after_restart() {
 }
 
 #[tokio::test]
-async fn pinned_private_probe_refreshes_only_live_peers_without_new_grants_or_events() {
+async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants() {
     let dir = tempfile::tempdir().unwrap();
     let (mut alice, _) = start(dir.path(), "alice", 0).await;
     let (bob, _) = start(dir.path(), "bob", 0).await;
@@ -224,10 +222,11 @@ async fn pinned_private_probe_refreshes_only_live_peers_without_new_grants_or_ev
     let conversations = alice.node.log.lock().unwrap().conversations();
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
     alice.node.probe_private_routes().await;
-    let live = alice
+    let visible = alice
         .peers()
         .iter()
         .any(|p| p.public.user_id() == bob.user_id());
+    let routable = alice.peer_public(bob.user_id()).is_some();
     let after_probe_policy = alice.privacy_snapshot();
     let after_probe_conversations = alice.node.log.lock().unwrap().conversations();
     bob.stop().await;
@@ -237,7 +236,11 @@ async fn pinned_private_probe_refreshes_only_live_peers_without_new_grants_or_ev
     alice.node.runtime_work.drain().await;
     let absent = alice.peers().is_empty();
     alice.stop().await;
-    assert!(live);
+    assert!(
+        !visible,
+        "private probes must not expose invisible Bob as online"
+    );
+    assert!(routable);
     assert_eq!(after_probe_policy, policy);
     assert_eq!(after_probe_conversations, conversations);
     assert!(absent, "failed probes must not refresh cached presence");
