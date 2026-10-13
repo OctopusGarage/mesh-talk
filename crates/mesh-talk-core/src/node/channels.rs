@@ -10,7 +10,7 @@ use crate::node::channel::seal_keys_for;
 use crate::node::session::{request_durable_have, request_round};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 /// Limit one background recovery tick even when routes are stale or a peer stalls.
@@ -675,6 +675,7 @@ impl Node {
         members: &[PublicIdentity],
         event_id: EventId,
     ) {
+        let started = Instant::now();
         let me = self.user_id();
         let peers: Vec<_> = members
             .iter()
@@ -690,6 +691,7 @@ impl Node {
             usize::from(event_id.as_bytes()[0]),
             LARGE_CHANNEL_INITIAL_FANOUT,
         );
+        let seeded = targets.len();
         for peer in targets {
             let _ = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
                 self.sync_and_confirm_custody(channel, event_id, &peer)
@@ -698,6 +700,15 @@ impl Node {
             .await;
         }
         let _ = self.replicate_to_post_office(channel).await;
+        log::debug!(
+            target: "mesh_talk::channel",
+            "send conv={} members={} seeded={} confirmed={} elapsed_ms={}",
+            hex::encode(&channel.as_bytes()[..4]),
+            members.len(),
+            seeded,
+            self.channel_custody_count(channel, event_id).unwrap_or(0),
+            started.elapsed().as_millis(),
+        );
     }
 
     /// Number of current member devices that previously proved durable custody of

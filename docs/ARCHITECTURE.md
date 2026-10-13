@@ -235,6 +235,11 @@ command names for Tauri registration. Commands clone a node handle from
   recipients' rounds then forward the signed log to other members. Smaller
   channels and membership controls retain direct fanout. File manifests retain
   direct fanout until chunk replication has an explicit retention policy.
+  Each channel send emits a debug metric with member count, seeded peer count,
+  confirmed member copies, and elapsed milliseconds. The sync layer separately
+  logs have-set size, applied and pushed events, and round count. These provide
+  latency and metadata-bandwidth evidence before changing the fanout threshold
+  or introducing a more complex gossip protocol.
   Member copy counts are historical confirmations. To make a current durability
   guarantee, the protocol would need renewable leases or periodic exact probes
   and a policy for peers that permanently leave; the UI does not claim one.
