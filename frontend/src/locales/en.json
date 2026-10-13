@@ -614,7 +614,28 @@
     "version": "Version {{version}}",
     "sourceRepo": "Source repository",
     "license": "License (MIT)",
-    "credits": "Animated stickers from Google's Noto Emoji, used under their open-source license."
+    "credits": "Animated stickers from Google's Noto Emoji, used under their open-source license.",
+    "updates": {
+      "title": "Updates",
+      "manual": "Check for a newer stable release. You choose when to download and install it.",
+      "check": "Check for updates",
+      "checking": "Checking…",
+      "current": "You're up to date ({{version}}).",
+      "available": "Version {{version}} is available",
+      "download": "Download update",
+      "downloading": "Downloading and verifying",
+      "cancel": "Cancel download",
+      "verified": "Download verified and ready to install",
+      "showDownload": "Show in Downloads",
+      "noPackage": "A package for this device is not available in this release. See the release page for options.",
+      "releaseNotes": "View release page",
+      "failed": "Update failed: {{error}}. Try again.",
+      "install": {
+        "mac": "Unzip the download, open the DMG, then drag Mesh-Talk to Applications. Quit the current app before replacing it. Your local data stays in place.",
+        "windows": "Unzip the download and run the EXE installer (or MSI for managed installs). Close Mesh-Talk first. Your local data stays in place.",
+        "linux": "Unzip the download, then install the DEB or RPM package for your distribution, or run the AppImage. Close Mesh-Talk first. Your local data stays in place."
+      }
+    }
   },
   "offlineConnect": {
     "trigger": "Connect without Wi-Fi",

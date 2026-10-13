@@ -16,6 +16,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
 | [`docs/backup-recovery.md`](backup-recovery.md) | Manual encrypted backup, offline restore, recovery key handling, and coverage limits. |
+| [`docs/updates.md`](updates.md) | Manual release check, verified package download, and platform install steps. |
 | [`docs/privacy-controls.md`](privacy-controls.md) | Privacy presets, app lock, invisible mode, hidden contacts, and limits. |
 | [`docs/evals/architecture-score.md`](evals/architecture-score.md) | Fixed-rubric architecture review, before/after score, evidence, and remaining seams. |
 | [`specifications/TODO.md`](../specifications/TODO.md) | Implementation status (feature-complete) + deliberate design notes / external constraints. |

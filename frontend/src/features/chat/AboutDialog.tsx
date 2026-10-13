@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { obs } from "@/lib/api";
+import { UpdatePanel } from "./UpdatePanel";
 
 const REPO_URL = "https://github.com/OctopusGarage/mesh-talk";
 const LICENSE_URL =
@@ -28,8 +29,12 @@ export function AboutDialog({ menuItem = false }: { menuItem?: boolean }) {
   useEffect(() => {
     if (!open) return;
     void obs.envInfo().then(
-      (e) => setVersion(e.app_version),
-      () => setVersion(null),
+      (e) => {
+        setVersion(e.app_version);
+      },
+      () => {
+        setVersion(null);
+      },
     );
   }, [open]);
 
@@ -51,15 +56,15 @@ export function AboutDialog({ menuItem = false }: { menuItem?: boolean }) {
           {menuItem && <span>{t("about.title")}</span>}
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-lg" data-testid="about-dialog">
         <DialogHeader>
           <DialogTitle>{t("about.title")}</DialogTitle>
           <DialogDescription>{t("about.description")}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-5">
+        <div className="grid gap-4">
           <div className="flex items-center gap-4">
-            <Logo size={56} className="shrink-0" />
+            <Logo size={48} className="shrink-0" />
             <div className="min-w-0">
               <div className="font-display text-xl font-semibold tracking-tight">
                 Mesh-Talk
@@ -75,6 +80,8 @@ export function AboutDialog({ menuItem = false }: { menuItem?: boolean }) {
           <p className="text-sm leading-relaxed text-muted-foreground">
             {t("about.tagline")}
           </p>
+
+          <UpdatePanel />
 
           <div className="grid gap-2">
             <Button

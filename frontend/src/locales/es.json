@@ -614,7 +614,28 @@
     "version": "Versión {{version}}",
     "sourceRepo": "Repositorio de código",
     "license": "Licencia (MIT)",
-    "credits": "Stickers animados de Noto Emoji de Google, usados bajo su licencia de código abierto."
+    "credits": "Stickers animados de Noto Emoji de Google, usados bajo su licencia de código abierto.",
+    "updates": {
+      "title": "Actualizaciones",
+      "manual": "Busca la última versión estable. Tú decides cuándo descargarla e instalarla.",
+      "check": "Buscar actualizaciones",
+      "checking": "Buscando…",
+      "current": "Ya tienes la versión más reciente ({{version}}).",
+      "available": "La versión {{version}} está disponible",
+      "download": "Descargar actualización",
+      "downloading": "Descargando y verificando",
+      "cancel": "Cancelar descarga",
+      "verified": "Descarga verificada y lista para instalar",
+      "showDownload": "Mostrar en Descargas",
+      "noPackage": "No hay un paquete para este dispositivo en esta versión. Consulta la página de la versión.",
+      "releaseNotes": "Ver página de la versión",
+      "failed": "Error al actualizar: {{error}}. Inténtalo de nuevo.",
+      "install": {
+        "mac": "Descomprime la descarga, abre el DMG y arrastra Mesh-Talk a Aplicaciones. Cierra la aplicación actual antes de reemplazarla. Tus datos locales se conservarán.",
+        "windows": "Descomprime la descarga y ejecuta el instalador EXE (o MSI para instalaciones administradas). Cierra Mesh-Talk primero. Tus datos locales se conservarán.",
+        "linux": "Descomprime la descarga e instala el paquete DEB o RPM de tu distribución, o ejecuta AppImage. Cierra Mesh-Talk primero. Tus datos locales se conservarán."
+      }
+    }
   },
   "offlineConnect": {
     "trigger": "Conectar sin Wi-Fi",

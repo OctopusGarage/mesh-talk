@@ -186,6 +186,27 @@ export interface EnvInfo {
   build_profile: string;
 }
 
+export interface UpdateCheck {
+  current_version: string;
+  latest_version: string;
+  is_newer: boolean;
+  release_url: string;
+  notes: string;
+  package_name: string | null;
+  package_size: number | null;
+  edition: "default" | "lite";
+}
+
+export interface DownloadProgress {
+  downloaded: number;
+  total: number;
+}
+
+export interface DownloadedUpdate {
+  path: string;
+  file_name: string;
+}
+
 // --- Contact trust / safety numbers (src-tauri/src/trust.rs + chat_commands.rs) ---
 
 export interface TrustInfo {

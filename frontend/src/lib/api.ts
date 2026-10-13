@@ -4,7 +4,7 @@ export { privacy } from "./api/privacy";
 export { auth } from "./api/auth";
 export { chat } from "./api/chat";
 export { calls } from "./api/calls";
-export { diag, presence, obs } from "./api/diagnostics";
+export { diag, presence, obs, updates } from "./api/diagnostics";
 export { contactPolicy, favorites, avatars } from "./api/contacts";
 export { settings } from "./api/settings";
 export { recovery } from "./api/recovery";
