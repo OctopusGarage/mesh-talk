@@ -221,6 +221,22 @@ async fn latest_release() -> Result<Release, String> {
     serde_json::from_slice(&bytes).map_err(|_| "The release response is invalid".into())
 }
 
+async fn release_or_cancel<T, F>(
+    release: F,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    if *cancel.borrow() {
+        return Err("Download canceled".into());
+    }
+    tokio::select! {
+        result = release => result,
+        _ = cancel.changed() => Err("Download canceled".into()),
+    }
+}
+
 #[tauri::command]
 pub async fn check_for_update() -> Result<UpdateCheck, String> {
     let release = latest_release().await?;
@@ -263,7 +279,7 @@ pub async fn download_update(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cancel_sender);
     let _cancel_registration = CancelRegistration;
-    let release = latest_release().await?;
+    let release = release_or_cancel(latest_release(), cancel_receiver.clone()).await?;
     let latest = release_version(&release)?;
     if latest.to_string() != version || latest <= current_version() {
         return Err("The available release changed. Check for updates again".into());
@@ -571,6 +587,30 @@ mod tests {
 
         assert_eq!(
             verified_existing(&path, &asset, &cancel).await.unwrap_err(),
+            "Download canceled"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_interrupts_a_pending_release_recheck() {
+        let (sender, cancel) = tokio::sync::watch::channel(false);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let waiting = tokio::spawn(release_or_cancel(
+            async move {
+                let _ = started.send(());
+                std::future::pending::<Result<(), String>>().await
+            },
+            cancel,
+        ));
+        ready.await.unwrap();
+        sender.send(true).unwrap();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(200), waiting)
+                .await
+                .expect("cancellation should interrupt the pending release check")
+                .unwrap()
+                .unwrap_err(),
             "Download canceled"
         );
     }
