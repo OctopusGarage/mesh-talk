@@ -14,6 +14,13 @@ fn main() {
     if let Ok(target) = std::env::var("TARGET") {
         println!("cargo:rustc-env=TARGET={target}");
     }
+    println!("cargo:rerun-if-env-changed=MESH_TALK_VARIANT");
+    let variant = if std::env::var("MESH_TALK_VARIANT").as_deref() == Ok("lite") {
+        "lite"
+    } else {
+        "default"
+    };
+    println!("cargo:rustc-env=MESH_TALK_VARIANT={variant}");
     let windows_msvc = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
     if windows_msvc {

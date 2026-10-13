@@ -1,9 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   DiagNetworkInfo,
   DiagPeerInfo,
   EnvInfo,
   PresenceMap,
+  UpdateCheck,
+  DownloadedUpdate,
+  DownloadProgress,
 } from "../types";
 
 export const diag = {
@@ -25,4 +28,20 @@ export const obs = {
   logFile: () => invoke<string>("get_log_file"),
   logTail: () => invoke<string>("read_log_tail"),
   saveLogTail: (dest: string) => invoke<void>("save_log_tail", { dest }),
+};
+
+export const updates = {
+  check: () => invoke<UpdateCheck>("check_for_update"),
+  download: (
+    version: string,
+    onProgress: (progress: DownloadProgress) => void,
+  ) => {
+    const channel = new Channel<DownloadProgress>();
+    channel.onmessage = onProgress;
+    return invoke<DownloadedUpdate>("download_update", {
+      version,
+      onProgress: channel,
+    });
+  },
+  cancel: () => invoke<void>("cancel_update_download"),
 };

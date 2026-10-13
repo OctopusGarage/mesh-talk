@@ -34,6 +34,7 @@ pub mod settings;
 pub mod state;
 pub mod tray;
 pub mod trust;
+pub mod updates;
 mod window_geometry;
 mod window_visibility;
 
@@ -419,6 +420,9 @@ pub fn run_tauri_configured(
                 crate::logger::read_log_tail,
                 crate::logger::save_log_tail,
                 crate::diagnostics::env_info,
+                crate::updates::check_for_update,
+                crate::updates::download_update,
+                crate::updates::cancel_update_download,
                 crate::settings::get_app_settings,
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,

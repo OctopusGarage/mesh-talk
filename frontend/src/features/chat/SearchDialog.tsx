@@ -66,11 +66,21 @@ export function SearchDialog() {
   const [retryTick, setRetryTick] = useState(0);
   const [activeIdx, setActiveIdx] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const resultsScroll = useRef<HTMLDivElement>(null);
   const resultRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   useEffect(() => {
-    if (!searching && !searchError)
-      resultRefs.current[activeIdx]?.scrollIntoView({ block: "nearest" });
+    if (searching || searchError) return;
+    const container = resultsScroll.current;
+    const result = resultRefs.current[activeIdx];
+    if (!container || !result) return;
+    const containerRect = container.getBoundingClientRect();
+    const resultRect = result.getBoundingClientRect();
+    if (resultRect.top < containerRect.top) {
+      container.scrollTop += resultRect.top - containerRect.top;
+    } else if (resultRect.bottom > containerRect.bottom) {
+      container.scrollTop += resultRect.bottom - containerRect.bottom;
+    }
   }, [activeIdx, hits, searching, searchError]);
 
   useEffect(() => {
@@ -169,7 +179,10 @@ export function SearchDialog() {
           <span className="truncate">{t("search.title")}</span>
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-lg" data-testid="search-dialog">
+      <DialogContent
+        className="flex max-w-lg flex-col overflow-hidden"
+        data-testid="search-dialog"
+      >
         <DialogHeader>
           <DialogTitle>{t("search.title")}</DialogTitle>
         </DialogHeader>
@@ -199,7 +212,10 @@ export function SearchDialog() {
             }
           />
         </div>
-        <div className="max-h-80 space-y-1 overflow-y-auto">
+        <div
+          ref={resultsScroll}
+          className="min-h-0 max-h-80 flex-1 space-y-1 overflow-y-auto"
+        >
           {searching && (
             <p className="py-8 text-center text-sm text-muted-foreground">
               {t("search.searching")}

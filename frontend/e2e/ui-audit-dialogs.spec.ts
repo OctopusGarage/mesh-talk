@@ -167,6 +167,27 @@ test("settings section navigation reaches the requested controls", async ({
   ).toBeInViewport();
 });
 
+test("settings navigation keeps the dialog header and sidebar in place", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+
+  const dialog = page.getByTestId("settings-dialog");
+  const nav = dialog.getByRole("navigation", { name: "Settings" });
+  await nav.getByRole("button", { name: "Data and recovery" }).click();
+
+  await expect(
+    dialog.getByRole("heading", { name: "Settings" }),
+  ).toBeInViewport();
+  await expect(nav.getByRole("button", { name: "Privacy" })).toBeInViewport();
+  await expect.poll(() => dialog.evaluate((node) => node.scrollTop)).toBe(0);
+
+  await nav.getByRole("button", { name: "Privacy" }).click();
+  await expect(dialog.getByTestId("invisible-switch")).toBeInViewport();
+});
+
 async function expectSurfaceMotionSettled(surface: Locator) {
   await expect
     .poll(async () =>

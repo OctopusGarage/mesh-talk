@@ -11,11 +11,20 @@ export function settingsCategory(section: string): string {
 }
 
 export function scrollToSettingsSection(
-  container: Pick<HTMLElement, "querySelector"> | null,
+  container: Pick<
+    HTMLElement,
+    "querySelector" | "getBoundingClientRect" | "scrollTop" | "scrollTo"
+  > | null,
   id: string,
 ): void {
-  container?.querySelector(`#settings-${id}`)?.scrollIntoView({
-    block: "start",
+  const section = container?.querySelector(`#settings-${id}`);
+  if (!container || !section) return;
+  const top =
+    container.scrollTop +
+    section.getBoundingClientRect().top -
+    container.getBoundingClientRect().top;
+  container.scrollTo({
+    top,
     behavior: settingsScrollBehavior(),
   });
 }

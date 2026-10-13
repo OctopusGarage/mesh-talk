@@ -614,7 +614,28 @@
     "version": "版本 {{version}}",
     "sourceRepo": "原始碼儲存庫",
     "license": "授權（MIT）",
-    "credits": "動畫貼圖來自 Google Noto Emoji，根據其開源授權使用。"
+    "credits": "動畫貼圖來自 Google Noto Emoji，根據其開源授權使用。",
+    "updates": {
+      "title": "更新",
+      "manual": "檢查最新穩定版本。幾時下載同安裝由你決定。",
+      "check": "檢查更新",
+      "checking": "檢查緊…",
+      "current": "已經係最新版本（{{version}}）。",
+      "available": "新版本 {{version}} 已推出",
+      "download": "下載更新",
+      "downloading": "下載同驗證緊",
+      "cancel": "取消下載",
+      "verified": "下載已驗證，可以安裝",
+      "showDownload": "喺下載資料夾顯示",
+      "noPackage": "呢個版本冇適合你部裝置嘅安裝包。請睇發布頁面。",
+      "releaseNotes": "睇發布頁面",
+      "failed": "更新失敗：{{error}}。請再試。",
+      "install": {
+        "mac": "解壓下載檔案，打開 DMG，將 Mesh-Talk 拖去「應用程式」。取代之前請先結束而家嘅應用程式。本機資料會保留。",
+        "windows": "解壓下載檔案，執行 EXE 安裝程式（受管理嘅安裝可用 MSI）。請先結束 Mesh-Talk。本機資料會保留。",
+        "linux": "解壓下載檔案，按發行版安裝 DEB 或 RPM，或者執行 AppImage。請先結束 Mesh-Talk。本機資料會保留。"
+      }
+    }
   },
   "offlineConnect": {
     "trigger": "無網絡直連教學",

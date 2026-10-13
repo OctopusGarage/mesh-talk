@@ -423,6 +423,12 @@ impl MediaStore {
         let mut index = 0u32;
         let mut buffer = vec![0u8; CHUNK];
         while done < total || index == 0 {
+            // An empty payload gets one authenticated chunk. Every later pass must
+            // still have plaintext to consume; otherwise this loop can write tags
+            // indefinitely without making progress.
+            if index != 0 && done == total {
+                return Err(invalid("media encryption made no progress"));
+            }
             let len = ((total - done).min(CHUNK as u64)) as usize;
             reader.read_exact(&mut buffer[..len])?;
             let aad = self.aad(conv, total, index, len as u32);
