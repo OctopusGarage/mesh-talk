@@ -9,6 +9,11 @@ use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
 use crate::node::session::request_round;
 use std::collections::HashSet;
+use std::time::Duration;
+
+/// Limit one background recovery tick even when routes are stale or a peer stalls.
+const CHANNEL_RECOVERY_PEERS_PER_TICK: usize = 3;
+const CHANNEL_RECOVERY_PEER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Members in canonical order: sorted by `user_id` and de-duplicated. `ChannelMeta` encodes
 /// the membership Vec positionally, and the same-epoch convergence tie-break in
@@ -578,5 +583,59 @@ impl Node {
             }
         }
         let _ = self.replicate_to_post_office(channel).await;
+    }
+
+    /// Reconcile one joined channel with an online member. A rotating cursor gives
+    /// every channel and member a turn without making the background loop dial the
+    /// full group. Any member holding an event can serve it, even if its author is
+    /// offline. The ordinary sync store enforces membership and validates events.
+    pub(in crate::node) async fn pull_one_channel_from_member(&self, cursor: usize) {
+        let me = self.user_id();
+        let channels = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            let mut channels: Vec<_> = book
+                .channel_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    let state = book.state(&id)?;
+                    state.is_member(&me).then(|| (id, state.members().to_vec()))
+                })
+                .collect();
+            channels.sort_unstable_by_key(|(id, _)| *id.as_bytes());
+            channels
+        };
+        if channels.is_empty() {
+            return;
+        }
+        let channel_count = channels.len();
+        let (channel_id, members) = &channels[cursor % channel_count];
+        let peers: Vec<_> = members
+            .iter()
+            .filter(|member| member.user_id() != me)
+            .filter_map(|member| {
+                self.routing_peer(&member.user_id())
+                    .filter(|peer| peer.public == *member)
+            })
+            .collect();
+        if peers.is_empty() {
+            return;
+        }
+        let start = (cursor / channel_count) % peers.len();
+        for offset in 0..peers.len().min(CHANNEL_RECOVERY_PEERS_PER_TICK) {
+            let peer = &peers[(start + offset) % peers.len()];
+            let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                let Ok(mut conn) = self.privacy_dial(peer.addr, &peer.public).await else {
+                    return false;
+                };
+                let store = self.sync_store(conn.peer_identity());
+                request_round(&mut conn, &store, *channel_id).await.is_ok()
+            })
+            .await;
+            if matches!(result, Ok(true)) {
+                self.process_channel(*channel_id);
+                self.process_file_events(*channel_id);
+                break;
+            }
+        }
     }
 }

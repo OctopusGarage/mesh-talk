@@ -1726,6 +1726,84 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
 }
 
 /// Bidirectional channel rig: Alice (creator) + Bob both run accept loops and know
+/// A member that missed a push can recover the event from another member even when
+/// the author has no listener and there is no post office.
+#[tokio::test]
+async fn channel_member_recovers_missed_message_from_peer() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let carol = DeviceIdentity::generate();
+    let alice_id = alice.public().user_id();
+    let bob_id = bob.public().user_id();
+    let carol_id = carol.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
+    let carol_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let carol_port = carol_listener.local_addr().unwrap().port();
+
+    let alice_roster = seed_roster(&bob, "Bob", bob_port, &alice_id);
+    add_peer(&alice_roster, &carol, "Carol", carol_port, &alice_id);
+    let bob_roster = seed_roster(&carol, "Carol", carol_port, &bob_id);
+    let carol_roster = seed_roster(&bob, "Bob", bob_port, &carol_id);
+    let bob_pub = bob.public();
+    let carol_pub = carol.public();
+    let open = |identity, roster, name: &str| {
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, ch_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
+    let (carol_node, mut carol_rx) = open(carol, carol_roster, "carol");
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let carol_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
+
+    let channel = alice_node
+        .create_channel("general", vec![bob_pub, carol_pub])
+        .await
+        .unwrap();
+    assert!(
+        carol_node
+            .list_channels()
+            .iter()
+            .any(|item| item.id == channel)
+    );
+    carol_task.abort();
+    carol_task.await.unwrap_err();
+
+    alice_node
+        .send_channel_message(channel, b"recover from Bob")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
+        .await
+        .expect("Bob received the original push");
+    assert!(carol_node.channel_history(channel, 10).is_empty());
+
+    carol_node.pull_one_channel_from_member(0).await;
+    let recovered = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
+        .await
+        .expect("Carol recovered from Bob")
+        .expect("channel stream open");
+    assert_eq!(recovered.text, b"recover from Bob");
+    assert_eq!(carol_node.channel_history(channel, 10).len(), 1);
+    bob_task.abort();
+}
+
+/// Bidirectional channel rig: Alice (creator) + Bob both run accept loops and know
 /// each other. Alice sends -> Bob receives (already worked). THEN Bob sends -> Alice
 /// receives + decrypts. The reverse direction was BROKEN before the fix: a
 /// non-creator never distributed its own sender-key distribution, so the creator

@@ -193,6 +193,11 @@ command names for Tauri registration. Commands clone a node handle from
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
+  A background channel recovery tick also reconciles one joined channel with up to
+  three known member routes. It rotates channels and peers, so a member that missed
+  the original push can obtain signed events from another member even without a
+  post office or the original author online. Each peer attempt is time-bounded;
+  normal sync membership projection and event validation still apply.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
 

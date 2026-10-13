@@ -28,6 +28,10 @@ const DRAIN_INTERVAL_SECS: u64 = 3;
 /// one-shot push is the only other delivery). A no-op when nothing is pending.
 const FILE_PULL_INTERVAL_SECS: u64 = 3;
 
+/// Reconcile one joined channel per tick with a fellow member. This repairs a
+/// missed sender push even on networks without a post office.
+const CHANNEL_RECOVERY_INTERVAL_SECS: u64 = 3;
+
 /// How often the node checks for freshly-discovered peers and re-publishes its current
 /// avatar to them (so a new contact sees the photo without waiting for the next change).
 /// A no-op when no new peers appeared and when we've never set an avatar.
@@ -419,6 +423,18 @@ impl NodeRuntime {
                     loop {
                         node.pull_pending_files().await;
                         tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
+                    }
+                }));
+            }
+            {
+                let node = Arc::clone(&node);
+                tasks.push(tokio::spawn(async move {
+                    let mut cursor = 0usize;
+                    loop {
+                        node.pull_one_channel_from_member(cursor).await;
+                        cursor = cursor.wrapping_add(1);
+                        tokio::time::sleep(Duration::from_secs(CHANNEL_RECOVERY_INTERVAL_SECS))
+                            .await;
                     }
                 }));
             }
