@@ -185,8 +185,12 @@ fn client(timeout: Duration) -> Result<reqwest::Client, String> {
 }
 
 async fn latest_release() -> Result<Release, String> {
-    let response = client(Duration::from_secs(20))?
-        .get(API_URL)
+    latest_release_from(&client(Duration::from_secs(20))?, API_URL).await
+}
+
+async fn latest_release_from(client: &reqwest::Client, url: &str) -> Result<Release, String> {
+    let response = client
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -204,7 +208,7 @@ async fn latest_release() -> Result<Release, String> {
     {
         return Err("The release response is too large".into());
     }
-    if response.url().as_str() != API_URL {
+    if response.url().as_str() != url {
         return Err("The release response came from an unexpected address".into());
     }
     let mut bytes = Vec::new();
@@ -489,14 +493,29 @@ async fn download_and_verify(
     asset: &ReleaseAsset,
     file: &mut tokio::fs::File,
     on_progress: &Channel<DownloadProgress>,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    download_and_verify_with_client(
+        &client(Duration::from_secs(20 * 60))?,
+        asset,
+        file,
+        on_progress,
+        cancel,
+    )
+    .await
+}
+
+async fn download_and_verify_with_client(
+    client: &reqwest::Client,
+    asset: &ReleaseAsset,
+    file: &mut tokio::fs::File,
+    on_progress: &Channel<DownloadProgress>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
     if *cancel.borrow() {
         return Err("Download canceled".into());
     }
-    let request = client(Duration::from_secs(20 * 60))?
-        .get(&asset.browser_download_url)
-        .send();
+    let request = client.get(&asset.browser_download_url).send();
     let mut response = tokio::select! {
         result = request => result.map_err(|_| "Could not start the download")?,
         _ = cancel.changed() => return Err("Download canceled".into()),
@@ -797,6 +816,197 @@ mod tests {
             directory
                 .path()
                 .join("mesh-talk_v0.4.0_macos_arm64 (1).zip")
+        );
+    }
+
+    #[test]
+    fn release_description_distinguishes_current_and_unavailable_packages() {
+        let mut release: Release = serde_json::from_value(serde_json::json!({
+            "tag_name": "v0.3.1", "body": "x".repeat(1300),
+            "draft": false, "prerelease": false, "assets": []
+        }))
+        .unwrap();
+        let current = describe_release(&release, "macos", "aarch64", "default").unwrap();
+        assert!(!current.is_newer);
+        assert_eq!(current.latest_version, "0.3.1");
+        assert_eq!(current.notes.chars().count(), 1200);
+        assert!(current.package_name.is_none());
+
+        release.tag_name = "v0.4.0".into();
+        let unavailable = describe_release(&release, "linux", "x86_64", "lite").unwrap();
+        assert!(unavailable.is_newer);
+        assert!(unavailable.package_name.is_none());
+        assert_eq!(unavailable.edition, "lite");
+
+        release.draft = true;
+        assert!(release_version(&release).is_err());
+        release.draft = false;
+        release.tag_name = "0.4.0".into();
+        assert!(release_version(&release).is_err());
+        release.tag_name = "v0.4.0-beta.1".into();
+        assert!(release_version(&release).is_err());
+    }
+
+    #[tokio::test]
+    async fn loopback_release_lookup_handles_success_limits_and_bad_responses() {
+        async fn serve(status: &str, body: &'static str, declared_size: usize) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/latest", listener.local_addr().unwrap());
+            let status = status.to_owned();
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request).await.unwrap();
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {declared_size}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(body.as_bytes()).await.unwrap();
+            });
+            url
+        }
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let valid =
+            r#"{"tag_name":"v0.4.0","body":"Notes","draft":false,"prerelease":false,"assets":[]}"#;
+        let url = serve("200 OK", valid, valid.len()).await;
+        let release = latest_release_from(&client, &url).await.unwrap();
+        assert_eq!(release.tag_name, "v0.4.0");
+
+        let url = serve("403 Forbidden", "", 0).await;
+        assert_eq!(
+            latest_release_from(&client, &url).await.err().unwrap(),
+            "GitHub is temporarily limiting update checks. Try again later"
+        );
+        let url = serve("200 OK", "not JSON", 8).await;
+        assert_eq!(
+            latest_release_from(&client, &url).await.err().unwrap(),
+            "The release response is invalid"
+        );
+        let url = serve("200 OK", "", (MAX_RELEASE_JSON + 1) as usize).await;
+        assert_eq!(
+            latest_release_from(&client, &url).await.err().unwrap(),
+            "The release response is too large"
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_existing_files_are_never_reused_or_overwritten() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = "package.zip";
+        let canonical = directory.path().join(name);
+        tokio::fs::write(&canonical, b"wrong bytes").await.unwrap();
+        tokio::fs::write(directory.path().join("package (2).zip"), b"wrong too")
+            .await
+            .unwrap();
+        let asset = ReleaseAsset {
+            name: name.into(),
+            browser_download_url: String::new(),
+            digest: Some(format!("sha256:{}", hex::encode(Sha256::digest(b"valid")))),
+            size: 5,
+            state: "uploaded".into(),
+        };
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        assert_eq!(
+            find_verified_existing(directory.path(), name, &asset, &cancel)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            destination(directory.path(), name),
+            directory.path().join("package (1).zip")
+        );
+        assert_eq!(tokio::fs::read(canonical).await.unwrap(), b"wrong bytes");
+    }
+
+    #[tokio::test]
+    async fn loopback_download_checks_length_digest_and_reports_progress() {
+        use std::sync::{Arc, Mutex};
+
+        async fn serve(bytes: &'static [u8]) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/package.zip", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request).await.unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(bytes).await.unwrap();
+            });
+            url
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let loopback_client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let digest = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(b"verified package"))
+        );
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let reports = progress.clone();
+        let channel = Channel::new(move |message| {
+            reports.lock().unwrap().push(message);
+            Ok(())
+        });
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let mut asset = ReleaseAsset {
+            name: "package.zip".into(),
+            browser_download_url: serve(b"verified package").await,
+            digest: Some(digest),
+            size: 16,
+            state: "uploaded".into(),
+        };
+        let mut file = tokio::fs::File::create(directory.path().join("valid.part"))
+            .await
+            .unwrap();
+        download_and_verify_with_client(
+            &loopback_client,
+            &asset,
+            &mut file,
+            &channel,
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read(directory.path().join("valid.part"))
+                .await
+                .unwrap(),
+            b"verified package"
+        );
+        assert!(progress.lock().unwrap().len() >= 2);
+
+        asset.browser_download_url = serve(b"short").await;
+        let mut file = tokio::fs::File::create(directory.path().join("short.part"))
+            .await
+            .unwrap();
+        assert_eq!(
+            download_and_verify_with_client(
+                &loopback_client,
+                &asset,
+                &mut file,
+                &channel,
+                cancel.clone()
+            )
+            .await
+            .unwrap_err(),
+            "The download size does not match the published release"
+        );
+
+        asset.browser_download_url = serve(b"tampered package").await;
+        let mut file = tokio::fs::File::create(directory.path().join("tampered.part"))
+            .await
+            .unwrap();
+        assert_eq!(
+            download_and_verify_with_client(&loopback_client, &asset, &mut file, &channel, cancel)
+                .await
+                .unwrap_err(),
+            "The downloaded package failed its SHA-256 check"
         );
     }
 }

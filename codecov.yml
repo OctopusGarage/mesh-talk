@@ -1,0 +1,8 @@
+# Desktop Rust coverage is now uploaded alongside the protocol core and browser UI.
+# The former automatic target came from a baseline that omitted the desktop crate.
+coverage:
+  status:
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
