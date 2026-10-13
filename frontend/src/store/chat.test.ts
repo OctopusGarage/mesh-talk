@@ -478,6 +478,57 @@ beforeEach(() => {
   reset();
 });
 
+it("dissolves only the selected channel and refreshes its roster", async () => {
+  useChat.setState({
+    channels: [
+      { channel_id: "team", name: "Team", owner: "me", member_count: 2 },
+      { channel_id: "other", name: "Other", owner: "me", member_count: 2 },
+    ],
+  });
+  invoke.mockImplementation((command: string) => {
+    if (command === "list_channels")
+      return Promise.resolve([
+        {
+          channel_id: "team",
+          name: "Team",
+          owner: "me",
+          member_count: 2,
+          dissolved: true,
+        },
+        { channel_id: "other", name: "Other", owner: "me", member_count: 2 },
+      ]);
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    return Promise.resolve([]);
+  });
+
+  expect(await useChat.getState().dissolveChannel("team")).toBe(true);
+  expect(invoke).toHaveBeenCalledWith("dissolve_channel", {
+    channelId: "team",
+  });
+  expect(
+    useChat.getState().channels.map((channel) => channel.dissolved),
+  ).toEqual([true, undefined]);
+  expect(invoke).toHaveBeenCalledWith("list_channels");
+});
+
+it("keeps a channel writable when dissolution is rejected", async () => {
+  useChat.setState({
+    channels: [
+      { channel_id: "team", name: "Team", owner: "me", member_count: 2 },
+    ],
+  });
+  invoke.mockRejectedValue(new Error("owner only"));
+
+  expect(await useChat.getState().dissolveChannel("team")).toBe(false);
+  expect(useChat.getState().channels[0].dissolved).toBeUndefined();
+  expect(useChat.getState().error).toContain("owner only");
+});
+
 it("persists contact pins and aliases under the signed-in owner", async () => {
   invoke.mockImplementation((command: string) =>
     command === "get_favorites" ? Promise.resolve([]) : Promise.resolve(),

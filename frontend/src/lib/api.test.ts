@@ -30,6 +30,13 @@ describe("contact visibility command mapping", () => {
   });
 });
 
+it("uses the channel dissolution IPC command with its channel id", async () => {
+  await chat.dissolveChannel("team");
+  expect(invoke).toHaveBeenCalledWith("dissolve_channel", {
+    channelId: "team",
+  });
+});
+
 describe("account contact metadata command mapping", () => {
   it("binds pin, alias, and avatar writes to the explicit owner", async () => {
     await favorites.setFavorite("alice", "peer", true);
