@@ -1236,6 +1236,62 @@ async fn projected_group_removal_takes_effect_before_channel_book_refresh() {
 }
 
 #[tokio::test]
+async fn invisible_sync_stops_projecting_events_after_channel_dissolution() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (owner, _) = node(&dir.path().join("owner"));
+    let (member, _) = node(&dir.path().join("member"));
+    let group = owner
+        .create_channel("Group", vec![member.identity.public()])
+        .await
+        .unwrap();
+    owner
+        .configure_privacy(
+            &dir.path().join("owner"),
+            "pw",
+            &owner.signed_announce("Owner", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    owner.set_invisible(true).await.unwrap();
+
+    let last = owner.log.lock().unwrap().events(&group).last().unwrap().id;
+    let terminal = crate::eventlog::Event::new(
+        &owner.identity,
+        group,
+        100,
+        vec![last],
+        100,
+        1,
+        crate::eventlog::EventKind::ChannelDissolve,
+        Vec::new(),
+    );
+    let late = crate::eventlog::Event::new(
+        &owner.identity,
+        group,
+        101,
+        vec![terminal.id],
+        101,
+        2,
+        crate::eventlog::EventKind::ChannelRename,
+        b"too late".to_vec(),
+    );
+    {
+        let mut log = owner.log.lock().unwrap();
+        log.append(terminal.clone()).unwrap();
+        log.append(late.clone()).unwrap();
+    }
+
+    let visible = owner
+        .sync_store(&member.identity.public())
+        .lock()
+        .unwrap()
+        .event_ids(&group);
+    assert!(visible.contains(&terminal.id));
+    assert!(!visible.contains(&late.id));
+}
+
+#[tokio::test]
 async fn manually_trusted_relay_only_delivers_cached_verified_dm_authors() {
     use crate::eventlog::sync::SyncStore;
     let dir = tempfile::tempdir().unwrap();

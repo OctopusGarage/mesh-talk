@@ -418,6 +418,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         .rename_channel(channel, "Renamed archive")
         .await
         .unwrap();
+    source.dissolve_channel(channel).await.unwrap();
     let mut snapshot = Vec::new();
     source.write_recovery_snapshot(&mut snapshot, 100).unwrap();
     let restored_dir = dir.path().join("restored");
@@ -451,6 +452,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     assert!(reopened.list_channels().iter().any(|summary| {
         summary.id == channel
             && summary.archived
+            && summary.dissolved
             && summary.member_count == 2
             && summary.name == "Renamed archive"
     }));

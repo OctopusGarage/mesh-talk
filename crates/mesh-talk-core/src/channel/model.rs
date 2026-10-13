@@ -460,6 +460,23 @@ mod tests {
     }
 
     #[test]
+    fn dissolved_channel_rejects_later_metadata_and_renames() {
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let id = new_channel_id();
+        let mut state = ChannelState::from_meta(id, meta("general", &[&a], 0));
+        state.dissolve();
+
+        state.apply_meta(meta("general", &[&a, &b], 1));
+        state.apply_rename("renamed", 2, EventId::new([1u8; 32]));
+
+        assert!(state.is_dissolved());
+        assert_eq!(state.epoch(), 0);
+        assert_eq!(state.name(), "general");
+        assert!(!state.is_member(&b.public().user_id()));
+    }
+
+    #[test]
     fn apply_meta_rejects_owner_change_even_at_higher_epoch() {
         // The owner is pinned at genesis. A snapshot naming a DIFFERENT owner — even at a
         // higher epoch — must be ignored, so ownership cannot be hijacked.
