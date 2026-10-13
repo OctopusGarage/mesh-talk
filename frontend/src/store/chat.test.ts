@@ -529,6 +529,39 @@ it("keeps a channel writable when dissolution is rejected", async () => {
   expect(useChat.getState().error).toContain("owner only");
 });
 
+it("does not send dissolution without a signed-in owner", async () => {
+  useAuth.setState({ user: null });
+
+  expect(await useChat.getState().dissolveChannel("team")).toBe(false);
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("does not update a replacement account after dissolution completes", async () => {
+  let finish!: () => void;
+  invoke.mockImplementation((command: string) =>
+    command === "dissolve_channel"
+      ? new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve([]),
+  );
+  useChat.setState({
+    channels: [
+      { channel_id: "team", name: "Team", owner: "me", member_count: 2 },
+    ],
+  });
+
+  const pending = useChat.getState().dissolveChannel("team");
+  useAuth.setState({
+    user: { id: "replacement", username: "bob", display_name: "Bob" },
+  });
+  finish();
+
+  expect(await pending).toBe(false);
+  expect(useChat.getState().channels[0].dissolved).toBeUndefined();
+  expect(invoke).not.toHaveBeenCalledWith("list_channels");
+});
+
 it("persists contact pins and aliases under the signed-in owner", async () => {
   invoke.mockImplementation((command: string) =>
     command === "get_favorites" ? Promise.resolve([]) : Promise.resolve(),
