@@ -10,15 +10,22 @@ it("keeps related settings under a single navigation category", () => {
 afterEach(() => vi.unstubAllGlobals());
 
 function section() {
-  const scrollIntoView = vi.fn();
-  const querySelector = vi.fn().mockReturnValue({ scrollIntoView });
+  const scrollTo = vi.fn();
+  const querySelector = vi.fn().mockReturnValue({
+    getBoundingClientRect: () => ({ top: 250 }),
+  });
   return {
-    container: { querySelector } as unknown as Pick<
+    container: {
+      querySelector,
+      getBoundingClientRect: () => ({ top: 100 }),
+      scrollTop: 120,
+      scrollTo,
+    } as unknown as Pick<
       HTMLElement,
-      "querySelector"
+      "querySelector" | "getBoundingClientRect" | "scrollTop" | "scrollTo"
     >,
     querySelector,
-    scrollIntoView,
+    scrollTo,
   };
 }
 
@@ -26,13 +33,13 @@ it("scrolls to the requested settings section with normal motion", () => {
   vi.stubGlobal("window", {
     matchMedia: () => ({ matches: false }),
   });
-  const { container, querySelector, scrollIntoView } = section();
+  const { container, querySelector, scrollTo } = section();
 
   scrollToSettingsSection(container, "privacy");
 
   expect(querySelector).toHaveBeenCalledWith("#settings-privacy");
-  expect(scrollIntoView).toHaveBeenCalledWith({
-    block: "start",
+  expect(scrollTo).toHaveBeenCalledWith({
+    top: 270,
     behavior: "smooth",
   });
 });
@@ -41,23 +48,22 @@ it("respects reduced motion when navigating settings", () => {
   vi.stubGlobal("window", {
     matchMedia: () => ({ matches: true }),
   });
-  const { container, scrollIntoView } = section();
+  const { container, scrollTo } = section();
 
   scrollToSettingsSection(container, "files");
 
-  expect(scrollIntoView).toHaveBeenCalledWith({
-    block: "start",
+  expect(scrollTo).toHaveBeenCalledWith({
+    top: 270,
     behavior: "auto",
   });
 });
 
 it("does nothing when the settings section is unavailable", () => {
   const querySelector = vi.fn().mockReturnValue(null);
-  const container = { querySelector } as unknown as Pick<
-    HTMLElement,
-    "querySelector"
-  >;
+  const scrollTo = vi.fn();
+  const container = { querySelector, scrollTo } as unknown as HTMLElement;
 
   expect(() => scrollToSettingsSection(container, "missing")).not.toThrow();
   expect(() => scrollToSettingsSection(null, "missing")).not.toThrow();
+  expect(scrollTo).not.toHaveBeenCalled();
 });

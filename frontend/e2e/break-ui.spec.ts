@@ -165,6 +165,26 @@ test("CJK and emoji search results stay usable with dense history", async ({
   await expect(page.getByTestId("conversation-header")).toBeVisible();
 });
 
+test("search keyboard navigation keeps its input visible with many results", async ({
+  page,
+}) => {
+  // A 760×520 desktop window at 200% browser zoom has this CSS viewport.
+  await page.setViewportSize({ width: 380, height: 260 });
+  await enter(page, "worst");
+  await page.getByTestId("sidebar-action-search").click();
+  const input = page.getByTestId("search-input");
+  await input.fill("Release notes");
+  await expect(page.getByTestId("search-result")).toHaveCount(84);
+  await expect(input).toBeInViewport();
+  for (let i = 0; i < 12; i++) await input.press("ArrowDown");
+  await expect(input).toBeInViewport();
+  const dialog = page.getByTestId("search-dialog");
+  await expect(
+    dialog.getByRole("heading", { name: "Search" }),
+  ).toBeInViewport();
+  await expect(dialog.getByRole("option", { selected: true })).toBeInViewport();
+});
+
 test("a long device name stays inside diagnostics", async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 520 });
   await enter(page, "worst");
