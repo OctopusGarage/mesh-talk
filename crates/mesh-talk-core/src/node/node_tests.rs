@@ -1,4 +1,5 @@
 use super::*;
+use crate::channel::ChannelMeta;
 use crate::discovery::announce::Announce;
 use crate::node::conversation::dm_conversation_id;
 use crate::node::message::MessageBody;
@@ -531,6 +532,8 @@ async fn recovered_channel_can_rejoin_send_and_reopen_without_sent_sequence_conf
     drop(restored);
     let rejoined = Node::open_recovery_profile(&restored_dir, "new password").unwrap();
     assert!(!rejoined.list_channels()[0].archived);
+    assert!(rejoined.list_channels()[0].pending_invite);
+    rejoined.accept_channel_invite(channel).await.unwrap();
     rejoined
         .send_channel_message(channel, b"after recovery one")
         .await
@@ -1694,6 +1697,32 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     assert!(!bob_hist[0].from_me);
     assert_eq!(bob_hist[0].text, b"hello channel");
     assert_eq!(bob_hist[0].who, alice_node.user_id());
+
+    // The membership projection can lag the durable log while two commands
+    // interleave. The transfer must not report success if replay sees a newer
+    // removal first and rejects the target.
+    let owner = alice_node.user_id();
+    alice_node
+        .append_event(
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "general".into(),
+                members: vec![alice_node.identity.public()],
+                epoch: 1,
+                owner: owner.clone(),
+            }
+            .encode(),
+        )
+        .unwrap();
+    assert!(
+        alice_node
+            .transfer_channel_owner(channel, &bob_node.user_id())
+            .await
+            .is_err(),
+        "a rejected transfer must not report success"
+    );
+    assert_eq!(alice_node.channel_owner(channel), owner);
 }
 
 /// Bidirectional channel rig: Alice (creator) + Bob both run accept loops and know
@@ -2000,9 +2029,18 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
 
     // Epoch 0: {Alice, Bob}. Alice sends; Bob receives.
     let channel = alice_node
-        .create_channel("general", vec![bob_pub])
+        .create_channel_invited("general", vec![bob_pub])
         .await
         .unwrap();
+    assert!(
+        alice_node
+            .transfer_channel_owner(channel, &bob_uid)
+            .await
+            .is_err(),
+        "an invitee cannot own the channel before accepting"
+    );
+    assert_eq!(alice_node.channel_owner(channel), alice_uid);
+    bob_node.accept_channel_invite(channel).await.unwrap();
     alice_node
         .send_channel_message(channel, b"epoch0 msg")
         .await
@@ -2018,6 +2056,13 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .add_channel_member(channel, carol_pub)
         .await
         .unwrap();
+    assert!(
+        carol_node
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == channel && summary.pending_invite)
+    );
+    carol_node.accept_channel_invite(channel).await.unwrap();
 
     // Epoch 1: Alice sends. Her lazy SKD for epoch 1 is distributed before the seal,
     // so both Bob (still a member) and Carol (newly joined) can read it.
@@ -2032,6 +2077,22 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .expect("channel stream open");
     assert_eq!(got_carol.text, b"epoch1 msg");
     assert_eq!(got_carol.from, alice_node.user_id());
+    add_peer(
+        &bob_node.roster,
+        &carol_node.identity,
+        "Carol",
+        carol_addr.port(),
+        &bob_uid,
+    );
+    bob_node
+        .send_channel_message(channel, b"bob after invite")
+        .await
+        .unwrap();
+    let from_existing_member = tokio::time::timeout(Duration::from_secs(5), c_ch_r.recv())
+        .await
+        .expect("new member receives an established member after accepting")
+        .expect("channel stream open");
+    assert_eq!(from_existing_member.text, b"bob after invite");
 
     // Late-join isolation: Carol never receives the epoch-0 message (she joined at
     // epoch 1). Her history holds only the epoch-1 message.
@@ -2072,6 +2133,17 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         assert_eq!(node.channel_owner(channel), alice_uid);
     }
 
+    // Removing the immutable owner would strand the remaining members without
+    // anyone authorized to manage the channel.
+    let owner_self_remove = alice_node.remove_channel_member(channel, &alice_uid).await;
+    assert!(matches!(owner_self_remove, Err(NodeError::Channel(_))));
+    assert!(
+        alice_node
+            .channel_members(channel)
+            .iter()
+            .any(|member| member.user_id() == alice_uid)
+    );
+
     // The OWNER can remove Carol and it converges (legit owner-authored change).
     alice_node
         .remove_channel_member(channel, &carol_uid)
@@ -2083,6 +2155,55 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
             .iter()
             .any(|m| m.user_id() == carol_uid),
         "the owner can remove a member",
+    );
+    alice_node
+        .transfer_channel_owner(channel, &bob_uid)
+        .await
+        .unwrap();
+    assert_eq!(bob_node.channel_owner(channel), bob_uid);
+    bob_node
+        .add_channel_member(channel, carol_node.identity.public())
+        .await
+        .unwrap();
+    assert!(
+        alice_node
+            .channel_members(channel)
+            .iter()
+            .any(|member| member.user_id() == carol_uid)
+    );
+    bob_node
+        .transfer_channel_owner(channel, &alice_uid)
+        .await
+        .unwrap();
+    // The final push can miss an offline owner. The signed leave remains in the
+    // durable log and the retry path must deliver it when the route returns.
+    add_peer(&bob_node.roster, &alice_node.identity, "Alice", 9, &bob_uid);
+    bob_node.leave_channel(channel).await.unwrap();
+    assert!(
+        bob_node
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == channel && summary.left)
+    );
+    assert!(
+        alice_node
+            .channel_members(channel)
+            .iter()
+            .any(|member| member.user_id() == bob_uid)
+    );
+    add_peer(
+        &bob_node.roster,
+        &alice_node.identity,
+        "Alice",
+        alice_addr.port(),
+        &bob_uid,
+    );
+    bob_node.retry_channel_departures().await;
+    assert!(
+        alice_node
+            .channel_members(channel)
+            .iter()
+            .all(|member| member.user_id() != bob_uid)
     );
 }
 

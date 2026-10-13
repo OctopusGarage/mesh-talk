@@ -128,14 +128,25 @@ export const test = base.extend({
         },
       ];
 
-      const channels = [
+      const channels: Array<{
+        channel_id: string;
+        name: string;
+        member_count: number;
+        dissolved?: boolean;
+        owner?: string;
+        pending_invite?: boolean;
+        left?: boolean;
+      }> = [
         {
           channel_id: CHANNEL.channel_id,
           name: CHANNEL.name,
           member_count: CHANNEL.member_count,
           dissolved: false,
+          owner: dataMode === "invite" ? BOB.device_id : SELF.device,
+          pending_invite: dataMode === "invite",
         },
       ];
+      let channelOwner = dataMode === "invite" ? BOB.device_id : SELF.device;
 
       (window as unknown as Record<string, unknown>).__mockClearRoster = () => {
         peers.length = 0;
@@ -143,7 +154,11 @@ export const test = base.extend({
         channels.length = 0;
       };
 
-      const channelMembers = [
+      const channelMembers: Array<{
+        user_id: string;
+        name: string;
+        pending?: boolean;
+      }> = [
         // Self is a member of its own channel. We never appear in our own discovery
         // roster, so the backend can only fall back to our raw user_id for the name and
         // there is no presence entry for us — the UI must fill in our name + online state.
@@ -151,6 +166,7 @@ export const test = base.extend({
         { user_id: BOB.device_id, name: BOB.name },
         { user_id: CAROL.device_id, name: CAROL.name },
       ];
+      if (dataMode === "invite") channelMembers[0].pending = true;
 
       if (dataMode === "site") channelMembers[0].name = "Cesc Fàbregas";
 
@@ -434,7 +450,12 @@ export const test = base.extend({
       // --- Favorites (pin + alias), persisted in-memory ---------------------
       const favorites: Record<
         string,
-        { id: string; pinned: boolean; custom_alias: string | null }
+        {
+          id: string;
+          pinned: boolean;
+          custom_alias: string | null;
+          hidden?: boolean;
+        }
       > = {};
       if (dataMode === "pinned-huge") {
         for (let i = 0; i < 1000; i++) {
@@ -663,14 +684,16 @@ export const test = base.extend({
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
           channel_members: () => ({
-            owner: SELF.device,
+            owner: channelOwner,
             members: channelMembers,
           }),
+          channel_activity: () => [],
 
           // history
           history: (a) => msgs[`dm:${a.peer}`] ?? [],
           account_history: (a) => msgs[`acc:${a.account}`] ?? [],
-          channel_history: (a) => msgs[`ch:${a.channelId}`] ?? [],
+          channel_history: (a) =>
+            dataMode === "invite" ? [] : (msgs[`ch:${a.channelId}`] ?? []),
 
           // reactions
           reactions: (a) => reacts[`dm:${a.peer}`] ?? [],
@@ -740,6 +763,23 @@ export const test = base.extend({
           remove_channel_member: ok,
           dissolve_channel: () => {
             channels[0].dissolved = true;
+            return null;
+          },
+          transfer_channel_owner: (a) => {
+            channelOwner = String(a.memberId);
+            const channel = channels.find((c) => c.channel_id === a.channelId);
+            if (channel) channel.owner = channelOwner;
+            return null;
+          },
+          leave_channel: (a) => {
+            const channel = channels.find((c) => c.channel_id === a.channelId);
+            if (channel) channel.left = true;
+            return null;
+          },
+          accept_channel_invite: (a) => {
+            const channel = channels.find((c) => c.channel_id === a.channelId);
+            if (channel) channel.pending_invite = false;
+            channelMembers[0].pending = false;
             return null;
           },
 
@@ -917,8 +957,13 @@ export const test = base.extend({
               id,
               pinned: Boolean(a.pinned),
               custom_alias: prev?.custom_alias ?? null,
+              hidden: prev?.hidden ?? false,
             };
-            if (!favorites[id].pinned && !favorites[id].custom_alias)
+            if (
+              !favorites[id].pinned &&
+              !favorites[id].custom_alias &&
+              !favorites[id].hidden
+            )
               delete favorites[id];
             return null;
           },
@@ -931,9 +976,25 @@ export const test = base.extend({
               id,
               pinned: prev?.pinned ?? false,
               custom_alias: alias,
+              hidden: prev?.hidden ?? false,
             };
-            if (!favorites[id].pinned && !favorites[id].custom_alias)
+            if (
+              !favorites[id].pinned &&
+              !favorites[id].custom_alias &&
+              !favorites[id].hidden
+            )
               delete favorites[id];
+            return null;
+          },
+          set_channel_hidden: (a) => {
+            const id = String(a.id);
+            const prev = favorites[id];
+            favorites[id] = {
+              id,
+              pinned: prev?.pinned ?? false,
+              custom_alias: prev?.custom_alias ?? null,
+              hidden: Boolean(a.hidden),
+            };
             return null;
           },
 

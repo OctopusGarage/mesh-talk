@@ -16,6 +16,8 @@ pub struct ChannelInfo {
     pub owner: String,
     pub archived: bool,
     pub dissolved: bool,
+    pub left: bool,
+    pub pending_invite: bool,
 }
 
 #[tauri::command]
@@ -34,6 +36,8 @@ pub async fn list_channels(
             owner: c.owner,
             archived: c.archived,
             dissolved: c.dissolved,
+            left: c.left,
+            pending_invite: c.pending_invite,
         })
         .collect())
 }
@@ -51,6 +55,8 @@ pub async fn channel_members(
     // been evicted from the roster) still shows the last name we saw, not a raw hex id.
     // Ourselves: we're never in our own roster, so use our own advertised name.
     let self_uid = rt.user_id();
+    let pending: std::collections::HashSet<_> =
+        rt.channel_pending_members(channel).into_iter().collect();
     let members = rt
         .channel_members(channel)
         .into_iter()
@@ -68,6 +74,7 @@ pub async fn channel_members(
                 rt.account_id_for_device(&p)
             };
             ChannelMemberInfo {
+                pending: pending.contains(&user_id),
                 user_id,
                 name,
                 account_id,
@@ -78,6 +85,34 @@ pub async fn channel_members(
         owner: rt.channel_owner(channel),
         members,
     })
+}
+
+#[derive(Serialize)]
+pub struct ChannelActivityInfo {
+    pub kind: String,
+    pub actor: String,
+    pub target: Option<String>,
+    pub wall_clock: u64,
+}
+
+#[tauri::command]
+pub async fn channel_activity(
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+) -> Result<Vec<ChannelActivityInfo>, CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    let guard = state.0.lock().await;
+    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+    Ok(rt
+        .channel_activity(channel)
+        .into_iter()
+        .map(|entry| ChannelActivityInfo {
+            kind: entry.kind.to_string(),
+            actor: entry.actor,
+            target: entry.target,
+            wall_clock: entry.wall_clock,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -99,7 +134,7 @@ pub async fn create_channel(
         (rt.handle(), members)
     };
     let id = node
-        .create_channel(&name, members)
+        .create_channel_invited(&name, members)
         .await
         .map_err(CommandError::from)?;
     Ok(hex::encode(id.as_bytes()))
@@ -134,6 +169,43 @@ pub async fn remove_channel_member(
     let channel = parse_channel_id(&channel_id)?;
     let node = state.node_handle().await?;
     node.remove_channel_member(channel, &member_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn transfer_channel_owner(
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    member_id: String,
+) -> Result<(), CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    let node = state.node_handle().await?;
+    node.transfer_channel_owner(channel, &member_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn leave_channel(
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+) -> Result<(), CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    let node = state.node_handle().await?;
+    node.leave_channel(channel)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn accept_channel_invite(
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+) -> Result<(), CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    let node = state.node_handle().await?;
+    node.accept_channel_invite(channel)
         .await
         .map_err(CommandError::from)
 }

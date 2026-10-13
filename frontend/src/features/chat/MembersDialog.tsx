@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Users, UserPlus, X } from "lucide-react";
+import { Crown, LogOut, Users, UserPlus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   Dialog,
@@ -20,6 +20,8 @@ import {
 } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
 import { displayName, useChat } from "@/store/chat";
+import { chat as chatApi } from "@/lib/api";
+import type { ChannelActivityInfo } from "@/lib/types";
 import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visiblePeers } from "@/lib/contactVisibility";
@@ -33,6 +35,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const members = useChat((s) => s.members);
+  const active = useChat((s) => s.active);
   const animateMembers = motionOK && members.length <= MAX_STAGGER_ITEMS;
   const channelOwner = useChat((s) => s.channelOwner);
   const peers = useChat((s) => s.peers);
@@ -45,13 +48,67 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const addMember = useChat((s) => s.addMember);
   const removeMember = useChat((s) => s.removeMember);
   const dissolveChannel = useChat((s) => s.dissolveChannel);
-  const active = useChat((s) => s.active);
+  const transferChannelOwner = useChat((s) => s.transferChannelOwner);
+  const leaveChannel = useChat((s) => s.leaveChannel);
   const openConversation = useChat((s) => s.open);
   // Whole presence map (the dialog reads many ids at once; one subscription).
   const presenceMap = usePresence((s) => s.map);
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pendingRemoval, setPendingRemoval] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [pendingTransfer, setPendingTransfer] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [transferring, setTransferring] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [activity, setActivity] = useState<ChannelActivityInfo[]>([]);
+  useEffect(() => {
+    if (!open || active?.kind !== "channel") return;
+    let live = true;
+    void chatApi.channelActivity(active.id).then(
+      (items) => {
+        if (live) setActivity(items);
+      },
+      () => {
+        if (live) setActivity([]);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [open, active?.id, active?.kind, members, channelOwner]);
+
+  const confirmRemoval = async () => {
+    if (!pendingRemoval || removing) return;
+    setRemoving(true);
+    const removed = await removeMember(pendingRemoval.id);
+    setRemoving(false);
+    if (removed) setPendingRemoval(null);
+  };
+  const confirmTransfer = async () => {
+    if (!pendingTransfer || transferring) return;
+    setTransferring(true);
+    const transferred = await transferChannelOwner(pendingTransfer.id);
+    setTransferring(false);
+    if (transferred) setPendingTransfer(null);
+  };
+  const finishLeave = async () => {
+    if (leaving) return;
+    setLeaving(true);
+    const left = await leaveChannel();
+    setLeaving(false);
+    if (left) {
+      setConfirmLeave(false);
+      setOpen(false);
+    }
+  };
 
   const statusFor = (accountId: string | null | undefined) =>
     presenceStatus((accountId ? presenceMap[accountId] : undefined) ?? OFFLINE);
@@ -138,7 +195,18 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (removing || transferring || leaving) return;
+        setOpen(next);
+        if (!next) {
+          setPendingRemoval(null);
+          setPendingTransfer(null);
+          setConfirmLeave(false);
+        }
+      }}
+    >
       <DialogTrigger asChild>
         <Button
           variant="ghost"
@@ -243,15 +311,36 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                       {t("members.owner")}
                     </span>
                   )}
+                  {m.pending && (
+                    <span className="shrink-0 rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+                      {t("members.pendingAcceptance")}
+                    </span>
+                  )}
                   {/* Only the owner may remove members — the core rejects a non-owner's kick. */}
+                  {isOwner && !memberIsOwner && !m.pending && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-11 w-11 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+                      title={t("members.transferOwner")}
+                      aria-label={`${t("members.transferOwner")} ${name}`}
+                      disabled={transferring || removing}
+                      onClick={() =>
+                        setPendingTransfer({ id: m.user_id, name })
+                      }
+                    >
+                      <Crown className="h-4 w-4" />
+                    </Button>
+                  )}
                   {isOwner && !memberIsOwner && (
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-11 w-11 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
                       title={t("common.remove")}
-                      aria-label={t("common.remove")}
-                      onClick={() => removeMember(m.user_id)}
+                      aria-label={`${t("common.remove")} ${name}`}
+                      disabled={removing || transferring}
+                      onClick={() => setPendingRemoval({ id: m.user_id, name })}
                     >
                       <X className="h-4 w-4" />
                     </Button>
@@ -271,6 +360,51 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           >
             {t("members.dissolve")}
           </Button>
+        )}
+        {pendingRemoval && (
+          <div className="space-y-3 rounded-lg border border-destructive/30 p-3">
+            <p className="break-words text-sm" role="status">
+              {t("members.confirmRemove", { name: pendingRemoval.name })}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                disabled={removing}
+                onClick={() => setPendingRemoval(null)}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={removing}
+                onClick={() => void confirmRemoval()}
+              >
+                {t("members.removeMember")}
+              </Button>
+            </div>
+          </div>
+        )}
+        {pendingTransfer && (
+          <div className="space-y-3 rounded-lg border p-3">
+            <p className="break-words text-sm" role="status">
+              {t("members.confirmTransfer", { name: pendingTransfer.name })}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                disabled={transferring}
+                onClick={() => setPendingTransfer(null)}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                disabled={transferring}
+                onClick={() => void confirmTransfer()}
+              >
+                {t("members.transferOwner")}
+              </Button>
+            </div>
+          </div>
         )}
 
         {isOwner && addable.length > 0 && (
@@ -303,6 +437,87 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             />
           </div>
         )}
+        {activity.length > 0 && (
+          <div className="space-y-2 border-t pt-3">
+            <h3 className="text-xs font-semibold text-muted-foreground">
+              {t("members.activity")}
+            </h3>
+            <ol className="max-h-36 space-y-1.5 overflow-y-auto text-xs text-muted-foreground">
+              {activity
+                .slice(-20)
+                .reverse()
+                .map((entry, index) => {
+                  const date = new Date(entry.wall_clock);
+                  const dateValid = Number.isFinite(date.getTime());
+                  const nameFor = (id: string) =>
+                    members.find((member) => member.user_id === id)?.name ||
+                    peers.find((peer) => peer.user_id === id)?.name ||
+                    `${id.slice(0, 8)}…`;
+                  return (
+                    <li
+                      key={`${entry.wall_clock}-${index}`}
+                      className="flex justify-between gap-3"
+                    >
+                      <span className="min-w-0 break-words">
+                        {t(`members.activity_${entry.kind}`, {
+                          actor: nameFor(entry.actor),
+                          target: entry.target ? nameFor(entry.target) : "",
+                        })}
+                      </span>
+                      <time
+                        className="shrink-0 tabular-nums"
+                        dateTime={dateValid ? date.toISOString() : undefined}
+                      >
+                        {dateValid ? date.toLocaleDateString() : ""}
+                      </time>
+                    </li>
+                  );
+                })}
+            </ol>
+          </div>
+        )}
+        <div className="border-t pt-3">
+          {dissolved ? (
+            <p className="text-xs text-muted-foreground">
+              {t("conversation.dissolvedChannelHint")}
+            </p>
+          ) : isOwner ? (
+            <p className="text-xs text-muted-foreground">
+              {t("members.transferBeforeLeave")}
+            </p>
+          ) : confirmLeave ? (
+            <div className="space-y-3">
+              <p className="text-sm" role="status">
+                {t("members.confirmLeave")}
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="ghost"
+                  disabled={leaving}
+                  onClick={() => setConfirmLeave(false)}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  variant="destructive"
+                  disabled={leaving}
+                  onClick={() => void finishLeave()}
+                >
+                  {t("members.leave")}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              variant="ghost"
+              className="text-destructive hover:text-destructive"
+              onClick={() => setConfirmLeave(true)}
+            >
+              <LogOut className="h-4 w-4" />
+              {t("members.leave")}
+            </Button>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   );

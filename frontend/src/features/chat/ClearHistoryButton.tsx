@@ -33,8 +33,9 @@ export function ClearHistoryButton({
 
   const confirm = async () => {
     setBusy(true);
-    await clearConversation();
+    const cleared = await clearConversation();
     setBusy(false);
+    if (!cleared) return;
     setOpen(false);
     onCleared?.();
   };

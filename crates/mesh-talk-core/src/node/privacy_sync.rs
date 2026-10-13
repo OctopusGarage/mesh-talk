@@ -3,17 +3,31 @@ use super::privacy_runtime::PrivacyState;
 use super::*;
 use crate::{
     eventlog::{
-        AppendOutcome, ConversationId, Event, EventId, EventKind, LogError, sync::SyncStore,
+        AppendOutcome, ConversationId, Event, EventId, EventKind, EventLog, LogError,
+        sync::SyncStore,
     },
     identity::device::PublicIdentity,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+// The staging area is scoped to one authenticated sync connection. An unrelated
+// group can consume at most this much memory and is forgotten when it disconnects.
+const MAX_PENDING_CHANNEL_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct PendingChannel {
+    log: EventLog,
+    events: Vec<Event>,
+    bytes: usize,
+}
 
 pub(in crate::node) struct GuardedSyncStore<'a> {
     node: &'a Node,
     peer: PublicIdentity,
     denied: bool,
     pull_only: bool,
+    pending_channels: HashMap<ConversationId, PendingChannel>,
+    pending_bytes: usize,
 }
 impl Node {
     pub(in crate::node) fn sync_store(
@@ -25,6 +39,8 @@ impl Node {
             peer: peer.clone(),
             denied: false,
             pull_only: false,
+            pending_channels: HashMap::new(),
+            pending_bytes: 0,
         })
     }
     pub(in crate::node) fn pull_sync_store(
@@ -36,10 +52,174 @@ impl Node {
             peer: peer.clone(),
             denied: false,
             pull_only: true,
+            pending_channels: HashMap::new(),
+            pending_bytes: 0,
         })
     }
 }
 impl GuardedSyncStore<'_> {
+    /// Hold an unknown channel's ancestry off disk until a signed, causally
+    /// valid membership snapshot explicitly invites this device. The ordinary
+    /// append gate is used only after the complete proof has been projected.
+    fn stage_uninvited_channel(
+        &mut self,
+        event: &Event,
+    ) -> Option<Result<AppendOutcome, LogError>> {
+        let conversation = event.conversation_id;
+        if !self.pending_channels.contains_key(&conversation) {
+            if event.kind != EventKind::MembershipChange || !event.parents.is_empty() {
+                return None;
+            }
+            let meta = crate::channel::ChannelMeta::decode(&event.ciphertext)?;
+            let me = self.node.identity.public();
+            if meta.is_member(&me.user_id())
+                || meta.owner != event.author.user_id()
+                || !meta.is_member(&meta.owner)
+                || !self
+                    .node
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .events(&conversation)
+                    .is_empty()
+            {
+                return None;
+            }
+            let guard = self
+                .node
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned");
+            let state = guard
+                .as_ref()
+                .filter(|state| state.policy.snapshot().invisible)?;
+            let manual = state
+                .policy
+                .snapshot()
+                .allowed_accounts
+                .iter()
+                .any(|account| {
+                    account.source == PermissionSource::Manual
+                        && state
+                            .proofs
+                            .by_author(&self.peer.ed25519_pub)
+                            .is_some_and(|proof| {
+                                proof.public() == self.peer
+                                    && proof.account_id().as_deref() == Some(&account.id)
+                            })
+                });
+            if !manual {
+                return None;
+            }
+        }
+
+        let mut pending = self
+            .pending_channels
+            .remove(&conversation)
+            .unwrap_or_default();
+        self.pending_bytes -= pending.bytes;
+        let size = event
+            .ciphertext
+            .len()
+            .saturating_add(event.sig.len())
+            .saturating_add(event.parents.len().saturating_mul(32))
+            .saturating_add(256);
+        if self
+            .pending_bytes
+            .saturating_add(pending.bytes)
+            .saturating_add(size)
+            > MAX_PENDING_CHANNEL_BYTES
+        {
+            self.denied = true;
+            return Some(Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "uninvited channel staging limit exceeded",
+            ))));
+        }
+        match pending.log.append(event.clone()) {
+            Ok(AppendOutcome::Duplicate) => {
+                self.pending_bytes += pending.bytes;
+                self.pending_channels.insert(conversation, pending);
+                return Some(Ok(AppendOutcome::Duplicate));
+            }
+            Err(error) => {
+                self.pending_bytes += pending.bytes;
+                self.pending_channels.insert(conversation, pending);
+                return Some(Err(error));
+            }
+            Ok(AppendOutcome::Appended) => {}
+        }
+        pending.bytes += size;
+        pending.events.push(event.clone());
+
+        let approved = {
+            let guard = self
+                .node
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned");
+            guard
+                .as_ref()
+                .filter(|state| state.policy.snapshot().invisible)
+                .and_then(|state| {
+                    let invitation = event.kind == EventKind::MembershipChange
+                        && crate::channel::ChannelMeta::is_invitation(&event.ciphertext)
+                        && crate::channel::ChannelMeta::decode(&event.ciphertext)
+                            .is_some_and(|meta| meta.is_member(&self.node.user_id()));
+                    if !invitation {
+                        return None;
+                    }
+                    let allowed = self.projection(state, &conversation, &pending.events);
+                    allowed.contains(&event.id).then_some(allowed)
+                })
+        };
+        if let Some(allowed) = approved {
+            // The proof itself and every committed ancestor have passed both the
+            // event-log integrity check and the channel membership projection.
+            let guard = self
+                .node
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned");
+            let still_allowed = guard
+                .as_ref()
+                .filter(|state| state.policy.snapshot().invisible)
+                .is_some_and(|state| {
+                    self.projection(state, &conversation, &pending.events)
+                        .contains(&event.id)
+                });
+            if !still_allowed {
+                self.denied = true;
+                return Some(Err(LogError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "channel invitation permission changed",
+                ))));
+            }
+            let accepted: Vec<_> = pending
+                .events
+                .into_iter()
+                .filter(|staged| allowed.contains(&staged.id))
+                .collect();
+            let result = self
+                .node
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .append_channel_batch_atomic(&accepted)
+                .map(|()| AppendOutcome::Appended);
+            if result.is_err() {
+                self.denied = true;
+            }
+            return Some(result);
+        }
+        self.pending_bytes += pending.bytes;
+        self.pending_channels.insert(conversation, pending);
+        Some(Ok(AppendOutcome::Appended))
+    }
+
     fn projection(
         &self,
         state: &PrivacyState,
@@ -115,6 +295,9 @@ impl GuardedSyncStore<'_> {
                             EventKind::MembershipChange
                                 | EventKind::KeyRotation
                                 | EventKind::ChannelRename
+                                | EventKind::ChannelOwnerTransfer
+                                | EventKind::ChannelLeave
+                                | EventKind::ChannelAccept
                         )
                         && event.parents.iter().all(|id| allowed.contains(id))
                     {
@@ -202,10 +385,117 @@ impl GuardedSyncStore<'_> {
                 .lock()
                 .expect("channels lock not poisoned");
             book.state(conversation)
-                .map(|s| (s.owner().to_string(), s.members().to_vec()))
+                .map(|s| (s.genesis_owner().to_string(), s.members().to_vec()))
+        };
+        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, event)).collect();
+        // A newly invited device is absent from the genesis snapshot. Validate
+        // the later membership chain before projecting its metadata ancestors;
+        // otherwise dependency closure prevents the invite event from syncing.
+        let future_pair = {
+            let mut future: Option<crate::channel::ChannelState> = None;
+            let mut future_departures: Vec<(String, EventId)> = Vec::new();
+            for event in events {
+                let author = event.author.user_id();
+                match event.kind {
+                    EventKind::MembershipChange => {
+                        if let Some(mut meta) =
+                            crate::channel::ChannelMeta::decode(&event.ciphertext)
+                        {
+                            let original_member_count = meta.members.len();
+                            meta.members.retain(|member| {
+                                !future_departures.iter().any(|(uid, leave_id)| {
+                                    uid == &member.user_id()
+                                        && !super::channel::descends_from(event, *leave_id, &by_id)
+                                })
+                            });
+                            if let Some(current) = future.as_mut() {
+                                if author == current.owner() {
+                                    let old: HashSet<_> = current
+                                        .members()
+                                        .iter()
+                                        .map(PublicIdentity::user_id)
+                                        .collect();
+                                    let invited = crate::channel::ChannelMeta::is_invitation(
+                                        &event.ciphertext,
+                                    );
+                                    if meta.members.len() < original_member_count {
+                                        current.apply_meta_after_concurrent_leave(meta);
+                                    } else {
+                                        current.apply_meta(meta);
+                                    }
+                                    let added: Vec<_> = current
+                                        .members()
+                                        .iter()
+                                        .map(PublicIdentity::user_id)
+                                        .filter(|uid| !old.contains(uid))
+                                        .collect();
+                                    for uid in added {
+                                        if invited {
+                                            current.mark_invited(&uid);
+                                        } else {
+                                            current.auto_accept_legacy_member(&uid);
+                                        }
+                                    }
+                                }
+                            } else if event.parents.is_empty()
+                                && author == meta.owner
+                                && meta.is_member(&author)
+                            {
+                                let invited =
+                                    crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
+                                let mut initial =
+                                    crate::channel::ChannelState::from_meta(*conversation, meta);
+                                if invited {
+                                    let invitees: Vec<_> = initial
+                                        .members()
+                                        .iter()
+                                        .map(PublicIdentity::user_id)
+                                        .filter(|uid| uid != &author)
+                                        .collect();
+                                    for uid in invitees {
+                                        initial.mark_invited(&uid);
+                                    }
+                                }
+                                future = Some(initial);
+                            }
+                        }
+                    }
+                    EventKind::ChannelOwnerTransfer => {
+                        if let Some(current) = future.as_mut()
+                            && author == current.owner()
+                            && let Ok(next) = std::str::from_utf8(&event.ciphertext)
+                        {
+                            current.transfer_owner(next);
+                        }
+                    }
+                    EventKind::ChannelAccept => {
+                        if event.ciphertext.is_empty()
+                            && let Some(current) = future.as_mut()
+                        {
+                            current.accept_invite(&author, event.id);
+                        }
+                    }
+                    EventKind::ChannelLeave => {
+                        if let Some(current) = future.as_mut()
+                            && event.ciphertext.is_empty()
+                            && current.leave_member(&author)
+                        {
+                            future_departures.push((author, event.id));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            future.is_some_and(|current| {
+                current.is_member(&me.user_id())
+                    && (current.is_member(&self.peer.user_id()) || relay)
+            })
         };
         let mut membership: Option<crate::channel::ChannelState> = None;
         let mut dissolved = false;
+        let mut departed_actor: Option<String> = None;
+        let mut departures: Vec<(String, EventId)> = Vec::new();
+        let mut removed_self = false;
         for event in events {
             if dissolved {
                 continue;
@@ -213,12 +503,68 @@ impl GuardedSyncStore<'_> {
             if !event.parents.iter().all(|id| allowed.contains(id)) {
                 continue;
             }
+            if removed_self && event.kind != EventKind::MembershipChange {
+                continue;
+            }
             let author = event.author.user_id();
+            if departed_actor.is_some()
+                && !matches!(
+                    event.kind,
+                    EventKind::MembershipChange
+                        | EventKind::ChannelOwnerTransfer
+                        | EventKind::ChannelAccept
+                )
+            {
+                continue;
+            }
             let accepted = if event.kind == EventKind::MembershipChange {
-                if let Some(meta) = crate::channel::ChannelMeta::decode(&event.ciphertext) {
+                if let Some(mut meta) = crate::channel::ChannelMeta::decode(&event.ciphertext) {
+                    let original_member_count = meta.members.len();
+                    meta.members.retain(|member| {
+                        !departures.iter().any(|(uid, leave_id)| {
+                            uid == &member.user_id()
+                                && !super::channel::descends_from(event, *leave_id, &by_id)
+                        })
+                    });
                     if let Some(current) = membership.as_mut() {
-                        if author == current.owner() && meta.owner == current.owner() {
-                            current.apply_meta(meta);
+                        if author == current.owner()
+                            && meta.owner == current.owner()
+                            && (!removed_self || meta.is_member(&me.user_id()))
+                        {
+                            let was_member = current.is_member(&me.user_id());
+                            let prior: HashSet<_> = current
+                                .members()
+                                .iter()
+                                .map(PublicIdentity::user_id)
+                                .collect();
+                            let invited =
+                                crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
+                            if meta.members.len() < original_member_count {
+                                current.apply_meta_after_concurrent_leave(meta);
+                            } else {
+                                current.apply_meta(meta);
+                            }
+                            let added: Vec<_> = current
+                                .members()
+                                .iter()
+                                .map(PublicIdentity::user_id)
+                                .filter(|uid| !prior.contains(uid))
+                                .collect();
+                            for uid in added {
+                                if invited {
+                                    current.mark_invited(&uid);
+                                } else {
+                                    current.auto_accept_legacy_member(&uid);
+                                }
+                            }
+                            removed_self =
+                                (removed_self || was_member) && !current.is_member(&me.user_id());
+                            if departed_actor
+                                .as_ref()
+                                .is_some_and(|id| current.is_member(id))
+                            {
+                                departed_actor = None;
+                            }
                             true
                         } else {
                             false
@@ -235,11 +581,25 @@ impl GuardedSyncStore<'_> {
                         if event.parents.is_empty()
                             && meta.owner == author
                             && meta.is_member(&author)
-                            && meta.is_member(&me.user_id())
+                            && (meta.is_member(&me.user_id()) || future_pair)
                             && (pinned || owner_allowed)
                         {
-                            membership =
-                                Some(crate::channel::ChannelState::from_meta(*conversation, meta));
+                            let invited =
+                                crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
+                            let mut initial =
+                                crate::channel::ChannelState::from_meta(*conversation, meta);
+                            if invited {
+                                let invitees: Vec<_> = initial
+                                    .members()
+                                    .iter()
+                                    .map(PublicIdentity::user_id)
+                                    .filter(|uid| uid != &author)
+                                    .collect();
+                                for uid in invitees {
+                                    initial.mark_invited(&uid);
+                                }
+                            }
+                            membership = Some(initial);
                             true
                         } else {
                             false
@@ -248,11 +608,40 @@ impl GuardedSyncStore<'_> {
                 } else {
                     false
                 }
+            } else if event.kind == EventKind::ChannelOwnerTransfer {
+                membership.as_mut().is_some_and(|current| {
+                    author == current.owner()
+                        && std::str::from_utf8(&event.ciphertext)
+                            .ok()
+                            .is_some_and(|next| current.transfer_owner(next))
+                })
+            } else if event.kind == EventKind::ChannelLeave {
+                membership.as_mut().is_some_and(|current| {
+                    let leaving = event.ciphertext.is_empty() && current.leave_member(&author);
+                    if leaving {
+                        departures.push((author.clone(), event.id));
+                    }
+                    if leaving && (author == me.user_id() || author == self.peer.user_id()) {
+                        departed_actor = Some(author.clone());
+                    }
+                    leaving
+                })
+            } else if event.kind == EventKind::ChannelAccept {
+                if event.ciphertext.is_empty() {
+                    membership.as_mut().is_some_and(|current| {
+                        if current.is_member(&author) {
+                            current.accept_invite(&author, event.id);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                } else {
+                    false
+                }
             } else {
                 membership.as_ref().is_some_and(|s| {
-                    s.members()
-                        .iter()
-                        .any(|p| p.ed25519_pub == *event.author.ed25519_pub())
+                    s.is_accepted_member(&author)
                         && (!matches!(
                             event.kind,
                             EventKind::ChannelRename | EventKind::ChannelDissolve
@@ -272,9 +661,20 @@ impl GuardedSyncStore<'_> {
             .as_ref()
             .map(|s| s.members().to_vec())
             .or_else(|| established.as_ref().map(|(_, members)| members.clone()));
-        if !current.is_some_and(|members| {
+        let current_pair = current.as_ref().is_some_and(|members| {
             members.contains(&me) && (members.contains(&self.peer) || relay || own_peer)
-        }) {
+        });
+        let departure_pair = departed_actor.as_ref().is_some_and(|departed| {
+            current.as_ref().is_some_and(|members| {
+                (departed == &me.user_id() && members.contains(&self.peer))
+                    || (departed == &self.peer.user_id() && members.contains(&me))
+            })
+        });
+        let removal_pair = removed_self
+            && current
+                .as_ref()
+                .is_some_and(|members| members.contains(&self.peer) || relay);
+        if !current_pair && !departure_pair && !removal_pair {
             allowed.clear();
         }
         allowed
@@ -380,7 +780,11 @@ impl SyncStore for GuardedSyncStore<'_> {
         self.denied
     }
     fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
-        self.visible(conversation).iter().map(|e| e.id).collect()
+        let mut ids: Vec<_> = self.visible(conversation).iter().map(|e| e.id).collect();
+        if let Some(pending) = self.pending_channels.get(conversation) {
+            ids.extend(pending.events.iter().map(|event| event.id));
+        }
+        ids
     }
     fn events_excluding(
         &self,
@@ -396,6 +800,9 @@ impl SyncStore for GuardedSyncStore<'_> {
             .collect()
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        if let Some(result) = self.stage_uninvited_channel(&event) {
+            return result;
+        }
         let known_file = {
             self.node
                 .files

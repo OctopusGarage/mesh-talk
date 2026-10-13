@@ -91,6 +91,12 @@ pub enum EventKind {
     ChannelRename = 9,
     /// Owner-authored terminal channel event. Members retain their local history.
     ChannelDissolve = 10,
+    /// Owner-signed transfer to an existing member's device user id.
+    ChannelOwnerTransfer = 11,
+    /// A current non-owner member's self-signed departure.
+    ChannelLeave = 12,
+    /// A current invited member's signed acceptance.
+    ChannelAccept = 13,
 }
 
 /// A single, content-addressed, signed log event.
@@ -387,6 +393,9 @@ mod tests {
             (EventKind::Profile, 8),
             (EventKind::ChannelRename, 9),
             (EventKind::ChannelDissolve, 10),
+            (EventKind::ChannelOwnerTransfer, 11),
+            (EventKind::ChannelLeave, 12),
+            (EventKind::ChannelAccept, 13),
         ];
         for (kind, index) in cases {
             assert_eq!(bincode::serialize(&kind).unwrap(), index.to_le_bytes());

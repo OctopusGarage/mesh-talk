@@ -455,41 +455,24 @@ impl Node {
         account.is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
     }
     pub(in crate::node) fn group_member(&self, public: &PublicIdentity) -> bool {
-        let snapshots: Vec<_> = {
+        let channel_ids = {
             let book = self.channels.lock().expect("channels lock not poisoned");
             book.channel_ids()
-                .into_iter()
-                .filter_map(|id| {
-                    let state = book.state(&id)?;
-                    Some((
-                        id,
-                        crate::channel::ChannelMeta {
-                            name: state.name().to_owned(),
-                            members: state.members().to_vec(),
-                            epoch: state.epoch(),
-                            owner: state.owner().to_owned(),
-                        },
-                    ))
-                })
-                .collect()
         };
-        // The book pins the owner, but may not yet have processed a newly
-        // appended removal. Reuse the channel's epoch/tie-break rules over the
-        // actual validated log before disclosing even signed listening presence.
+        // Admission must use the durable, signed membership controls, including
+        // leaves and transfers that the live book has not processed yet.
         let log = self.log.lock().expect("log lock not poisoned");
-        snapshots.into_iter().any(|(id, snapshot)| {
-            let mut current = crate::channel::ChannelState::from_meta(id, snapshot);
-            for event in log.events(&id) {
-                if event.kind == crate::eventlog::EventKind::MembershipChange
-                    && event.author.user_id() == current.owner()
-                    && let Some(meta) = crate::channel::ChannelMeta::decode(&event.ciphertext)
-                {
-                    current.apply_meta(meta);
-                }
-            }
-            current.members().contains(public)
-                && current.members().contains(&self.identity.public())
+        channel_ids.into_iter().any(|id| {
+            let events = log.events(&id);
+            crate::node::channel::ChannelBook::projected_members(id, &events).is_some_and(
+                |members| members.contains(public) && members.contains(&self.identity.public()),
+            )
         })
+    }
+
+    pub(in crate::node) fn group_departure_peer(&self, public: &PublicIdentity) -> bool {
+        let book = self.channels.lock().expect("channels lock not poisoned");
+        book.departure_link(&self.user_id(), &public.user_id())
     }
     pub(in crate::node) fn known_account_allowed(&self, public: &PublicIdentity) -> bool {
         let announce = self
@@ -658,6 +641,7 @@ impl Node {
         }
         self.account_allowed(peer.public_identity(), peer.announcement())
             || self.group_member(peer.public_identity())
+            || self.group_departure_peer(peer.public_identity())
     }
     fn own_presence(&self) -> Option<Announce> {
         self.privacy
@@ -691,7 +675,7 @@ impl Node {
         if announce.public() != *public || !announce.verify() {
             return Err(TransportError::IdentityMismatch);
         }
-        let group_member = self.group_member(public);
+        let group_member = self.group_member(public) || self.group_departure_peer(public);
         #[cfg(test)]
         if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
             hook();
@@ -846,7 +830,10 @@ impl Node {
             .expect("roster lock not poisoned")
             .announcement(expected)
             .cloned();
-        if !self.account_allowed(expected, announce.as_ref()) && !self.group_member(expected) {
+        if !self.account_allowed(expected, announce.as_ref())
+            && !self.group_member(expected)
+            && !self.group_departure_peer(expected)
+        {
             return Err(TransportError::AdmissionDenied);
         }
         let mut channel = tokio::time::timeout(super::transport::HANDSHAKE_TIMEOUT, async {

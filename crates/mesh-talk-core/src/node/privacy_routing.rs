@@ -131,7 +131,10 @@ impl Node {
         candidates
             .into_iter()
             .filter_map(|(account_allowed, peer)| {
-                (account_allowed || self.group_member(&peer.public)).then_some(peer)
+                (account_allowed
+                    || self.group_member(&peer.public)
+                    || self.group_departure_peer(&peer.public))
+                .then_some(peer)
             })
             .collect()
     }

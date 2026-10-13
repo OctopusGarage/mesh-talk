@@ -185,6 +185,9 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+            if !state.is_accepted_member(&self.user_id()) {
+                return Err(NodeError::Channel("not a channel member".into()));
+            }
             state.members().to_vec()
         };
         // Reactions must be re-readable by every member (aggregated on each `reactions`
@@ -203,11 +206,15 @@ impl Node {
     /// and folds them per `(target, emoji)`.
     pub fn reactions(&self, conv: ConversationId) -> Vec<ReactionView> {
         let self_uid = self.identity.public().user_id();
+        let content_gate = self.channel_content_gate(conv);
         let react_events: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
             log.events(&conv)
                 .into_iter()
-                .filter(|e| e.kind == EventKind::React)
+                .filter(|e| {
+                    e.kind == EventKind::React
+                        && content_gate.as_ref().is_none_or(|ids| ids.contains(&e.id))
+                })
                 .cloned()
                 .collect()
         };

@@ -86,12 +86,14 @@ function EmptyState() {
   const { t } = useTranslation();
   const accounts = useChat((s) => s.accounts);
   const channels = useChat((s) => s.channels);
+  const favorites = useChat((s) => s.favorites);
   const hidden = useContactPolicy((s) => s.contacts);
   const policyLoaded = useContactPolicy((s) => s.loaded);
   const policyError = useContactPolicy((s) => s.error);
   const owner = useAuth((s) => s.user?.id);
   const visibleCount =
-    channels.length +
+    channels.filter((channel) => !favorites[channel.channel_id]?.hidden)
+      .length +
     (policyLoaded
       ? accounts.filter((account) => !hidden[account.account_id]).length
       : 0);
@@ -357,12 +359,16 @@ function ChannelHeader({
   memberCount,
   archived,
   dissolved,
+  left,
+  pendingInvite,
 }: {
   id: string;
   name: string;
   memberCount: number;
   archived: boolean;
   dissolved: boolean;
+  left: boolean;
+  pendingInvite: boolean;
 }) {
   const { t } = useTranslation();
   const presence = usePresenceFor(id);
@@ -377,7 +383,7 @@ function ChannelHeader({
         >
           <GroupAvatar channelId={id} size={36} title={name} />
         </AvatarEditMenu>
-        {!archived && !dissolved && (
+        {!archived && !dissolved && !left && !pendingInvite && (
           <PresenceDot
             status={status}
             size="md"
@@ -397,9 +403,13 @@ function ChannelHeader({
             ? t("conversation.dissolvedChannel")
             : archived
               ? t("conversation.archivedChannel")
-              : memberCount
-                ? t("conversation.members", { count: memberCount })
-                : t("conversation.channel")}
+              : left
+                ? t("conversation.leftChannel")
+                : pendingInvite
+                  ? t("conversation.pendingInvite")
+                  : memberCount
+                    ? t("conversation.members", { count: memberCount })
+                    : t("conversation.channel")}
         </div>
       </div>
     </div>
@@ -429,6 +439,10 @@ export function ConversationView() {
     id: string;
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [declineOpen, setDeclineOpen] = useState(false);
+  const acceptChannelInvite = useChat((s) => s.acceptChannelInvite);
+  const leaveChannel = useChat((s) => s.leaveChannel);
   const [screenshotBytes, setScreenshotBytes] = useState<Uint8Array | null>(
     null,
   );
@@ -508,7 +522,10 @@ export function ConversationView() {
     channels.some(
       (channel) =>
         channel.channel_id === active.id &&
-        (channel.archived || channel.dissolved),
+        (channel.archived ||
+          channel.dissolved ||
+          channel.left ||
+          channel.pending_invite),
     );
   sendFileRef.current = sendFile;
   setErrorRef.current = setError;
@@ -685,7 +702,17 @@ export function ConversationView() {
     channels.some(
       (channel) => channel.channel_id === active.id && channel.dissolved,
     );
-  const readOnly = archived || dissolved;
+  const left =
+    isChannel &&
+    channels.some(
+      (channel) => channel.channel_id === active.id && channel.left,
+    );
+  const pendingInvite =
+    isChannel &&
+    channels.some(
+      (channel) => channel.channel_id === active.id && channel.pending_invite,
+    );
+  const readOnly = archived || dissolved || left || pendingInvite;
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -746,6 +773,8 @@ export function ConversationView() {
             memberCount={members.length}
             archived={archived}
             dissolved={dissolved}
+            left={left}
+            pendingInvite={pendingInvite}
           />
         ) : (
           <DmHeader id={active.id} name={headerName} />
@@ -754,7 +783,7 @@ export function ConversationView() {
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
-        {isChannel && !archived ? (
+        {isChannel && !archived && !pendingInvite ? (
           <MembersDialog dissolved={dissolved} />
         ) : (
           active.kind === "account" && (
@@ -994,7 +1023,64 @@ export function ConversationView() {
         </DialogContent>
       </Dialog>
 
-      {readOnly ? (
+      {pendingInvite ? (
+        <div className="border-t bg-card px-5 py-4" role="status">
+          <p className="text-sm text-muted-foreground">
+            {t("conversation.pendingInviteHint")}
+          </p>
+          <div className="mt-3 flex gap-2">
+            <Button
+              disabled={inviteBusy}
+              onClick={() => {
+                setInviteBusy(true);
+                void acceptChannelInvite().finally(() => setInviteBusy(false));
+              }}
+            >
+              {t("conversation.acceptInvite")}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={inviteBusy}
+              onClick={() => setDeclineOpen(true)}
+            >
+              {t("conversation.declineInvite")}
+            </Button>
+          </div>
+          <Dialog open={declineOpen} onOpenChange={setDeclineOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{t("conversation.declineInvite")}</DialogTitle>
+                <DialogDescription>
+                  {t("conversation.declineInviteConfirm")}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="ghost"
+                  disabled={inviteBusy}
+                  onClick={() => setDeclineOpen(false)}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  variant="destructive"
+                  disabled={inviteBusy}
+                  onClick={() => {
+                    setInviteBusy(true);
+                    void leaveChannel()
+                      .then((ok) => {
+                        if (ok) setDeclineOpen(false);
+                      })
+                      .finally(() => setInviteBusy(false));
+                  }}
+                >
+                  {t("conversation.declineInvite")}
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+        </div>
+      ) : readOnly ? (
         <div
           className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
           role="status"
@@ -1002,7 +1088,9 @@ export function ConversationView() {
           {t(
             dissolved
               ? "conversation.dissolvedChannelHint"
-              : "conversation.archivedChannelHint",
+              : left
+                ? "conversation.leftChannelHint"
+                : "conversation.archivedChannelHint",
           )}
         </div>
       ) : (

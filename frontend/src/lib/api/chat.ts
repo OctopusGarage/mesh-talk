@@ -3,6 +3,7 @@ import type {
   AccountInfo,
   ChannelInfo,
   ChannelMembersInfo,
+  ChannelActivityInfo,
   HistoryItem,
   FileStatus,
   OutgoingFileStatus,
@@ -147,10 +148,18 @@ export const chat = {
     invoke<string>("create_channel", { name, memberIds }),
   channelMembers: (channelId: string) =>
     invoke<ChannelMembersInfo>("channel_members", { channelId }),
+  channelActivity: (channelId: string) =>
+    invoke<ChannelActivityInfo[]>("channel_activity", { channelId }),
   addChannelMember: (channelId: string, memberId: string) =>
     invoke<void>("add_channel_member", { channelId, memberId }),
   removeChannelMember: (channelId: string, memberId: string) =>
     invoke<void>("remove_channel_member", { channelId, memberId }),
+  transferChannelOwner: (channelId: string, memberId: string) =>
+    invoke<void>("transfer_channel_owner", { channelId, memberId }),
+  leaveChannel: (channelId: string) =>
+    invoke<void>("leave_channel", { channelId }),
+  acceptChannelInvite: (channelId: string) =>
+    invoke<void>("accept_channel_invite", { channelId }),
   renameChannel: (channelId: string, name: string) =>
     invoke<void>("rename_channel", { channelId, name }),
   dissolveChannel: (channelId: string) =>

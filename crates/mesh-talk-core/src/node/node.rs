@@ -74,6 +74,9 @@ pub struct ChannelSummary {
     pub archived: bool,
     /// Owner-authored terminal event has closed this channel for new activity.
     pub dissolved: bool,
+    /// A departed local member may still read retained history, but cannot send.
+    pub left: bool,
+    pub pending_invite: bool,
 }
 
 fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> Vec<ChannelSummary> {
@@ -83,6 +86,7 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
             continue;
         }
         let mut archived: Option<ChannelSummary> = None;
+        let mut archived_members = std::collections::HashSet::new();
         for event in log.events(&id) {
             if archived.as_ref().is_some_and(|summary| summary.dissolved) {
                 break;
@@ -92,6 +96,8 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
                     let author = event.author.user_id();
                     match &mut archived {
                         None if author == meta.owner && meta.is_member(&meta.owner) => {
+                            archived_members =
+                                meta.members.iter().map(PublicIdentity::user_id).collect();
                             archived = Some(ChannelSummary {
                                 id,
                                 name: meta.name,
@@ -99,9 +105,13 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
                                 owner: meta.owner,
                                 archived: true,
                                 dissolved: false,
+                                left: false,
+                                pending_invite: false,
                             });
                         }
                         Some(summary) if author == summary.owner && meta.owner == summary.owner => {
+                            archived_members =
+                                meta.members.iter().map(PublicIdentity::user_id).collect();
                             summary.name = meta.name;
                             summary.member_count = meta.members.len();
                         }
@@ -120,6 +130,13 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
                 && event.ciphertext.is_empty()
             {
                 summary.dissolved = true;
+            } else if event.kind == EventKind::ChannelOwnerTransfer
+                && let Some(summary) = &mut archived
+                && event.author.user_id() == summary.owner
+                && let Ok(next) = std::str::from_utf8(&event.ciphertext)
+                && archived_members.contains(next)
+            {
+                summary.owner = next.to_string();
             }
         }
         if let Some(summary) = archived {
@@ -732,6 +749,7 @@ impl Node {
 
     /// Summaries of all channels this node is a member of.
     pub fn list_channels(&self) -> Vec<ChannelSummary> {
+        let own_id = self.user_id();
         let book = self.channels.lock().expect("channels mutex not poisoned");
         let mut channels: Vec<_> = book
             .channel_ids()
@@ -744,6 +762,8 @@ impl Node {
                     owner: s.owner().to_string(),
                     archived: false,
                     dissolved: s.is_dissolved(),
+                    left: !s.is_member(&own_id),
+                    pending_invite: s.pending_invite(),
                 })
             })
             .collect();
@@ -764,8 +784,28 @@ impl Node {
             .unwrap_or_default()
     }
 
-    /// The owner (creator) of `channel` — the only principal allowed to change
-    /// membership. Empty if the channel is unknown.
+    pub fn channel_pending_members(&self, channel: ConversationId) -> Vec<String> {
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        book.state(&channel)
+            .map(|state| {
+                state
+                    .members()
+                    .iter()
+                    .map(PublicIdentity::user_id)
+                    .filter(|user_id| !state.is_accepted_member(user_id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn channel_activity(&self, channel: ConversationId) -> Vec<super::ChannelActivity> {
+        self.channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .activity(&channel)
+    }
+
+    /// The current owner of `channel`, or empty if the channel is unknown.
     pub fn channel_owner(&self, channel: ConversationId) -> String {
         let book = self.channels.lock().expect("channels mutex not poisoned");
         book.state(&channel)
