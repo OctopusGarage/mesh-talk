@@ -43,10 +43,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     /// Noise session. Without a presence proof the emitted auth bytes are legacy.
     /// Supplied own proofs are validated before any handshake traffic is sent.
     pub async fn connect_with_presence(
+        stream: S,
+        identity: &DeviceIdentity,
+        expected_peer: Option<&PublicIdentity>,
+        presence: Option<&Announce>,
+    ) -> Result<Self, TransportError> {
+        Self::connect_with_visibility(stream, identity, expected_peer, presence, true).await
+    }
+
+    pub async fn connect_with_visibility(
         mut stream: S,
         identity: &DeviceIdentity,
         expected_peer: Option<&PublicIdentity>,
         presence: Option<&Announce>,
+        publicly_visible: bool,
     ) -> Result<Self, TransportError> {
         presence_auth::validate_own(identity, presence)?;
         let x_secret = identity.secret_bytes().1;
@@ -74,6 +84,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             &mut stream,
             identity,
             presence,
+            publicly_visible,
             out,
             AuthOrder::SendFirst,
             |_| true,
@@ -130,9 +141,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     /// Noise XX still exposes the responder's static key; this is not anonymity.
     /// Hosts must enforce revocation and author admission on application traffic.
     pub async fn accept_with_presence<F>(
+        stream: S,
+        identity: &DeviceIdentity,
+        presence: Option<&Announce>,
+        admit: F,
+    ) -> Result<Self, TransportError>
+    where
+        F: FnOnce(&VerifiedPeer) -> bool,
+    {
+        Self::accept_with_visibility(stream, identity, presence, true, admit).await
+    }
+
+    pub async fn accept_with_visibility<F>(
         mut stream: S,
         identity: &DeviceIdentity,
         presence: Option<&Announce>,
+        publicly_visible: bool,
         admit: F,
     ) -> Result<Self, TransportError>
     where
@@ -155,6 +179,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             &mut stream,
             identity,
             presence,
+            publicly_visible,
             out,
             AuthOrder::ReceiveFirst,
             admit,
@@ -178,6 +203,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     /// The announcement contains no observed IP address or endpoint freshness.
     pub fn peer_announcement(&self) -> Option<&Announce> {
         self.peer.announcement()
+    }
+
+    pub fn peer_publicly_visible(&self) -> bool {
+        self.peer.publicly_visible()
     }
 
     /// Install a host policy gate. Sends hold the shared read gate across the
@@ -243,8 +272,10 @@ fn encrypt_auth(
     identity: &DeviceIdentity,
     handshake_hash: &[u8; 32],
     presence: Option<&Announce>,
+    publicly_visible: bool,
 ) -> Result<Vec<u8>, TransportError> {
-    let bytes = presence_auth::build(identity, handshake_hash, presence)?;
+    let bytes =
+        presence_auth::build_with_visibility(identity, handshake_hash, presence, publicly_visible)?;
     session.encrypt(&bytes)
 }
 
@@ -254,6 +285,7 @@ async fn auth_exchange<S, F>(
     stream: &mut S,
     identity: &DeviceIdentity,
     presence: Option<&Announce>,
+    publicly_visible: bool,
     out: HandshakeOutput,
     order: AuthOrder,
     admit: F,
@@ -270,7 +302,13 @@ where
 
     let peer = match order {
         AuthOrder::SendFirst => {
-            let ct = encrypt_auth(&mut session, identity, &handshake_hash, presence)?;
+            let ct = encrypt_auth(
+                &mut session,
+                identity,
+                &handshake_hash,
+                presence,
+                publicly_visible,
+            )?;
             write_frame(stream, &ct).await?;
             let peer_ct = read_frame(stream).await?;
             verify_peer(&mut session, &peer_ct, &handshake_hash, &remote_static)?
@@ -281,7 +319,13 @@ where
             if !admit(&peer) {
                 return Err(TransportError::AdmissionDenied);
             }
-            let ct = encrypt_auth(&mut session, identity, &handshake_hash, presence)?;
+            let ct = encrypt_auth(
+                &mut session,
+                identity,
+                &handshake_hash,
+                presence,
+                publicly_visible,
+            )?;
             write_frame(stream, &ct).await?;
             peer
         }

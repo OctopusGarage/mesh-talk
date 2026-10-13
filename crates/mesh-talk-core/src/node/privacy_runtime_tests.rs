@@ -9,6 +9,53 @@ use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
 #[test]
+fn authenticated_private_peer_keeps_route_but_clears_online_roster() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &dir.path().join("alice"),
+            "pw",
+            &alice.signed_announce("Alice", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let proof = bob.signed_announce("Bob", 4321);
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, ip, &alice.user_id());
+    assert!(
+        alice
+            .cached_peer_snapshot()
+            .unwrap()
+            .iter()
+            .any(|p| p.public == bob.identity.public())
+    );
+
+    alice
+        .remember_peer_with_visibility(&bob.identity.public(), Some(&proof), ip, false)
+        .unwrap();
+
+    assert!(
+        alice
+            .cached_peer_snapshot()
+            .unwrap()
+            .iter()
+            .all(|p| p.public != bob.identity.public())
+    );
+    assert!(
+        alice
+            .cached_routing_peers()
+            .iter()
+            .any(|p| p.public == bob.identity.public())
+    );
+}
+
+#[test]
 fn channel_member_account_stays_known_without_a_live_peer() {
     let dir = tempfile::tempdir().unwrap();
     let (bob, _) = node(&dir.path().join("bob"));

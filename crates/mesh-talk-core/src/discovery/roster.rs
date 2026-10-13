@@ -206,6 +206,15 @@ impl Roster {
         self.announcements
             .retain(|id, _| self.peers.contains_key(id));
     }
+
+    /// Authenticated private presence supersedes an earlier public sighting.
+    pub fn forget(&mut self, public: &PublicIdentity) {
+        let id = public.user_id();
+        if self.peers.get(&id).is_some_and(|p| p.public == *public) {
+            self.peers.remove(&id);
+            self.announcements.remove(&id);
+        }
+    }
 }
 
 #[cfg(test)]
