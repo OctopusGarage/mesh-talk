@@ -804,6 +804,11 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
     )
     .unwrap();
 
+    assert!(
+        !bob_node.verified_dm_pull_peer(&alice_uid),
+        "a direct incoming DM must not require a verified pull contact"
+    );
+
     // Bob accepts and serves connections.
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
 
@@ -862,14 +867,19 @@ async fn reconnecting_dm_recipient_pulls_from_sender_without_sender_route_or_rel
         .await
         .unwrap();
     assert!(bob_rx.try_recv().is_err());
-    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
     let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), alice_listener.accept())
+            .await
+            .is_err(),
+        "unverified discovery must not initiate a TCP pull from Alice"
+    );
     assert!(
         bob_rx.try_recv().is_err(),
         "discovery alone must not authorize recipient-initiated DM pulls"
     );
     bob_node.replace_verified_dm_pull_peers(vec![alice_uid.clone()]);
+    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
     let received = tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
         .await
         .expect("Bob pulls from Alice after reconnecting without a relay")
@@ -1983,6 +1993,10 @@ async fn channel_member_recovers_missed_message_from_peer() {
     );
     let before_recovery = carol_node.channel_history(channel, 10);
     assert!(before_recovery.is_empty(), "{before_recovery:?}");
+    assert!(
+        !carol_node.verified_dm_pull_peer(&bob_node.user_id()),
+        "channel recovery must not depend on DM safety-number verification"
+    );
 
     let changed = carol_roster_for_discovery.lock().unwrap().changes();
     let recovery_task = tokio::spawn(Arc::clone(&carol_node).run_channel_recovery_loop(changed));

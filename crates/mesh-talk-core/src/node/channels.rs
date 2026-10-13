@@ -10,7 +10,7 @@ use crate::node::channel::seal_keys_for;
 use crate::node::session::{request_durable_have, request_round};
 use futures_util::future::join_all;
 use futures_util::stream::{self, StreamExt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -54,6 +54,39 @@ fn select_channel_targets(
     peers
 }
 
+fn advance_custody_cursor(
+    channel: ConversationId,
+    key: (u64, EventId),
+    after: &mut HashMap<ConversationId, (u64, EventId)>,
+    cycles: &mut HashMap<ConversationId, usize>,
+) -> usize {
+    let previous = after.insert(channel, key);
+    let cycle = cycles.entry(channel).or_default();
+    if previous.is_some_and(|old| key <= old) {
+        *cycle = cycle.wrapping_add(1);
+    }
+    *cycle
+}
+
+fn next_custody_retry_key(
+    candidates: &mut impl Iterator<Item = (u64, EventId)>,
+    channel: ConversationId,
+    after: &mut HashMap<ConversationId, (u64, EventId)>,
+    cycles: &mut HashMap<ConversationId, usize>,
+) -> Option<(EventId, usize)> {
+    let key = candidates.next()?;
+    // Commit progress before an attempt: a failed sync cannot pin the next
+    // tick to this message and starve later messages in the same batch.
+    let cycle = advance_custody_cursor(channel, key, after, cycles);
+    Some((key.1, cycle))
+}
+
+fn select_custody_peer(mut peers: Vec<PeerRecord>, cycle: usize) -> Option<PeerRecord> {
+    peers.sort_unstable_by_key(|peer| peer.public.ed25519_pub);
+    let len = peers.len();
+    (len > 0).then(|| peers.swap_remove(cycle % len))
+}
+
 impl Node {
     /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
     pub(in crate::node) async fn run_channel_recovery_loop(self: Arc<Self>, changes: Arc<Notify>) {
@@ -61,6 +94,10 @@ impl Node {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
         let mut custody_cursor = 0usize;
+        let mut retry_after = HashMap::new();
+        let mut retry_cycle = HashMap::new();
+        let mut recheck_after = HashMap::new();
+        let mut recheck_cycle = HashMap::new();
         let mut startup = true;
         loop {
             let discovered = tokio::select! {
@@ -77,10 +114,15 @@ impl Node {
                 self.pull_one_channel_from_member(cursor).await;
                 cursor = cursor.wrapping_add(1);
             }
-            self.retry_one_channel_custody(custody_cursor).await;
+            self.retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
+                .await;
             if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
-                self.recheck_one_channel_custody(custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS)
-                    .await;
+                self.recheck_one_channel_custody(
+                    custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
+                    &mut recheck_after,
+                    &mut recheck_cycle,
+                )
+                .await;
             }
             custody_cursor = custody_cursor.wrapping_add(1);
         }
@@ -797,32 +839,42 @@ impl Node {
     /// Periodically verify one old claim without first syncing the missing
     /// event back to that peer. A negative answer retracts the displayed copy;
     /// the normal retry queue may subsequently restore and reconfirm it.
-    async fn recheck_one_channel_custody(&self, cursor: usize) {
+    async fn recheck_one_channel_custody(
+        &self,
+        cursor: usize,
+        after: &mut HashMap<ConversationId, (u64, EventId)>,
+        cycles: &mut HashMap<ConversationId, usize>,
+    ) {
         let me = self.user_id();
         let author =
             crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
-        let candidates: Vec<_> = {
+        let mut channels: Vec<_> = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
-            let log = self.log.lock().expect("log mutex not poisoned");
             book.channel_ids()
                 .into_iter()
                 .filter(|channel| {
                     book.state(channel)
                         .is_some_and(|state| state.is_member(&me) && !state.is_dissolved())
                 })
-                .flat_map(|channel| {
-                    log.events(&channel)
-                        .into_iter()
-                        .filter(|event| event.author == author && event.kind == EventKind::Message)
-                        .map(move |event| (channel, event.id))
-                        .collect::<Vec<_>>()
-                })
                 .collect()
         };
-        if candidates.is_empty() {
+        if channels.is_empty() {
             return;
         }
-        let (channel, event_id) = candidates[cursor % candidates.len()];
+        channels.sort_unstable_by_key(|channel| *channel.as_bytes());
+        let channel = channels[cursor % channels.len()];
+        let previous = after.get(&channel).copied();
+        let Some((lamport, event_id)) = self
+            .log
+            .lock()
+            .expect("log mutex not poisoned")
+            .message_keys_after(channel, author, previous, 1)
+            .into_iter()
+            .next()
+        else {
+            return;
+        };
+        let cycle = advance_custody_cursor(channel, (lamport, event_id), after, cycles);
         let confirmed = self
             .channel_custody
             .lock()
@@ -831,17 +883,19 @@ impl Node {
         let peer = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.state(&channel).and_then(|state| {
-                state
+                let peers: Vec<_> = state
                     .members()
                     .iter()
                     .filter(|member| {
                         confirmed.contains(&member.user_id())
                             && book.replica_enabled(channel, &member.user_id())
                     })
-                    .find_map(|member| {
+                    .filter_map(|member| {
                         self.routing_peer(&member.user_id())
                             .filter(|peer| peer.public == *member)
                     })
+                    .collect();
+                select_custody_peer(peers, cycle)
             })
         };
         let Some(peer) = peer else { return };
@@ -865,9 +919,14 @@ impl Node {
 
     /// Retry one insufficiently replicated own message per tick. The event log is
     /// the durable pending queue, so a restart cannot forget local-only messages.
-    async fn retry_one_channel_custody(&self, cursor: usize) {
+    async fn retry_one_channel_custody(
+        &self,
+        cursor: usize,
+        after: &mut HashMap<ConversationId, (u64, EventId)>,
+        cycles: &mut HashMap<ConversationId, usize>,
+    ) {
         let me = self.user_id();
-        let channels: Vec<_> = {
+        let mut channels: Vec<_> = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.channel_ids()
                 .into_iter()
@@ -878,31 +937,30 @@ impl Node {
                 })
                 .collect()
         };
+        if channels.is_empty() {
+            return;
+        }
+        channels.sort_unstable_by_key(|(channel, _)| *channel.as_bytes());
+        let (channel, members) = &channels[cursor % channels.len()];
+        let channel = *channel;
         let author =
             crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
         let candidates: Vec<_> = {
             let log = self.log.lock().expect("log mutex not poisoned");
-            channels
-                .iter()
-                .flat_map(|(channel, _)| {
-                    log.events(channel)
-                        .into_iter()
-                        .filter(move |event| {
-                            event.author == author && event.kind == EventKind::Message
-                        })
-                        .map(move |event| (*channel, event.id))
-                })
-                .collect()
+            log.message_keys_after(
+                channel,
+                author,
+                after.get(&channel).copied(),
+                CHANNEL_CUSTODY_SCAN_PER_TICK,
+            )
         };
         if candidates.is_empty() {
             return;
         }
-        let start = cursor.wrapping_mul(CHANNEL_CUSTODY_SCAN_PER_TICK) % candidates.len();
-        for offset in 0..candidates.len().min(CHANNEL_CUSTODY_SCAN_PER_TICK) {
-            let (channel, event_id) = candidates[(start + offset) % candidates.len()];
-            let Some((_, members)) = channels.iter().find(|(id, _)| *id == channel) else {
-                continue;
-            };
+        let mut candidates = candidates.into_iter();
+        while let Some((event_id, cycle)) =
+            next_custody_retry_key(&mut candidates, channel, after, cycles)
+        {
             let target = members
                 .iter()
                 .filter(|member| {
@@ -919,7 +977,7 @@ impl Node {
                 .lock()
                 .expect("channel_custody mutex not poisoned")
                 .peers(event_id);
-            if let Some(peer) = members
+            let peers = members
                 .iter()
                 .filter(|member| member.user_id() != me && !confirmed.contains(&member.user_id()))
                 .filter(|member| self.channel_replica_enabled(channel, &member.user_id()))
@@ -927,8 +985,8 @@ impl Node {
                     self.routing_peer(&member.user_id())
                         .filter(|peer| peer.public == *member)
                 })
-                .next()
-            {
+                .collect();
+            if let Some(peer) = select_custody_peer(peers, cycle) {
                 let _ = tokio::time::timeout(
                     CHANNEL_RECOVERY_PEER_TIMEOUT,
                     self.sync_and_confirm_custody(channel, event_id, &peer),
@@ -1074,5 +1132,83 @@ mod fanout_tests {
         assert_eq!(next.len(), 2);
         assert_ne!(first[0].public, next[0].public);
         assert_eq!(select_channel_targets(peers.clone(), 5, 0, 2).len(), 5);
+    }
+
+    #[test]
+    fn custody_recheck_rotates_confirmed_peers_after_each_message_cycle() {
+        let channel = ConversationId::new([9; 32]);
+        let key = (1, EventId::new([7; 32]));
+        let mut after = HashMap::new();
+        let mut cycles = HashMap::new();
+        let peers: Vec<_> = (0..2)
+            .map(|port| PeerRecord {
+                public: DeviceIdentity::generate().public(),
+                addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 4100 + port)),
+                name: String::new(),
+                post_office: false,
+                account_id: None,
+                last_seen: Instant::now(),
+            })
+            .collect();
+        let first_cycle = advance_custody_cursor(channel, key, &mut after, &mut cycles);
+        let second_cycle = advance_custody_cursor(channel, key, &mut after, &mut cycles);
+        let first = select_custody_peer(peers.clone(), first_cycle).unwrap();
+        let second = select_custody_peer(peers, second_cycle).unwrap();
+        assert_eq!(first_cycle, 0);
+        assert_eq!(second_cycle, 1);
+        assert_ne!(first.public, second.public);
+    }
+
+    #[test]
+    fn custody_retry_rotates_after_a_failed_first_candidate() {
+        let channel = ConversationId::new([8; 32]);
+        let last_in_batch = (2, EventId::new([8; 32]));
+        let mut after = HashMap::new();
+        let mut cycles = HashMap::new();
+        let peers: Vec<_> = (0..2)
+            .map(|port| PeerRecord {
+                public: DeviceIdentity::generate().public(),
+                addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 4200 + port)),
+                name: String::new(),
+                post_office: false,
+                account_id: None,
+                last_seen: Instant::now(),
+            })
+            .collect();
+        let first = select_custody_peer(
+            peers.clone(),
+            advance_custody_cursor(channel, last_in_batch, &mut after, &mut cycles),
+        )
+        .unwrap();
+        let second = select_custody_peer(
+            peers,
+            advance_custody_cursor(channel, last_in_batch, &mut after, &mut cycles),
+        )
+        .unwrap();
+        assert_ne!(first.public, second.public);
+    }
+
+    #[test]
+    fn failed_retry_does_not_starve_a_later_message_in_the_same_batch() {
+        let channel = ConversationId::new([6; 32]);
+        let first = (1, EventId::new([1; 32]));
+        let later = (2, EventId::new([2; 32]));
+        let mut after = HashMap::new();
+        let mut cycles = HashMap::new();
+
+        // The first attempt fails and this tick stops. Only the examined key
+        // should be committed; the next tick must start at the later message.
+        let mut first_tick = [first, later].into_iter();
+        assert_eq!(
+            next_custody_retry_key(&mut first_tick, channel, &mut after, &mut cycles),
+            Some((first.1, 0))
+        );
+        assert_eq!(after.get(&channel), Some(&first));
+        let mut next_tick = [later, first].into_iter();
+        assert_eq!(
+            next_custody_retry_key(&mut next_tick, channel, &mut after, &mut cycles),
+            Some((later.1, 0))
+        );
+        assert_eq!(after.get(&channel), Some(&later));
     }
 }

@@ -151,6 +151,12 @@ command names for Tauri registration. Commands clone a node handle from
   signed message events are the durable retry queue: after restart and on
   discovery, a bounded recovery tick retries messages with fewer than two
   confirmed, currently sharing members (or fewer if the group is smaller).
+  An ordered message-by-author index lets each tick inspect at most 128 of the
+  sender's events per selected channel without rebuilding a whole-history list.
+  Cursors rotate channels and resume within their histories. Each examined
+  message advances the retry cursor so a failed sync cannot starve later
+  messages; custody retries rotate eligible members, while rechecks rotate
+  confirmed members for each message.
   The UI shows no-confirmed-copy, last-confirmed one-copy, or last-confirmed
   two-or-more-copy status for the sender's message. Every 20 recovery ticks,
   one historical claim is probed without first sending the event; a negative

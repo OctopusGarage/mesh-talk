@@ -297,7 +297,10 @@ impl Node {
         *self
             .verified_dm_pull_peers
             .lock()
-            .expect("verified DM pull mutex not poisoned") = fingerprints.into_iter().collect();
+            .expect("verified DM pull mutex not poisoned") = fingerprints
+            .into_iter()
+            .map(|fingerprint| fingerprint.to_ascii_lowercase())
+            .collect();
         self.delivery_notify.notify_one();
     }
 

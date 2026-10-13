@@ -154,6 +154,16 @@ impl PersistentEventLog {
     pub fn events(&self, conversation: &ConversationId) -> Vec<&Event> {
         self.log.events(conversation)
     }
+    pub fn message_keys_after(
+        &self,
+        conversation: ConversationId,
+        author: crate::eventlog::event::Author,
+        cursor: Option<(u64, EventId)>,
+        limit: usize,
+    ) -> Vec<(u64, EventId)> {
+        self.log
+            .message_keys_after(conversation, author, cursor, limit)
+    }
     pub fn heads(&self, conversation: &ConversationId) -> Vec<EventId> {
         self.log.heads(conversation)
     }
@@ -442,6 +452,31 @@ mod tests {
         assert_eq!(log.fingerprint_and_len(&conv).1, 2);
         log.drop_conversation(&conv).unwrap();
         assert_eq!(log.fingerprint_and_len(&conv), empty);
+    }
+
+    #[test]
+    fn authored_message_cursor_rebuilds_on_reopen_and_drops_with_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.log");
+        let author = DeviceIdentity::generate();
+        let conversation = ConversationId::new([1; 32]);
+        let event = mk(&author, 1, 1, b"retained");
+        let key = (1, event.id);
+        let by = crate::eventlog::event::Author::from_ed25519(author.public().ed25519_pub);
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        log.append(event).unwrap();
+        drop(log);
+        let mut reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.message_keys_after(conversation, by, None, 1),
+            vec![key]
+        );
+        reopened.drop_conversation(&conversation).unwrap();
+        assert!(
+            reopened
+                .message_keys_after(conversation, by, None, 1)
+                .is_empty()
+        );
     }
 
     #[test]

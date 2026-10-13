@@ -27,6 +27,8 @@ pub struct EventLog {
     /// orders incrementally as events are indexed). `(lamport, id)` is stable per event
     /// (both are content-addressed), so no duplicate/aliasing.
     by_conversation: HashMap<ConversationId, BTreeSet<(u64, EventId)>>,
+    /// Message-only author index for bounded background custody scans.
+    messages_by_author: HashMap<(ConversationId, Author), BTreeSet<(u64, EventId)>>,
     /// Channels containing a wire kind that older peers cannot decode.
     replica_v2: HashSet<ConversationId>,
     /// Per-conversation frontier: events not (yet) referenced as a parent.
@@ -123,6 +125,12 @@ impl EventLog {
         self.author_seq.insert((conv, event.author, event.seq), id);
         let set = self.by_conversation.entry(conv).or_default();
         set.insert((event.lamport, id));
+        if event.kind == EventKind::Message {
+            self.messages_by_author
+                .entry((conv, event.author))
+                .or_default()
+                .insert((event.lamport, id));
+        }
         // Observability for unbounded log growth: an append-only DAG can't drop interior
         // events (they're referenced as parents — pruning would dangle them), so a
         // conversation that grows pathologically (e.g. a peer flooding profile/reaction
@@ -192,6 +200,36 @@ impl EventLog {
                 .collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Return at most `limit` authored messages after `cursor`, wrapping once.
+    /// A B-tree range avoids walking or allocating the whole channel history.
+    pub fn message_keys_after(
+        &self,
+        conversation: ConversationId,
+        author: Author,
+        cursor: Option<(u64, EventId)>,
+        limit: usize,
+    ) -> Vec<(u64, EventId)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let Some(keys) = self.messages_by_author.get(&(conversation, author)) else {
+            return Vec::new();
+        };
+        let target = limit.min(keys.len());
+        let mut result = Vec::with_capacity(target);
+        if let Some(after) = cursor {
+            result.extend(
+                keys.range((Excluded(after), Unbounded))
+                    .take(target)
+                    .copied(),
+            );
+            if result.len() < target {
+                result.extend(keys.iter().take(target - result.len()).copied());
+            }
+        } else {
+            result.extend(keys.iter().take(target).copied());
+        }
+        result
     }
 
     /// The current frontier of a conversation: events not referenced as a
@@ -274,6 +312,42 @@ mod tests {
         let child = mk(&id, 2, vec![root.id], 2, b"child");
         assert_eq!(log.append(child.clone()).unwrap(), AppendOutcome::Appended);
         assert!(log.has(&child.id));
+    }
+
+    #[test]
+    fn authored_message_cursor_is_bounded_and_wraps_without_other_events() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let mut log = EventLog::default();
+        let first = mk(&alice, 1, vec![], 1, b"first");
+        let other = mk(&bob, 1, vec![first.id], 2, b"other");
+        let control = Event::new(
+            &alice,
+            conv(),
+            2,
+            vec![other.id],
+            3,
+            0,
+            EventKind::React,
+            b"control".to_vec(),
+        );
+        let last = mk(&alice, 3, vec![control.id], 4, b"last");
+        for event in [&first, &other, &control, &last] {
+            log.append(event.clone()).unwrap();
+        }
+        let author = Author::from_ed25519(alice.public().ed25519_pub);
+        assert_eq!(
+            log.message_keys_after(conv(), author, None, 1),
+            vec![(1, first.id)]
+        );
+        assert_eq!(
+            log.message_keys_after(conv(), author, Some((1, first.id)), 2),
+            vec![(4, last.id), (1, first.id)]
+        );
+        assert_eq!(
+            log.message_keys_after(conv(), author, Some((4, last.id)), 128),
+            vec![(1, first.id), (4, last.id)]
+        );
     }
 
     #[test]

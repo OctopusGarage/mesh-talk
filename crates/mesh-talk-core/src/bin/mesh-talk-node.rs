@@ -106,12 +106,16 @@ fn verified_peer_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("verified-dm-peers")
 }
 
+fn canonical_verified_peer(fingerprint: &str) -> Option<String> {
+    (fingerprint.len() == 32 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| fingerprint.to_ascii_lowercase())
+}
+
 fn load_verified_peers(path: &std::path::Path) -> BTreeSet<String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter(|line| line.len() == 32 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_owned)
+        .filter_map(canonical_verified_peer)
         .collect()
 }
 
@@ -386,15 +390,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if let Some(fingerprint) = line.strip_prefix("/verify-peer ") {
             let fingerprint = fingerprint.trim();
-            if fingerprint.len() != 32 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-            {
+            let Some(fingerprint) = canonical_verified_peer(fingerprint) else {
                 emit(
                     "usage: /verify-peer <full-device-fingerprint> (compare it out of band first)",
                 );
                 continue;
-            }
+            };
             let mut next = verified_peers.clone();
-            next.insert(fingerprint.to_owned());
+            next.insert(fingerprint);
             match save_verified_peers(&verified_path, &next) {
                 Ok(()) => {
                     verified_peers = next;
@@ -773,6 +776,20 @@ mod tests {
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;
     use std::time::Instant;
+
+    #[test]
+    fn verified_peer_fingerprint_is_canonical_across_cli_restart() {
+        let upper = "AB".repeat(16);
+        let lower = "ab".repeat(16);
+        assert_eq!(canonical_verified_peer(&upper), Some(lower.clone()));
+        assert_eq!(canonical_verified_peer("not-a-device-id"), None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = verified_peer_path(dir.path());
+        std::fs::write(&path, format!("{upper}\ninvalid\n")).unwrap();
+        assert_eq!(load_verified_peers(&path), BTreeSet::from([lower.clone()]));
+        save_verified_peers(&path, &load_verified_peers(&path)).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{lower}\n"));
+    }
 
     #[test]
     fn channel_replica_parser_accepts_only_a_prefix_and_on_or_off() {

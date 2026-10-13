@@ -20,9 +20,17 @@ One macOS loopback run on 2026-10-14 produced:
 
 | Members | Sender contacts | Sender frame bytes | Online convergence | Missed-member recovery |
 |---:|---:|---:|---:|---:|
-| 5 | 4 | 3,276 | <1 ms | 102 ms |
-| 20 | 2 | 2,184 | 8,930 ms | 102 ms |
-| 50 | 2 | 2,184 | 5,679 ms | 207 ms |
+| 5 | 4 | 2,360 | 5 ms | 103 ms |
+| 20 | 2 | 2,184 | 3,130 ms | 103 ms |
+| 50 | 2 | 2,184 | 6,130 ms | 222 ms |
+
+The corresponding `./scripts/channel-scale-rehearsal.sh` output was:
+
+```text
+channel-tcp members=5 contacts=4 initial_holders=3 offline=1 sender_frame_bytes=2360 send_ms=34 online_converge_ms=5 offline_recovery_ms=103 total_ms=508
+channel-tcp members=20 contacts=2 initial_holders=2 offline=3 sender_frame_bytes=2184 send_ms=32 online_converge_ms=3130 offline_recovery_ms=103 total_ms=4668
+channel-tcp members=50 contacts=2 initial_holders=2 offline=10 sender_frame_bytes=2184 send_ms=51 online_converge_ms=6130 offline_recovery_ms=222 total_ms=10363
+```
 
 Times depend on the host and scheduling; compare repeated runs and keep the
 per-conversation `mesh_talk::sync` and `mesh_talk::channel` debug metrics. The

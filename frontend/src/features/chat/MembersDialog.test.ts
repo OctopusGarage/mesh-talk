@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 import "@/lib/i18n";
 
-const { chatState, avatars, dialog } = vi.hoisted(() => ({
+const { chatState, avatars, dialog, channelApi } = vi.hoisted(() => ({
   chatState: {
     members: [
       {
@@ -39,7 +39,23 @@ const { chatState, avatars, dialog } = vi.hoisted(() => ({
     string
   >,
   dialog: { onOpenChange: null as null | ((open: boolean) => void) },
+  channelApi: {
+    channelMembers: vi.fn(async () => ({
+      members: [
+        {
+          user_id: "owner-device",
+          account_id: "owner-account",
+          name: "Me",
+          replica_enabled: true,
+        },
+      ],
+    })),
+    channelActivity: vi.fn(async () => []),
+    setChannelReplicaEnabled: vi.fn(async () => {}),
+  },
 }));
+
+vi.mock("@/lib/api", () => ({ chat: channelApi }));
 
 vi.mock("@/store/chat", () => ({
   useChat: (selector: (state: typeof chatState) => unknown) =>
@@ -114,6 +130,53 @@ it("shows a member's signed replica opt-out", () => {
     expect(html).toContain('data-testid="member-replica-disabled-peer-device"');
   } finally {
     chatState.members = previous;
+  }
+});
+
+it("loads live replica state, toggles the local replica, and preserves it on a failed request", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(channelApi.channelMembers).toHaveBeenCalledWith("channel");
+    expect(channelApi.channelActivity).toHaveBeenCalledWith("channel");
+
+    const toggle = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+        (button) => button.textContent?.includes("sharing"),
+      )!;
+    await act(async () => toggle().click());
+    expect(channelApi.setChannelReplicaEnabled).toHaveBeenCalledWith(
+      "channel",
+      false,
+    );
+    expect(
+      container.querySelector(
+        '[data-testid="member-replica-disabled-owner-device"]',
+      ),
+    ).not.toBeNull();
+
+    channelApi.setChannelReplicaEnabled.mockRejectedValueOnce(
+      new Error("offline"),
+    );
+    await act(async () => toggle().click());
+    expect(channelApi.setChannelReplicaEnabled).toHaveBeenLastCalledWith(
+      "channel",
+      true,
+    );
+    expect(
+      container.querySelector(
+        '[data-testid="member-replica-disabled-owner-device"]',
+      ),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("Could not update");
+  } finally {
+    await act(async () => root.unmount());
+    channelApi.channelMembers.mockClear();
+    channelApi.channelActivity.mockClear();
+    channelApi.setChannelReplicaEnabled.mockReset();
+    channelApi.setChannelReplicaEnabled.mockResolvedValue(undefined);
   }
 });
 
