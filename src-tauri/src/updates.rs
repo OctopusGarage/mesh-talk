@@ -256,7 +256,10 @@ fn destination(downloads: &std::path::Path, name: &str) -> PathBuf {
         } else {
             downloads.join(format!("{base} ({index}).zip"))
         };
-        if !candidate.exists() {
+        if matches!(
+            std::fs::symlink_metadata(&candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
             return candidate;
         }
     }
@@ -659,5 +662,20 @@ mod tests {
             b"verified package"
         );
         assert!(!temporary.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_skips_a_broken_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = "mesh-talk_v0.4.0_macos_arm64.zip";
+        std::os::unix::fs::symlink("missing.zip", directory.path().join(name)).unwrap();
+
+        assert_eq!(
+            destination(directory.path(), name),
+            directory
+                .path()
+                .join("mesh-talk_v0.4.0_macos_arm64 (1).zip")
+        );
     }
 }
