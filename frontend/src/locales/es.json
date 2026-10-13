@@ -188,6 +188,8 @@
   "conversation": {
     "archivedChannel": "Canal archivado",
     "archivedChannelHint": "Este canal es un archivo de solo lectura de tu dispositivo anterior. No puedes enviar mensajes nuevos aquí.",
+    "dissolvedChannel": "Canal disuelto",
+    "dissolvedChannelHint": "El propietario disolvió este canal. Puedes leer el historial, pero no enviar mensajes nuevos.",
     "noneSelectedTitle": "Ninguna conversación seleccionada",
     "noneSelectedDesc": "Elige un contacto o canal para empezar a chatear.",
     "unlockingTitle": "Desbloqueando tus almacenes cifrados…",
@@ -592,6 +594,8 @@
     "description": "Todos los del canal.",
     "addPeer": "Añadir un contacto",
     "owner": "Propietario",
+    "dissolve": "Disolver canal",
+    "dissolveConfirm": "¿Disolver este canal para todos? Los miembros conservarán el historial, pero ya no podrán enviar mensajes ni cambiar los miembros.",
     "openDm": "Enviar un mensaje"
   },
   "createChannel": {

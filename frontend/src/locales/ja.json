@@ -188,6 +188,8 @@
   "conversation": {
     "archivedChannel": "アーカイブ済みグループ",
     "archivedChannelHint": "以前の端末から復元した読み取り専用の履歴です。ここでは新しいメッセージを送信できません。",
+    "dissolvedChannel": "解散済みのグループ",
+    "dissolvedChannelHint": "オーナーがこのグループを解散しました。履歴は閲覧できますが、新しいメッセージは送信できません。",
     "noneSelectedTitle": "会話が選択されていません",
     "noneSelectedDesc": "連絡先またはチャンネルを選んでチャットを始めましょう。",
     "unlockingTitle": "暗号化されたストアを解除しています…",
@@ -592,6 +594,8 @@
     "description": "このチャンネルの全員。",
     "addPeer": "相手を追加",
     "owner": "オーナー",
+    "dissolve": "グループを解散",
+    "dissolveConfirm": "このグループを全員に対して解散しますか？履歴は残りますが、以後メッセージの送信やメンバーの変更はできません。",
     "openDm": "メッセージを送る"
   },
   "createChannel": {

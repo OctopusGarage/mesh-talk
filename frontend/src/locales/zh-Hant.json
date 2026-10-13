@@ -188,6 +188,8 @@
   "conversation": {
     "archivedChannel": "已封存群聊",
     "archivedChannelHint": "這是從舊裝置還原的唯讀群聊記錄，無法在此傳送新訊息。",
+    "dissolvedChannel": "已解散群聊",
+    "dissolvedChannelHint": "群主已解散此群聊。你仍可查看歷史記錄，但無法傳送新訊息。",
     "noneSelectedTitle": "未選擇對話",
     "noneSelectedDesc": "選擇一位聯絡人或頻道開始聊天。",
     "unlockingTitle": "正在解鎖你的加密儲存空間…",
@@ -592,6 +594,8 @@
     "description": "此頻道中的所有成員。",
     "addPeer": "新增對方",
     "owner": "群主",
+    "dissolve": "解散群組",
+    "dissolveConfirm": "確定要為所有成員解散此群組嗎？成員會保留聊天記錄，但之後無法傳送訊息或變更成員。",
     "openDm": "傳送私訊"
   },
   "createChannel": {

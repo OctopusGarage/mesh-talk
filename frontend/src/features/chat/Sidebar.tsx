@@ -709,9 +709,11 @@ export function Sidebar() {
         id,
         conv: channelConv(c, name),
         pinned: favorites[id]?.pinned ?? false,
-        subtitle: c.archived
-          ? t("conversation.archivedChannel")
-          : t("conversation.members", { count: c.member_count }),
+        subtitle: c.dissolved
+          ? t("conversation.dissolvedChannel")
+          : c.archived
+            ? t("conversation.archivedChannel")
+            : t("conversation.members", { count: c.member_count }),
       };
     });
 

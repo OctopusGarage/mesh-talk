@@ -133,6 +133,7 @@ export const test = base.extend({
           channel_id: CHANNEL.channel_id,
           name: CHANNEL.name,
           member_count: CHANNEL.member_count,
+          dissolved: false,
         },
       ];
 
@@ -244,6 +245,7 @@ export const test = base.extend({
             channel_id: `chan_bulk_${i}`,
             name: `Channel ${String(i + 1).padStart(4, "0")}`,
             member_count: 2,
+            dissolved: false,
           });
         }
       }
@@ -736,6 +738,10 @@ export const test = base.extend({
           create_channel: () => "chan_new_eeee5555",
           add_channel_member: ok,
           remove_channel_member: ok,
+          dissolve_channel: () => {
+            channels[0].dissolved = true;
+            return null;
+          },
 
           // trust
           get_trust: (a) => ({

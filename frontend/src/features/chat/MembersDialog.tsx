@@ -29,7 +29,7 @@ import { VirtualRosterList, VIRTUALIZE_AT } from "./VirtualRosterList";
 // (so no peer/presence entry exists for us) — show the self member as online.
 const SELF_ONLINE = presenceStatus({ online: true, last_seen_secs: 0 });
 
-export function MembersDialog() {
+export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const members = useChat((s) => s.members);
@@ -44,10 +44,14 @@ export function MembersDialog() {
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
   const addMember = useChat((s) => s.addMember);
   const removeMember = useChat((s) => s.removeMember);
+  const dissolveChannel = useChat((s) => s.dissolveChannel);
+  const active = useChat((s) => s.active);
   const openConversation = useChat((s) => s.open);
   // Whole presence map (the dialog reads many ids at once; one subscription).
   const presenceMap = usePresence((s) => s.map);
   const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const statusFor = (accountId: string | null | undefined) =>
     presenceStatus((accountId ? presenceMap[accountId] : undefined) ?? OFFLINE);
@@ -67,7 +71,7 @@ export function MembersDialog() {
   );
   // Only the channel owner may change membership — the core enforces this (a non-owner's
   // add/remove is rejected by every node), so a non-owner only ever sees a read-only list.
-  const isOwner = channelOwner !== "" && channelOwner === myId;
+  const isOwner = !dissolved && channelOwner !== "" && channelOwner === myId;
 
   // Membership retains the verified account id when a device leaves discovery.
   const accountByUserId = useMemo(() => {
@@ -80,6 +84,58 @@ export function MembersDialog() {
     }
     return accounts;
   }, [members, peers]);
+
+  if (confirming) {
+    return (
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (busy) return;
+          setOpen(next);
+          if (!next) setConfirming(false);
+        }}
+      >
+        <DialogContent
+          className="max-w-sm"
+          data-testid="dissolve-channel-dialog"
+        >
+          <DialogHeader>
+            <DialogTitle>{t("members.dissolve")}</DialogTitle>
+            <DialogDescription>
+              {t("members.dissolveConfirm")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={busy}
+              data-testid="dissolve-channel-confirm"
+              onClick={() => {
+                if (active?.kind !== "channel") return;
+                setBusy(true);
+                void dissolveChannel(active.id).then((success) => {
+                  if (success) {
+                    setOpen(false);
+                    setConfirming(false);
+                  }
+                  setBusy(false);
+                });
+              }}
+            >
+              {t("members.dissolve")}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -205,6 +261,17 @@ export function MembersDialog() {
             }}
           />
         </motion.div>
+
+        {isOwner && active?.kind === "channel" && (
+          <Button
+            variant="ghost"
+            className="text-destructive hover:text-destructive"
+            data-testid="dissolve-channel-trigger"
+            onClick={() => setConfirming(true)}
+          >
+            {t("members.dissolve")}
+          </Button>
+        )}
 
         {isOwner && addable.length > 0 && (
           <div className="space-y-1.5">

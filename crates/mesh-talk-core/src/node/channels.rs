@@ -22,6 +22,29 @@ fn canonical_members(mut members: Vec<PublicIdentity>) -> Vec<PublicIdentity> {
 }
 
 impl Node {
+    /// Close a channel for every member while retaining each device's local history.
+    pub async fn dissolve_channel(&self, channel: ConversationId) -> Result<(), NodeError> {
+        let members = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            let state = book
+                .state(&channel)
+                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+            if self.user_id() != state.owner() {
+                return Err(NodeError::Channel(
+                    "only the channel owner can dissolve it".into(),
+                ));
+            }
+            if state.is_dissolved() {
+                return Err(NodeError::Channel("channel is already dissolved".into()));
+            }
+            state.members().to_vec()
+        };
+        self.append_event(channel, EventKind::ChannelDissolve, Vec::new())?;
+        self.process_channel(channel);
+        self.distribute_channel(channel, &members).await;
+        Ok(())
+    }
+
     /// Create a channel named `name` with `members` (the creator is added
     /// automatically). Mints a channel id, posts the membership event, builds our own
     /// channel state, then distributes our epoch-0 sender-key distribution to the

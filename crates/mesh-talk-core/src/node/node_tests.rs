@@ -418,6 +418,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         .rename_channel(channel, "Renamed archive")
         .await
         .unwrap();
+    source.dissolve_channel(channel).await.unwrap();
     let mut snapshot = Vec::new();
     source.write_recovery_snapshot(&mut snapshot, 100).unwrap();
     let restored_dir = dir.path().join("restored");
@@ -451,6 +452,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     assert!(reopened.list_channels().iter().any(|summary| {
         summary.id == channel
             && summary.archived
+            && summary.dissolved
             && summary.member_count == 2
             && summary.name == "Renamed archive"
     }));
@@ -2301,6 +2303,134 @@ async fn list_channels_reports_created_channels() {
     assert_eq!(channels[0].id, id);
     assert_eq!(channels[0].name, "general");
     assert_eq!(channels[0].member_count, 1); // just the creator
+}
+
+#[tokio::test]
+async fn owner_dissolves_channel_and_local_mutations_stop() {
+    let me = DeviceIdentity::generate();
+    let secrets = me.secret_bytes();
+    let dir = tempfile::tempdir().unwrap();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        roster,
+        dm_tx,
+        ch_tx,
+        file_tx,
+        &dir.path().join("m.log"),
+        &dir.path().join("m-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let id = node.create_channel("general", vec![]).await.unwrap();
+    node.send_channel_message(id, b"before closure")
+        .await
+        .unwrap();
+    node.dissolve_channel(id).await.unwrap();
+    assert!(node.list_channels()[0].dissolved);
+    assert!(
+        node.channel_history(id, 10)
+            .iter()
+            .any(|item| item.text == b"before closure")
+    );
+    assert!(matches!(
+        node.send_channel_message(id, b"late").await,
+        Err(NodeError::Channel(_))
+    ));
+    assert!(matches!(
+        node.rename_channel(id, "late").await,
+        Err(NodeError::Channel(_))
+    ));
+    assert!(matches!(
+        node.dissolve_channel(id).await,
+        Err(NodeError::Channel(_))
+    ));
+    drop(node);
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let reopened = Node::open(
+        DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        ch_tx,
+        file_tx,
+        &dir.path().join("m.log"),
+        &dir.path().join("m-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    assert!(reopened.list_channels()[0].dissolved);
+    assert!(
+        reopened
+            .channel_history(id, 10)
+            .iter()
+            .any(|item| item.text == b"before closure")
+    );
+    assert!(matches!(
+        reopened.send_channel_message(id, b"late").await,
+        Err(NodeError::Channel(_))
+    ));
+}
+
+#[tokio::test]
+async fn owner_dissolution_syncs_to_member_over_loopback() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_public = bob.public();
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = listener.local_addr().unwrap();
+    let alice_roster = seed_roster(&bob, "Bob", bob_addr.port(), &alice.public().user_id());
+    let bob_roster = Arc::new(Mutex::new(Roster::default()));
+    let (a_dm, _a_dm_rx) = mpsc::unbounded_channel();
+    let (a_ch, _a_ch_rx) = mpsc::unbounded_channel();
+    let (a_file, _a_file_rx) = mpsc::unbounded_channel();
+    let (b_dm, _b_dm_rx) = mpsc::unbounded_channel();
+    let (b_ch, _b_ch_rx) = mpsc::unbounded_channel();
+    let (b_file, _b_file_rx) = mpsc::unbounded_channel();
+    let owner = Node::open(
+        alice,
+        alice_roster,
+        a_dm,
+        a_ch,
+        a_file,
+        &dir.path().join("a.log"),
+        &dir.path().join("a-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let member = Node::open(
+        bob,
+        bob_roster,
+        b_dm,
+        b_ch,
+        b_file,
+        &dir.path().join("b.log"),
+        &dir.path().join("b-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    tokio::spawn(Arc::clone(&member).run_accept_loop(listener));
+
+    let channel = owner
+        .create_channel("general", vec![bob_public])
+        .await
+        .unwrap();
+    assert!(matches!(
+        member.dissolve_channel(channel).await,
+        Err(NodeError::Channel(_))
+    ));
+    owner.dissolve_channel(channel).await.unwrap();
+    assert!(owner.list_channels()[0].dissolved);
+    assert!(member.list_channels()[0].dissolved);
+    assert!(matches!(
+        member.send_channel_message(channel, b"late").await,
+        Err(NodeError::Channel(_))
+    ));
 }
 
 // A sent/received IMAGE is persisted to the durable chat-media store and is readable from

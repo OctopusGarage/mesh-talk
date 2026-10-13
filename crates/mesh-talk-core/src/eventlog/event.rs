@@ -89,6 +89,8 @@ pub enum EventKind {
     /// snapshot's name) and is applied last-writer-wins by `(lamport, id)` — INDEPENDENT
     /// of the membership epoch, so a rename never collides with a concurrent add/remove.
     ChannelRename = 9,
+    /// Owner-authored terminal channel event. Members retain their local history.
+    ChannelDissolve = 10,
 }
 
 /// A single, content-addressed, signed log event.
@@ -384,6 +386,7 @@ mod tests {
             (EventKind::FileManifest, 7),
             (EventKind::Profile, 8),
             (EventKind::ChannelRename, 9),
+            (EventKind::ChannelDissolve, 10),
         ];
         for (kind, index) in cases {
             assert_eq!(bincode::serialize(&kind).unwrap(), index.to_le_bytes());

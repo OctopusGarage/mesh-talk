@@ -15,6 +15,7 @@ pub struct ChannelInfo {
     /// the synced-rename action on this (non-owners fall back to a local alias).
     pub owner: String,
     pub archived: bool,
+    pub dissolved: bool,
 }
 
 #[tauri::command]
@@ -32,6 +33,7 @@ pub async fn list_channels(
             member_count: c.member_count,
             owner: c.owner,
             archived: c.archived,
+            dissolved: c.dissolved,
         })
         .collect())
 }
@@ -145,6 +147,18 @@ pub async fn rename_channel(
     let channel = parse_channel_id(&channel_id)?;
     let node = state.node_handle().await?;
     node.rename_channel(channel, &name)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn dissolve_channel(
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+) -> Result<(), CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    let node = state.node_handle().await?;
+    node.dissolve_channel(channel)
         .await
         .map_err(CommandError::from)
 }

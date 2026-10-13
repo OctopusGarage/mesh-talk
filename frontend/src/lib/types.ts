@@ -97,6 +97,7 @@ export interface ChannelInfo {
   // members); non-owners fall back to a local-only alias.
   owner: string;
   archived?: boolean;
+  dissolved?: boolean;
 }
 
 export interface SearchHitInfo {
