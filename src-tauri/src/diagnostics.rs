@@ -31,6 +31,7 @@ pub(crate) fn log_linux_graphics_configuration() {
     ] {
         let value = std::env::var_os(key);
         log::info!(
+            target: crate::logger::GRAPHICS_LOG_TARGET,
             "Linux graphics configuration: pid={} {key}={}",
             std::process::id(),
             graphics_env_value(value.as_deref())
