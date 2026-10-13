@@ -16,13 +16,11 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
-import { STICKERS, installedStickers } from "@/lib/stickerPacks";
+import { installedStickers } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
 import { PackManager } from "@/components/PackManager";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
-
-const BUILTIN_STICKER_PACK = "builtin:noto";
 
 // A small curated palette — enough for everyday chat without pulling in a heavy emoji library.
 const EMOJIS = [
@@ -227,7 +225,7 @@ export function Composer({
   const { t } = useTranslation();
   const installedPacks = usePacks((s) => s.packs);
   const stickers = useMemo(
-    () => [...STICKERS, ...installedStickers(installedPacks)],
+    () => installedStickers(installedPacks),
     [installedPacks],
   );
   const stickerLibraries = installedPacks.filter(
@@ -242,12 +240,14 @@ export function Composer({
   const [expressionTab, setExpressionTab] = useState<
     "emoji" | "stickers" | null
   >(null);
-  const [stickerPack, setStickerPack] = useState(BUILTIN_STICKER_PACK);
+  const [stickerPack, setStickerPack] = useState<string | null>(null);
   const activeStickerPack = stickerLibraries.some(
     (pack) => pack.id === stickerPack,
   )
     ? stickerPack
-    : BUILTIN_STICKER_PACK;
+    : (stickerLibraries.find((pack) => pack.id === "google-noto")?.id ??
+      stickerLibraries[0]?.id ??
+      null);
   const [showTools, setShowTools] = useState(false);
   const [panelPointerMotion, setPanelPointerMotion] = useState(false);
   const panelMotion = { pointer: panelPointerMotion, reduced: !motionOK };
@@ -605,19 +605,7 @@ export function Composer({
                     className="mb-2 flex gap-1 overflow-x-auto border-b pb-2"
                     aria-label={t("composer.stickerPacks")}
                   >
-                    {[
-                      {
-                        id: BUILTIN_STICKER_PACK,
-                        name: t("composer.stickerPackEmoji"),
-                      },
-                      ...stickerLibraries.map((pack) => ({
-                        id: pack.id,
-                        name:
-                          pack.id === "cats" && pack.name === "Cat Stickers"
-                            ? t("composer.stickerPackCats")
-                            : pack.name,
-                      })),
-                    ].map((pack) => (
+                    {stickerLibraries.map((pack) => (
                       <button
                         key={pack.id}
                         type="button"
@@ -631,16 +619,16 @@ export function Composer({
                             : "text-muted-foreground hover:bg-accent/70 hover:text-foreground",
                         )}
                       >
-                        {pack.name}
+                        {pack.id === "cats" && pack.name === "Cat Stickers"
+                          ? t("composer.stickerPackCats")
+                          : pack.name}
                       </button>
                     ))}
                   </div>
                   <div className="grid grid-cols-5 gap-1">
                     {stickers
                       .filter((sticker) =>
-                        activeStickerPack === BUILTIN_STICKER_PACK
-                          ? !sticker.id.startsWith("pack:")
-                          : sticker.id.startsWith(`pack:${activeStickerPack}:`),
+                        sticker.id.startsWith(`pack:${activeStickerPack}:`),
                       )
                       .map((s) => (
                         <button

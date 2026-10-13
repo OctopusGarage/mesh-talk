@@ -1,10 +1,7 @@
 import type { CustomizationPack } from "@/lib/pack";
 
-// Built-in sticker IDs use Google's Noto Animated Emoji filenames. The default
-// edition bundles downscaled animated WebP; lite keeps IDs and emoji fallbacks.
-// Vite discovers filenames at build time; each is named by codepoints joined with `_`
-// (e.g. `1f602.webp`, `2764_fe0f.webp`), so the sticker id and its fallback emoji char
-// are both derived from the filename. Drop a `.webp` in the folder and it appears.
+// Earlier app versions sent unprefixed Noto IDs. Keep those messages readable
+// after moving the artwork into the removable Google Noto pack.
 
 export interface Sticker {
   /** Stable id sent over the wire — the codepoint string, e.g. "1f602" / "2764_fe0f". */
@@ -16,40 +13,48 @@ export interface Sticker {
   label?: string;
 }
 
-/** "1f602" → 😂, "2764_fe0f" → ❤️ (joins the codepoints; invalid parts are dropped). */
-function emojiFromId(id: string): string {
-  try {
-    const cps = id.split("_").map((h) => parseInt(h, 16));
-    if (cps.some((n) => Number.isNaN(n))) return "";
-    return String.fromCodePoint(...cps);
-  } catch {
-    return "";
-  }
-}
-
-function idFromPath(path: string): string {
-  return (path.split("/").pop() ?? "").replace(/\.[^.]+$/, "");
-}
-
-/** Built-in stickers, sorted by ID; lite uses emoji-only fallbacks. */
-const bundledNotoArtwork = import.meta.env.VITE_BUNDLED_NOTO_STICKERS;
-export const STICKERS: Sticker[] = Object.keys(
-  import.meta.glob("../assets/stickers/noto/*.webp"),
-)
-  .sort()
-  .map((path) => {
-    const name = path.split("/").pop() ?? "";
-    const id = idFromPath(name);
-    return {
-      id,
-      url: bundledNotoArtwork
-        ? `/stickers/noto/${encodeURIComponent(name)}`
-        : "",
-      emoji: emojiFromId(id),
-    };
-  });
-
-const BY_ID = new Map(STICKERS.map((s) => [s.id, s]));
+const LEGACY_NOTO_IDS = new Set([
+  "1f389",
+  "1f44b",
+  "1f44c",
+  "1f44d",
+  "1f44e",
+  "1f44f",
+  "1f496",
+  "1f4a9",
+  "1f4aa",
+  "1f4af",
+  "1f525",
+  "1f602",
+  "1f608",
+  "1f609",
+  "1f60a",
+  "1f60b",
+  "1f60d",
+  "1f60e",
+  "1f618",
+  "1f621",
+  "1f622",
+  "1f62d",
+  "1f631",
+  "1f634",
+  "1f644",
+  "1f648",
+  "1f64f",
+  "1f680",
+  "1f914",
+  "1f917",
+  "1f923",
+  "1f92a",
+  "1f92f",
+  "1f970",
+  "1f971",
+  "1f973",
+  "1f97a",
+  "270c_fe0f",
+  "2764_fe0f",
+  "2b50",
+]);
 
 export function installedStickers(packs: CustomizationPack[]): Sticker[] {
   return packs.flatMap((pack) =>
@@ -64,7 +69,7 @@ export function installedStickers(packs: CustomizationPack[]): Sticker[] {
   );
 }
 
-/** Resolve a built-in or installed sticker; unknown packs show the sent fallback. */
+/** Resolve installed artwork; removed packs show the sent fallback. */
 export function stickerById(
   id: string,
   packs: CustomizationPack[] = [],
@@ -72,8 +77,26 @@ export function stickerById(
   // Messages sent by the earlier bundled cat collection used unprefixed IDs.
   const lookupId = id.startsWith("cat-") ? `pack:cats:${id}` : id;
   if (!lookupId.startsWith("pack:")) {
-    const builtIn = BY_ID.get(lookupId);
-    return builtIn?.url ? builtIn : undefined;
+    if (!LEGACY_NOTO_IDS.has(lookupId)) return undefined;
+    const pack =
+      packs.find(
+        (item) => item.kind === "sticker" && item.id === "google-noto",
+      ) ??
+      packs.find(
+        (item) => item.kind === "sticker" && item.id === "noto-favorites",
+      );
+    const sticker =
+      pack?.kind === "sticker"
+        ? pack.stickers.find((item) => item.id === lookupId)
+        : undefined;
+    return (
+      sticker && {
+        id,
+        url: sticker.url,
+        emoji: sticker.fallback,
+        label: sticker.label,
+      }
+    );
   }
   const separator = lookupId.lastIndexOf(":");
   if (separator <= 5) return undefined;

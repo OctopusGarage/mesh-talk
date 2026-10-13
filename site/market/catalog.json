@@ -229,8 +229,8 @@
     "sha256": "bca23f634025025b483778a1cb7f1e9be92aeccde862bfc72aa5a88ec205faf9"
   },
   {
-    "id": "noto-favorites",
-    "name": "Noto Favorites",
+    "id": "google-noto",
+    "name": "Google Noto",
     "version": "1.0.0",
     "kind": "sticker",
     "format": 1,
@@ -238,12 +238,12 @@
       "mesh-talk"
     ],
     "rightsStatus": "pending",
-    "description": "Eight animated emoji stickers from Google Noto",
-    "file": "packs/noto-favorites/1.0.0/f5f2506720fe90d182b294360261c6679517bd5a56becf547a6ee6cb9c2ac1ad.zip",
-    "bytes": 1368221,
-    "preview": "previews/noto-favorites.webp",
-    "previewSha256": "c7724a8a95d3bd47ab2eac53b9c4cd9e82b949b367252924c44ca7c6c35c13fc",
-    "sha256": "f5f2506720fe90d182b294360261c6679517bd5a56becf547a6ee6cb9c2ac1ad"
+    "description": "Forty animated emoji stickers from Google Noto",
+    "file": "packs/google-noto/1.0.0/cf55d9d8a0fab72b29f9f692729eb8e3ee7b690e154a14ae67ce591814a76e3d.zip",
+    "bytes": 8668727,
+    "preview": "previews/google-noto.webp",
+    "previewSha256": "c29be72b75c676c38b637d7d9fbd8a3d16d47de52164137d03fafc7666efa972",
+    "sha256": "cf55d9d8a0fab72b29f9f692729eb8e3ee7b690e154a14ae67ce591814a76e3d"
   },
   {
     "id": "cats",

@@ -152,7 +152,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 Grab the `.zip` for your OS/arch and edition from the [**Releases**](https://github.com/OctopusGarage/mesh-talk/releases)
 page (e.g. `mesh-talk_vX.Y.Z_macos_arm64.zip`) and **unzip it** — inside are the installer(s) for
 your platform plus a `SHA256SUMS` file. The macOS zip contains a DMG with the app inside. The
-default edition includes optional packs and animated Noto stickers; ZIPs ending in `_lite.zip`
+default edition includes removable packs, including 40 animated Google Noto stickers; ZIPs ending in `_lite.zip`
 omit those bundled assets while retaining the core messaging features. Both editions can install
 packs later. See the [pack guide](docs/CUSTOMIZATION_PACKS.md).
 

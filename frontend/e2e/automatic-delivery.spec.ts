@@ -35,7 +35,7 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
-  await page.getByTestId("sticker-option-1f602").click();
+  await page.getByTestId("sticker-option-pack:google-noto:1f602").click();
   await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(2);
   await revealComposerTools(page);
   await page.getByTestId("composer-attach").click();

@@ -18,11 +18,7 @@ if (variant === "lite") {
     "lite contains animated Noto stickers",
   );
 } else {
-  assert.deepEqual(
-    readdirSync(stickerDirectory).sort(),
-    readdirSync(resolve(root, "frontend/src/assets/stickers/noto")).sort(),
-    "default Noto sticker assets differ from source",
-  );
+  assert.equal(existsSync(stickerDirectory), false, "Noto artwork must be removable with its pack");
   const catalog = JSON.parse(
     readFileSync(resolve(root, "site/market/catalog.json"), "utf8"),
   );

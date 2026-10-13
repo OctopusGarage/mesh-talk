@@ -370,7 +370,7 @@ describe("customization pack", () => {
         "utf8",
       ),
     ) as { id: string }[];
-    expect(lock).toHaveLength(14);
+    expect(lock).toHaveLength(catalog.length);
     for (const item of catalog) {
       const bytes = readFileSync(
         new URL(`../../../site/market/packs/${item.id}.zip`, import.meta.url),
