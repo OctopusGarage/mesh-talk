@@ -34,7 +34,10 @@ test("open the sticker panel and send an animated sticker", async ({
   await page.getByTestId("composer-stickers").click();
   const panel = page.getByTestId("sticker-panel");
   await expect(panel).toBeVisible();
-  // The bundled Noto set is present (thumbnails are real animated WebP).
+  await expect(page.getByTestId("sticker-pack-google-noto")).toBeVisible();
+  await expect(
+    panel.locator('[data-testid^="sticker-option-pack:google-noto:"]'),
+  ).toHaveCount(40);
   await expect(panel.locator("img").first()).toBeVisible();
   await expect
     .poll(() =>
@@ -45,28 +48,29 @@ test("open the sticker panel and send an animated sticker", async ({
     )
     .toBeGreaterThan(0);
 
-  // Send the "face with tears of joy" sticker (bundled id 1f602).
-  await page.getByTestId("sticker-option-1f602").click();
+  // Send the "face with tears of joy" sticker from the removable pack.
+  await page.getByTestId("sticker-option-pack:google-noto:1f602").click();
   // Panel closes and the sticker lands as its own bubble-less message.
   await expect(panel).toBeHidden();
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
 });
 
-test("lite sends built-in stickers as emoji and shows their fallback", async ({
-  page,
-}) => {
+test("lite starts without Google Noto and can install it", async ({ page }) => {
   test.skip(process.env.MESH_TALK_VARIANT !== "lite", "Lite edition only");
   await enterBobDm(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
-  const option = page.getByTestId("sticker-option-1f602");
-  await expect(option).toContainText("😂");
-  await expect(option.locator("img")).toHaveCount(0);
-  await option.click();
-  await expect(page.getByTestId("message-sticker-fallback").last()).toHaveText(
-    "😂",
-  );
+  await expect(page.getByTestId("sticker-pack-google-noto")).toHaveCount(0);
+  await page.getByText("Manage sticker packs").click();
+  await page
+    .getByTestId("pack-manager-sticker")
+    .locator('input[type="file"]')
+    .setInputFiles(resolve("../site/market/packs/google-noto.zip"));
+  await page.getByTestId("sticker-pack-google-noto").click();
+  await expect(
+    page.getByTestId("sticker-option-pack:google-noto:1f602"),
+  ).toBeVisible();
 });
 
 test("the default edition installs the cat sticker collection", async ({
@@ -102,10 +106,10 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
   const manager = page.getByTestId("pack-manager-sticker");
   await manager
     .locator('input[type="file"]')
-    .setInputFiles(resolve("../site/market/packs/noto-favorites.zip"));
-  await expect(manager.getByText("Noto Favorites")).toBeVisible();
-  await page.getByTestId("sticker-pack-noto-favorites").click();
-  await page.getByTestId("sticker-option-pack:noto-favorites:1f602").click();
+    .setInputFiles(resolve("../site/market/packs/google-noto.zip"));
+  await expect(manager.getByText("Google Noto")).toBeVisible();
+  await page.getByTestId("sticker-pack-google-noto").click();
+  await page.getByTestId("sticker-option-pack:google-noto:1f602").click();
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "src",
     /^data:image\/webp;base64,/,
@@ -116,19 +120,25 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
   await page.getByText("Manage sticker packs").click();
   await page
     .getByTestId("pack-manager-sticker")
-    .getByRole("button", { name: "Remove Noto Favorites" })
+    .getByRole("button", { name: "Remove Google Noto" })
     .click();
   await expect(
-    page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
+    page.getByTestId("sticker-option-pack:google-noto:1f602"),
   ).toHaveCount(0);
   await expect(page.getByTestId("message-sticker-fallback").last()).toHaveText(
     "😂",
   );
+  await page.reload();
+  await enterBobDm(page);
+  await revealComposerTools(page);
+  await page.getByTestId("composer-emoji").click();
+  await page.getByTestId("composer-stickers").click();
+  await expect(page.getByTestId("sticker-pack-google-noto")).toHaveCount(0);
 });
 
 test("a custom noto pack has its own sticker tab", async ({ page }) => {
   const files = unzipSync(
-    readFileSync(resolve("../site/market/packs/noto-favorites.zip")),
+    readFileSync(resolve("../site/market/packs/google-noto.zip")),
   );
   const manifest = JSON.parse(new TextDecoder().decode(files["manifest.json"]));
   manifest.id = "noto";
@@ -151,8 +161,12 @@ test("a custom noto pack has its own sticker tab", async ({ page }) => {
   await expect(
     page.getByTestId("sticker-option-pack:noto:1f602"),
   ).toBeVisible();
-  await page.getByTestId("sticker-pack-builtin:noto").click();
-  await expect(page.getByTestId("sticker-option-1f602")).toBeVisible();
+  if (process.env.MESH_TALK_VARIANT !== "lite") {
+    await page.getByTestId("sticker-pack-google-noto").click();
+    await expect(
+      page.getByTestId("sticker-option-pack:google-noto:1f602"),
+    ).toBeVisible();
+  }
 });
 
 test("installs a sticker from the verified marketplace catalog", async ({
@@ -161,7 +175,7 @@ test("installs a sticker from the verified marketplace catalog", async ({
   const catalog = JSON.parse(
     readFileSync(resolve("../site/market/catalog.json"), "utf8"),
   ) as { id: string }[];
-  const entry = catalog.find((item) => item.id === "noto-favorites");
+  const entry = catalog.find((item) => item.id === "google-noto");
   if (!entry) throw new Error("Missing sticker catalog entry");
   await page.route("**/marketplace/catalog.json", (route) =>
     route.fulfill({
@@ -170,11 +184,11 @@ test("installs a sticker from the verified marketplace catalog", async ({
       body: JSON.stringify({ schemaVersion: 1, packs: [entry] }),
     }),
   );
-  await page.route("**/marketplace/packs/noto-favorites/*/*.zip", (route) =>
+  await page.route("**/marketplace/packs/google-noto/*/*.zip", (route) =>
     route.fulfill({
       contentType: "application/zip",
       headers: { "access-control-allow-origin": "*" },
-      body: readFileSync(resolve("../site/market/packs/noto-favorites.zip")),
+      body: readFileSync(resolve("../site/market/packs/google-noto.zip")),
     }),
   );
   await enterBobDm(page);
@@ -183,10 +197,10 @@ test("installs a sticker from the verified marketplace catalog", async ({
   await page.getByTestId("composer-stickers").click();
   await page.getByText("Manage sticker packs").click();
   const manager = page.getByTestId("pack-manager-sticker");
-  await manager.getByRole("button", { name: "Install", exact: true }).click();
-  await page.getByTestId("sticker-pack-noto-favorites").click();
+  await manager.getByRole("button", { name: /^(Install|Reinstall)$/ }).click();
+  await page.getByTestId("sticker-pack-google-noto").click();
   await expect(
-    page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
+    page.getByTestId("sticker-option-pack:google-noto:1f602"),
   ).toBeVisible();
 });
 

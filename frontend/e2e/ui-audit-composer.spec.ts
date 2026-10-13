@@ -1,5 +1,6 @@
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm } from "./helpers/session";
+import { seedMarketPacks } from "./helpers/packs";
 import { prepareForScreenshot, snapshotName } from "./helpers/visual-snapshot";
 import {
   expectElementsWithin,
@@ -13,6 +14,7 @@ test.use({ viewport: { width: 820, height: 620 } });
 test("composer controls and popovers stay usable at narrow width", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["google-noto"]);
   await enterChat(page);
   await openBobDm(page);
   await page.getByTestId("composer-input").fill("composer audit");
@@ -58,7 +60,10 @@ test("composer controls and popovers stay usable at narrow width", async ({
   await page.getByTestId("composer-stickers").click();
   await expect(page.getByTestId("sticker-panel")).toBeVisible();
   await expectElementsWithin(page, '[data-testid="expression-picker"]', "body");
-  await expectVisibleFocus(page, page.getByTestId("sticker-option-1f602"));
+  await expectVisibleFocus(
+    page,
+    page.getByTestId("sticker-option-pack:google-noto:1f602"),
+  );
   await page.keyboard.press("Escape");
 
   await page.getByTestId("composer-screenshot").click();
@@ -91,6 +96,7 @@ test.describe("narrow composer pane", () => {
   test("composer popovers fit when a persisted wide sidebar narrows the chat pane", async ({
     page,
   }) => {
+    await seedMarketPacks(page, ["google-noto"]);
     await page.addInitScript(() => {
       localStorage.setItem("mesh-talk-sidebar-width", "460");
     });

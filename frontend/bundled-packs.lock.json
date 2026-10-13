@@ -68,5 +68,10 @@
     "id": "cats",
     "version": "1.0.0",
     "sha256": "6ba0f66d1767b59bf8a969d0a341916d62177d1b9f8f4dbe828e3059b6ce8d3d"
+  },
+  {
+    "id": "google-noto",
+    "version": "1.0.0",
+    "sha256": "cf55d9d8a0fab72b29f9f692729eb8e3ee7b690e154a14ae67ce591814a76e3d"
   }
 ]

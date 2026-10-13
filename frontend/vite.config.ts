@@ -36,11 +36,8 @@ export default defineConfig(({ command, mode }) => {
       "import.meta.env.VITE_BUNDLED_PACK_IDS": JSON.stringify(
         bundled.map(({ id }) => id).join(","),
       ),
-      "import.meta.env.VITE_BUNDLED_NOTO_STICKERS": JSON.stringify(!lite),
     },
-    // src/assets currently contains only the Noto animations. Lite keeps their
-    // sticker IDs and emoji fallbacks without copying the WebP files.
-    publicDir: lite ? false : "src/assets",
+    publicDir: false,
     plugins: [
       react(),
       {

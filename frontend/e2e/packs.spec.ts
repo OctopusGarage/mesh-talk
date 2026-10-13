@@ -15,15 +15,15 @@ test("a missing bundled ZIP does not hide an installed sticker pack", async ({
   await page.route("**/builtin-packs/nature.zip", (route) =>
     route.fulfill({ status: 404, body: "missing" }),
   );
-  await seedMarketPacks(page, ["noto-favorites"]);
+  await seedMarketPacks(page, ["google-noto"]);
   await enterChat(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
-  await page.getByTestId("sticker-pack-noto-favorites").click();
+  await page.getByTestId("sticker-pack-google-noto").click();
   await expect(
-    page.getByTestId("sticker-option-pack:noto-favorites:1f602"),
+    page.getByTestId("sticker-option-pack:google-noto:1f602"),
   ).toBeVisible();
   await page.keyboard.press("Escape");
   await openSidebarMenuAction(page, "sidebar-nav-settings");
