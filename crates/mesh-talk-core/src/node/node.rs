@@ -300,6 +300,8 @@ pub struct Node {
     pub(in crate::node) channel_senders: Mutex<ChannelSenderStore>,
     /// Last confirmed durable holders of our own channel events.
     pub(in crate::node) channel_custody: Mutex<ChannelCustodyStore>,
+    #[cfg(test)]
+    pub(in crate::node) channel_last_send: Mutex<Option<(usize, u64)>>,
     pub(in crate::node) emitted: Mutex<HashSet<EventId>>,
     pub(in crate::node) file_incoming: mpsc::UnboundedSender<ReceivedFile>,
     pub(in crate::node) files: Mutex<FileBook>,
@@ -668,6 +670,8 @@ impl Node {
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
+            #[cfg(test)]
+            channel_last_send: Mutex::new(None),
             emitted: Mutex::new(emitted),
             file_incoming,
             files: Mutex::new(files),

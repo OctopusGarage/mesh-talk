@@ -162,6 +162,10 @@ command names for Tauri registration. Commands clone a node handle from
   member Noise duplex exercise with every fifth recipient initially offline,
   then recovers them from another member after the origin exits. It reports
   contact count, serialized event payload estimate, and convergence time.
+  `channel_real_tcp_scale_rehearsal` runs complete Nodes over loopback TCP and
+  measures encrypted application-frame bytes sent by the origin to its initial
+  targets. See [channel release rehearsal](channel-release-rehearsal.md) for
+  the repeatable commands and mixed-version binary check.
   This protocol rehearsal does not measure real LAN discovery, TCP overhead,
   or sustained throughput; use the sync-cost debug metrics and a real LAN trial
   before deciding whether a fuller gossip protocol is needed.

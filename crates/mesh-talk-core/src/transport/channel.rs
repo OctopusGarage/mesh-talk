@@ -20,6 +20,7 @@ pub struct SecureChannel<S> {
     session: Session,
     peer: VerifiedPeer,
     io_admission: Option<IoAdmission>,
+    sent_frame_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -101,6 +102,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             session,
             peer,
             io_admission: None,
+            sent_frame_bytes: 0,
         })
     }
 
@@ -191,6 +193,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             session,
             peer,
             io_admission: None,
+            sent_frame_bytes: 0,
         })
     }
 
@@ -223,23 +226,33 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     pub fn io_admitted(&self) -> bool {
         self.io_admission.as_ref().is_none_or(|a| (a.check)())
     }
+    /// Encrypted application-frame bytes written on this connection, including
+    /// the four-byte length prefix. The Noise handshake is excluded.
+    pub fn sent_frame_bytes(&self) -> u64 {
+        self.sent_frame_bytes
+    }
 
     /// Encrypt and send one application message.
     pub async fn send(&mut self, plaintext: &[u8]) -> Result<(), TransportError> {
         if let Some(admission) = self.io_admission.clone() {
-            return tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let _guard = admission.gate.read().await;
                 if !(admission.check)() {
                     return Err(TransportError::AdmissionDenied);
                 }
                 let ct = self.session.encrypt(plaintext)?;
-                write_frame(&mut self.stream, &ct).await
+                write_frame(&mut self.stream, &ct).await?;
+                Ok(ct.len() as u64 + 4)
             })
             .await
             .map_err(|_| TransportError::Noise("policy-gated send timed out".into()))?;
+            self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes?);
+            return Ok(());
         }
         let ct = self.session.encrypt(plaintext)?;
-        write_frame(&mut self.stream, &ct).await
+        write_frame(&mut self.stream, &ct).await?;
+        self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(ct.len() as u64 + 4);
+        Ok(())
     }
 
     /// Receive and decrypt one application message.
@@ -402,7 +415,9 @@ mod tests {
             .expect("connect");
         // Client confirms it is talking to B.
         assert_eq!(ch.peer_identity(), &b_pub);
+        assert_eq!(ch.sent_frame_bytes(), 0);
         ch.send(b"ping").await.expect("send");
+        assert_eq!(ch.sent_frame_bytes(), 4 + 4 + 16);
         let got = ch.recv().await.expect("recv");
         assert_eq!(got, b"pong");
 

@@ -697,21 +697,32 @@ impl Node {
             LARGE_CHANNEL_INITIAL_FANOUT,
         );
         let seeded = targets.len();
+        let mut sent_frame_bytes = 0u64;
         for peer in targets {
-            let _ = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                self.sync_and_confirm_custody(channel, event_id, &peer)
-                    .await;
-            })
-            .await;
+            let bytes = tokio::time::timeout(
+                CHANNEL_RECOVERY_PEER_TIMEOUT,
+                self.sync_and_confirm_custody(channel, event_id, &peer),
+            )
+            .await
+            .unwrap_or(0);
+            sent_frame_bytes = sent_frame_bytes.saturating_add(bytes);
         }
         let _ = self.replicate_to_post_office(channel).await;
+        #[cfg(test)]
+        {
+            *self
+                .channel_last_send
+                .lock()
+                .expect("channel send mutex not poisoned") = Some((seeded, sent_frame_bytes));
+        }
         log::debug!(
             target: "mesh_talk::channel",
-            "send conv={} members={} seeded={} confirmed={} elapsed_ms={}",
+            "send conv={} members={} seeded={} confirmed={} sent_frame_bytes={} elapsed_ms={}",
             hex::encode(&channel.as_bytes()[..4]),
             members.len(),
             seeded,
             self.channel_custody_count(channel, event_id).unwrap_or(0),
+            sent_frame_bytes,
             started.elapsed().as_millis(),
         );
     }
@@ -756,9 +767,9 @@ impl Node {
         channel: ConversationId,
         event_id: EventId,
         peer: &PeerRecord,
-    ) {
+    ) -> u64 {
         let Ok(mut conn) = self.privacy_dial(peer.addr, &peer.public).await else {
-            return;
+            return 0;
         };
         let store = self.sync_store(conn.peer_identity());
         if request_round(&mut conn, &store, channel).await.is_ok()
@@ -773,6 +784,7 @@ impl Node {
                 .expect("channel_custody mutex not poisoned")
                 .confirm(event_id, &peer.public.user_id());
         }
+        conn.sent_frame_bytes()
     }
 
     /// Periodically verify one old claim without first syncing the missing

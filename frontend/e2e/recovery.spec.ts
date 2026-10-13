@@ -97,6 +97,9 @@ test("restore verifies the archive, shows its limits, and offers a fresh identit
   await expect(page.getByTestId("restore-preview")).toContainText(
     "1 file cards have no local media bytes",
   );
+  await expect(page.getByTestId("restore-preview")).toContainText(
+    "Peer sync cannot restore channel messages that were not in the backup",
+  );
   await page.getByRole("checkbox", { name: /old device may be lost/i }).check();
   await expect(page.getByTestId("restore-commit")).toHaveCount(0);
   await expect(
@@ -146,9 +149,7 @@ test("recovered channel history is readable without send actions", async ({
     page.getByTestId("message-bubble").getByText("channel kickoff"),
   ).toBeVisible();
   await expect(
-    page.getByText(
-      "This channel is a read-only archive from your previous device. New messages cannot be sent here.",
-    ),
+    page.getByText(/Ask the channel owner to invite this new device/),
   ).toBeVisible();
   await expect(page.getByPlaceholder("Message #team")).toHaveCount(0);
 });

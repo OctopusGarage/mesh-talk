@@ -3,6 +3,7 @@
 //! and drives 1:1 DMs, channels, and file transfers from a line-based REPL
 //! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
 //! `/channel-new <name> <member-prefix>...`, `/channel-msg <chan-id-prefix> <text>`,
+//! `/channel-replica <chan-id-prefix> on|off`,
 //! `/sendfile <peer-prefix> <path>`, `/quit`), printing inbound DMs, channel
 //! messages, and files as they arrive.
 
@@ -368,6 +369,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_channel_new(&node, &roster, rest);
         } else if let Some(rest) = line.strip_prefix("/channel-msg ") {
             handle_channel_msg(&node, rest);
+        } else if let Some(rest) = line.strip_prefix("/channel-replica ") {
+            handle_channel_replica(&node, rest);
         } else if let Some(rest) = line.strip_prefix("/sendfile ") {
             handle_sendfile(&node, &roster, rest);
         } else if let Some((accept, rest)) = line
@@ -393,7 +396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if !line.is_empty() {
             emit(
-                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
             );
         }
     }
@@ -622,6 +625,55 @@ fn handle_channel_msg(node: &Arc<Node>, rest: &str) {
     });
 }
 
+fn parse_replica_command(rest: &str) -> Option<(&str, bool)> {
+    let mut parts = rest.split_whitespace();
+    let prefix = parts.next()?;
+    let enabled = match parts.next()? {
+        "on" => true,
+        "off" => false,
+        _ => return None,
+    };
+    parts.next().is_none().then_some((prefix, enabled))
+}
+
+fn handle_channel_replica(node: &Arc<Node>, rest: &str) {
+    let Some((prefix, enabled)) = parse_replica_command(rest) else {
+        emit("usage: /channel-replica <chan-id-prefix> on|off");
+        return;
+    };
+    let matches: Vec<_> = node
+        .list_channels()
+        .into_iter()
+        .filter(|channel| hex::encode(channel.id.as_bytes()).starts_with(prefix))
+        .map(|channel| channel.id)
+        .collect();
+    let channel = match matches.as_slice() {
+        [] => {
+            emit(&format!("no channel matches prefix '{prefix}'"));
+            return;
+        }
+        [channel] => *channel,
+        _ => {
+            emit(&format!(
+                "'{prefix}' matches {} channels; be more specific",
+                matches.len()
+            ));
+            return;
+        }
+    };
+    let node = Arc::clone(node);
+    tokio::spawn(async move {
+        match node.set_channel_replica_enabled(channel, enabled).await {
+            Ok(()) => emit(&format!(
+                "channel {} replica {}",
+                hex::encode(channel.as_bytes()),
+                if enabled { "enabled" } else { "disabled" }
+            )),
+            Err(error) => emit(&format!("channel replica change failed: {error}")),
+        }
+    });
+}
+
 /// Parse and dispatch `/sendfile <peer-prefix> <path>`: resolve the recipient and send
 /// the file at `path` on a spawned task (streamed seal + dial + sync round).
 fn handle_sendfile(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
@@ -664,6 +716,15 @@ mod tests {
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;
     use std::time::Instant;
+
+    #[test]
+    fn channel_replica_parser_accepts_only_a_prefix_and_on_or_off() {
+        assert_eq!(parse_replica_command("abc on"), Some(("abc", true)));
+        assert_eq!(parse_replica_command("abc off"), Some(("abc", false)));
+        for input in ["", "abc", "abc maybe", "abc on extra"] {
+            assert_eq!(parse_replica_command(input), None);
+        }
+    }
 
     #[test]
     fn account_message_parser_requires_a_full_account_and_preserves_text() {

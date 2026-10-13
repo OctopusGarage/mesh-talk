@@ -1888,6 +1888,177 @@ async fn channel_member_recovers_missed_message_from_peer() {
     bob_task.abort();
 }
 
+/// Real Noise/TCP sockets and complete Nodes, with deterministic signed routes.
+/// Run each size with MESH_TALK_CHANNEL_MEMBERS=5, 20, or 50. Multicast and
+/// separate physical hosts still require a device trial.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real TCP scale rehearsal; run with MESH_TALK_CHANNEL_MEMBERS=5/20/50"]
+async fn channel_real_tcp_scale_rehearsal() {
+    let count: usize = std::env::var("MESH_TALK_CHANNEL_MEMBERS")
+        .unwrap_or_else(|_| "5".into())
+        .parse()
+        .unwrap();
+    assert!([5, 20, 50].contains(&count));
+    let started = std::time::Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let identities: Vec<_> = (0..count).map(|_| DeviceIdentity::generate()).collect();
+    let public: Vec<_> = identities.iter().map(DeviceIdentity::public).collect();
+    let mut listeners = Vec::new();
+    let mut ports = Vec::new();
+    for _ in 0..count {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        ports.push(listener.local_addr().unwrap().port());
+        listeners.push(listener);
+    }
+    let rosters: Vec<_> = (0..count)
+        .map(|_| Arc::new(Mutex::new(Roster::default())))
+        .collect();
+    for i in 0..count {
+        for j in 0..count {
+            if i != j {
+                add_peer(
+                    &rosters[i],
+                    &identities[j],
+                    &format!("member-{j}"),
+                    ports[j],
+                    &public[i].user_id(),
+                );
+            }
+        }
+    }
+    let mut receivers = Vec::new();
+    let mut nodes = Vec::new();
+    for (i, identity) in identities.into_iter().enumerate() {
+        let path = dir.path().join(format!("member-{i}"));
+        std::fs::create_dir_all(&path).unwrap();
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        receivers.push(ch_rx);
+        nodes.push(
+            Node::open(
+                identity,
+                Arc::clone(&rosters[i]),
+                dm_tx,
+                ch_tx,
+                file_tx,
+                &path.join("messages.log"),
+                &path.join("sent.log"),
+                "pw",
+            )
+            .unwrap(),
+        );
+    }
+    let mut tasks: Vec<_> = listeners
+        .into_iter()
+        .enumerate()
+        .map(|(i, listener)| tokio::spawn(Arc::clone(&nodes[i]).run_accept_loop(listener)))
+        .collect();
+    let channel = tokio::time::timeout(
+        Duration::from_secs(90),
+        nodes[0].create_channel("scale", public[1..].to_vec()),
+    )
+    .await
+    .expect("channel creation deadline")
+    .unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.list_channels().iter().any(|item| item.id == channel))
+    );
+    // In a five-member channel everyone is a direct target, so take one
+    // listener down before the send to exercise actual missed-message recovery.
+    if count == 5 {
+        tasks[4].abort();
+        let _ = (&mut tasks[4]).await;
+    }
+    let send_started = std::time::Instant::now();
+    nodes[0]
+        .send_channel_message(channel, b"scale-check")
+        .await
+        .unwrap();
+    let sender_ms = send_started.elapsed().as_millis();
+    let event_id = nodes[0].channel_history(channel, 10)[0].id;
+    let (contacts, sender_frame_bytes) = nodes[0].channel_last_send.lock().unwrap().unwrap();
+    assert_eq!(contacts, if count <= 5 { count - 1 } else { 2 });
+    assert!(sender_frame_bytes > 0);
+    let initially_holding: Vec<_> = (1..count)
+        .filter(|&i| nodes[i].log.lock().unwrap().has(&event_id))
+        .collect();
+    assert!(!initially_holding.is_empty());
+    let mut offline: Vec<_> = if count == 5 {
+        vec![4]
+    } else {
+        (1..count)
+            .filter(|i| i % 5 == 4 && !initially_holding.contains(i))
+            .collect()
+    };
+    if initially_holding.iter().all(|i| offline.contains(i)) {
+        offline.retain(|i| *i != initially_holding[0]);
+    }
+    for &i in &offline {
+        if count != 5 {
+            tasks[i].abort();
+        }
+    }
+    tasks[0].abort();
+    for &i in offline.iter().chain(std::iter::once(&0)) {
+        if i != 4 || count != 5 {
+            let _ = (&mut tasks[i]).await;
+        }
+    }
+    let converge_started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            if (1..count).filter(|i| !offline.contains(i)).all(|i| {
+                nodes[i]
+                    .channel_history(channel, 10)
+                    .iter()
+                    .any(|entry| entry.text == b"scale-check")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("online members converged without the sender");
+    let online_ms = converge_started.elapsed().as_millis();
+    let offline_started = std::time::Instant::now();
+    for &i in &offline {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, ports[i]))
+            .await
+            .unwrap();
+        tasks[i] = tokio::spawn(Arc::clone(&nodes[i]).run_accept_loop(listener));
+    }
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            if offline.iter().all(|&i| {
+                nodes[i]
+                    .channel_history(channel, 10)
+                    .iter()
+                    .any(|entry| entry.text == b"scale-check")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("offline members recovered from replicas");
+    eprintln!(
+        "channel-tcp members={count} contacts={contacts} initial_holders={} offline={} sender_frame_bytes={sender_frame_bytes} send_ms={sender_ms} online_converge_ms={online_ms} offline_recovery_ms={} total_ms={}",
+        initially_holding.len(),
+        offline.len(),
+        offline_started.elapsed().as_millis(),
+        started.elapsed().as_millis(),
+    );
+    for task in tasks {
+        task.abort();
+    }
+    drop(receivers);
+}
+
 #[tokio::test]
 async fn signed_channel_replica_preference_survives_restart_and_ignores_outsiders() {
     let identity = DeviceIdentity::generate();
