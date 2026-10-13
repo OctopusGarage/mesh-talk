@@ -330,6 +330,9 @@ pub struct Node {
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
+    /// Exact device fingerprints the host user has safety-number verified for
+    /// recipient-initiated DM catch-up. Discovery alone never adds entries.
+    pub(in crate::node) verified_dm_pull_peers: Mutex<HashSet<UserId>>,
     pub(in crate::node) delivery_control_ids:
         Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
     pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
@@ -684,6 +687,7 @@ impl Node {
             outgoing_file_consents: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
             delivery_status_notify: tokio::sync::Notify::new(),
+            verified_dm_pull_peers: Mutex::new(HashSet::new()),
             delivery_control_ids: Mutex::new(delivery_control_ids),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             received: Mutex::new(received),

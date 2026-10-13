@@ -507,6 +507,9 @@ impl Node {
         let store = self.sync_store(channel.peer_identity());
         // Drain a DM conversation per non-PO peer (we never DM a post office).
         for peer in self.historical_dm_peers() {
+            if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+                continue;
+            }
             let conv = dm_conversation_id(&self.identity.public(), &peer.public());
             if request_round(&mut channel, &store, conv).await.is_err() {
                 return; // channel broke; the next drain re-dials

@@ -824,6 +824,63 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
 }
 
 #[tokio::test]
+async fn reconnecting_dm_recipient_pulls_from_sender_without_sender_route_or_relay() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let alice_uid = alice.public().user_id();
+    let bob_uid = bob.public().user_id();
+    let alice_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let alice_port = alice_listener.local_addr().unwrap().port();
+    let bob_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let dead = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let bob_old_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let alice_roster = seed_roster(&bob, "Bob", bob_old_port, &alice_uid);
+    let bob_roster = seed_roster(&alice, "Alice", alice_port, &bob_uid);
+    let dir = tempfile::tempdir().unwrap();
+    let open = |identity, roster, name: &str| {
+        let (dm_tx, dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, dm_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
+    alice_node
+        .send_dm(&bob_uid, b"offline direct pull")
+        .await
+        .unwrap();
+    assert!(bob_rx.try_recv().is_err());
+    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "discovery alone must not authorize recipient-initiated DM pulls"
+    );
+    bob_node.replace_verified_dm_pull_peers(vec![alice_uid.clone()]);
+    let received = tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
+        .await
+        .expect("Bob pulls from Alice after reconnecting without a relay")
+        .expect("DM stream open");
+    assert_eq!(received.from, alice_uid);
+    assert_eq!(received.text, b"offline direct pull");
+    alice_task.abort();
+    bob_task.abort();
+}
+
+#[tokio::test]
 async fn send_call_signal_to_unknown_peer_errors() {
     let dir = tempfile::tempdir().unwrap();
     let me = DeviceIdentity::generate();
@@ -1030,6 +1087,13 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         .send_dm(&bob_uid, b"held-hello")
         .await
         .expect("send_dm succeeds via the post office despite offline recipient");
+
+    bob_node.drain_from_post_office().await;
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "discovery alone must not authorize a relay DM pull"
+    );
+    bob_node.replace_verified_dm_pull_peers(vec![alice_uid.clone()]);
 
     // Bob drains from the PO (retry to absorb the relay's async ingest).
     let mut received = None;

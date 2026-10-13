@@ -4,6 +4,7 @@
 //! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
 //! `/channel-new <name> <member-prefix>...`, `/channel-msg <chan-id-prefix> <text>`,
 //! `/channel-replica <chan-id-prefix> on|off`,
+//! `/verify-peer <full-device-fingerprint>`,
 //! `/sendfile <peer-prefix> <path>`, `/quit`), printing inbound DMs, channel
 //! messages, and files as they arrive.
 
@@ -15,6 +16,7 @@ use mesh_talk_core::node::{
     DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket, spawn_discovery,
 };
 use mesh_talk_core::postoffice::PostOffice;
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -98,6 +100,37 @@ fn resolve_recipient(peers: &[PeerRecord], prefix: &str) -> Result<UserId, Resol
         1 => Ok(matches.into_iter().next().expect("len checked == 1")),
         n => Err(ResolveError::Ambiguous(n)),
     }
+}
+
+fn verified_peer_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("verified-dm-peers")
+}
+
+fn load_verified_peers(path: &std::path::Path) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.len() == 32 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn save_verified_peers(path: &std::path::Path, peers: &BTreeSet<String>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file =
+        tempfile::NamedTempFile::new_in(path.parent().unwrap_or(std::path::Path::new(".")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    for peer in peers {
+        writeln!(file, "{peer}")?;
+    }
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Write one line to stdout and FLUSH it. Piped stdout is block-buffered, so a
@@ -256,6 +289,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &sent_path,
         &args.password,
     )?;
+    let verified_path = verified_peer_path(data_dir);
+    let mut verified_peers = load_verified_peers(&verified_path);
+    node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
     node.configure_privacy(data_dir, &args.password, &announce, visibility.clone())?;
 
@@ -348,6 +384,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                 }
             }
+        } else if let Some(fingerprint) = line.strip_prefix("/verify-peer ") {
+            let fingerprint = fingerprint.trim();
+            if fingerprint.len() != 32 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                emit(
+                    "usage: /verify-peer <full-device-fingerprint> (compare it out of band first)",
+                );
+                continue;
+            }
+            let mut next = verified_peers.clone();
+            next.insert(fingerprint.to_owned());
+            match save_verified_peers(&verified_path, &next) {
+                Ok(()) => {
+                    verified_peers = next;
+                    node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
+                    emit("peer verified for automatic DM recovery");
+                }
+                Err(error) => emit(&format!("could not save verification: {error}")),
+            }
+        } else if line == "/verify-peer" {
+            emit("usage: /verify-peer <full-device-fingerprint> (compare it out of band first)");
         } else if let Some(rest) = line.strip_prefix("/msg ") {
             handle_msg(&node, &roster, rest);
         } else if let Some(rest) = line.strip_prefix("/account-msg ") {
@@ -396,7 +453,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if !line.is_empty() {
             emit(
-                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+                "commands: /peers, /verify-peer <full-device-fingerprint>, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
             );
         }
     }

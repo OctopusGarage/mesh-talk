@@ -3288,6 +3288,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         Account::from_secret_bytes(baccount),
         &ap,
     );
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
     b.roster
         .lock()
         .unwrap()
@@ -3348,6 +3349,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         Account::from_secret_bytes(aaccount),
         &bp,
     );
+    a.replace_verified_dm_pull_peers(vec![bp.public().user_id()]);
     a.roster
         .lock()
         .unwrap()

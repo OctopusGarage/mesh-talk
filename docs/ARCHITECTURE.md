@@ -296,6 +296,16 @@ transactions install the file row before appending their immutable receipt.
 Live recovery publishes callbacks once after durable installation; startup replay
 only reconstructs history and pending controls. Enqueue APIs perform local durable
 acceptance only; existing send APIs additionally attempt immediate transport.
+On reconnect, a recipient's recurring DM catch-up only visits contacts whose
+device fingerprint the user explicitly verified against the safety number.
+It first reconciles directly with that sender. If that round cannot complete,
+it tries the elected post office; desktop and CLI hosts also drain verified DM
+conversations from the post office periodically. The desktop trust file restores
+this allowlist at login; the CLI persists explicit `/verify-peer` decisions.
+Discovery or a valid handshake alone never authorizes recipient-initiated DM
+pulls. Unverified peers can still push messages directly.
+The sender's retry worker independently attempts direct delivery before relay
+replication, so either side can initiate recovery when a route returns.
 
 Card delivery is not file download or read confirmation. Independent immutable
 chunk work survives an early card receipt and sender restart. The worker also
@@ -431,9 +441,11 @@ wakes, selects one destination and one receipt per iteration, and rotates logica
 messages and their independent destination cursors. It takes owned bounded
 snapshots after local recovery on the blocking pool, releases store locks before
 network awaits, and bounds each network operation to 400 ms. Dropping the accept
-loop cancels its worker and the worker's outstanding network operations. Historical DM and
-control pulls use a receive-only reconciliation projection; controls can be pulled
-directly or through the relay while the original sender is offline.
+loop cancels its worker and the worker's outstanding network operations.
+Historical DM and control pulls for manually verified contacts use a
+receive-only reconciliation projection; DM bodies prefer the direct sender
+route and fall back to the relay, while controls can be pulled directly or
+through the relay when the original sender is offline.
 
 Immutable file retries retain at most eight authenticated connections across
 complete protocol exchanges, with a ten-second idle limit. A rotating admission
