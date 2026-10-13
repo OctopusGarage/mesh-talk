@@ -83,6 +83,9 @@ export default defineConfig(({ command, mode }) => {
     },
     build: {
       outDir: "dist",
+      // macOS 12 WKWebView can reject Radix's class static blocks, which Vite's
+      // default Safari 16.4 target leaves intact.
+      target: "safari15",
       // The sign-in shell and authenticated chat are separate chunks. Assets load locally in
       // Tauri, so a modestly higher limit than Vite's web default is appropriate here.
       chunkSizeWarningLimit: 700,

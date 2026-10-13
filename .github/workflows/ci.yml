@@ -72,6 +72,10 @@ jobs:
           npm ci
           npm run build
 
+      - name: Check built JavaScript for macOS 12 WKWebView
+        working-directory: frontend
+        run: npm run check:build-syntax
+
       - name: Frontend unit tests and coverage
         working-directory: frontend
         run: npm run test:coverage
