@@ -198,6 +198,8 @@ command names for Tauri registration. Commands clone a node handle from
   the original push can obtain signed events from another member even without a
   post office or the original author online. Each peer attempt is time-bounded;
   normal sync membership projection and event validation still apply.
+  Discovery of a new or relocated peer wakes a bounded recovery batch immediately;
+  the three-second tick remains a fallback for missed announcements and old routes.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
 

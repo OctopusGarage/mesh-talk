@@ -1725,16 +1725,15 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     assert_eq!(alice_node.channel_owner(channel), owner);
 }
 
-/// Bidirectional channel rig: Alice (creator) + Bob both run accept loops and know
-/// A member that missed a push can recover the event from another member even when
-/// the author has no listener and there is no post office.
+/// A restarted member recovers from another member when the author and post office
+/// are unavailable. Discovery of the serving member wakes recovery immediately.
 #[tokio::test]
 async fn channel_member_recovers_missed_message_from_peer() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let carol = DeviceIdentity::generate();
+    let carol_secrets = carol.secret_bytes();
     let alice_id = alice.public().user_id();
-    let bob_id = bob.public().user_id();
     let carol_id = carol.public().user_id();
     let dir = tempfile::tempdir().unwrap();
     let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1744,11 +1743,14 @@ async fn channel_member_recovers_missed_message_from_peer() {
 
     let alice_roster = seed_roster(&bob, "Bob", bob_port, &alice_id);
     add_peer(&alice_roster, &carol, "Carol", carol_port, &alice_id);
-    let bob_roster = seed_roster(&carol, "Carol", carol_port, &bob_id);
-    let carol_roster = seed_roster(&bob, "Bob", bob_port, &carol_id);
+    let bob_roster = Arc::new(Mutex::new(Roster::default()));
+    let carol_roster = Arc::new(Mutex::new(Roster::default()));
+    let carol_roster_for_discovery = Arc::clone(&carol_roster);
     let bob_pub = bob.public();
     let carol_pub = carol.public();
     let open = |identity, roster, name: &str| {
+        let node_dir = dir.path().join(name);
+        std::fs::create_dir_all(&node_dir).unwrap();
         let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
         let (ch_tx, ch_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::unbounded_channel();
@@ -1758,8 +1760,8 @@ async fn channel_member_recovers_missed_message_from_peer() {
             dm_tx,
             ch_tx,
             file_tx,
-            &dir.path().join(format!("{name}.log")),
-            &dir.path().join(format!("{name}-sent.log")),
+            &node_dir.join("messages.log"),
+            &node_dir.join("sent.log"),
             "pw",
         )
         .unwrap();
@@ -1767,12 +1769,12 @@ async fn channel_member_recovers_missed_message_from_peer() {
     };
     let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
     let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
-    let (carol_node, mut carol_rx) = open(carol, carol_roster, "carol");
+    let (carol_node, carol_rx) = open(carol, carol_roster, "carol");
     let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
     let carol_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
 
     let channel = alice_node
-        .create_channel("general", vec![bob_pub, carol_pub])
+        .create_channel("general", vec![bob_pub, carol_pub.clone()])
         .await
         .unwrap();
     assert!(
@@ -1783,6 +1785,10 @@ async fn channel_member_recovers_missed_message_from_peer() {
     );
     carol_task.abort();
     carol_task.await.unwrap_err();
+    drop(carol_node);
+    drop(carol_rx);
+    alice_node.roster.lock().unwrap().forget(&carol_pub);
+    assert!(alice_node.routing_peer(&carol_id).is_none());
 
     alice_node
         .send_channel_message(channel, b"recover from Bob")
@@ -1791,15 +1797,33 @@ async fn channel_member_recovers_missed_message_from_peer() {
     tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
         .await
         .expect("Bob received the original push");
-    assert!(carol_node.channel_history(channel, 10).is_empty());
+    let (carol_node, mut carol_rx) = open(
+        DeviceIdentity::from_secret_bytes(carol_secrets.0, carol_secrets.1),
+        Arc::clone(&carol_roster_for_discovery),
+        "carol",
+    );
+    let before_recovery = carol_node.channel_history(channel, 10);
+    assert!(before_recovery.is_empty(), "{before_recovery:?}");
 
-    carol_node.pull_one_channel_from_member(0).await;
+    let changed = carol_roster_for_discovery.lock().unwrap().changes();
+    let recovery_task = tokio::spawn(crate::node::runtime::run_channel_recovery_loop(
+        Arc::clone(&carol_node),
+        changed,
+    ));
+    add_peer(
+        &carol_roster_for_discovery,
+        &bob_node.identity,
+        "Bob",
+        bob_port,
+        &carol_id,
+    );
     let recovered = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
         .await
         .expect("Carol recovered from Bob")
         .expect("channel stream open");
     assert_eq!(recovered.text, b"recover from Bob");
     assert_eq!(carol_node.channel_history(channel, 10).len(), 1);
+    recovery_task.abort();
     bob_task.abort();
 }
 

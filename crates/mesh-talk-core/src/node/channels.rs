@@ -28,6 +28,15 @@ fn canonical_members(mut members: Vec<PublicIdentity>) -> Vec<PublicIdentity> {
 }
 
 impl Node {
+    pub(in crate::node) fn joined_channel_count(&self) -> usize {
+        let me = self.user_id();
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        book.channel_ids()
+            .into_iter()
+            .filter(|id| book.state(id).is_some_and(|state| state.is_member(&me)))
+            .count()
+    }
+
     /// Close a channel for every member while retaining each device's local history.
     pub async fn dissolve_channel(&self, channel: ConversationId) -> Result<(), NodeError> {
         let members = {
