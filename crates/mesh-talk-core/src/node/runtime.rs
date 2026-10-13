@@ -28,36 +28,6 @@ const DRAIN_INTERVAL_SECS: u64 = 3;
 /// one-shot push is the only other delivery). A no-op when nothing is pending.
 const FILE_PULL_INTERVAL_SECS: u64 = 3;
 
-/// Reconcile one joined channel per tick with a fellow member. This repairs a
-/// missed sender push even on networks without a post office.
-const CHANNEL_RECOVERY_INTERVAL_SECS: u64 = 3;
-const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
-
-/// Recover promptly when discovery finds a member, while one-channel periodic
-/// reconciliation repairs missed notifications. Work is sequential and bounded.
-pub(in crate::node) async fn run_channel_recovery_loop(node: Arc<Node>, changes: Arc<Notify>) {
-    let mut tick = tokio::time::interval(Duration::from_secs(CHANNEL_RECOVERY_INTERVAL_SECS));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut cursor = 0usize;
-    let mut startup = true;
-    loop {
-        let discovered = tokio::select! {
-            _ = changes.notified() => true,
-            _ = tick.tick() => false,
-        };
-        let batch = if startup || discovered {
-            node.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH)
-        } else {
-            1
-        };
-        startup = false;
-        for _ in 0..batch {
-            node.pull_one_channel_from_member(cursor).await;
-            cursor = cursor.wrapping_add(1);
-        }
-    }
-}
-
 /// How often the node checks for freshly-discovered peers and re-publishes its current
 /// avatar to them (so a new contact sees the photo without waiting for the next change).
 /// A no-op when no new peers appeared and when we've never set an avatar.
@@ -451,11 +421,6 @@ impl NodeRuntime {
                         tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
                     }
                 }));
-            }
-            {
-                let node = Arc::clone(&node);
-                let changes = roster.lock().expect("roster mutex not poisoned").changes();
-                tasks.push(tokio::spawn(run_channel_recovery_loop(node, changes)));
             }
             tasks.push(tokio::spawn(async move {
                 while let Some(dm) = incoming_rx.recv().await {

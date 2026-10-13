@@ -1806,10 +1806,7 @@ async fn channel_member_recovers_missed_message_from_peer() {
     assert!(before_recovery.is_empty(), "{before_recovery:?}");
 
     let changed = carol_roster_for_discovery.lock().unwrap().changes();
-    let recovery_task = tokio::spawn(crate::node::runtime::run_channel_recovery_loop(
-        Arc::clone(&carol_node),
-        changed,
-    ));
+    let recovery_task = tokio::spawn(Arc::clone(&carol_node).run_channel_recovery_loop(changed));
     add_peer(
         &carol_roster_for_discovery,
         &bob_node.identity,
@@ -1825,6 +1822,81 @@ async fn channel_member_recovers_missed_message_from_peer() {
     assert_eq!(carol_node.channel_history(channel, 10).len(), 1);
     recovery_task.abort();
     bob_task.abort();
+}
+
+/// In a large group Alice knows only Bob's address, while Dana knows no route
+/// at all. Bob must forward the channel and later message after receiving them.
+#[tokio::test]
+async fn large_channel_member_forwards_to_peer_without_author_route() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let dana = DeviceIdentity::generate();
+    let extra: Vec<_> = (0..3)
+        .map(|_| DeviceIdentity::generate().public())
+        .collect();
+    let alice_id = alice.public().user_id();
+    let bob_id = bob.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
+    let dana_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dana_port = dana_listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&bob, "Bob", bob_port, &alice_id);
+    let bob_roster = seed_roster(&dana, "Dana", dana_port, &bob_id);
+    let dana_roster = Arc::new(Mutex::new(Roster::default()));
+    let bob_pub = bob.public();
+    let dana_pub = dana.public();
+    let open = |identity, roster, name: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &path.join("messages.log"),
+            &path.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        (node, ch_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, _bob_rx) = open(bob, bob_roster, "bob");
+    let (dana_node, mut dana_rx) = open(dana, dana_roster, "dana");
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let dana_task = tokio::spawn(Arc::clone(&dana_node).run_accept_loop(dana_listener));
+
+    let mut members = vec![bob_pub, dana_pub];
+    members.extend(extra);
+    let channel = alice_node.create_channel("relay", members).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while !dana_node
+            .list_channels()
+            .iter()
+            .any(|item| item.id == channel)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Bob forwarded the channel membership to Dana");
+
+    alice_node
+        .send_channel_message(channel, b"via Bob")
+        .await
+        .unwrap();
+    let forwarded = tokio::time::timeout(Duration::from_secs(8), dana_rx.recv())
+        .await
+        .expect("Bob forwarded the message to Dana")
+        .expect("Dana's channel stream open");
+    assert_eq!(forwarded.text, b"via Bob");
+    bob_task.abort();
+    dana_task.abort();
 }
 
 /// Bidirectional channel rig: Alice (creator) + Bob both run accept loops and know

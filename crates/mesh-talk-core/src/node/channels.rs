@@ -9,11 +9,17 @@ use crate::identity::device::PublicIdentity;
 use crate::node::channel::seal_keys_for;
 use crate::node::session::request_round;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 /// Limit one background recovery tick even when routes are stale or a peer stalls.
 const CHANNEL_RECOVERY_PEERS_PER_TICK: usize = 3;
 const CHANNEL_RECOVERY_PEER_TIMEOUT: Duration = Duration::from_secs(15);
+const CHANNEL_RECOVERY_INTERVAL: Duration = Duration::from_secs(3);
+const CHANNEL_RECOVERY_WAKE_BATCH: usize = 8;
+const SMALL_CHANNEL_MEMBER_LIMIT: usize = 5;
+const LARGE_CHANNEL_INITIAL_FANOUT: usize = 2;
 
 /// Members in canonical order: sorted by `user_id` and de-duplicated. `ChannelMeta` encodes
 /// the membership Vec positionally, and the same-epoch convergence tie-break in
@@ -27,7 +33,47 @@ fn canonical_members(mut members: Vec<PublicIdentity>) -> Vec<PublicIdentity> {
     members
 }
 
+fn select_channel_targets(
+    mut peers: Vec<PeerRecord>,
+    member_count: usize,
+    start: usize,
+    fanout: usize,
+) -> Vec<PeerRecord> {
+    peers.sort_by_key(|peer| peer.public.user_id());
+    if member_count <= SMALL_CHANNEL_MEMBER_LIMIT || peers.len() <= fanout {
+        return peers;
+    }
+    let peer_count = peers.len();
+    peers.rotate_left(start % peer_count);
+    peers.truncate(fanout);
+    peers
+}
+
 impl Node {
+    /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
+    pub(in crate::node) async fn run_channel_recovery_loop(self: Arc<Self>, changes: Arc<Notify>) {
+        let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut cursor = 0usize;
+        let mut startup = true;
+        loop {
+            let discovered = tokio::select! {
+                _ = changes.notified() => true,
+                _ = tick.tick() => false,
+            };
+            let batch = if startup || discovered {
+                self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH)
+            } else {
+                1
+            };
+            startup = false;
+            for _ in 0..batch {
+                self.pull_one_channel_from_member(cursor).await;
+                cursor = cursor.wrapping_add(1);
+            }
+        }
+    }
+
     pub(in crate::node) fn joined_channel_count(&self) -> usize {
         let me = self.user_id();
         let book = self.channels.lock().expect("channels mutex not poisoned");
@@ -566,24 +612,60 @@ impl Node {
             .lock()
             .expect("sentlog mutex not poisoned")
             .record(channel, seq, now_millis(), &wrapped);
-        self.distribute_channel(channel, &members).await;
+        self.distribute_channel_message(channel, &members).await;
         Ok(())
     }
 
-    /// Push the channel conversation to each known online member (dial + sync) and
-    /// replicate it to the elected post office. Best-effort and fail-soft.
+    /// Push a control event to every known member, including on large channels.
+    /// Membership changes and key rotations must not depend on gossip convergence.
     pub(in crate::node) async fn distribute_channel(
         &self,
         channel: ConversationId,
         members: &[PublicIdentity],
     ) {
+        self.distribute_channel_targets(channel, members, None, true)
+            .await;
+    }
+
+    /// For a large channel, seed a few replicas and let member gossip plus
+    /// anti-entropy complete the distribution. Small channels retain direct fanout.
+    pub(in crate::node) async fn distribute_channel_message(
+        &self,
+        channel: ConversationId,
+        members: &[PublicIdentity],
+    ) {
+        self.distribute_channel_targets(channel, members, Some(LARGE_CHANNEL_INITIAL_FANOUT), true)
+            .await;
+    }
+
+    async fn distribute_channel_targets(
+        &self,
+        channel: ConversationId,
+        members: &[PublicIdentity],
+        fanout: Option<usize>,
+        replicate_to_post_office: bool,
+    ) {
         let me = self.identity.public().user_id();
-        let targets: Vec<PeerRecord> = {
+        let peers: Vec<PeerRecord> = {
             members
                 .iter()
                 .filter(|m| m.user_id() != me)
-                .filter_map(|m| self.routing_peer(&m.user_id()))
+                .filter_map(|m| {
+                    self.routing_peer(&m.user_id())
+                        .filter(|peer| peer.public == *m)
+                })
                 .collect()
+        };
+        let targets = if let Some(limit) = fanout {
+            let start = self
+                .log
+                .lock()
+                .expect("log mutex not poisoned")
+                .conversation_len(&channel)
+                .wrapping_add(self.identity.public().ed25519_pub[0] as usize);
+            select_channel_targets(peers, members.len(), start, limit)
+        } else {
+            peers
         };
         for peer in targets {
             if let Ok(mut ch) = self.privacy_dial(peer.addr, &peer.public).await {
@@ -591,7 +673,9 @@ impl Node {
                 let _ = request_round(&mut ch, &store, channel).await;
             }
         }
-        let _ = self.replicate_to_post_office(channel).await;
+        if replicate_to_post_office {
+            let _ = self.replicate_to_post_office(channel).await;
+        }
     }
 
     /// Reconcile one joined channel with an online member. A rotating cursor gives
@@ -646,5 +730,33 @@ impl Node {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::*;
+    use crate::identity::device::DeviceIdentity;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    #[test]
+    fn large_channel_limits_and_rotates_initial_targets() {
+        let peers: Vec<_> = (0..5)
+            .map(|port| PeerRecord {
+                public: DeviceIdentity::generate().public(),
+                addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 4000 + port)),
+                name: String::new(),
+                post_office: false,
+                account_id: None,
+                last_seen: Instant::now(),
+            })
+            .collect();
+        let first = select_channel_targets(peers.clone(), 6, 0, 2);
+        let next = select_channel_targets(peers.clone(), 6, 1, 2);
+        assert_eq!(first.len(), 2);
+        assert_eq!(next.len(), 2);
+        assert_ne!(first[0].public, next[0].public);
+        assert_eq!(select_channel_targets(peers.clone(), 5, 0, 2).len(), 5);
     }
 }

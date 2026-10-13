@@ -200,6 +200,11 @@ command names for Tauri registration. Commands clone a node handle from
   normal sync membership projection and event validation still apply.
   Discovery of a new or relocated peer wakes a bounded recovery batch immediately;
   the three-second tick remains a fallback for missed announcements and old routes.
+  Every TCP-serving node runs this bidirectional anti-entropy loop. For channels
+  with more than five members, a text sender seeds at most two routed members;
+  recipients' rounds then forward the signed log to other members. Smaller
+  channels and membership controls retain direct fanout. File manifests retain
+  direct fanout until chunk replication has an explicit retention policy.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
   `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
 

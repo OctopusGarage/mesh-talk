@@ -66,10 +66,16 @@ impl Node {
     /// Maintenance runs on the blocking pool and stops when this future is dropped;
     /// CLI and SDK hosts get the same log maintenance as the desktop runtime.
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
+        let changes = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .changes();
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
             _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
+            _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
             _ = self.accept_connections(listener) => {}
         }
     }
