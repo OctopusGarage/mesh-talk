@@ -74,6 +74,14 @@ test("signed discovery queries again when the first CLI roster is still empty", 
   assert.equal(queries, 2);
 });
 
+test("private restart retains UI discovery without requiring public CLI presence", async () => {
+  const { signedPeerObservation } = await import("./native-core-scenarios.mjs");
+  const rawPeer = { name: "eval-peer", user_id: "b".repeat(32) };
+  const peer = { output: "", stdin: new Writable({ write(_bytes, _encoding, done) { done(new Error("private peer must not query public roster")); } }) };
+  const found = await signedPeerObservation({ peer, userId: "a".repeat(32), peerName: rawPeer.name, observe: async () => [rawPeer], publiclyVisible: false, until: async (_label, poll) => { const value = await poll(); if (value) return value; throw new Error("missing private observation"); } });
+  assert.equal(found, rawPeer);
+});
+
 test("native attachment rendering uses the visible jump-to-latest control when history is scrolled", async () => {
   const { revealLatestNativeMessage } = await import("./native-core-scenarios.mjs");
   let observations = 0;
