@@ -356,11 +356,13 @@ function ChannelHeader({
   name,
   memberCount,
   archived,
+  dissolved,
 }: {
   id: string;
   name: string;
   memberCount: number;
   archived: boolean;
+  dissolved: boolean;
 }) {
   const { t } = useTranslation();
   const presence = usePresenceFor(id);
@@ -375,7 +377,7 @@ function ChannelHeader({
         >
           <GroupAvatar channelId={id} size={36} title={name} />
         </AvatarEditMenu>
-        {!archived && (
+        {!archived && !dissolved && (
           <PresenceDot
             status={status}
             size="md"
@@ -391,11 +393,13 @@ function ChannelHeader({
           {name}
         </div>
         <div className="truncate text-xs text-muted-foreground">
-          {archived
-            ? t("conversation.archivedChannel")
-            : memberCount
-              ? t("conversation.members", { count: memberCount })
-              : t("conversation.channel")}
+          {dissolved
+            ? t("conversation.dissolvedChannel")
+            : archived
+              ? t("conversation.archivedChannel")
+              : memberCount
+                ? t("conversation.members", { count: memberCount })
+                : t("conversation.channel")}
         </div>
       </div>
     </div>
@@ -502,7 +506,9 @@ export function ConversationView() {
   archivedRef.current =
     active?.kind === "channel" &&
     channels.some(
-      (channel) => channel.channel_id === active.id && channel.archived,
+      (channel) =>
+        channel.channel_id === active.id &&
+        (channel.archived || channel.dissolved),
     );
   sendFileRef.current = sendFile;
   setErrorRef.current = setError;
@@ -674,6 +680,12 @@ export function ConversationView() {
     channels.some(
       (channel) => channel.channel_id === active.id && channel.archived,
     );
+  const dissolved =
+    isChannel &&
+    channels.some(
+      (channel) => channel.channel_id === active.id && channel.dissolved,
+    );
+  const readOnly = archived || dissolved;
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -733,6 +745,7 @@ export function ConversationView() {
             name={headerName}
             memberCount={members.length}
             archived={archived}
+            dissolved={dissolved}
           />
         ) : (
           <DmHeader id={active.id} name={headerName} />
@@ -742,7 +755,7 @@ export function ConversationView() {
           conversation={{ ...active, name: headerName }}
         />
         {isChannel && !archived ? (
-          <MembersDialog />
+          <MembersDialog dissolved={dissolved} />
         ) : (
           active.kind === "account" && (
             <>
@@ -882,7 +895,7 @@ export function ConversationView() {
                     grouped={grouped}
                     showTime={showTime}
                     isChannel={isChannel}
-                    readOnly={archived}
+                    readOnly={readOnly}
                     authorAvatarId={accountByDevice.get(m.who) ?? m.who}
                     authorName={nameByDevice.get(m.who)}
                     fresh={motionOK && isFresh(m, i)}
@@ -981,12 +994,16 @@ export function ConversationView() {
         </DialogContent>
       </Dialog>
 
-      {archived ? (
+      {readOnly ? (
         <div
           className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
           role="status"
         >
-          {t("conversation.archivedChannelHint")}
+          {t(
+            dissolved
+              ? "conversation.dissolvedChannelHint"
+              : "conversation.archivedChannelHint",
+          )}
         </div>
       ) : (
         <Composer

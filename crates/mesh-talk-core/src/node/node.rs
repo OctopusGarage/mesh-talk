@@ -72,6 +72,8 @@ pub struct ChannelSummary {
     pub owner: String,
     /// Restored history from a previous device; this device has no sender key.
     pub archived: bool,
+    /// Owner-authored terminal event has closed this channel for new activity.
+    pub dissolved: bool,
 }
 
 fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> Vec<ChannelSummary> {
@@ -82,6 +84,9 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
         }
         let mut archived: Option<ChannelSummary> = None;
         for event in log.events(&id) {
+            if archived.as_ref().is_some_and(|summary| summary.dissolved) {
+                break;
+            }
             if event.kind == EventKind::MembershipChange {
                 if let Some(meta) = crate::channel::ChannelMeta::decode(&event.ciphertext) {
                     let author = event.author.user_id();
@@ -93,6 +98,7 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
                                 member_count: meta.members.len(),
                                 owner: meta.owner,
                                 archived: true,
+                                dissolved: false,
                             });
                         }
                         Some(summary) if author == summary.owner && meta.owner == summary.owner => {
@@ -108,6 +114,12 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
                 && let Ok(name) = std::str::from_utf8(&event.ciphertext)
             {
                 summary.name = name.to_string();
+            } else if event.kind == EventKind::ChannelDissolve
+                && let Some(summary) = &mut archived
+                && event.author.user_id() == summary.owner
+                && event.ciphertext.is_empty()
+            {
+                summary.dissolved = true;
             }
         }
         if let Some(summary) = archived {
@@ -731,6 +743,7 @@ impl Node {
                     member_count: s.members().len(),
                     owner: s.owner().to_string(),
                     archived: false,
+                    dissolved: s.is_dissolved(),
                 })
             })
             .collect();
@@ -769,6 +782,15 @@ impl Node {
         kind: EventKind,
         ciphertext: Vec<u8>,
     ) -> Result<u64, NodeError> {
+        if self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .is_some_and(|state| state.is_dissolved())
+        {
+            return Err(NodeError::Channel("channel is dissolved".into()));
+        }
         // Accepted immutable intents reserve their author's sequence even before
         // installation. Serialize every local allocation with that reservation.
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");

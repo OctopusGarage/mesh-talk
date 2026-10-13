@@ -115,6 +115,7 @@ pub struct ChannelState {
     members: Vec<PublicIdentity>,
     epoch: u64,
     owner: String,
+    dissolved: bool,
     my_user_id: Option<String>,
     my_sender: HashMap<u64, SenderKey>,
     sender_chains: HashMap<(String, u64), SenderChain>,
@@ -130,6 +131,7 @@ impl ChannelState {
             members: meta.members,
             epoch: meta.epoch,
             owner: meta.owner,
+            dissolved: false,
             my_user_id: None,
             my_sender: HashMap::new(),
             sender_chains: HashMap::new(),
@@ -149,6 +151,9 @@ impl ChannelState {
     /// epoch can never hijack the channel.
     pub fn apply_meta(&mut self, meta: ChannelMeta) {
         use std::cmp::Ordering;
+        if self.dissolved {
+            return;
+        }
         // Owner is immutable: never adopt a snapshot that renames the owner.
         if meta.owner != self.owner {
             return;
@@ -174,6 +179,9 @@ impl ChannelState {
     /// neither rotates keys nor races a membership change. Owner authorization is enforced
     /// at the call site in `ChannelBook::process`.
     pub fn apply_rename(&mut self, name: &str, lamport: u64, id: EventId) {
+        if self.dissolved {
+            return;
+        }
         let version = (lamport, id);
         if version > self.name_version {
             self.name = name.to_string();
@@ -193,6 +201,12 @@ impl ChannelState {
     /// The channel owner's device `user_id` — the only principal allowed to change membership.
     pub fn owner(&self) -> &str {
         &self.owner
+    }
+    pub fn is_dissolved(&self) -> bool {
+        self.dissolved
+    }
+    pub fn dissolve(&mut self) {
+        self.dissolved = true;
     }
     pub fn members(&self) -> &[PublicIdentity] {
         &self.members

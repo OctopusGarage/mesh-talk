@@ -210,9 +210,22 @@ impl ChannelBook {
     ) -> Vec<ReceivedChannelMessage> {
         let my_author = Author::from_ed25519(me.public().ed25519_pub);
         let mut out = Vec::new();
+        let mut dissolved_on_replay = false;
 
         for event in events {
+            if dissolved_on_replay {
+                continue;
+            }
             match event.kind {
+                EventKind::ChannelDissolve => {
+                    if event.ciphertext.is_empty()
+                        && let Some(state) = self.states.get_mut(&channel_id)
+                        && event.author.user_id() == state.owner()
+                    {
+                        state.dissolve();
+                        dissolved_on_replay = true;
+                    }
+                }
                 EventKind::MembershipChange => {
                     if let Some(meta) = ChannelMeta::decode(&event.ciphertext) {
                         let author_uid = event.author.user_id();
@@ -350,6 +363,53 @@ mod tests {
         let mut state = ChannelState::from_meta(channel, meta.clone());
         state.set_identity(author.public().user_id());
         state
+    }
+
+    #[test]
+    fn only_owner_can_dissolve_a_channel_and_closure_survives_replay() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut log = EventLog::default();
+        let meta = ChannelMeta {
+            name: "general".into(),
+            members: vec![alice.public(), bob.public()],
+            epoch: 0,
+            owner: alice.public().user_id(),
+        };
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode(),
+        );
+        append(&mut log, &bob, channel, EventKind::ChannelDissolve, vec![]);
+        let mut book = ChannelBook::new();
+        book.process(&bob, channel, &collect(&log, &channel));
+        assert!(!book.state(&channel).unwrap().is_dissolved());
+
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::ChannelDissolve,
+            vec![],
+        );
+        book.process(&bob, channel, &collect(&log, &channel));
+        assert!(book.state(&channel).unwrap().is_dissolved());
+        let mut replayed = ChannelBook::new();
+        replayed.process(&bob, channel, &collect(&log, &channel));
+        assert!(replayed.state(&channel).unwrap().is_dissolved());
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::ChannelRename,
+            b"too late".to_vec(),
+        );
+        replayed.process(&bob, channel, &collect(&log, &channel));
+        assert_eq!(replayed.state(&channel).unwrap().name(), "general");
     }
 
     #[test]

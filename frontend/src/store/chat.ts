@@ -268,6 +268,7 @@ export interface ChatState {
   createChannel: (name: string, memberIds: string[]) => Promise<boolean>;
   addMember: (memberId: string) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
+  dissolveChannel: (channelId: string) => Promise<boolean>;
   /** Rename a channel for everyone (owner-only; the new name syncs to all members). */
   renameChannel: (channelId: string, name: string) => Promise<void>;
 }
@@ -864,6 +865,28 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     } catch (e) {
       if (get().activeRequest === request)
         set({ error: `Couldn't remove member: ${errorMessage(e)}` });
+    }
+  },
+
+  dissolveChannel: async (channelId) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return false;
+    try {
+      await chat.dissolveChannel(channelId);
+      if (!lease.current()) return false;
+      set((state) => ({
+        channels: state.channels.map((channel) =>
+          channel.channel_id === channelId
+            ? { ...channel, dissolved: true }
+            : channel,
+        ),
+      }));
+      await get().refreshRoster();
+      return lease.current();
+    } catch (e) {
+      set({ error: `Couldn't dissolve channel: ${errorMessage(e)}` });
+      return false;
     }
   },
 

@@ -9,6 +9,7 @@ const { chatState, avatars } = vi.hoisted(() => ({
       { user_id: "owner-device", account_id: "owner-account", name: "Me" },
     ],
     channelOwner: "owner-device",
+    active: { kind: "channel", id: "channel", name: "Group" },
     peers: [
       {
         user_id: "peer-device",
@@ -23,6 +24,7 @@ const { chatState, avatars } = vi.hoisted(() => ({
     myAccountId: "owner-account",
     addMember: () => {},
     removeMember: () => {},
+    dissolveChannel: async () => true,
     open: () => {},
   },
   avatars: { "peer-account": "data:image/png;base64,AAAA" } as Record<
@@ -72,4 +74,16 @@ it("shows an unjoined peer's account avatar in Add a peer", () => {
 
   expect(html).toContain("Alice");
   expect(html).toContain('src="data:image/png;base64,AAAA"');
+});
+
+it("offers dissolution to the owner of an active channel", () => {
+  const html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain('data-testid="dissolve-channel-trigger"');
+});
+
+it("does not offer dissolution after the channel is closed", () => {
+  const html = renderToStaticMarkup(
+    createElement(MembersDialog, { dissolved: true }),
+  );
+  expect(html).not.toContain('data-testid="dissolve-channel-trigger"');
 });

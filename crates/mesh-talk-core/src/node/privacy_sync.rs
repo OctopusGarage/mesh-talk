@@ -205,7 +205,11 @@ impl GuardedSyncStore<'_> {
                 .map(|s| (s.owner().to_string(), s.members().to_vec()))
         };
         let mut membership: Option<crate::channel::ChannelState> = None;
+        let mut dissolved = false;
         for event in events {
+            if dissolved {
+                continue;
+            }
             if !event.parents.iter().all(|id| allowed.contains(id)) {
                 continue;
             }
@@ -249,12 +253,19 @@ impl GuardedSyncStore<'_> {
                     s.members()
                         .iter()
                         .any(|p| p.ed25519_pub == *event.author.ed25519_pub())
-                        && (event.kind != EventKind::ChannelRename || author == s.owner())
+                        && (!matches!(
+                            event.kind,
+                            EventKind::ChannelRename | EventKind::ChannelDissolve
+                        ) || author == s.owner())
+                        && (event.kind != EventKind::ChannelDissolve || event.ciphertext.is_empty())
                         && event.kind != EventKind::Profile
                 })
             };
             if accepted && event.parents.iter().all(|id| allowed.contains(id)) {
                 allowed.insert(event.id);
+                if event.kind == EventKind::ChannelDissolve {
+                    dissolved = true;
+                }
             }
         }
         let current = membership

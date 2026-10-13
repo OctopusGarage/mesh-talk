@@ -70,7 +70,9 @@ command names for Tauri registration. Commands clone a node handle from
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
-  persisted so a restarted node can resume sending.
+  persisted so a restarted node can resume sending. An owner-authored `ChannelDissolve`
+  event closes a channel for all members without erasing local history; closed channels
+  remain visible as read-only history and reject new local events.
 - **Multi-device** — `DmEnvelope{route, msg_id, body}` (magic `MTDE1`) carries
   sender/recipient *account* routing inside the ciphertext; `send_to_account` fans a
   per-device ratcheted copy to every device of the target account + self-syncs to own

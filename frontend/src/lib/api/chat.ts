@@ -153,6 +153,8 @@ export const chat = {
     invoke<void>("remove_channel_member", { channelId, memberId }),
   renameChannel: (channelId: string, name: string) =>
     invoke<void>("rename_channel", { channelId, name }),
+  dissolveChannel: (channelId: string) =>
+    invoke<void>("dissolve_channel", { channelId }),
   sendChannelMessage: (
     channelId: string,
     text: string,
