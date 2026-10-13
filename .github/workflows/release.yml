@@ -137,6 +137,7 @@ jobs:
           cd frontend
           npm ci
           npm run build
+          npm run check:build-syntax
 
       # 6️⃣ Build Tauri app
       - name: Build Tauri app
