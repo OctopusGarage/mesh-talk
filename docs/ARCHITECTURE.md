@@ -125,9 +125,23 @@ command names for Tauri registration. Commands clone a node handle from
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is
   re-verified (hash + signature) on ingest.
   Channel recovery asks up to three online members per turn and continues past a
-  reachable but stale member. A completed channel file remains available from a
-  receiver after local save; complete channel chunk conversations are retained
+  reachable but stale member. A completed generic channel attachment remains available from a
+  receiver after local save; complete attachment chunk conversations are retained
   newest-first within a 64 MiB ciphertext budget, then whole old files are evicted.
+  Each accepted member shares its channel log and retained channel file chunks by
+  default. A member can publish a self-signed `ChannelReplica` preference (event
+  kind 14, one-byte enabled flag). Peers show the signed status in the member list.
+  Disabling sharing hides the local channel and channel-file logs from inbound
+  reconciliation while preserving incoming pushes and the member's local history.
+  Because event-kind indices are positional in bincode, peers must run a build
+  that understands kind 14 before exchanging this preference event.
+  Locally saved channel attachments are then reclaimed instead of kept as replicas.
+  Direct-message files and inline media keep their existing completion and
+  cleanup paths.
+  A public channel's whole-set fingerprint is cached in the durable log and
+  invalidated on append or compaction, so idle anti-entropy probes do not sort
+  and hash the entire channel history every time. Invisible-mode projections
+  continue computing a fingerprint of only the events visible to that peer.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance

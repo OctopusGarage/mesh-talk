@@ -11,8 +11,8 @@
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::eventlog::sync::{
     ApplyReport, FileConsentStatus, FpRequest, FpResponse, MAX_REJECTED_DETAIL, SyncFollowup,
-    SyncRequest, SyncResponse, SyncStore, build_request, fingerprint, handle_followup,
-    handle_request_bounded, handle_response_bounded_burst,
+    SyncRequest, SyncResponse, SyncStore, build_request, handle_followup, handle_request_bounded,
+    handle_response_bounded_burst,
 };
 use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
 use bincode::Options;
@@ -411,9 +411,7 @@ impl SyncProgress {
             self.started = true;
             let (fp, local_count) = {
                 let store = store.lock().expect("store mutex not poisoned");
-                let ids = store.event_ids(&conversation);
-                let count = ids.len();
-                (fingerprint(ids), count)
+                store.fingerprint_and_len(&conversation)
             };
             channel
                 .send(&encode(&SyncWire::FpRequest(FpRequest {
@@ -664,7 +662,7 @@ where
             let conversation = req.conversation;
             let matched = {
                 let store = store.lock().expect("store mutex not poisoned");
-                fingerprint(store.event_ids(&conversation)) == req.fingerprint
+                store.fingerprint_and_len(&conversation).0 == req.fingerprint
             };
             channel
                 .send(&encode(&SyncWire::FpResponse(FpResponse { matched }))?)

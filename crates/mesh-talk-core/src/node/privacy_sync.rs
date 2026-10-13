@@ -26,6 +26,7 @@ pub(in crate::node) struct GuardedSyncStore<'a> {
     peer: PublicIdentity,
     denied: bool,
     pull_only: bool,
+    inbound: bool,
     pending_channels: HashMap<ConversationId, PendingChannel>,
     pending_bytes: usize,
 }
@@ -39,6 +40,7 @@ impl Node {
             peer: peer.clone(),
             denied: false,
             pull_only: false,
+            inbound: false,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
         })
@@ -52,9 +54,50 @@ impl Node {
             peer: peer.clone(),
             denied: false,
             pull_only: true,
+            inbound: false,
             pending_channels: HashMap::new(),
             pending_bytes: 0,
         })
+    }
+
+    pub(in crate::node) fn serve_sync_store(
+        &self,
+        peer: &PublicIdentity,
+    ) -> std::sync::Mutex<GuardedSyncStore<'_>> {
+        std::sync::Mutex::new(GuardedSyncStore {
+            node: self,
+            peer: peer.clone(),
+            denied: false,
+            pull_only: false,
+            inbound: true,
+            pending_channels: HashMap::new(),
+            pending_bytes: 0,
+        })
+    }
+
+    pub(in crate::node) fn shares_replica(&self, conversation: &ConversationId) -> bool {
+        let me = self.user_id();
+        let book = self.channels.lock().expect("channels lock not poisoned");
+        if book.state(conversation).is_some() {
+            return book.replica_enabled(*conversation, &me);
+        }
+        drop(book);
+        let manifests = self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .manifest_events(*conversation);
+        let parents: Vec<_> = {
+            let log = self.log.lock().expect("log lock not poisoned");
+            manifests
+                .iter()
+                .filter_map(|id| log.get(id).map(|event| event.conversation_id))
+                .collect()
+        };
+        let book = self.channels.lock().expect("channels lock not poisoned");
+        parents
+            .into_iter()
+            .all(|parent| book.state(&parent).is_none() || book.replica_enabled(parent, &me))
     }
 }
 impl GuardedSyncStore<'_> {
@@ -680,6 +723,9 @@ impl GuardedSyncStore<'_> {
         allowed
     }
     fn visible(&self, conversation: &ConversationId) -> Vec<Event> {
+        if self.inbound && !self.node.shares_replica(conversation) {
+            return Vec::new();
+        }
         let guard = self
             .node
             .privacy
@@ -695,6 +741,19 @@ impl GuardedSyncStore<'_> {
             .into_iter()
             .cloned()
             .collect();
+        if guard
+            .as_ref()
+            .is_none_or(|state| !state.policy.snapshot().invisible)
+            && self
+                .node
+                .channels
+                .lock()
+                .expect("channels lock not poisoned")
+                .state(conversation)
+                .is_some()
+        {
+            return events;
+        }
         // Local erase cancels receipt retries, while preserving encrypted chat
         // history's established non-recall semantics. Apply this in public mode
         // too, so dormant erased controls cannot be advertised again.
@@ -747,6 +806,35 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
+    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+        if (!self.inbound || self.node.shares_replica(conversation))
+            && self
+                .node
+                .privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned")
+                .as_ref()
+                .is_none_or(|state| !state.policy.snapshot().invisible)
+            && self
+                .node
+                .channels
+                .lock()
+                .expect("channels lock not poisoned")
+                .state(conversation)
+                .is_some()
+        {
+            return self
+                .node
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .fingerprint_and_len(conversation);
+        }
+        let ids = self.event_ids(conversation);
+        let len = ids.len();
+        (crate::eventlog::sync::fingerprint(ids), len)
+    }
     fn file_consent(
         &self,
         file: &ConversationId,

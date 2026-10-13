@@ -1824,6 +1824,54 @@ async fn channel_member_recovers_missed_message_from_peer() {
     bob_task.abort();
 }
 
+#[tokio::test]
+async fn signed_channel_replica_preference_survives_restart_and_ignores_outsiders() {
+    let identity = DeviceIdentity::generate();
+    let secrets = identity.secret_bytes();
+    let dir = tempfile::tempdir().unwrap();
+    let open = |identity| {
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        Node::open(
+            identity,
+            Arc::new(Mutex::new(Roster::default())),
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join("messages.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open(identity);
+    let channel = node.create_channel("replicas", vec![]).await.unwrap();
+    assert!(node.channel_replica_enabled(channel, &node.user_id()));
+    node.set_channel_replica_enabled(channel, false)
+        .await
+        .unwrap();
+    let outsider = DeviceIdentity::generate();
+    let (parents, lamport) = node.log.lock().unwrap().prepare(&channel);
+    let forged = Event::new(
+        &outsider,
+        channel,
+        1,
+        parents,
+        lamport,
+        1,
+        EventKind::ChannelReplica,
+        vec![0],
+    );
+    node.log.lock().unwrap().append(forged).unwrap();
+    node.process_channel(channel);
+    assert!(node.channel_replica_enabled(channel, &outsider.public().user_id()));
+    drop(node);
+    let reopened = open(DeviceIdentity::from_secret_bytes(secrets.0, secrets.1));
+    assert!(!reopened.channel_replica_enabled(channel, &reopened.user_id()));
+    assert!(reopened.channel_replica_enabled(channel, &outsider.public().user_id()));
+}
+
 /// In a large group Alice knows only Bob's address, while Dana knows no route
 /// at all. Bob must forward the channel and later message after receiving them.
 #[tokio::test]
@@ -1895,6 +1943,46 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
         .expect("Bob forwarded the message to Dana")
         .expect("Dana's channel stream open");
     assert_eq!(forwarded.text, b"via Bob");
+    add_peer(
+        &dana_node.roster,
+        &bob_node.identity,
+        "Bob",
+        bob_port,
+        &dana_node.user_id(),
+    );
+
+    bob_node
+        .set_channel_replica_enabled(channel, false)
+        .await
+        .unwrap();
+    assert!(!bob_node.channel_replica_enabled(channel, &bob_node.user_id()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while dana_node.channel_replica_enabled(channel, &bob_node.user_id()) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Dana sees Bob's signed replica preference");
+    alice_node
+        .send_channel_message(channel, b"Bob does not relay")
+        .await
+        .unwrap();
+    dana_node.pull_one_channel_from_member(0).await;
+    assert_eq!(dana_node.channel_history(channel, 10).len(), 1);
+
+    // Bob resumes sharing, but has no direct address for Dana: only Dana's pull
+    // from Bob can deliver the missed second message.
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&dana_node.identity.public());
+    bob_node
+        .set_channel_replica_enabled(channel, true)
+        .await
+        .unwrap();
+    dana_node.pull_one_channel_from_member(0).await;
+    assert_eq!(dana_node.channel_history(channel, 10).len(), 2);
     bob_task.abort();
     dana_task.abort();
 }
@@ -3860,6 +3948,11 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
 
     alice_task.abort();
     alice_task.await.unwrap_err();
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&alice_node.identity.public());
     carol_node
         .roster
         .lock()
@@ -3873,6 +3966,16 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         &carol_id,
     );
     carol_node.decide_attachment(file, true).unwrap();
+    bob_node
+        .set_channel_replica_enabled(channel, false)
+        .await
+        .unwrap();
+    carol_node.pull_pending_files().await;
+    assert_eq!(carol_node.file_progress(file).unwrap().done, 0);
+    bob_node
+        .set_channel_replica_enabled(channel, true)
+        .await
+        .unwrap();
     let carol_dest = dir.path().join("carol.bin");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

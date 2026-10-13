@@ -121,6 +121,13 @@ pub struct ApplyReport {
 /// The data operations sync needs from an event store. Implemented by both the
 /// in-memory [`EventLog`] and the durable `PersistentEventLog`.
 pub trait SyncStore {
+    /// Digest and size of the currently visible event set. Implementations with
+    /// unfiltered durable logs may cache this across idle recovery ticks.
+    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+        let ids = self.event_ids(conversation);
+        let len = ids.len();
+        (fingerprint(ids), len)
+    }
     /// The authenticated peer may transfer chunks of this exact offered file.
     /// Stores without an attachment policy fail closed for this optional query.
     fn file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> FileConsentStatus {

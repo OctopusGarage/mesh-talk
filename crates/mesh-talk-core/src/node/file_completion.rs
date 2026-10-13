@@ -103,7 +103,7 @@ impl Node {
         if !committed && !self.untracked_file_reclaimable(conversation, &store) {
             return false;
         }
-        if !self.retained_file_rows(conversation).is_empty() {
+        if self.is_channel_attachment(conversation) && self.shares_replica(&conversation) {
             self.prune_channel_file_replicas();
             return true;
         }
@@ -113,6 +113,26 @@ impl Node {
             .expect("log lock not poisoned")
             .drop_conversation(&conversation);
         true
+    }
+
+    fn is_channel_attachment(&self, conversation: ConversationId) -> bool {
+        if self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .manifest(&conversation)
+            .and_then(|manifest| manifest.kind())
+            != Some(crate::file::FileKind::File)
+        {
+            return false;
+        }
+        self.retained_file_rows(conversation).iter().any(|row| {
+            self.channels
+                .lock()
+                .expect("channels lock not poisoned")
+                .state(&row.conversation)
+                .is_some()
+        })
     }
 
     /// Keep complete channel files newest-first within a fixed local storage budget.
@@ -127,6 +147,9 @@ impl Node {
             .file_convs();
         let mut replicas = Vec::new();
         for file in file_convs {
+            if !self.is_channel_attachment(file) {
+                continue;
+            }
             let rows = self.retained_file_rows(file);
             if rows.is_empty() {
                 continue;

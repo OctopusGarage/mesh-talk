@@ -83,6 +83,30 @@ impl Node {
             .count()
     }
 
+    /// Publish this device's signed per-channel replica preference. Receiving
+    /// messages continues normally; when disabled, inbound peers cannot fetch
+    /// this device's channel log or file chunks as a recovery source.
+    pub async fn set_channel_replica_enabled(
+        &self,
+        channel: ConversationId,
+        enabled: bool,
+    ) -> Result<(), NodeError> {
+        let members = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            let state = book
+                .state(&channel)
+                .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+            if !state.is_accepted_member(&self.user_id()) || state.is_dissolved() {
+                return Err(NodeError::Channel("not an active channel member".into()));
+            }
+            state.members().to_vec()
+        };
+        self.append_event(channel, EventKind::ChannelReplica, vec![u8::from(enabled)])?;
+        self.process_channel(channel);
+        self.distribute_channel(channel, &members).await;
+        Ok(())
+    }
+
     /// Close a channel for every member while retaining each device's local history.
     pub async fn dissolve_channel(&self, channel: ConversationId) -> Result<(), NodeError> {
         let members = {

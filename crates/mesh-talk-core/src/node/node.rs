@@ -784,6 +784,13 @@ impl Node {
             .unwrap_or_default()
     }
 
+    pub fn channel_replica_enabled(&self, channel: ConversationId, member: &str) -> bool {
+        self.channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .replica_enabled(channel, member)
+    }
+
     pub fn channel_pending_members(&self, channel: ConversationId) -> Vec<String> {
         let book = self.channels.lock().expect("channels mutex not poisoned");
         book.state(&channel)

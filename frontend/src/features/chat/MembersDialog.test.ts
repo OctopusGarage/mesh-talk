@@ -8,7 +8,12 @@ import "@/lib/i18n";
 const { chatState, avatars, dialog } = vi.hoisted(() => ({
   chatState: {
     members: [
-      { user_id: "owner-device", account_id: "owner-account", name: "Me" },
+      {
+        user_id: "owner-device",
+        account_id: "owner-account",
+        name: "Me",
+        replica_enabled: true,
+      },
     ],
     channelOwner: "owner-device",
     active: { kind: "channel", id: "channel", name: "Group" },
@@ -91,6 +96,25 @@ it("shows an unjoined peer's account avatar in Add a peer", () => {
 it("offers dissolution to the owner of an active channel", () => {
   const html = renderToStaticMarkup(createElement(MembersDialog));
   expect(html).toContain('data-testid="dissolve-channel-trigger"');
+});
+
+it("shows a member's signed replica opt-out", () => {
+  const previous = chatState.members;
+  chatState.members = [
+    ...previous,
+    {
+      user_id: "peer-device",
+      account_id: "peer-account",
+      name: "Alice",
+      replica_enabled: false,
+    },
+  ];
+  try {
+    const html = renderToStaticMarkup(createElement(MembersDialog));
+    expect(html).toContain('data-testid="member-replica-disabled-peer-device"');
+  } finally {
+    chatState.members = previous;
+  }
 });
 
 it("does not offer dissolution after the channel is closed", () => {

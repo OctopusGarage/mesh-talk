@@ -148,6 +148,8 @@ export const chat = {
     invoke<string>("create_channel", { name, memberIds }),
   channelMembers: (channelId: string) =>
     invoke<ChannelMembersInfo>("channel_members", { channelId }),
+  setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>
+    invoke<void>("set_channel_replica_enabled", { channelId, enabled }),
   channelActivity: (channelId: string) =>
     invoke<ChannelActivityInfo[]>("channel_activity", { channelId }),
   addChannelMember: (channelId: string, memberId: string) =>

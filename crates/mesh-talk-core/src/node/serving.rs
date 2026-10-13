@@ -135,7 +135,7 @@ impl Node {
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
     pub async fn serve_connection(&self, mut channel: SecureChannel<TcpStream>) {
-        let store = self.sync_store(channel.peer_identity());
+        let store = self.serve_sync_store(channel.peer_identity());
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
         let first = match tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {

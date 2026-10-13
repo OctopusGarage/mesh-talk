@@ -75,6 +75,7 @@ pub async fn channel_members(
             };
             ChannelMemberInfo {
                 pending: pending.contains(&user_id),
+                replica_enabled: rt.channel_replica_enabled(channel, &user_id),
                 user_id,
                 name,
                 account_id,
@@ -85,6 +86,19 @@ pub async fn channel_members(
         owner: rt.channel_owner(channel),
         members,
     })
+}
+
+#[tauri::command]
+pub async fn set_channel_replica_enabled(
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    enabled: bool,
+) -> Result<(), CommandError> {
+    let channel = parse_channel_id(&channel_id)?;
+    let node = state.node_handle().await?;
+    node.set_channel_replica_enabled(channel, enabled)
+        .await
+        .map_err(CommandError::from)
 }
 
 #[derive(Serialize)]
