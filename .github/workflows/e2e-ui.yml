@@ -101,6 +101,8 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - name: Verify lite build has no bundled packs
         run: npm run build:lite && node ../scripts/release/check-variant-assets.mjs lite
+      - name: Check lite JavaScript for macOS 12 WKWebView
+        run: npm run check:build-syntax
       - name: Prepare coverable line map
         run: npm run test:coverage
       - name: Run lite sticker and installation flows
