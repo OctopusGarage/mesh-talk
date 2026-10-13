@@ -37,6 +37,35 @@ it("uses the channel dissolution IPC command with its channel id", async () => {
   });
 });
 
+it("maps channel ownership transfer to the desktop command", async () => {
+  await chat.transferChannelOwner("channel", "next-device");
+  expect(invoke).toHaveBeenCalledWith("transfer_channel_owner", {
+    channelId: "channel",
+    memberId: "next-device",
+  });
+});
+
+it("maps channel leave to the desktop command", async () => {
+  await chat.leaveChannel("channel");
+  expect(invoke).toHaveBeenCalledWith("leave_channel", {
+    channelId: "channel",
+  });
+});
+
+it("maps invitation acceptance to the desktop command", async () => {
+  await chat.acceptChannelInvite("channel");
+  expect(invoke).toHaveBeenCalledWith("accept_channel_invite", {
+    channelId: "channel",
+  });
+});
+
+it("loads the signed channel activity feed", async () => {
+  await chat.channelActivity("channel");
+  expect(invoke).toHaveBeenCalledWith("channel_activity", {
+    channelId: "channel",
+  });
+});
+
 describe("account contact metadata command mapping", () => {
   it("binds pin, alias, and avatar writes to the explicit owner", async () => {
     await favorites.setFavorite("alice", "peer", true);
@@ -50,6 +79,12 @@ describe("account contact metadata command mapping", () => {
       owner: "alice",
       id: "peer",
       alias: "Friend",
+    });
+    await favorites.setChannelHidden("alice", "channel", true);
+    expect(invoke).toHaveBeenCalledWith("set_channel_hidden", {
+      owner: "alice",
+      id: "channel",
+      hidden: true,
     });
     await avatars.set("alice", "peer", "data:image/png;base64,AA==");
     expect(invoke).toHaveBeenCalledWith("set_avatar", {

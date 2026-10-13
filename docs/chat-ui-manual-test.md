@@ -53,9 +53,15 @@ HOME=/tmp/mesh-po cargo run -p mesh-talk-core --bin mesh-talk-node -- \
    **Composer** and send: the bubble appears immediately on the sender (optimistic) and
    shortly after on the recipient (live). Reply back the other way.
    - `Enter` sends; `Shift+Enter` inserts a newline. URLs render as clickable links.
-4. **Channel.** Use **New channel**, confirm peer photos and device IDs in its picker, add
-   peers, and exchange messages. Open **Members**, try its keyboard navigation with a large
-   roster, and confirm opening a member's DM returns focus to the conversation.
+4. **Channel.** Use **New channel**, confirm peer photos and device IDs in its picker, and
+   invite a peer. On the peer device, confirm the channel is marked as a pending invitation,
+   cannot compose, and offers **Accept invitation** and **Decline**. Accept, then exchange
+   messages; the invitee must not see messages sent before the acceptance was observed.
+   Open **Members** and confirm accepted/pending status, activity, and keyboard navigation.
+   Transfer ownership to an accepted member, then leave from the former owner's device;
+   its existing history should remain read-only. Hide the channel from the sidebar and
+   restore it from **Hidden channels**; this must not change group membership.
+   Confirm opening a member's DM returns focus to the conversation.
 5. **React.** Hover a message and add an emoji reaction; the chip appears for both sides.
 6. **@-mention.** In a channel, type `@` and pick a member from the autocomplete; the
    mention is highlighted, and the mentioned user sees a "mentioned you" marker.

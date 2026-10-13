@@ -22,6 +22,8 @@ export const favorites = {
   /** Set or clear (null/blank) a contact's custom alias. */
   setAlias: (owner: string, id: string, alias: string | null) =>
     invoke<void>("set_alias", { owner, id, alias }),
+  setChannelHidden: (owner: string, id: string, hidden: boolean) =>
+    invoke<void>("set_channel_hidden", { owner, id, hidden }),
 };
 
 export const avatars = {

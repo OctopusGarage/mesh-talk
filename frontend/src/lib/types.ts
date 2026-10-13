@@ -63,6 +63,21 @@ export interface ChannelMemberInfo {
   user_id: string;
   name: string;
   account_id?: string | null;
+  pending?: boolean;
+}
+
+export interface ChannelActivityInfo {
+  kind:
+    | "created"
+    | "joined"
+    | "removed"
+    | "renamed"
+    | "transferred"
+    | "left"
+    | "accepted";
+  actor: string;
+  target: string | null;
+  wall_clock: number;
 }
 
 // A channel's membership plus its owner. The owner is the only principal allowed to
@@ -98,6 +113,8 @@ export interface ChannelInfo {
   owner: string;
   archived?: boolean;
   dissolved?: boolean;
+  left?: boolean;
+  pending_invite?: boolean;
 }
 
 export interface SearchHitInfo {
@@ -234,6 +251,7 @@ export interface FavoriteInfo {
   pinned: boolean;
   /** A user-set alias that overrides the announced name (null = use announced name). */
   custom_alias: string | null;
+  hidden?: boolean;
 }
 
 // --- Tauri events (src-tauri/src/events.rs) ---

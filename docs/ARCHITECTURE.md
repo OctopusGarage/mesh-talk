@@ -72,7 +72,38 @@ command names for Tauri registration. Commands clone a node handle from
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
   persisted so a restarted node can resume sending. An owner-authored `ChannelDissolve`
   event closes a channel for all members without erasing local history; closed channels
-  remain visible as read-only history and reject new local events.
+  remain visible as read-only history and reject new local events. Desktop-created
+  groups mark the
+  genesis and later invitations with `MTCH2`; invited devices remain pending until
+  they append a self-signed `ChannelAccept`. The receiver surfaces content only
+  when its signed event causally descends from acceptance, and an unaccepted member
+  cannot send or inherit ownership. This cutoff also applies to channel file
+  manifests, reactions, and recalls.
+  Legacy unmarked channels retain their original auto-join semantics. The current
+  owner alone may add/remove members or sign `ChannelOwnerTransfer`, and only an
+  accepted current member can become owner. A non-owner can append a self-signed
+  `ChannelLeave`; this advances the epoch and leaves its local history read-only.
+  A concurrent owner snapshot cannot restore a departed member; re-invitation
+  requires the snapshot to causally descend from the signed leave event.
+  Invisible-mode admission and sync projection replay those same signed
+  membership controls before granting a group route.
+  Departure, acceptance, and ownership-transfer delivery are retried to channel
+  members after an offline first push (bounded batches).
+  Membership is keyed to the device identity, so another device of the same account
+  must be invited separately. Restored groups remain read-only archives until that
+  new device is invited. In Invisible mode, a manually trusted carrier may send
+  a new channel's earlier signed ancestry, but the receiving sync connection
+  stages it only in bounded memory (8 MiB). It is never advertised as durable
+  custody and disappears on disconnect. A signed, causally valid invitation
+  naming this device unlocks one atomic encrypted-log commit of the authorized
+  ancestry and invitation. Group content still waits for explicit acceptance.
+  A trusted post office may carry that ancestry without being a group member.
+  After a signed removal, the removed device may retain the removal notice but
+  cannot ingest later group content through a manually trusted member.
+  If a channel has more than 8 MiB of ancestry before the invitation, this
+  direct sync is rejected instead of persisting uninvited history; the inviter
+  must create a fresh channel or a future protocol revision must carry a compact
+  invitation proof ahead of the backlog.
 - **Multi-device** — `DmEnvelope{route, msg_id, body}` (magic `MTDE1`) carries
   sender/recipient *account* routing inside the ciphertext; `send_to_account` fans a
   per-device ratcheted copy to every device of the target account + self-syncs to own

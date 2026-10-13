@@ -774,12 +774,26 @@ impl NodeRuntime {
         self.node.channel_members(channel)
     }
 
+    pub fn channel_pending_members(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Vec<String> {
+        self.node.channel_pending_members(channel)
+    }
+
+    pub fn channel_activity(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Vec<crate::node::ChannelActivity> {
+        self.node.channel_activity(channel)
+    }
+
     /// Resolve a member's certified account even after discovery expires.
     pub fn account_id_for_device(&self, device: &PublicIdentity) -> Option<String> {
         self.node.account_id_for_device(device)
     }
 
-    /// The owner (creator) of a channel — the only principal allowed to change membership.
+    /// The current owner of a channel.
     pub fn channel_owner(&self, channel: crate::eventlog::event::ConversationId) -> String {
         self.node.channel_owner(channel)
     }

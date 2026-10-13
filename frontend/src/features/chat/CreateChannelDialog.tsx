@@ -50,7 +50,7 @@ export function CreateChannelDialog() {
 
   const submit = async () => {
     const ids = peers.filter((p) => selected[p.user_id]).map((p) => p.user_id);
-    if (!name.trim()) return;
+    if (!name.trim() || ids.length === 0) return;
     setCreateError(null);
     setBusy(true);
     try {
@@ -185,7 +185,10 @@ export function CreateChannelDialog() {
           >
             {t("common.cancel")}
           </Button>
-          <Button disabled={!name.trim() || busy} onClick={submit}>
+          <Button
+            disabled={!name.trim() || selectedCount === 0 || busy}
+            onClick={submit}
+          >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
             {t("common.create")}
           </Button>

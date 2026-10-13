@@ -80,20 +80,24 @@ function channelConv(c: ChannelInfo, name: string): Conversation {
 function Row({
   conv,
   subtitle,
+  prioritizeSubtitle,
   channel,
   pinned,
   onTogglePin,
   onRename,
+  onHide,
   navIndex,
   listPosition,
   listSize,
 }: {
   conv: Conversation;
   subtitle: string;
+  prioritizeSubtitle?: boolean;
   channel?: boolean;
   pinned: boolean;
   onTogglePin: () => void;
   onRename: () => void;
+  onHide?: () => void;
   navIndex?: number;
   listPosition: number;
   listSize: number;
@@ -111,10 +115,11 @@ function Row({
   const status = presenceStatus(presence);
   const latest = history?.[history.length - 1];
   const lastTime = latest ? formatTime(latest.wallClock) : null;
-  const summary =
-    latest?.text ||
-    latest?.file?.name ||
-    (channel ? subtitle : presenceLabel(presence, t));
+  const summary = prioritizeSubtitle
+    ? subtitle
+    : latest?.text ||
+      latest?.file?.name ||
+      (channel ? subtitle : presenceLabel(presence, t));
 
   const row = (
     <div
@@ -229,6 +234,18 @@ function Row({
             )}
             {t(pinned ? "sidebar.unpin" : "sidebar.pin")}
           </button>
+          {channel && onHide && (
+            <button
+              type="button"
+              onClick={() => {
+                setActionsOpen(false);
+                onHide();
+              }}
+              className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {t("sidebar.hideChannel")}
+            </button>
+          )}
         </PopoverContent>
       </Popover>
     </div>
@@ -497,6 +514,7 @@ export function Sidebar() {
   // The active theme's crest (a brand theme) replaces the app mark in the footer, so the
   // chosen club/national/Messi identity is always present without shouting.
   const togglePinned = useChat((s) => s.togglePinned);
+  const setChannelHidden = useChat((s) => s.setChannelHidden);
   const setAlias = useChat((s) => s.setAlias);
   const renameChannel = useChat((s) => s.renameChannel);
   const myId = useChat((s) => s.myId);
@@ -687,6 +705,7 @@ export function Sidebar() {
     unpinnedAccounts,
     pinnedChannels,
     unpinnedChannels,
+    hiddenChannels,
     hasPinned,
   } = useMemo(() => {
     const accountRows = accounts.map((a) => {
@@ -713,23 +732,39 @@ export function Sidebar() {
           ? t("conversation.dissolvedChannel")
           : c.archived
             ? t("conversation.archivedChannel")
-            : t("conversation.members", { count: c.member_count }),
+            : c.left
+              ? t("conversation.leftChannel")
+              : c.pending_invite
+                ? t("conversation.pendingInvite")
+                : t("conversation.members", { count: c.member_count }),
+        prioritizeSubtitle: !!(
+          c.dissolved ||
+          c.archived ||
+          c.left ||
+          c.pending_invite
+        ),
       };
     });
 
     const pinnedAccounts = accountRows.filter((r) => r.pinned);
     const unpinnedAccounts = accountRows.filter((r) => !r.pinned);
-    const pinnedChannels = channelRows.filter((r) => r.pinned);
-    const unpinnedChannels = channelRows.filter((r) => !r.pinned);
+    const hiddenChannels = channelRows.filter((r) => favorites[r.id]?.hidden);
+    const pinnedChannels = channelRows.filter(
+      (r) => r.pinned && !favorites[r.id]?.hidden,
+    );
+    const unpinnedChannels = channelRows.filter(
+      (r) => !r.pinned && !favorites[r.id]?.hidden,
+    );
     return {
       pinnedAccounts,
       unpinnedAccounts,
       pinnedChannels,
       unpinnedChannels,
+      hiddenChannels,
       hasPinned: pinnedAccounts.length + pinnedChannels.length > 0,
     };
   }, [accounts, channels, favorites, t]);
-  const listSize = accounts.length + channels.length;
+  const listSize = accounts.length + channels.length - hiddenChannels.length;
   const pinnedCount = pinnedAccounts.length + pinnedChannels.length;
   const pinnedRows = useMemo(
     () => [
@@ -737,6 +772,7 @@ export function Sidebar() {
         id: r.id,
         conv: r.conv,
         subtitle: r.subtitle,
+        prioritizeSubtitle: false,
         channel: false,
         renameName: r.a.names[0] || shortId(r.id),
       })),
@@ -744,6 +780,7 @@ export function Sidebar() {
         id: r.id,
         conv: r.conv,
         subtitle: r.subtitle,
+        prioritizeSubtitle: r.prioritizeSubtitle,
         channel: true,
         renameName: r.c.name,
       })),
@@ -832,6 +869,7 @@ export function Sidebar() {
                   <Row
                     conv={r.conv}
                     subtitle={r.subtitle}
+                    prioritizeSubtitle={r.prioritizeSubtitle}
                     channel={r.channel}
                     pinned
                     navIndex={index}
@@ -839,6 +877,11 @@ export function Sidebar() {
                     listSize={listSize}
                     onTogglePin={() => void togglePinned(r.id, false)}
                     onRename={() => startRename(r.id, r.renameName)}
+                    onHide={
+                      r.channel
+                        ? () => void setChannelHidden(r.id, true)
+                        : undefined
+                    }
                   />
                 )}
               />
@@ -848,12 +891,18 @@ export function Sidebar() {
                   key={r.id}
                   conv={r.conv}
                   subtitle={r.subtitle}
+                  prioritizeSubtitle={r.prioritizeSubtitle}
                   channel={r.channel}
                   pinned
                   listPosition={index + 1}
                   listSize={listSize}
                   onTogglePin={() => void togglePinned(r.id, false)}
                   onRename={() => startRename(r.id, r.renameName)}
+                  onHide={
+                    r.channel
+                      ? () => void setChannelHidden(r.id, true)
+                      : undefined
+                  }
                 />
               ))
             )}
@@ -957,6 +1006,7 @@ export function Sidebar() {
               <Row
                 conv={r.conv}
                 subtitle={r.subtitle}
+                prioritizeSubtitle={r.prioritizeSubtitle}
                 channel
                 pinned={false}
                 navIndex={index}
@@ -964,6 +1014,7 @@ export function Sidebar() {
                 listSize={listSize}
                 onTogglePin={() => void togglePinned(r.id, true)}
                 onRename={() => startRename(r.id, r.c.name)}
+                onHide={() => void setChannelHidden(r.id, true)}
               />
             )}
           />
@@ -973,14 +1024,42 @@ export function Sidebar() {
               key={r.id}
               conv={r.conv}
               subtitle={r.subtitle}
+              prioritizeSubtitle={r.prioritizeSubtitle}
               channel
               pinned={false}
               listPosition={pinnedCount + unpinnedAccounts.length + index + 1}
               listSize={listSize}
               onTogglePin={() => void togglePinned(r.id, true)}
               onRename={() => startRename(r.id, r.c.name)}
+              onHide={() => void setChannelHidden(r.id, true)}
             />
           ))
+        )}
+        {hiddenChannels.length > 0 && (
+          <details className="px-2.5 pt-3 text-xs text-muted-foreground">
+            <summary className="cursor-pointer rounded-md py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              {t("sidebar.hiddenChannels", { count: hiddenChannels.length })}
+            </summary>
+            <div className="space-y-1 pb-2">
+              {hiddenChannels.map((row) => (
+                <div
+                  key={row.id}
+                  className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5"
+                >
+                  <span className="min-w-0 truncate" title={row.conv.name}>
+                    {row.conv.name}
+                  </span>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md px-2 py-1 text-signal hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() => void setChannelHidden(row.id, false)}
+                  >
+                    {t("sidebar.restoreChannel")}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </details>
         )}
       </nav>
 

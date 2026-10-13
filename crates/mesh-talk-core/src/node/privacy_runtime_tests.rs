@@ -1,4 +1,5 @@
 use super::*;
+use crate::eventlog::EventKind;
 use crate::{identity::device::DeviceIdentity, node::transport::dial, transport::TransportError};
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -1220,6 +1221,371 @@ async fn allowed_carrier_cannot_create_a_group_owned_by_an_unknown_author() {
 }
 
 #[tokio::test]
+async fn manually_allowed_invisible_device_can_receive_later_channel_invitation() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let (carol, _) = node(&dir.path().join("carol"));
+    carol
+        .configure_privacy(
+            &dir.path().join("carol"),
+            "pw",
+            &carol.signed_announce("Carol", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    carol.roster.lock().unwrap().update(
+        &alice.signed_announce("Alice", 1234),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &carol.user_id(),
+    );
+    carol.set_allowed(&alice.account_id(), true).await.unwrap();
+    carol.set_invisible(true).await.unwrap();
+    let channel = alice
+        .create_channel_invited("Team", vec![bob.identity.public()])
+        .await
+        .unwrap();
+    alice
+        .add_channel_member(channel, carol.identity.public())
+        .await
+        .unwrap();
+    let events: Vec<_> = alice
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .cloned()
+        .collect();
+    let store = carol.sync_store(&alice.identity.public());
+    for event in events {
+        store
+            .lock()
+            .unwrap()
+            .ingest(event)
+            .expect("approved inviter's channel ancestry syncs");
+    }
+    carol.process_channel(channel);
+    assert!(
+        carol
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == channel && summary.pending_invite)
+    );
+}
+
+#[tokio::test]
+async fn invisible_late_invitation_can_arrive_through_an_allowed_post_office() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (relay, _) = node(&dir.path().join("relay"));
+    let (carol, _) = node(&dir.path().join("carol"));
+    carol
+        .configure_privacy(
+            &dir.path().join("carol"),
+            "pw",
+            &carol.signed_announce("Carol", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let relay_proof =
+        Announce::new_post_office_with_account(&relay.identity, &relay.account, "Relay", 1234);
+    for (peer, proof) in [
+        (&alice, alice.signed_announce("Alice", 1234)),
+        (&relay, relay_proof),
+    ] {
+        carol.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &carol.user_id(),
+        );
+        carol.set_allowed(&peer.account_id(), true).await.unwrap();
+    }
+    carol.set_invisible(true).await.unwrap();
+    let group = alice.create_channel_invited("Team", vec![]).await.unwrap();
+    alice
+        .add_channel_member(group, carol.identity.public())
+        .await
+        .unwrap();
+    let events: Vec<_> = alice
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .cloned()
+        .collect();
+    let store = carol.sync_store(&relay.identity.public());
+    for event in events {
+        store.lock().unwrap().ingest(event).unwrap();
+    }
+    carol.process_channel(group);
+    assert!(
+        carol
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == group && summary.pending_invite)
+    );
+}
+
+#[tokio::test]
+async fn manually_allowed_member_cannot_keep_syncing_after_recipient_is_removed() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let (carol, _) = node(&dir.path().join("carol"));
+    carol
+        .configure_privacy(
+            &dir.path().join("carol"),
+            "pw",
+            &carol.signed_announce("Carol", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    for peer in [&alice, &bob] {
+        carol.roster.lock().unwrap().update(
+            &peer.signed_announce("Peer", 1234),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &carol.user_id(),
+        );
+        carol.set_allowed(&peer.account_id(), true).await.unwrap();
+    }
+    carol.set_invisible(true).await.unwrap();
+    let group = alice
+        .create_channel("Team", vec![bob.identity.public(), carol.identity.public()])
+        .await
+        .unwrap();
+    let genesis = alice.log.lock().unwrap().events(&group)[0].clone();
+    let removal = crate::eventlog::Event::new(
+        &alice.identity,
+        group,
+        2,
+        vec![genesis.id],
+        2,
+        1,
+        EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Team".into(),
+            members: vec![alice.identity.public(), bob.identity.public()],
+            epoch: 1,
+            owner: alice.user_id(),
+        }
+        .encode(),
+    );
+    let later = crate::eventlog::Event::new(
+        &bob.identity,
+        group,
+        1,
+        vec![removal.id],
+        3,
+        1,
+        EventKind::Message,
+        vec![1, 2, 3],
+    );
+    let store = carol.sync_store(&bob.identity.public());
+    store.lock().unwrap().ingest(genesis).unwrap();
+    store.lock().unwrap().ingest(removal).unwrap();
+    assert!(store.lock().unwrap().ingest(later.clone()).is_err());
+    assert!(!carol.log.lock().unwrap().has(&later.id));
+}
+
+#[tokio::test]
+async fn invisible_late_invitee_follows_an_accepted_owner_transfer() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let (carol, _) = node(&dir.path().join("carol"));
+    carol
+        .configure_privacy(
+            &dir.path().join("carol"),
+            "pw",
+            &carol.signed_announce("Carol", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    for peer in [&alice, &bob] {
+        carol.roster.lock().unwrap().update(
+            &peer.signed_announce("Peer", 1234),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &carol.user_id(),
+        );
+        carol.set_allowed(&peer.account_id(), true).await.unwrap();
+    }
+    carol.set_invisible(true).await.unwrap();
+    let channel = alice
+        .create_channel_invited("Team", vec![bob.identity.public()])
+        .await
+        .unwrap();
+    let (root, lamport) = {
+        let log = alice.log.lock().unwrap();
+        let events = log.events(&channel);
+        let last = events.last().unwrap();
+        (last.id, last.lamport)
+    };
+    let accepted = crate::eventlog::Event::new(
+        &bob.identity,
+        channel,
+        1,
+        vec![root],
+        lamport + 1,
+        1,
+        EventKind::ChannelAccept,
+        vec![],
+    );
+    alice.log.lock().unwrap().append(accepted).unwrap();
+    alice
+        .append_event(
+            channel,
+            EventKind::ChannelOwnerTransfer,
+            bob.user_id().into_bytes(),
+        )
+        .unwrap();
+    let (transfer, lamport) = {
+        let log = alice.log.lock().unwrap();
+        let events = log.events(&channel);
+        let last = events.last().unwrap();
+        (last.id, last.lamport)
+    };
+    let invite = crate::eventlog::Event::new(
+        &bob.identity,
+        channel,
+        2,
+        vec![transfer],
+        lamport + 1,
+        1,
+        EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Team".into(),
+            members: vec![
+                alice.identity.public(),
+                bob.identity.public(),
+                carol.identity.public(),
+            ],
+            epoch: 1,
+            owner: bob.user_id(),
+        }
+        .encode_invitation(),
+    );
+    alice.log.lock().unwrap().append(invite).unwrap();
+    let mut events: Vec<_> = alice
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .cloned()
+        .collect();
+    let invitation = events.pop().unwrap();
+    assert_eq!(invitation.kind, EventKind::MembershipChange);
+    let store = carol.sync_store(&bob.identity.public());
+    for event in events {
+        let kind = event.kind;
+        let seq = event.seq;
+        store
+            .lock()
+            .unwrap()
+            .ingest(event)
+            .unwrap_or_else(|error| panic!("{kind:?} seq {seq} ancestry sync failed: {error}"));
+    }
+    assert!(
+        carol.log.lock().unwrap().events(&channel).is_empty(),
+        "channel ancestry must stay ephemeral until a valid invitation arrives"
+    );
+    carol.process_channel(channel);
+    assert!(carol.list_channels().is_empty());
+    store.lock().unwrap().ingest(invitation).unwrap();
+    assert!(!carol.log.lock().unwrap().events(&channel).is_empty());
+    carol.process_channel(channel);
+    assert!(
+        carol
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == channel && summary.pending_invite)
+    );
+}
+
+#[tokio::test]
+async fn invisible_sync_discards_uninvited_history_and_unowned_invitation() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let (carol, _) = node(&dir.path().join("carol"));
+    carol
+        .configure_privacy(
+            &dir.path().join("carol"),
+            "pw",
+            &carol.signed_announce("Carol", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    for peer in [&alice, &bob] {
+        carol.roster.lock().unwrap().update(
+            &peer.signed_announce("Peer", 1234),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &carol.user_id(),
+        );
+        carol.set_allowed(&peer.account_id(), true).await.unwrap();
+    }
+    carol.set_invisible(true).await.unwrap();
+    let channel = alice
+        .create_channel_invited("Unrelated", vec![bob.identity.public()])
+        .await
+        .unwrap();
+    let genesis = alice.log.lock().unwrap().events(&channel)[0].clone();
+    let message = crate::eventlog::Event::new(
+        &alice.identity,
+        channel,
+        2,
+        vec![genesis.id],
+        2,
+        1,
+        EventKind::Message,
+        vec![1, 2, 3],
+    );
+    let forged_invite = crate::eventlog::Event::new(
+        &bob.identity,
+        channel,
+        1,
+        vec![message.id],
+        3,
+        1,
+        EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Unrelated".into(),
+            members: vec![
+                alice.identity.public(),
+                bob.identity.public(),
+                carol.identity.public(),
+            ],
+            epoch: 1,
+            owner: bob.user_id(),
+        }
+        .encode_invitation(),
+    );
+    let store = carol.sync_store(&bob.identity.public());
+    for event in [genesis.clone(), message, forged_invite] {
+        store.lock().unwrap().ingest(event).unwrap();
+    }
+    assert_eq!(store.lock().unwrap().event_ids(&channel).len(), 3);
+    assert!(!store.lock().unwrap().durable_have(&channel, &genesis.id));
+    assert!(carol.log.lock().unwrap().events(&channel).is_empty());
+    drop(store);
+    assert!(
+        carol
+            .sync_store(&bob.identity.public())
+            .lock()
+            .unwrap()
+            .event_ids(&channel)
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn projected_group_removal_takes_effect_before_channel_book_refresh() {
     use crate::eventlog::sync::SyncStore;
     let dir = tempfile::tempdir().unwrap();
@@ -1336,6 +1702,191 @@ async fn invisible_sync_stops_projecting_events_after_channel_dissolution() {
         .event_ids(&group);
     assert!(visible.contains(&terminal.id));
     assert!(!visible.contains(&late.id));
+}
+
+#[tokio::test]
+async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let carol = DeviceIdentity::generate();
+    let group = alice
+        .create_channel("Group", vec![bob.identity.public()])
+        .await
+        .unwrap();
+    alice
+        .configure_privacy(
+            &dir.path().join("alice"),
+            "pw",
+            &alice.signed_announce("Alice", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    alice.roster.lock().unwrap().update(
+        &bob.signed_announce("Bob", 1),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &alice.user_id(),
+    );
+    alice.set_allowed(&bob.account_id(), true).await.unwrap();
+    alice.set_invisible(true).await.unwrap();
+    assert!(
+        !alice
+            .sync_store(&bob.identity.public())
+            .lock()
+            .unwrap()
+            .event_ids(&group)
+            .is_empty(),
+        "the peer must be able to sync before leaving"
+    );
+    let (before_id, before_lamport) = {
+        let log = alice.log.lock().unwrap();
+        let events = log.events(&group);
+        let before = events.last().unwrap();
+        (before.id, before.lamport)
+    };
+    let snapshot = crate::eventlog::Event::new(
+        &alice.identity,
+        group,
+        3,
+        vec![before_id],
+        before_lamport + 2,
+        1,
+        EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Group".into(),
+            members: vec![
+                alice.identity.public(),
+                bob.identity.public(),
+                carol.public(),
+            ],
+            epoch: 1,
+            owner: alice.user_id(),
+        }
+        .encode_invitation(),
+    );
+    let snapshot_id = snapshot.id;
+    alice.log.lock().unwrap().append(snapshot).unwrap();
+    let leave = crate::eventlog::Event::new(
+        &bob.identity,
+        group,
+        1,
+        vec![before_id],
+        before_lamport + 1,
+        1,
+        EventKind::ChannelLeave,
+        vec![],
+    );
+    let leave_id = leave.id;
+    alice.log.lock().unwrap().append(leave).unwrap();
+    assert!(
+        !alice.group_member(&bob.identity.public()),
+        "admission must honor the signed leave despite the stale owner snapshot"
+    );
+    alice
+        .append_event(group, EventKind::ChannelRename, b"After leave".to_vec())
+        .unwrap();
+    let after_leave = alice.log.lock().unwrap().events(&group).last().unwrap().id;
+    let visible = alice
+        .sync_store(&bob.identity.public())
+        .lock()
+        .unwrap()
+        .event_ids(&group);
+    assert!(visible.contains(&snapshot_id));
+    assert!(visible.contains(&leave_id));
+    assert!(
+        !visible.contains(&after_leave),
+        "a stale owner snapshot must not resume departed peer sync"
+    );
+}
+
+#[tokio::test]
+async fn departed_peer_can_sync_transfer_needed_for_causal_reinvitation() {
+    use crate::eventlog::sync::SyncStore;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let carol = DeviceIdentity::generate();
+    let group = alice
+        .create_channel("Group", vec![bob.identity.public(), carol.public()])
+        .await
+        .unwrap();
+    alice
+        .configure_privacy(
+            &dir.path().join("alice"),
+            "pw",
+            &alice.signed_announce("Alice", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    alice.roster.lock().unwrap().update(
+        &bob.signed_announce("Bob", 1),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &alice.user_id(),
+    );
+    alice.set_allowed(&bob.account_id(), true).await.unwrap();
+    alice.set_invisible(true).await.unwrap();
+    let (parent, lamport) = {
+        let log = alice.log.lock().unwrap();
+        let events = log.events(&group);
+        let last = events.last().unwrap();
+        (last.id, last.lamport)
+    };
+    let leave = crate::eventlog::Event::new(
+        &bob.identity,
+        group,
+        1,
+        vec![parent],
+        lamport + 1,
+        1,
+        EventKind::ChannelLeave,
+        vec![],
+    );
+    alice.log.lock().unwrap().append(leave).unwrap();
+    alice
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            carol.public().user_id().into_bytes(),
+        )
+        .unwrap();
+    let (transfer_id, transfer_lamport) = {
+        let log = alice.log.lock().unwrap();
+        let events = log.events(&group);
+        let last = events.last().unwrap();
+        (last.id, last.lamport)
+    };
+    let invite = crate::eventlog::Event::new(
+        &carol,
+        group,
+        1,
+        vec![transfer_id],
+        transfer_lamport + 1,
+        1,
+        EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Group".into(),
+            members: vec![
+                alice.identity.public(),
+                bob.identity.public(),
+                carol.public(),
+            ],
+            epoch: 2,
+            owner: carol.public().user_id(),
+        }
+        .encode_invitation(),
+    );
+    let invite_id = invite.id;
+    alice.log.lock().unwrap().append(invite).unwrap();
+    assert!(
+        alice
+            .sync_store(&bob.identity.public())
+            .lock()
+            .unwrap()
+            .event_ids(&group)
+            .contains(&invite_id),
+        "the departed peer needs the valid transfer to verify a later invitation"
+    );
 }
 
 #[tokio::test]

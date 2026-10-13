@@ -1,6 +1,6 @@
 //! Channel orchestration over the event log: the per-member sealed
 //! sender-key-distribution payload carried by `KeyRotation` events, the payload
-//! builders for the three channel event kinds, and a [`ChannelBook`] that replays a
+//! builders for channel events, and a [`ChannelBook`] that replays a
 //! channel's events into per-channel state + decrypted messages. Operates on
 //! `Event`s — no live network.
 
@@ -161,6 +161,14 @@ pub struct ReceivedChannelMessage {
     pub wrapped: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelActivity {
+    pub kind: &'static str,
+    pub actor: String,
+    pub target: Option<String>,
+    pub wall_clock: u64,
+}
+
 /// A node's view of all the channels it knows: each channel's [`ChannelState`]
 /// keyed by channel id. [`ChannelBook::process`] replays a channel's events (in the
 /// causal order the log returns them) to update membership/keys and surface
@@ -169,9 +177,153 @@ pub struct ReceivedChannelMessage {
 pub struct ChannelBook {
     states: HashMap<ConversationId, ChannelState>,
     emitted: HashSet<EventId>,
+    applied_leaves: HashSet<EventId>,
+    applied_transfers: HashSet<EventId>,
+    transferred: HashSet<(ConversationId, String)>,
+    departed: HashSet<(ConversationId, String)>,
+    activities: HashMap<ConversationId, Vec<ChannelActivity>>,
+    activity_emitted: HashSet<EventId>,
+    lineage_owner: HashMap<ConversationId, String>,
+}
+
+/// A Lamport timestamp cannot establish whether an owner observed a leave: an
+/// unrelated local event can make a concurrent snapshot look newer. Follow the
+/// signed event DAG instead when deciding whether a snapshot may re-invite them.
+pub(super) fn descends_from(
+    event: &Event,
+    ancestor: EventId,
+    by_id: &HashMap<EventId, &Event>,
+) -> bool {
+    let mut pending = event.parents.clone();
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if id == ancestor {
+            return true;
+        }
+        if seen.insert(id)
+            && let Some(parent) = by_id.get(&id)
+        {
+            pending.extend(&parent.parents);
+        }
+    }
+    false
 }
 
 impl ChannelBook {
+    /// Replay only signed membership controls. This keeps late-invite pending
+    /// reconstruction and admission checks on the same causal leave rules.
+    fn membership_view(
+        channel_id: ConversationId,
+        events: &[&Event],
+        before: Option<EventId>,
+        by_id: &HashMap<EventId, &Event>,
+    ) -> (Option<ChannelState>, Vec<(String, EventId)>) {
+        let mut prior: Option<ChannelState> = None;
+        let mut departures: Vec<(String, EventId)> = Vec::new();
+        for event in events {
+            if before == Some(event.id) {
+                break;
+            }
+            let author = event.author.user_id();
+            match event.kind {
+                EventKind::MembershipChange => {
+                    let Some(mut meta) = ChannelMeta::decode(&event.ciphertext) else {
+                        continue;
+                    };
+                    let original_member_count = meta.members.len();
+                    meta.members.retain(|member| {
+                        !departures.iter().any(|(uid, leave_id)| {
+                            uid == &member.user_id() && !descends_from(event, *leave_id, by_id)
+                        })
+                    });
+                    if let Some(state) = prior.as_mut() {
+                        if author != state.owner() {
+                            continue;
+                        }
+                        let old: HashSet<_> = state
+                            .members()
+                            .iter()
+                            .map(PublicIdentity::user_id)
+                            .collect();
+                        let invited = ChannelMeta::is_invitation(&event.ciphertext);
+                        if meta.members.len() < original_member_count {
+                            state.apply_meta_after_concurrent_leave(meta);
+                        } else {
+                            state.apply_meta(meta);
+                        }
+                        let added: Vec<_> = state
+                            .members()
+                            .iter()
+                            .map(PublicIdentity::user_id)
+                            .filter(|uid| !old.contains(uid))
+                            .collect();
+                        for uid in added {
+                            if invited {
+                                state.mark_invited(&uid);
+                            } else {
+                                state.auto_accept_legacy_member(&uid);
+                            }
+                        }
+                    } else if event.parents.is_empty()
+                        && author == meta.owner
+                        && meta.is_member(&author)
+                    {
+                        let invited = ChannelMeta::is_invitation(&event.ciphertext);
+                        let mut state = ChannelState::from_meta(channel_id, meta);
+                        if invited {
+                            let invitees: Vec<_> = state
+                                .members()
+                                .iter()
+                                .map(PublicIdentity::user_id)
+                                .filter(|uid| uid != &author)
+                                .collect();
+                            for uid in invitees {
+                                state.mark_invited(&uid);
+                            }
+                        }
+                        prior = Some(state);
+                    }
+                }
+                EventKind::ChannelAccept => {
+                    if event.ciphertext.is_empty()
+                        && let Some(state) = prior.as_mut()
+                    {
+                        state.accept_invite(&author, event.id);
+                    }
+                }
+                EventKind::ChannelOwnerTransfer => {
+                    if let Some(state) = prior.as_mut()
+                        && author == state.owner()
+                        && let Ok(next) = std::str::from_utf8(&event.ciphertext)
+                    {
+                        state.transfer_owner(next);
+                    }
+                }
+                EventKind::ChannelLeave => {
+                    if event.ciphertext.is_empty()
+                        && let Some(state) = prior.as_mut()
+                        && state.leave_member(&author)
+                    {
+                        departures.push((author, event.id));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (prior, departures)
+    }
+
+    /// Current members from the validated event DAG, without decrypting or
+    /// surfacing message content. Used for connection admission decisions.
+    pub fn projected_members(
+        channel_id: ConversationId,
+        events: &[&Event],
+    ) -> Option<Vec<PublicIdentity>> {
+        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
+        let (state, _) = Self::membership_view(channel_id, events, None, &by_id);
+        state.map(|state| state.members().to_vec())
+    }
+
     pub fn new() -> Self {
         ChannelBook::default()
     }
@@ -192,6 +344,53 @@ impl ChannelBook {
         self.states.keys().copied().collect()
     }
 
+    pub fn activity(&self, channel_id: &ConversationId) -> Vec<ChannelActivity> {
+        self.activities.get(channel_id).cloned().unwrap_or_default()
+    }
+
+    /// Only the departing node may dial a current member to finish its own
+    /// departure sync. A remaining member must not admit a former member after
+    /// processing the leave, which would reveal signed presence indefinitely.
+    pub fn departure_link(&self, own: &str, peer: &str) -> bool {
+        self.states.iter().any(|(id, state)| {
+            !state.is_member(own)
+                && state.is_member(peer)
+                && self.departed.contains(&(*id, own.to_string()))
+        })
+    }
+
+    pub fn pending_departures(&self, own: &str) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
+        self.states
+            .iter()
+            .filter(|(id, state)| {
+                !state.is_member(own) && self.departed.contains(&(**id, own.to_string()))
+            })
+            .map(|(id, state)| (*id, state.members().to_vec()))
+            .collect()
+    }
+
+    pub fn pending_acceptances(&self, own: &str) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
+        self.states
+            .iter()
+            .filter(|(_, state)| {
+                state.is_accepted_member(own) && state.accepted_event_id().is_some()
+            })
+            .map(|(id, state)| (*id, state.members().to_vec()))
+            .collect()
+    }
+
+    pub fn pending_transfers(&self, own: &str) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
+        self.states
+            .iter()
+            .filter(|(id, state)| {
+                state.is_member(own)
+                    && state.owner() != own
+                    && self.transferred.contains(&(**id, own.to_string()))
+            })
+            .map(|(id, state)| (*id, state.members().to_vec()))
+            .collect()
+    }
+
     /// Replay `events` (a channel's events, in log/causal order) for the node `me`.
     /// Updates membership + keys and returns the channel `Message`s that are newly
     /// decryptable and authored by someone other than `me`. Events we can't act on
@@ -209,13 +408,28 @@ impl ChannelBook {
         events: &[&Event],
     ) -> Vec<ReceivedChannelMessage> {
         let my_author = Author::from_ed25519(me.public().ed25519_pub);
+        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
         let mut out = Vec::new();
         let mut dissolved_on_replay = false;
+        let mut after_accept = HashSet::new();
 
         for event in events {
             if dissolved_on_replay {
                 continue;
             }
+            if let Some(accepted) = self
+                .states
+                .get(&channel_id)
+                .and_then(ChannelState::accepted_event_id)
+                && (event.id == accepted
+                    || event
+                        .parents
+                        .iter()
+                        .any(|parent| after_accept.contains(parent)))
+            {
+                after_accept.insert(event.id);
+            }
+            let mut activity: Option<(&'static str, Option<String>)> = None;
             match event.kind {
                 EventKind::ChannelDissolve => {
                     if event.ciphertext.is_empty()
@@ -227,19 +441,89 @@ impl ChannelBook {
                     }
                 }
                 EventKind::MembershipChange => {
-                    if let Some(meta) = ChannelMeta::decode(&event.ciphertext) {
+                    if let Some(mut meta) = ChannelMeta::decode(&event.ciphertext) {
                         let author_uid = event.author.user_id();
+                        let prior_view = (!self.states.contains_key(&channel_id)).then(|| {
+                            Self::membership_view(channel_id, events, Some(event.id), &by_id)
+                        });
+                        let prior_pending: Vec<_> = prior_view
+                            .as_ref()
+                            .and_then(|(state, _)| state.as_ref())
+                            .map(|state| {
+                                state
+                                    .members()
+                                    .iter()
+                                    .map(PublicIdentity::user_id)
+                                    .filter(|uid| !state.is_accepted_member(uid))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let original_member_count = meta.members.len();
+                        meta.members.retain(|member| {
+                            let departed_before_join =
+                                prior_view.as_ref().is_some_and(|(_, leaves)| {
+                                    leaves.iter().any(|(uid, leave_id)| {
+                                        uid == &member.user_id()
+                                            && !descends_from(event, *leave_id, &by_id)
+                                    })
+                                });
+                            !departed_before_join
+                                && !events.iter().any(|leave| {
+                                    leave.kind == EventKind::ChannelLeave
+                                        && self.applied_leaves.contains(&leave.id)
+                                        && leave.author.user_id() == member.user_id()
+                                        && !descends_from(event, leave.id, &by_id)
+                                })
+                        });
+                        if event.parents.is_empty()
+                            && author_uid == meta.owner
+                            && meta.is_member(&author_uid)
+                        {
+                            self.lineage_owner
+                                .entry(channel_id)
+                                .or_insert_with(|| author_uid.clone());
+                        }
                         match self.states.get_mut(&channel_id) {
                             Some(state) => {
-                                // Authorization: ONLY THE OWNER may change an established
-                                // channel's membership. The event author must equal the
-                                // channel's (immutable, genesis) owner; a non-owner member's
-                                // add/remove is dropped by every node (not merely hidden in the
-                                // UI). `apply_meta` additionally pins the owner, so an
-                                // owner-authored snapshot that renames the owner is rejected
-                                // too — no ownership hijack via a higher epoch.
+                                // Only the current owner may change membership. A
+                                // snapshot cannot transfer ownership.
                                 if author_uid == state.owner() {
-                                    state.apply_meta(meta);
+                                    let prior_members: HashSet<_> = state
+                                        .members()
+                                        .iter()
+                                        .map(PublicIdentity::user_id)
+                                        .collect();
+                                    let invited = ChannelMeta::is_invitation(&event.ciphertext);
+                                    if meta.members.len() < original_member_count {
+                                        state.apply_meta_after_concurrent_leave(meta);
+                                    } else {
+                                        state.apply_meta(meta);
+                                    }
+                                    let after: HashSet<_> = state
+                                        .members()
+                                        .iter()
+                                        .map(PublicIdentity::user_id)
+                                        .collect();
+                                    if let Some(added) = after.difference(&prior_members).next() {
+                                        activity = Some(("joined", Some(added.clone())));
+                                    } else if let Some(removed) =
+                                        prior_members.difference(&after).next()
+                                    {
+                                        activity = Some(("removed", Some(removed.clone())));
+                                    }
+                                    let added: Vec<_> = state
+                                        .members()
+                                        .iter()
+                                        .map(PublicIdentity::user_id)
+                                        .filter(|uid| !prior_members.contains(uid))
+                                        .collect();
+                                    for uid in added {
+                                        if invited {
+                                            state.mark_invited(&uid);
+                                        } else {
+                                            state.auto_accept_legacy_member(&uid);
+                                        }
+                                    }
                                 }
                             }
                             None => {
@@ -251,9 +535,47 @@ impl ChannelBook {
                                     && author_uid == meta.owner
                                     && meta.is_member(&meta.owner)
                                 {
+                                    let invited = ChannelMeta::is_invitation(&event.ciphertext);
+                                    let is_genesis = meta.epoch == 0;
                                     let mut state = ChannelState::from_meta(channel_id, meta);
+                                    if let Some(origin) = self.lineage_owner.get(&channel_id) {
+                                        state.set_genesis_owner(origin.clone());
+                                    }
                                     state.set_identity(me.public().user_id());
+                                    if invited {
+                                        let invitees: Vec<_> = if is_genesis {
+                                            state
+                                                .members()
+                                                .iter()
+                                                .map(PublicIdentity::user_id)
+                                                .filter(|uid| uid != &author_uid)
+                                                .collect()
+                                        } else {
+                                            vec![me.public().user_id()]
+                                        };
+                                        for uid in invitees {
+                                            state.mark_invited(&uid);
+                                        }
+                                    }
+                                    if !is_genesis {
+                                        for uid in &prior_pending {
+                                            if state.is_member(uid) {
+                                                state.mark_invited(uid);
+                                            }
+                                        }
+                                    }
                                     self.states.insert(channel_id, state);
+                                    if let Some((_, leaves)) = &prior_view {
+                                        for (uid, leave_id) in leaves {
+                                            self.applied_leaves.insert(*leave_id);
+                                            self.departed.insert((channel_id, uid.clone()));
+                                        }
+                                    }
+                                    activity = Some(if is_genesis {
+                                        ("created", None)
+                                    } else {
+                                        ("joined", Some(me.public().user_id()))
+                                    });
                                 }
                             }
                         }
@@ -268,6 +590,45 @@ impl ChannelBook {
                         && let Ok(name) = std::str::from_utf8(&event.ciphertext)
                     {
                         state.apply_rename(name, event.lamport, event.id);
+                        activity = Some(("renamed", None));
+                    }
+                }
+                EventKind::ChannelOwnerTransfer => {
+                    if !self.applied_transfers.contains(&event.id)
+                        && let Some(state) = self.states.get_mut(&channel_id)
+                        && event.author.user_id() == state.owner()
+                        && let Ok(next) = std::str::from_utf8(&event.ciphertext)
+                        && state.transfer_owner(next)
+                    {
+                        self.applied_transfers.insert(event.id);
+                        self.transferred
+                            .insert((channel_id, event.author.user_id()));
+                        activity = Some(("transferred", Some(next.to_string())));
+                    }
+                }
+                EventKind::ChannelLeave => {
+                    if event.ciphertext.is_empty()
+                        && !self.applied_leaves.contains(&event.id)
+                        && let Some(state) = self.states.get_mut(&channel_id)
+                        && state.leave_member(&event.author.user_id())
+                    {
+                        self.applied_leaves.insert(event.id);
+                        self.departed.insert((channel_id, event.author.user_id()));
+                        activity = Some(("left", Some(event.author.user_id())));
+                    }
+                }
+                EventKind::ChannelAccept => {
+                    if event.ciphertext.is_empty()
+                        && let Some(state) = self.states.get_mut(&channel_id)
+                        && state.is_member(&event.author.user_id())
+                    {
+                        if !state.is_accepted_member(&event.author.user_id()) {
+                            activity = Some(("accepted", Some(event.author.user_id())));
+                        }
+                        state.accept_invite(&event.author.user_id(), event.id);
+                        if event.author == my_author {
+                            after_accept.insert(event.id);
+                        }
                     }
                 }
                 EventKind::KeyRotation => {
@@ -278,6 +639,9 @@ impl ChannelBook {
                         continue;
                     };
                     let author_uid = event.author.user_id();
+                    if !state.is_accepted_member(&author_uid) {
+                        continue;
+                    }
                     let Some(author_x25519) = state
                         .members()
                         .iter()
@@ -297,6 +661,13 @@ impl ChannelBook {
                     let Some(state) = self.states.get_mut(&channel_id) else {
                         continue;
                     };
+                    if state.pending_invite()
+                        || (state.accepted_event_id().is_some()
+                            && !after_accept.contains(&event.id))
+                        || !state.is_accepted_member(&event.author.user_id())
+                    {
+                        continue;
+                    }
                     if let Some(plaintext) =
                         state.open_sender_message(&event.author.user_id(), &event.ciphertext)
                     {
@@ -316,6 +687,19 @@ impl ChannelBook {
                     }
                 }
                 _ => {}
+            }
+            if let Some((kind, target)) = activity
+                && self.activity_emitted.insert(event.id)
+            {
+                self.activities
+                    .entry(channel_id)
+                    .or_default()
+                    .push(ChannelActivity {
+                        kind,
+                        actor: event.author.user_id(),
+                        target,
+                        wall_clock: event.wall_clock,
+                    });
             }
         }
         out
@@ -860,6 +1244,559 @@ mod tests {
                 .any(|m| m.user_id() == mallory.public().user_id()),
             "a non-owner cannot add a member to the channel"
         );
+    }
+
+    #[test]
+    fn owner_transfer_allows_the_new_owner_to_manage_membership() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public()],
+                epoch: 0,
+                owner: alice.public().user_id(),
+            }
+            .encode(),
+        );
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::ChannelOwnerTransfer,
+            bob.public().user_id().into_bytes(),
+        );
+        append(
+            &mut log,
+            &bob,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 1,
+                owner: bob.public().user_id(),
+            }
+            .encode(),
+        );
+        let mut book = ChannelBook::new();
+        book.process(&alice, channel, &collect(&log, &channel));
+        let state = book.state(&channel).unwrap();
+        assert_eq!(state.owner(), bob.public().user_id());
+        assert!(state.is_member(&carol.public().user_id()));
+        book.process(&alice, channel, &collect(&log, &channel));
+        assert_eq!(
+            book.state(&channel).unwrap().owner(),
+            bob.public().user_id()
+        );
+        append(
+            &mut log,
+            &bob,
+            channel,
+            EventKind::ChannelOwnerTransfer,
+            alice.public().user_id().into_bytes(),
+        );
+        book.process(&alice, channel, &collect(&log, &channel));
+        assert_eq!(
+            book.state(&channel).unwrap().owner(),
+            alice.public().user_id()
+        );
+        let kinds: Vec<_> = book
+            .activity(&channel)
+            .into_iter()
+            .map(|entry| entry.kind)
+            .collect();
+        assert_eq!(kinds, ["created", "transferred", "joined", "transferred"]);
+        book.process(&alice, channel, &collect(&log, &channel));
+        assert_eq!(
+            book.state(&channel).unwrap().owner(),
+            alice.public().user_id()
+        );
+    }
+
+    #[test]
+    fn member_leave_removes_only_its_author_and_is_idempotent() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 0,
+                owner: alice.public().user_id(),
+            }
+            .encode(),
+        );
+        append(&mut log, &bob, channel, EventKind::ChannelLeave, vec![]);
+        let mut book = ChannelBook::new();
+        let events = collect(&log, &channel);
+        book.process(&carol, channel, &events);
+        let state = book.state(&channel).unwrap();
+        assert!(!state.is_member(&bob.public().user_id()));
+        assert!(state.is_member(&alice.public().user_id()));
+        assert_eq!(state.epoch(), 1);
+        book.process(&carol, channel, &events);
+        assert_eq!(book.state(&channel).unwrap().epoch(), 1);
+        let mut departed_book = ChannelBook::new();
+        departed_book.process(&bob, channel, &events);
+        assert!(
+            departed_book
+                .state_mut(&channel)
+                .unwrap()
+                .seal_sender_message(b"after leaving")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn concurrent_owner_snapshot_cannot_restore_a_departed_member() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut owner_log = EventLog::default();
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public()],
+                epoch: 0,
+                owner: alice.public().user_id(),
+            }
+            .encode(),
+        );
+        let mut bob_log = EventLog::default();
+        reconcile(&mut bob_log, &mut owner_log, channel);
+        // Alice's unrelated rename raises her next event's Lamport time, but she
+        // still has not observed Bob's concurrently signed leave.
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::ChannelRename,
+            b"team 2".to_vec(),
+        );
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 1,
+                owner: alice.public().user_id(),
+            }
+            .encode_invitation(),
+        );
+        append(&mut bob_log, &bob, channel, EventKind::ChannelLeave, vec![]);
+        reconcile(&mut owner_log, &mut bob_log, channel);
+
+        let mut book = ChannelBook::new();
+        let events = collect(&owner_log, &channel);
+        book.process(&alice, channel, &events);
+        let state = book.state(&channel).unwrap();
+        assert!(!state.is_member(&bob.public().user_id()));
+        assert!(state.is_member(&carol.public().user_id()));
+        book.process(&alice, channel, &events);
+        assert!(
+            !book
+                .state(&channel)
+                .unwrap()
+                .is_member(&bob.public().user_id())
+        );
+
+        // After observing the leave, Alice may deliberately invite Bob again.
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 2,
+                owner: alice.public().user_id(),
+            }
+            .encode_invitation(),
+        );
+        book.process(&alice, channel, &collect(&owner_log, &channel));
+        assert!(
+            book.state(&channel)
+                .unwrap()
+                .is_member(&bob.public().user_id())
+        );
+    }
+
+    #[test]
+    fn late_invitee_does_not_inherit_a_concurrently_departed_member() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut owner_log = EventLog::default();
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public()],
+                epoch: 0,
+                owner: alice.public().user_id(),
+            }
+            .encode_invitation(),
+        );
+        let mut bob_log = EventLog::default();
+        reconcile(&mut bob_log, &mut owner_log, channel);
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::ChannelRename,
+            b"team 2".to_vec(),
+        );
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 1,
+                owner: alice.public().user_id(),
+            }
+            .encode_invitation(),
+        );
+        append(&mut bob_log, &bob, channel, EventKind::ChannelLeave, vec![]);
+        reconcile(&mut owner_log, &mut bob_log, channel);
+
+        let mut book = ChannelBook::new();
+        book.process(&carol, channel, &collect(&owner_log, &channel));
+        let state = book.state(&channel).unwrap();
+        assert!(!state.is_member(&bob.public().user_id()));
+        assert!(state.is_member(&carol.public().user_id()));
+        book.process(&carol, channel, &collect(&owner_log, &channel));
+        assert!(
+            !book
+                .state(&channel)
+                .unwrap()
+                .is_member(&bob.public().user_id())
+        );
+    }
+
+    #[test]
+    fn concurrent_owner_removal_and_member_leave_both_take_effect() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut owner_log = EventLog::default();
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 0,
+                owner: alice.public().user_id(),
+            }
+            .encode(),
+        );
+        let mut bob_log = EventLog::default();
+        reconcile(&mut bob_log, &mut owner_log, channel);
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::ChannelRename,
+            b"team 2".to_vec(),
+        );
+        append(
+            &mut owner_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public()],
+                epoch: 1,
+                owner: alice.public().user_id(),
+            }
+            .encode(),
+        );
+        append(&mut bob_log, &bob, channel, EventKind::ChannelLeave, vec![]);
+        reconcile(&mut owner_log, &mut bob_log, channel);
+
+        let mut book = ChannelBook::new();
+        book.process(&alice, channel, &collect(&owner_log, &channel));
+        let state = book.state(&channel).unwrap();
+        assert!(!state.is_member(&bob.public().user_id()));
+        assert!(!state.is_member(&carol.public().user_id()));
+    }
+
+    #[test]
+    fn unmarked_legacy_member_addition_remains_auto_accepted() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public()],
+                epoch: 0,
+                owner: alice.public().user_id(),
+            }
+            .encode(),
+        );
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 1,
+                owner: alice.public().user_id(),
+            }
+            .encode(),
+        );
+        let mut book = ChannelBook::new();
+        book.process(&alice, channel, &collect(&log, &channel));
+        assert!(
+            book.state(&channel)
+                .unwrap()
+                .is_accepted_member(&carol.public().user_id())
+        );
+    }
+
+    #[test]
+    fn new_invitation_requires_the_invitee_to_accept() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut log = EventLog::default();
+        let meta = ChannelMeta {
+            name: "team".into(),
+            members: vec![alice.public(), bob.public()],
+            epoch: 0,
+            owner: alice.public().user_id(),
+        };
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode_invitation(),
+        );
+        let mut sender = author_state(&alice, channel, &meta);
+        let sealed =
+            seal_keys_for(&alice, &meta.members, &sender.my_sender_distribution(), 0).unwrap();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::KeyRotation,
+            sealed.encode(),
+        );
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::Message,
+            sender.seal_sender_message(b"before").unwrap(),
+        );
+        let mut book = ChannelBook::new();
+        assert!(
+            book.process(&bob, channel, &collect(&log, &channel))
+                .is_empty()
+        );
+        assert!(book.state(&channel).unwrap().pending_invite());
+        let mut owner_book = ChannelBook::new();
+        owner_book.process(&alice, channel, &collect(&log, &channel));
+        assert!(
+            !owner_book
+                .state_mut(&channel)
+                .unwrap()
+                .transfer_owner(&bob.public().user_id())
+        );
+        append(&mut log, &bob, channel, EventKind::ChannelAccept, vec![]);
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::Message,
+            sender.seal_sender_message(b"after").unwrap(),
+        );
+        let got = book.process(&bob, channel, &collect(&log, &channel));
+        assert_eq!(
+            got.iter()
+                .map(|message| message.text.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"after".as_slice()]
+        );
+        assert!(!book.state(&channel).unwrap().pending_invite());
+        assert_eq!(
+            book.activity(&channel)
+                .iter()
+                .filter(|entry| entry.kind == "accepted")
+                .count(),
+            1
+        );
+        owner_book.process(&alice, channel, &collect(&log, &channel));
+        assert!(
+            owner_book
+                .state_mut(&channel)
+                .unwrap()
+                .transfer_owner(&bob.public().user_id())
+        );
+    }
+
+    #[test]
+    fn acceptance_uses_causal_ancestry_not_wall_clock_or_lamport() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let meta = ChannelMeta {
+            name: "team".into(),
+            members: vec![alice.public(), bob.public()],
+            epoch: 0,
+            owner: alice.public().user_id(),
+        };
+        let mut alice_log = EventLog::default();
+        append(
+            &mut alice_log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode_invitation(),
+        );
+        let mut sender = author_state(&alice, channel, &meta);
+        let sealed =
+            seal_keys_for(&alice, &meta.members, &sender.my_sender_distribution(), 0).unwrap();
+        append(
+            &mut alice_log,
+            &alice,
+            channel,
+            EventKind::KeyRotation,
+            sealed.encode(),
+        );
+        let mut bob_log = EventLog::default();
+        reconcile(&mut bob_log, &mut alice_log, channel);
+        append(
+            &mut bob_log,
+            &bob,
+            channel,
+            EventKind::ChannelAccept,
+            vec![],
+        );
+        // Alice has not seen Bob's acceptance. Later local sends are concurrent,
+        // even if their Lamport clock advances past the acceptance's clock.
+        for n in 0..4 {
+            append(
+                &mut alice_log,
+                &alice,
+                channel,
+                EventKind::Message,
+                sender
+                    .seal_sender_message(format!("concurrent {n}").as_bytes())
+                    .unwrap(),
+            );
+        }
+        reconcile(&mut bob_log, &mut alice_log, channel);
+        append(
+            &mut alice_log,
+            &alice,
+            channel,
+            EventKind::Message,
+            sender.seal_sender_message(b"causally after").unwrap(),
+        );
+        reconcile(&mut bob_log, &mut alice_log, channel);
+        let mut book = ChannelBook::new();
+        let received = book.process(&bob, channel, &collect(&bob_log, &channel));
+        assert_eq!(
+            received
+                .iter()
+                .map(|message| message.text.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"causally after".as_slice()]
+        );
+    }
+
+    #[test]
+    fn late_invitee_keeps_earlier_unaccepted_members_pending() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public()],
+                epoch: 0,
+                owner: alice.public().user_id(),
+            }
+            .encode_invitation(),
+        );
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "team".into(),
+                members: vec![alice.public(), bob.public(), carol.public()],
+                epoch: 1,
+                owner: alice.public().user_id(),
+            }
+            .encode_invitation(),
+        );
+        let mut book = ChannelBook::new();
+        book.process(&carol, channel, &collect(&log, &channel));
+        let state = book.state(&channel).unwrap();
+        assert!(state.pending_invite());
+        assert!(!state.is_accepted_member(&bob.public().user_id()));
+        append(&mut log, &bob, channel, EventKind::ChannelAccept, vec![]);
+        book.process(&carol, channel, &collect(&log, &channel));
+        assert!(
+            book.state(&channel)
+                .unwrap()
+                .is_accepted_member(&bob.public().user_id())
+        );
+        assert!(book.state(&channel).unwrap().pending_invite());
     }
 
     #[test]

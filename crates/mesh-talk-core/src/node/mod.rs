@@ -63,7 +63,7 @@ pub use crate::transport::net::{
 };
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
-pub use channel::ReceivedChannelMessage;
+pub use channel::{ChannelActivity, ReceivedChannelMessage};
 pub use delivery_store::DeliveryStatus;
 pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;

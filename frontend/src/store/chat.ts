@@ -242,6 +242,7 @@ export interface ChatState {
   retryBoot: () => void;
   loadFavorites: () => Promise<void>;
   togglePinned: (id: string, pinned: boolean) => Promise<void>;
+  setChannelHidden: (id: string, hidden: boolean) => Promise<void>;
   setAlias: (id: string, alias: string | null) => Promise<void>;
   dismissFile: (fileConv: string) => void;
   clearError: () => void;
@@ -262,13 +263,16 @@ export interface ChatState {
   /** Recall (unsend) one of my own messages within the 2-minute window. */
   recallMessage: (target: string) => Promise<void>;
   /** Clear all local history for the active conversation. */
-  clearConversation: () => Promise<void>;
+  clearConversation: () => Promise<boolean>;
   /** Send an animated sticker (by id) as its own message; `fallback` is its emoji char. */
   sendSticker: (stickerId: string, fallback: string) => Promise<void>;
   createChannel: (name: string, memberIds: string[]) => Promise<boolean>;
-  addMember: (memberId: string) => Promise<void>;
-  removeMember: (memberId: string) => Promise<void>;
   dissolveChannel: (channelId: string) => Promise<boolean>;
+  addMember: (memberId: string) => Promise<boolean>;
+  removeMember: (memberId: string) => Promise<boolean>;
+  transferChannelOwner: (memberId: string) => Promise<boolean>;
+  leaveChannel: () => Promise<boolean>;
+  acceptChannelInvite: () => Promise<boolean>;
   /** Rename a channel for everyone (owner-only; the new name syncs to all members). */
   renameChannel: (channelId: string, name: string) => Promise<void>;
 }
@@ -341,7 +345,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       return {
         favorites: {
           ...s.favorites,
-          [id]: { id, pinned, custom_alias: prev?.custom_alias ?? null },
+          [id]: {
+            id,
+            pinned,
+            custom_alias: prev?.custom_alias ?? null,
+            hidden: prev?.hidden ?? false,
+          },
         },
       };
     });
@@ -363,7 +372,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       return {
         favorites: {
           ...s.favorites,
-          [id]: { id, pinned: prev?.pinned ?? false, custom_alias: trimmed },
+          [id]: {
+            id,
+            pinned: prev?.pinned ?? false,
+            custom_alias: trimmed,
+            hidden: prev?.hidden ?? false,
+          },
         },
       };
     });
@@ -371,6 +385,36 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       await favoritesApi.setAlias(lease.owner!, id, trimmed);
     } catch (e) {
       set({ error: `Couldn't rename contact: ${errorMessage(e)}` });
+    }
+    if (lease.current()) await get().loadFavorites();
+  },
+
+  setChannelHidden: async (id, hidden) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return;
+    set((s) => {
+      const prev = s.favorites[id];
+      return {
+        favorites: {
+          ...s.favorites,
+          [id]: {
+            id,
+            pinned: prev?.pinned ?? false,
+            custom_alias: prev?.custom_alias ?? null,
+            hidden,
+          },
+        },
+        active:
+          hidden && s.active?.kind === "channel" && s.active.id === id
+            ? null
+            : s.active,
+      };
+    });
+    try {
+      await favoritesApi.setChannelHidden(lease.owner!, id, hidden);
+    } catch (e) {
+      set({ error: `Couldn't update channel visibility: ${errorMessage(e)}` });
     }
     if (lease.current()) await get().loadFavorites();
   },
@@ -789,17 +833,19 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   clearConversation: async () => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return;
+    if (!lease.current()) return false;
     const c = get().active;
-    if (!c) return;
+    if (!c) return false;
     const key = convKey(c);
     try {
       await chat.clearConversation(c.id, isChannelConv(c));
-      if (!lease.current()) return;
+      if (!lease.current()) return false;
       set((state) => clearConversationMessages(state, key));
       if (get().active && convKey(get().active!) === key) await get().reload();
+      return true;
     } catch (e) {
       set({ error: `Couldn't clear history: ${errorMessage(e)}` });
+      return false;
     }
   },
 
@@ -829,42 +875,133 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   addMember: async (memberId) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return;
+    if (!lease.current()) return false;
     const c = get().active;
-    if (!c || c.kind !== "channel") return;
+    if (!c || c.kind !== "channel") return false;
     const request = get().activeRequest + 1;
     set({ activeRequest: request });
     try {
       await chat.addChannelMember(c.id, memberId);
-      if (!lease.current() || get().activeRequest !== request) return;
+      if (!lease.current() || get().activeRequest !== request) return false;
       const info = await chat.channelMembers(c.id);
-      if (!lease.current() || get().activeRequest !== request) return;
+      if (!lease.current() || get().activeRequest !== request) return false;
       set({ members: info.members, channelOwner: info.owner });
       void get().refreshRoster();
+      return true;
     } catch (e) {
       if (get().activeRequest === request)
         set({ error: `Couldn't add member: ${errorMessage(e)}` });
+      return false;
     }
   },
 
   removeMember: async (memberId) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return;
+    if (!lease.current()) return false;
     const c = get().active;
-    if (!c || c.kind !== "channel") return;
+    if (!c || c.kind !== "channel") return false;
     const request = get().activeRequest + 1;
     set({ activeRequest: request });
     try {
       await chat.removeChannelMember(c.id, memberId);
-      if (!lease.current() || get().activeRequest !== request) return;
+      if (!lease.current() || get().activeRequest !== request) return false;
       const info = await chat.channelMembers(c.id);
-      if (!lease.current() || get().activeRequest !== request) return;
+      if (!lease.current() || get().activeRequest !== request) return false;
       set({ members: info.members, channelOwner: info.owner });
       void get().refreshRoster();
+      return true;
     } catch (e) {
       if (get().activeRequest === request)
         set({ error: `Couldn't remove member: ${errorMessage(e)}` });
+      return false;
+    }
+  },
+
+  transferChannelOwner: async (memberId) => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return false;
+    const c = get().active;
+    if (!c || c.kind !== "channel") return false;
+    const request = get().activeRequest + 1;
+    set({ activeRequest: request });
+    try {
+      await chat.transferChannelOwner(c.id, memberId);
+      if (!lease.current() || get().activeRequest !== request) return false;
+      const info = await chat.channelMembers(c.id);
+      if (!lease.current() || get().activeRequest !== request) return false;
+      set({ members: info.members, channelOwner: info.owner });
+      void get().refreshRoster();
+      return true;
+    } catch (e) {
+      if (get().activeRequest === request)
+        set({
+          error: `Couldn't transfer channel ownership: ${errorMessage(e)}`,
+        });
+      return false;
+    }
+  },
+
+  leaveChannel: async () => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return false;
+    const c = get().active;
+    if (!c || c.kind !== "channel") return false;
+    try {
+      await chat.leaveChannel(c.id);
+      if (!lease.current()) return false;
+      set((state) => {
+        const unread = { ...state.unread };
+        delete unread[convKey(c)];
+        return {
+          active: state.active?.id === c.id ? null : state.active,
+          members: [],
+          channelOwner: "",
+          unread,
+        };
+      });
+      await get().refreshRoster();
+      return lease.current();
+    } catch (e) {
+      set({ error: `Couldn't leave channel: ${errorMessage(e)}` });
+      return false;
+    }
+  },
+
+  acceptChannelInvite: async () => {
+    const lease = captureChat(get);
+    const set = guardedSet(rawSet, lease.current);
+    if (!lease.current()) return false;
+    const c = get().active;
+    if (!c || c.kind !== "channel") return false;
+    const request = get().activeRequest;
+    try {
+      await chat.acceptChannelInvite(c.id);
+      if (!lease.current()) return false;
+      await get().refreshRoster();
+      if (
+        lease.current() &&
+        get().activeRequest === request &&
+        get().active?.id === c.id
+      ) {
+        try {
+          const info = await chat.channelMembers(c.id);
+          if (
+            lease.current() &&
+            get().activeRequest === request &&
+            get().active?.id === c.id
+          )
+            set({ members: info.members, channelOwner: info.owner });
+        } catch {
+          // Acceptance succeeded; opening the member list can retry its details.
+        }
+      }
+      return lease.current();
+    } catch (e) {
+      set({ error: `Couldn't accept invitation: ${errorMessage(e)}` });
+      return false;
     }
   },
 

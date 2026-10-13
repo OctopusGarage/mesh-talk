@@ -69,7 +69,15 @@ impl Node {
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
             _ = Arc::clone(&self).run_delivery_loop() => {}
+            _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = self.accept_connections(listener) => {}
+        }
+    }
+
+    async fn run_channel_control_retry_loop(self: Arc<Self>) {
+        loop {
+            self.retry_channel_controls().await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 
@@ -184,15 +192,14 @@ impl Node {
     /// manifest events. Own manifests are skipped (the sender already knows).
     pub(in crate::node) fn process_file_events(&self, conv: ConversationId) {
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        let manifest_events: Vec<Event> = {
+        let all_events: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv)
-                .into_iter()
-                .filter(|e| e.kind == EventKind::FileManifest && e.author != self_author)
-                .cloned()
-                .collect()
+            log.events(&conv).into_iter().cloned().collect()
         };
-        if manifest_events.is_empty() {
+        if !all_events
+            .iter()
+            .any(|e| e.kind == EventKind::FileManifest && e.author != self_author)
+        {
             return;
         }
         // Is this a channel conversation? If so, open with its group key.
@@ -200,8 +207,18 @@ impl Node {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.state(&conv).is_some()
         };
+        let content_gate = self.channel_content_gate(conv);
         let mut surfaced: Vec<ReceivedFile> = Vec::new();
-        for event in manifest_events {
+        for event in all_events
+            .into_iter()
+            .filter(|event| event.kind == EventKind::FileManifest && event.author != self_author)
+        {
+            if content_gate
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&event.id))
+            {
+                continue;
+            }
             if self
                 .files
                 .lock()
@@ -215,10 +232,13 @@ impl Node {
             // until discovery catches up — is retried on a later sync, not lost.
             let plaintext = if is_channel {
                 let mut book = self.channels.lock().expect("channels mutex not poisoned");
-                match book
-                    .state_mut(&conv)
-                    .and_then(|s| s.open_sender_message(&event.author.user_id(), &event.ciphertext))
-                {
+                match book.state_mut(&conv).and_then(|s| {
+                    if s.is_accepted_member(&event.author.user_id()) {
+                        s.open_sender_message(&event.author.user_id(), &event.ciphertext)
+                    } else {
+                        None
+                    }
+                }) {
                     Some(p) => p,
                     None => continue,
                 }

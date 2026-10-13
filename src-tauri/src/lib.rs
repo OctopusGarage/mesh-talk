@@ -375,9 +375,13 @@ pub fn run_tauri_configured(
                 crate::chat_commands::create_channel,
                 crate::chat_commands::add_channel_member,
                 crate::chat_commands::remove_channel_member,
+                crate::chat_commands::transfer_channel_owner,
+                crate::chat_commands::leave_channel,
+                crate::chat_commands::accept_channel_invite,
                 crate::chat_commands::rename_channel,
                 crate::chat_commands::dissolve_channel,
                 crate::chat_commands::channel_members,
+                crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,
                 crate::chat_commands::channel_history,
                 crate::chat_commands::send_file_dm,
@@ -430,6 +434,7 @@ pub fn run_tauri_configured(
                 crate::favorites::get_favorites,
                 crate::favorites::set_favorite,
                 crate::favorites::set_alias,
+                crate::favorites::set_channel_hidden,
                 crate::avatars::get_avatars,
                 crate::avatars::set_avatar
             ];

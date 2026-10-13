@@ -612,6 +612,15 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
+        {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            let state = book
+                .state(&channel)
+                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+            if !state.is_member(&self.user_id()) || state.pending_invite() {
+                return Err(NodeError::Channel("not an accepted channel member".into()));
+            }
+        }
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         // Publish our sender-key distribution before the first seal (see
         // `send_channel_message_reply`).

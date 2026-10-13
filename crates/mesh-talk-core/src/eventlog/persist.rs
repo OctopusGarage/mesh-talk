@@ -98,6 +98,35 @@ impl PersistentEventLog {
         Ok(AppendOutcome::Appended)
     }
 
+    /// Commit a new channel's verified ancestry and invitation together. The
+    /// caller has already enforced channel admission; this method independently
+    /// verifies event integrity, causal order, and an empty destination before
+    /// the atomic file replacement.
+    pub(crate) fn append_channel_batch_atomic(&mut self, events: &[Event]) -> Result<(), LogError> {
+        let Some(first) = events.first() else {
+            return Ok(());
+        };
+        if !self.log.events(&first.conversation_id).is_empty()
+            || events
+                .iter()
+                .any(|event| event.conversation_id != first.conversation_id)
+        {
+            return Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "channel batch must be one new conversation",
+            )));
+        }
+        let mut validation = EventLog::default();
+        for event in events {
+            validation.append(event.clone())?;
+        }
+        self.file.append_batch_atomic(events)?;
+        for event in events {
+            self.log.index_trusted(event.clone());
+        }
+        Ok(())
+    }
+
     pub fn has(&self, id: &EventId) -> bool {
         self.log.has(id)
     }
@@ -375,6 +404,35 @@ mod tests {
         assert_eq!(log.get(&parent.id), Some(&parent));
         assert_eq!(log.get(&child.id), Some(&child));
         assert_eq!(log.conversation_len(&parent.conversation_id), 2);
+    }
+
+    #[test]
+    fn channel_batch_appears_on_disk_only_after_atomic_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let id = DeviceIdentity::generate();
+        let parent = mk(&id, 1, 1, b"parent");
+        let child = Event::new(
+            &id,
+            parent.conversation_id,
+            2,
+            vec![parent.id],
+            2,
+            0,
+            EventKind::Message,
+            b"child".to_vec(),
+        );
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let before_rename = path.clone();
+        let conversation = parent.conversation_id;
+        log.before_rewrite_rename(Box::new(move || {
+            let old = PersistentEventLog::open(&before_rename, "pw").unwrap();
+            assert!(old.events(&conversation).is_empty());
+        }));
+        log.append_channel_batch_atomic(&[parent.clone(), child.clone()])
+            .unwrap();
+        let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(reopened.events(&parent.conversation_id).len(), 2);
     }
 
     #[test]

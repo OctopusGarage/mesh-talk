@@ -85,6 +85,7 @@ pub struct ChannelMemberInfo {
     pub user_id: String,
     pub name: String,
     pub account_id: Option<String>,
+    pub pending: bool,
 }
 
 /// A channel's membership plus its owner. The owner is the only principal allowed to

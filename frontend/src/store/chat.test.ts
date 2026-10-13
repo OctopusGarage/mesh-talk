@@ -102,6 +102,108 @@ it("refreshes channel member snapshots for group avatars", async () => {
   expect(useChat.getState().channelMembersById).toBe(first);
 });
 
+it("reports a failed member removal to the dialog", async () => {
+  invoke.mockImplementation((command: string) =>
+    command === "remove_channel_member"
+      ? Promise.reject(new Error("offline"))
+      : Promise.resolve([]),
+  );
+  useChat.setState({
+    active: { kind: "channel", id: "team", name: "Team" },
+  });
+  expect(await useChat.getState().removeMember("peer")).toBe(false);
+  expect(useChat.getState().error).toContain("offline");
+});
+
+it("updates the open channel owner after transfer", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "channel_members")
+      return Promise.resolve({
+        owner: "peer",
+        members: [{ user_id: "peer", name: "Alice" }],
+      });
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "channel", id: "team", name: "Team" },
+    channelOwner: "me",
+  });
+  expect(await useChat.getState().transferChannelOwner("peer")).toBe(true);
+  expect(useChat.getState().channelOwner).toBe("peer");
+});
+
+it("closes the active channel after a successful leave", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "channel", id: "team", name: "Team" },
+    unread: { "channel:team": 2 },
+  });
+  expect(await useChat.getState().leaveChannel()).toBe(true);
+  expect(useChat.getState().active).toBeNull();
+  expect(useChat.getState().unread["channel:team"]).toBeUndefined();
+});
+
+it("refreshes a pending invitation after acceptance", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_channels")
+      return Promise.resolve([
+        {
+          channel_id: "team",
+          name: "Team",
+          member_count: 2,
+          owner: "peer",
+          pending_invite: false,
+        },
+      ]);
+    if (command === "channel_members")
+      return Promise.resolve({
+        owner: "peer",
+        members: [{ user_id: "me", name: "tester", pending: false }],
+      });
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "channel", id: "team", name: "Team" },
+    channels: [
+      {
+        channel_id: "team",
+        name: "Team",
+        member_count: 2,
+        owner: "peer",
+        pending_invite: true,
+      },
+    ],
+    members: [{ user_id: "me", name: "tester", pending: true }],
+    channelOwner: "peer",
+  });
+  expect(await useChat.getState().acceptChannelInvite()).toBe(true);
+  expect(invoke).toHaveBeenCalledWith("accept_channel_invite", {
+    channelId: "team",
+  });
+  expect(useChat.getState().channels[0]?.pending_invite).toBe(false);
+  expect(useChat.getState().members[0]?.pending).toBe(false);
+});
+
 it("shows a newly discovered peer on the next two-second roster poll", async () => {
   vi.useFakeTimers();
   let stop: (() => void) | undefined;
@@ -578,6 +680,12 @@ it("persists contact pins and aliases under the signed-in owner", async () => {
     id: "peer",
     alias: "Friend",
   });
+  await useChat.getState().setChannelHidden("team", true);
+  expect(invoke).toHaveBeenCalledWith("set_channel_hidden", {
+    owner: "host",
+    id: "team",
+    hidden: true,
+  });
 });
 
 it("projects recipient-confirmed upload progress onto only the matching outgoing file", async () => {
@@ -1014,6 +1122,19 @@ describe("send", () => {
     await useChat.getState().reload();
     expect(useChat.getState().messages["account:target"]).toEqual([]);
     expect(useChat.getState().intents).toEqual({});
+  });
+
+  it("reports a failed clear so its confirmation remains open", async () => {
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "clear_conversation"
+        ? Promise.reject(new Error("disk full"))
+        : Promise.resolve([]),
+    );
+    useChat.setState({
+      active: { kind: "channel", id: "group", name: "Group" },
+    });
+    expect(await useChat.getState().clearConversation()).toBe(false);
+    expect(useChat.getState().error).toContain("disk full");
   });
 
   it("own-account sparse absence never invents a clock and group legacy void retires only its own intent", async () => {

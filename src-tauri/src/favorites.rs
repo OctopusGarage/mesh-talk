@@ -28,6 +28,9 @@ pub struct FavoriteRecord {
     /// announced name.
     #[serde(default)]
     pub custom_alias: Option<String>,
+    /// Local-only channel visibility; does not change membership or delete history.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// The on-disk shape: `id` (account_id / channel_id) -> record.
@@ -47,6 +50,7 @@ pub struct FavoriteInfo {
     pub id: String,
     pub pinned: bool,
     pub custom_alias: Option<String>,
+    pub hidden: bool,
 }
 
 /// The persistence file inside the host account's profile.
@@ -69,6 +73,7 @@ pub fn get_favorites(
                 id: id.clone(),
                 pinned: rec.pinned,
                 custom_alias: rec.custom_alias.clone(),
+                hidden: rec.hidden,
             })
             .collect())
     })
@@ -89,7 +94,7 @@ pub fn set_favorite(
         let mut file: FavoritesFile = config_store::read_account(path);
         let rec = file.contacts.entry(id.clone()).or_default();
         rec.pinned = pinned;
-        if !rec.pinned && rec.custom_alias.is_none() {
+        if !rec.pinned && rec.custom_alias.is_none() && !rec.hidden {
             file.contacts.remove(&id);
         }
         config_store::write_account(path, &file)
@@ -114,7 +119,29 @@ pub fn set_alias(
         let mut file: FavoritesFile = config_store::read_account(path);
         let rec = file.contacts.entry(id.clone()).or_default();
         rec.custom_alias = trimmed;
-        if !rec.pinned && rec.custom_alias.is_none() {
+        if !rec.pinned && rec.custom_alias.is_none() && !rec.hidden {
+            file.contacts.remove(&id);
+        }
+        config_store::write_account(path, &file)
+    })
+}
+
+/// Hide or restore a channel on this device. The channel remains a member and
+/// continues to sync; this only changes the local conversation list.
+#[tauri::command]
+pub fn set_channel_hidden(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, FavoritesState>,
+    owner: String,
+    id: String,
+    hidden: bool,
+) -> Result<(), CommandError> {
+    config_store::with_account(&app, &owner, FAVORITES_FILE, |path| {
+        let _guard = state.0.lock().unwrap();
+        let mut file: FavoritesFile = config_store::read_account(path);
+        let rec = file.contacts.entry(id.clone()).or_default();
+        rec.hidden = hidden;
+        if !rec.pinned && rec.custom_alias.is_none() && !rec.hidden {
             file.contacts.remove(&id);
         }
         config_store::write_account(path, &file)

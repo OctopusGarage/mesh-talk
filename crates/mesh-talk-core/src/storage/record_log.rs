@@ -322,6 +322,53 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         }
         Ok(())
     }
+
+    /// Append a causally closed batch as one filesystem replacement. A crash
+    /// before rename leaves none of the batch; a crash after rename leaves all
+    /// of it. Existing encrypted records are copied verbatim in file order.
+    pub fn append_batch_atomic(&mut self, records: &[R]) -> Result<(), LogError> {
+        if self.poisoned {
+            return Err(LogError::CorruptFile("record log requires reopen".into()));
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+        let tmp = self.path.with_extension("compact-tmp");
+        {
+            let mut source = File::open(&self.path)?;
+            let target = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)?;
+            let mut writer = BufWriter::new(target);
+            std::io::copy(&mut source, &mut writer)?;
+            for record in records {
+                writer.write_all(&self.encode_record(record)?)?;
+            }
+            let target = writer
+                .into_inner()
+                .map_err(|error| LogError::Io(error.into_error()))?;
+            target.sync_all()?;
+        }
+        let file = OpenOptions::new().read(true).append(true).open(&tmp)?;
+        #[cfg(windows)]
+        let repair = OpenOptions::new().write(true).open(&tmp)?;
+        #[cfg(test)]
+        if let Some(hook) = self.before_rewrite_rename.take() {
+            hook();
+        }
+        std::fs::rename(&tmp, &self.path)?;
+        self.file = file;
+        #[cfg(windows)]
+        {
+            self.repair = repair;
+        }
+        if sync_parent(&self.path).is_err() {
+            log::warn!("record log replacement directory sync failed");
+        }
+        Ok(())
+    }
 }
 
 fn sync_parent(path: &Path) -> std::io::Result<()> {

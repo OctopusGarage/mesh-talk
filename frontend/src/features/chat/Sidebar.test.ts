@@ -18,13 +18,16 @@ const { chatState, policyState } = vi.hoisted(() => ({
       owner: string;
       member_count: number;
       archived?: boolean;
+      pending_invite?: boolean;
+      left?: boolean;
     }>,
     peers: [],
     favorites: {} as Record<
       string,
-      { pinned: boolean; custom_alias: string | null }
+      { pinned: boolean; custom_alias: string | null; hidden?: boolean }
     >,
     togglePinned: () => {},
+    setChannelHidden: () => {},
     setAlias: () => {},
     renameChannel: () => {},
     myId: "me",
@@ -161,4 +164,33 @@ it("labels a recovered channel as an archive", () => {
   ];
   const html = renderToStaticMarkup(createElement(Sidebar));
   expect(html).toContain('aria-label="Study, Archived channel"');
+});
+
+it("keeps a hidden channel in a restore section instead of the active list", () => {
+  chatState.channels = [
+    { channel_id: "group", name: "Study", owner: "me", member_count: 2 },
+  ];
+  chatState.favorites = {
+    group: { pinned: false, custom_alias: null, hidden: true },
+  };
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html).not.toContain('data-testid="conversation-row-group"');
+  expect(html).toContain("Hidden channels (1)");
+  expect(html).toContain("Restore");
+});
+
+it("shows a left channel status ahead of its last message", () => {
+  chatState.channels = [
+    {
+      channel_id: "group",
+      name: "Study",
+      owner: "peer",
+      member_count: 2,
+      left: true,
+    },
+  ];
+  chatState.messages = { "channel:group": [{ text: "Old message" }] };
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html).toContain('aria-label="Study, Left channel"');
+  expect(html).not.toContain("Old message");
 });

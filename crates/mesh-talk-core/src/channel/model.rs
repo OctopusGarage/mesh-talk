@@ -15,7 +15,7 @@ use bincode::Options;
 use rand_core::OsRng;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The plaintext membership snapshot carried by a `MembershipChange` event: the full
 /// member set + channel name + epoch. A snapshot (not a delta) so the latest one
@@ -25,13 +25,14 @@ pub struct ChannelMeta {
     pub name: String,
     pub members: Vec<PublicIdentity>,
     pub epoch: u64,
-    /// The channel owner's device `user_id` (the creator). The owner is the ONLY
-    /// principal allowed to change membership: every node accepts a `MembershipChange`
-    /// only when its event author equals this `owner` (see `ChannelBook::process`), so a
-    /// non-owner cannot add/remove members on any node. Fixed at genesis — a later
-    /// snapshot that names a different owner is rejected (no ownership hijack).
+    /// Current owner's device user id. A signed transfer changes authority; a
+    /// membership snapshot alone cannot assign a new owner.
     pub owner: String,
 }
+
+/// New channel genesis marker. Legacy snapshots have no prefix and remain
+/// readable; an invited channel requires an explicit local acceptance.
+const INVITATION_GENESIS: &[u8] = b"MTCH2";
 
 impl ChannelMeta {
     /// Serialize for an event's payload (fixint, matching the codebase wire style).
@@ -42,8 +43,17 @@ impl ChannelMeta {
             .expect("channel meta serializes")
     }
 
+    pub fn encode_invitation(&self) -> Vec<u8> {
+        [INVITATION_GENESIS, self.encode().as_slice()].concat()
+    }
+
+    pub fn is_invitation(bytes: &[u8]) -> bool {
+        bytes.starts_with(INVITATION_GENESIS)
+    }
+
     /// Parse a membership snapshot, fail-closed (reject trailing bytes).
     pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let bytes = bytes.strip_prefix(INVITATION_GENESIS).unwrap_or(bytes);
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .reject_trailing_bytes()
@@ -116,6 +126,10 @@ pub struct ChannelState {
     epoch: u64,
     owner: String,
     dissolved: bool,
+    genesis_owner: String,
+    pending_invite: bool,
+    accepted_event_id: Option<EventId>,
+    accepted_members: HashSet<String>,
     my_user_id: Option<String>,
     my_sender: HashMap<u64, SenderKey>,
     sender_chains: HashMap<(String, u64), SenderChain>,
@@ -124,14 +138,19 @@ pub struct ChannelState {
 impl ChannelState {
     /// Build state from a channel id and its current membership snapshot (no keys yet).
     pub fn from_meta(id: ConversationId, meta: ChannelMeta) -> Self {
+        let accepted_members = meta.members.iter().map(PublicIdentity::user_id).collect();
         ChannelState {
             id,
             name: meta.name,
             name_version: (0, EventId::new([0u8; 32])),
             members: meta.members,
             epoch: meta.epoch,
-            owner: meta.owner,
             dissolved: false,
+            owner: meta.owner.clone(),
+            genesis_owner: meta.owner,
+            pending_invite: false,
+            accepted_event_id: None,
+            accepted_members,
             my_user_id: None,
             my_sender: HashMap::new(),
             sender_chains: HashMap::new(),
@@ -146,15 +165,24 @@ impl ChannelState {
     ///
     /// Owner authorization is enforced at the call site in `ChannelBook::process`
     /// (the event author must equal the owner). This snapshot's `owner` is additionally
-    /// pinned to the genesis owner: a snapshot naming a DIFFERENT owner is rejected here
-    /// outright, so even an owner-authored event cannot reassign ownership and a higher
-    /// epoch can never hijack the channel.
+    /// pinned to the current owner: a snapshot naming another owner is rejected.
     pub fn apply_meta(&mut self, meta: ChannelMeta) {
+        self.apply_meta_with_departure(meta, false);
+    }
+
+    /// Merge an owner snapshot with a concurrent, independently signed leave.
+    /// Its full member set still defines the owner's other additions/removals,
+    /// while the departed member has already been filtered from `meta`.
+    pub fn apply_meta_after_concurrent_leave(&mut self, meta: ChannelMeta) {
+        self.apply_meta_with_departure(meta, true);
+    }
+
+    fn apply_meta_with_departure(&mut self, meta: ChannelMeta, concurrent_leave: bool) {
         use std::cmp::Ordering;
         if self.dissolved {
             return;
         }
-        // Owner is immutable: never adopt a snapshot that renames the owner.
+        // A membership snapshot cannot perform an ownership transfer.
         if meta.owner != self.owner {
             return;
         }
@@ -165,7 +193,9 @@ impl ChannelState {
             // (nodes diverge). Converge deterministically on the canonically-greater MEMBER
             // SET (by encoded bytes) — name is excluded so it can't sway the membership
             // winner — so every node lands on the same membership.
-            Ordering::Equal => encode_members(&meta.members) > encode_members(&self.members),
+            Ordering::Equal => {
+                concurrent_leave || encode_members(&meta.members) > encode_members(&self.members)
+            }
             Ordering::Less => false,
         };
         if take {
@@ -208,11 +238,75 @@ impl ChannelState {
     pub fn dissolve(&mut self) {
         self.dissolved = true;
     }
+    pub fn genesis_owner(&self) -> &str {
+        &self.genesis_owner
+    }
+    pub fn set_genesis_owner(&mut self, owner: String) {
+        self.genesis_owner = owner;
+    }
+    pub fn pending_invite(&self) -> bool {
+        self.pending_invite
+    }
+    pub fn accepted_event_id(&self) -> Option<EventId> {
+        self.accepted_event_id
+    }
+    pub fn mark_invited(&mut self, user_id: &str) {
+        self.accepted_members.remove(user_id);
+        if self.my_user_id.as_deref() == Some(user_id) {
+            self.pending_invite = true;
+            self.accepted_event_id = None;
+        }
+    }
+    pub fn accept_invite(&mut self, user_id: &str, event_id: EventId) {
+        if !self.is_member(user_id) {
+            return;
+        }
+        self.accepted_members.insert(user_id.to_string());
+        if self.my_user_id.as_deref() == Some(user_id) && self.pending_invite {
+            self.pending_invite = false;
+            self.accepted_event_id = Some(event_id);
+        }
+    }
+    /// Historical, unmarked membership snapshots auto-joined newly added
+    /// members. Preserve that behavior without introducing an acceptance cutoff.
+    pub fn auto_accept_legacy_member(&mut self, user_id: &str) {
+        if !self.is_member(user_id) {
+            return;
+        }
+        self.accepted_members.insert(user_id.to_string());
+        if self.my_user_id.as_deref() == Some(user_id) {
+            self.pending_invite = false;
+            self.accepted_event_id = None;
+        }
+    }
+    /// Transfer administration only to a current member. The signed-event author is
+    /// checked by the caller before this method is invoked.
+    pub fn transfer_owner(&mut self, next: &str) -> bool {
+        if !self.is_member(next) || !self.accepted_members.contains(next) {
+            return false;
+        }
+        self.owner = next.to_string();
+        true
+    }
+    /// Apply a self-signed departure. Epoch advances so later sends use fresh
+    /// sender keys and concurrent stale owner snapshots cannot restore the member.
+    pub fn leave_member(&mut self, user_id: &str) -> bool {
+        if user_id == self.owner || !self.is_member(user_id) {
+            return false;
+        }
+        self.members.retain(|member| member.user_id() != user_id);
+        self.accepted_members.remove(user_id);
+        self.epoch = self.epoch.saturating_add(1);
+        true
+    }
     pub fn members(&self) -> &[PublicIdentity] {
         &self.members
     }
     pub fn is_member(&self, user_id: &str) -> bool {
         self.members.iter().any(|m| m.user_id() == user_id)
+    }
+    pub fn is_accepted_member(&self, user_id: &str) -> bool {
+        self.is_member(user_id) && self.accepted_members.contains(user_id)
     }
 
     /// Set this node's identity (who "I" am) for sender-key send/AAD. Idempotent.
@@ -265,6 +359,9 @@ impl ChannelState {
             .my_user_id
             .clone()
             .ok_or_else(|| ChannelError::Malformed("no identity".into()))?;
+        if !self.is_member(&me) || self.pending_invite {
+            return Err(ChannelError::Malformed("not a channel member".into()));
+        }
         let epoch = self.epoch;
         let sk = self
             .my_sender
@@ -501,61 +598,62 @@ mod tests {
 
     // --- sender-key path ---
 
-    fn sender_pair(epoch: u64) -> (ChannelState, ChannelState) {
+    fn sender_pair(epoch: u64) -> (ChannelState, ChannelState, String) {
         let a = DeviceIdentity::generate();
         let b = DeviceIdentity::generate();
         let id = new_channel_id();
         let mut alice = ChannelState::from_meta(id, meta("general", &[&a, &b], epoch));
-        alice.set_identity("alice".into());
+        let alice_uid = a.public().user_id();
+        alice.set_identity(alice_uid.clone());
         let mut bob = ChannelState::from_meta(id, meta("general", &[&a, &b], epoch));
-        bob.set_identity("bob".into());
+        bob.set_identity(b.public().user_id());
         // Bob follows Alice's chain from her distribution.
         let skd = alice.my_sender_distribution();
-        bob.record_sender_chain("alice".into(), epoch, &skd);
-        (alice, bob)
+        bob.record_sender_chain(alice_uid.clone(), epoch, &skd);
+        (alice, bob, alice_uid)
     }
 
     #[test]
     fn sender_key_seal_then_open() {
-        let (mut alice, mut bob) = sender_pair(0);
+        let (mut alice, mut bob, alice_uid) = sender_pair(0);
         let wire = alice.seal_sender_message(b"hi").unwrap();
         assert_eq!(
-            bob.open_sender_message("alice", &wire).as_deref(),
+            bob.open_sender_message(&alice_uid, &wire).as_deref(),
             Some(&b"hi"[..])
         );
     }
 
     #[test]
     fn sender_key_out_of_order() {
-        let (mut alice, mut bob) = sender_pair(0);
+        let (mut alice, mut bob, alice_uid) = sender_pair(0);
         let w0 = alice.seal_sender_message(b"m0").unwrap();
         let w1 = alice.seal_sender_message(b"m1").unwrap();
         let w2 = alice.seal_sender_message(b"m2").unwrap();
         // Bob opens 2, 0, 1 — the chain ratchets forward and buffers skipped keys.
         assert_eq!(
-            bob.open_sender_message("alice", &w2).as_deref(),
+            bob.open_sender_message(&alice_uid, &w2).as_deref(),
             Some(&b"m2"[..])
         );
         assert_eq!(
-            bob.open_sender_message("alice", &w0).as_deref(),
+            bob.open_sender_message(&alice_uid, &w0).as_deref(),
             Some(&b"m0"[..])
         );
         assert_eq!(
-            bob.open_sender_message("alice", &w1).as_deref(),
+            bob.open_sender_message(&alice_uid, &w1).as_deref(),
             Some(&b"m1"[..])
         );
     }
 
     #[test]
     fn sender_key_is_single_use() {
-        let (mut alice, mut bob) = sender_pair(0);
+        let (mut alice, mut bob, alice_uid) = sender_pair(0);
         let wire = alice.seal_sender_message(b"once").unwrap();
         assert_eq!(
-            bob.open_sender_message("alice", &wire).as_deref(),
+            bob.open_sender_message(&alice_uid, &wire).as_deref(),
             Some(&b"once"[..])
         );
         // The key was consumed (forward secrecy) — re-opening the same wire fails.
-        assert!(bob.open_sender_message("alice", &wire).is_none());
+        assert!(bob.open_sender_message(&alice_uid, &wire).is_none());
     }
 
     #[test]
@@ -564,13 +662,13 @@ mod tests {
         // (or replay one) under an event they author, burning Alice's single-use
         // position so her genuine message is dropped (censorship/DoS). The author bind
         // must reject it BEFORE the chain is consumed.
-        let (mut alice, mut bob) = sender_pair(0);
+        let (mut alice, mut bob, alice_uid) = sender_pair(0);
         let wire = alice.seal_sender_message(b"hi").unwrap();
         // Same wire, but the authenticated author is someone else: rejected.
         assert!(bob.open_sender_message("mallory", &wire).is_none());
         // Crucially, Alice's position was NOT consumed — her genuine message still opens.
         assert_eq!(
-            bob.open_sender_message("alice", &wire).as_deref(),
+            bob.open_sender_message(&alice_uid, &wire).as_deref(),
             Some(&b"hi"[..]),
         );
     }
@@ -580,12 +678,16 @@ mod tests {
         let a = DeviceIdentity::generate();
         let id = new_channel_id();
         let mut alice = ChannelState::from_meta(id, meta("general", &[&a], 0));
-        alice.set_identity("alice".into());
+        alice.set_identity(a.public().user_id());
         let wire = alice.seal_sender_message(b"secret").unwrap();
         // A member who never recorded Alice's chain cannot open her message.
         let mut outsider = ChannelState::from_meta(id, meta("general", &[&a], 0));
         outsider.set_identity("carol".into());
-        assert!(outsider.open_sender_message("alice", &wire).is_none());
+        assert!(
+            outsider
+                .open_sender_message(&a.public().user_id(), &wire)
+                .is_none()
+        );
     }
 
     #[test]

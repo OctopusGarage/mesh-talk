@@ -248,6 +248,9 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+            if !state.is_accepted_member(&self.user_id()) {
+                return Err(NodeError::Channel("not a channel member".into()));
+            }
             state.members().to_vec()
         };
         let payload = DeletePayload { target };
@@ -274,6 +277,7 @@ impl Node {
         &self,
         conv: ConversationId,
     ) -> HashSet<EventId> {
+        let content_gate = self.channel_content_gate(conv);
         let mut out: HashSet<EventId> = self
             .recalls
             .lock()
@@ -286,7 +290,10 @@ impl Node {
             let log = self.log.lock().expect("log mutex not poisoned");
             log.events(&conv)
                 .into_iter()
-                .filter(|e| e.kind == EventKind::Delete)
+                .filter(|e| {
+                    e.kind == EventKind::Delete
+                        && content_gate.as_ref().is_none_or(|ids| ids.contains(&e.id))
+                })
                 .cloned()
                 .collect()
         };
