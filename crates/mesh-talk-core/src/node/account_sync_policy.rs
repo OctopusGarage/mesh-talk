@@ -30,10 +30,10 @@ impl Default for DeviceSyncPolicy {
     fn default() -> Self {
         Self {
             history: true,
-            attachments: true,
-            profile: true,
-            appearance: true,
-            contacts: true,
+            attachments: false,
+            profile: false,
+            appearance: false,
+            contacts: false,
         }
     }
 }

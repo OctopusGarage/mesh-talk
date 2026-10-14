@@ -5855,6 +5855,11 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
         "pw",
     )
     .unwrap();
+    assert!(
+        node.set_device_sync_category(crate::node::SyncCategory::Appearance, true)
+            .is_err(),
+        "unsupported categories must not report a successful sync setting"
+    );
     let msg_id = [7; 32];
     let plaintext = DmEnvelope::new(
         bob_id.clone(),

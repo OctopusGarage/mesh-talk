@@ -94,6 +94,11 @@ impl Node {
         category: SyncCategory,
         enabled: bool,
     ) -> Result<(), NodeError> {
+        if category != SyncCategory::History {
+            return Err(NodeError::Channel(
+                "this sync category is not available yet".into(),
+            ));
+        }
         self.account_sync_policy
             .lock()
             .expect("account sync policy mutex not poisoned")
