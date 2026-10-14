@@ -378,7 +378,8 @@ try {
   // in either shipped language instead of assuming an English OS.
   assert.match(confirmationCopy, /History is kept|聊天历史保留/);
   assert.match(confirmationCopy, /Messages and calls can still arrive|仍可收到消息和来电/);
-  assert.match(confirmationCopy, /signed-in user on this device|本设备当前登录用户/);
+  assert.match(confirmationCopy, /Saved on this device|保存在本设备上/);
+  assert.match(confirmationCopy, /Linked devices can share this choice|已关联设备都启用联系人同步/);
   await key("\uE007");
   await until("Enter cancels confirmation", async () => !await exists("hide-contact-dialog"));
   assert.equal(await exists(row()), true);
