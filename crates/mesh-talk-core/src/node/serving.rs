@@ -213,10 +213,11 @@ impl Node {
         if let Some(super::account_sync_wire::AccountHistoryFrame::Request {
             account_id,
             cursor,
+            known_digest,
             ..
         }) = super::account_sync_wire::AccountHistoryFrame::decode(&first)
         {
-            self.serve_account_history(&mut channel, &account_id, cursor)
+            self.serve_account_history(&mut channel, &account_id, cursor, known_digest)
                 .await;
             return;
         }

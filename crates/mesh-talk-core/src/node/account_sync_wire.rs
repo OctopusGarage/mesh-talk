@@ -15,6 +15,7 @@ pub(super) enum AccountHistoryFrame {
         version: u16,
         account_id: String,
         cursor: u32,
+        known_digest: [u8; 32],
     },
     Device {
         device: AccountDevice,
@@ -31,6 +32,7 @@ pub(super) enum AccountHistoryFrame {
     },
     Complete {
         next_cursor: Option<u32>,
+        digest: [u8; 32],
     },
 }
 
@@ -96,6 +98,7 @@ mod tests {
                 version: VERSION,
                 account_id: "ab".repeat(16),
                 cursor: 7,
+                known_digest: [0; 32],
             },
             AccountHistoryFrame::Device {
                 device: AccountDevice {
@@ -115,6 +118,7 @@ mod tests {
             },
             AccountHistoryFrame::Complete {
                 next_cursor: Some(8),
+                digest: [9; 32],
             },
         ] {
             let encoded = frame.encode().expect("valid frame encodes");
@@ -130,6 +134,7 @@ mod tests {
                 version: VERSION + 1,
                 account_id: "ab".repeat(16),
                 cursor: 0,
+                known_digest: [0; 32],
             }
             .encode()
             .is_none()
@@ -156,9 +161,12 @@ mod tests {
 
     #[test]
     fn rejects_trailing_bytes_and_wrong_magic() {
-        let encoded = AccountHistoryFrame::Complete { next_cursor: None }
-            .encode()
-            .unwrap();
+        let encoded = AccountHistoryFrame::Complete {
+            next_cursor: None,
+            digest: [0; 32],
+        }
+        .encode()
+        .unwrap();
         let mut trailing = encoded.clone();
         trailing.push(0);
         assert!(AccountHistoryFrame::decode(&trailing).is_none());

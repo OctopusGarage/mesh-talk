@@ -10,6 +10,7 @@ use super::session::SessionError;
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::transport::SecureChannel;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -19,6 +20,13 @@ use tokio::net::TcpStream;
 const RECORDS_PER_PAGE: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+struct PeerCursor {
+    next: u32,
+    known_digest: [u8; 32],
+    sweep_digest: [u8; 32],
+}
 
 #[derive(Clone)]
 struct PendingRecord {
@@ -123,11 +131,9 @@ impl Node {
         channel: &mut SecureChannel<TcpStream>,
         account_id: &str,
         cursor: u32,
+        known_digest: [u8; 32],
     ) {
-        if account_id != self.account_id()
-            || !channel.io_admitted()
-            || !self.device_sync_policy().history
-        {
+        if account_id != self.account_id() || !channel.io_admitted() {
             return;
         }
         let peer = channel.peer_identity();
@@ -146,7 +152,34 @@ impl Node {
                 return;
             }
         }
+        if !self.device_sync_policy().history {
+            let _ = send_frame(
+                channel,
+                &AccountHistoryFrame::Complete {
+                    next_cursor: None,
+                    digest: [0; 32],
+                },
+            )
+            .await;
+            return;
+        }
         let records = self.export_sync_records();
+        let mut hasher = Sha256::new();
+        for record in &records {
+            hasher.update(record.event_id);
+        }
+        let digest: [u8; 32] = hasher.finalize().into();
+        if cursor == 0 && known_digest == digest {
+            let _ = send_frame(
+                channel,
+                &AccountHistoryFrame::Complete {
+                    next_cursor: None,
+                    digest,
+                },
+            )
+            .await;
+            return;
+        }
         let start = (cursor as usize).min(records.len());
         let end = start.saturating_add(RECORDS_PER_PAGE).min(records.len());
         for record in &records[start..end] {
@@ -175,16 +208,24 @@ impl Node {
             }
         }
         let next_cursor = (end < records.len()).then_some(end as u32);
-        let _ = send_frame(channel, &AccountHistoryFrame::Complete { next_cursor }).await;
+        let _ = send_frame(
+            channel,
+            &AccountHistoryFrame::Complete {
+                next_cursor,
+                digest,
+            },
+        )
+        .await;
     }
 
     async fn pull_account_history_page(
         &self,
         peer: &PeerRecord,
         cursor: u32,
-    ) -> Result<Option<u32>, NodeError> {
+        known_digest: [u8; 32],
+    ) -> Result<(Option<u32>, [u8; 32]), NodeError> {
         if !self.device_sync_policy().history {
-            return Ok(None);
+            return Ok((None, [0; 32]));
         }
         let own = self.account_id();
         if peer.account_id.as_deref() != Some(own.as_str())
@@ -207,6 +248,7 @@ impl Node {
                 version: VERSION,
                 account_id: own.clone(),
                 cursor,
+                known_digest,
             },
         )
         .await?;
@@ -272,11 +314,14 @@ impl Node {
                         page.push(record);
                     }
                 }
-                AccountHistoryFrame::Complete { next_cursor } if pending.is_none() => {
+                AccountHistoryFrame::Complete {
+                    next_cursor,
+                    digest,
+                } if pending.is_none() => {
                     if self.device_sync_policy().history {
                         self.import_account_backfill(&page)?;
                     }
-                    return Ok(next_cursor);
+                    return Ok((next_cursor, digest));
                 }
                 _ => return Err(NodeError::Channel("unexpected history frame".into())),
             }
@@ -286,7 +331,7 @@ impl Node {
     pub(in crate::node) async fn run_account_history_loop(self: Arc<Self>) {
         let mut tick = tokio::time::interval(RETRY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut cursors: HashMap<String, u32> = HashMap::new();
+        let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
@@ -307,9 +352,25 @@ impl Node {
                 if peer.public != device.public {
                     continue;
                 }
-                let cursor = *cursors.get(&id).unwrap_or(&0);
-                if let Ok(next) = self.pull_account_history_page(&peer, cursor).await {
-                    cursors.insert(id, next.unwrap_or(0));
+                let state = cursors.entry(id).or_default();
+                if let Ok((next, digest)) = self
+                    .pull_account_history_page(&peer, state.next, state.known_digest)
+                    .await
+                {
+                    match next {
+                        Some(next) if state.next == 0 => {
+                            state.next = next;
+                            state.sweep_digest = digest;
+                            state.known_digest = [0; 32];
+                        }
+                        Some(next) if state.sweep_digest == digest => state.next = next,
+                        Some(_) => *state = PeerCursor::default(),
+                        None if state.next == 0 || state.sweep_digest == digest => {
+                            state.next = 0;
+                            state.known_digest = digest;
+                        }
+                        None => *state = PeerCursor::default(),
+                    }
                 }
             }
         }
