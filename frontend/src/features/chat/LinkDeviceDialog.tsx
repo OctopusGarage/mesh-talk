@@ -12,7 +12,9 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { auth, chat } from "@/lib/api";
+import type { DeviceSyncPolicy } from "@/lib/api/chat";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
@@ -38,6 +40,47 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
     null,
   );
+  const [syncPolicy, setSyncPolicy] = useState<DeviceSyncPolicy | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setSyncPolicy(null);
+    setSyncError(null);
+    void chat.getDeviceSyncPolicy().then(
+      (policy) => {
+        if (active) setSyncPolicy(policy);
+      },
+      (error) => {
+        if (active)
+          setSyncError(
+            t("linkDevice.syncLoadFailed", { error: errorMessage(error) }),
+          );
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [open, t]);
+
+  const setHistorySync = async (enabled: boolean) => {
+    if (!syncPolicy || syncBusy) return;
+    setSyncBusy(true);
+    setSyncError(null);
+    try {
+      const policy = await chat.setDeviceSyncCategory("history", enabled);
+      if (openRef.current) setSyncPolicy(policy);
+    } catch (error) {
+      if (openRef.current)
+        setSyncError(
+          t("linkDevice.syncSaveFailed", { error: errorMessage(error) }),
+        );
+    } finally {
+      setSyncBusy(false);
+    }
+  };
 
   const stopLinking = () => {
     const pending = chat.stopLinking().catch((e) => {
@@ -298,6 +341,36 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
               {t("common.link")}
             </Button>
           </div>
+        </section>
+
+        <section className="space-y-3 rounded-lg border p-4">
+          <p className="font-display text-sm font-semibold tracking-tight">
+            {t("linkDevice.syncTitle")}
+          </p>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                {t("linkDevice.historySync")}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("linkDevice.historySyncDescription")}
+              </p>
+            </div>
+            <Switch
+              checked={syncPolicy?.history ?? false}
+              disabled={!syncPolicy || syncBusy}
+              aria-label={t("linkDevice.historySync")}
+              onCheckedChange={(enabled) => void setHistorySync(enabled)}
+            />
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("linkDevice.otherSyncUnavailable")}
+          </p>
+          {syncError && (
+            <p role="alert" className="text-xs text-destructive">
+              {syncError}
+            </p>
+          )}
         </section>
 
         {/* Lost / compromised device — rotate the account identity. */}

@@ -934,6 +934,25 @@ export const test = base.extend({
           },
 
           // device linking
+          get_device_sync_policy: () =>
+            JSON.parse(
+              localStorage.getItem(`mock-device-sync-policy-${SELF.device}`) ??
+                '{"history":true,"attachments":false,"profile":false,"appearance":false,"contacts":false}',
+            ),
+          set_device_sync_category: (a) => {
+            if (a.category !== "history")
+              throw new Error("this sync category is not available yet");
+            const policy = responses.get_device_sync_policy({}) as Record<
+              string,
+              boolean
+            >;
+            const next = { ...policy, history: Boolean(a.enabled) };
+            localStorage.setItem(
+              `mock-device-sync-policy-${SELF.device}`,
+              JSON.stringify(next),
+            );
+            return next;
+          },
           start_linking: () => "0123456789abcdef0123456789abcdef", // 32 hex, like a real PairingCode
           stop_linking: ok,
           link_device: () => SELF.account,

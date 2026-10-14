@@ -467,6 +467,12 @@
     "folderLoadFailed": "Couldn’t load the download folder: {{error}}"
   },
   "linkDevice": {
+    "syncTitle": "Sync on this device",
+    "historySync": "Direct message history",
+    "historySyncDescription": "Share and receive direct message history with your linked devices.",
+    "otherSyncUnavailable": "Channel messages and attachments, profile, appearance, and contacts aren't available for sync yet.",
+    "syncLoadFailed": "Couldn't load sync choices: {{error}}",
+    "syncSaveFailed": "Couldn't save sync choice: {{error}}",
     "trigger": "Link a device",
     "title": "Your devices",
     "thisAccount": "This device's account:",

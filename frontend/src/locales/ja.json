@@ -467,6 +467,12 @@
     "folderLoadFailed": "ダウンロードフォルダーを読み込めませんでした: {{error}}"
   },
   "linkDevice": {
+    "syncTitle": "この端末で同期",
+    "historySync": "ダイレクトメッセージの履歴",
+    "historySyncDescription": "リンクした端末とダイレクトメッセージの履歴を送受信します。",
+    "otherSyncUnavailable": "チャンネルのメッセージと添付ファイル、プロフィール、外観、連絡先の同期にはまだ対応していません。",
+    "syncLoadFailed": "同期設定を読み込めませんでした: {{error}}",
+    "syncSaveFailed": "同期設定を保存できませんでした: {{error}}",
     "trigger": "端末をリンク",
     "title": "あなたの端末",
     "thisAccount": "この端末のアカウント：",

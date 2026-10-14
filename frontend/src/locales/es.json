@@ -467,6 +467,12 @@
     "folderLoadFailed": "No se pudo cargar la carpeta de descargas: {{error}}"
   },
   "linkDevice": {
+    "syncTitle": "Sincronización en este dispositivo",
+    "historySync": "Historial de mensajes directos",
+    "historySyncDescription": "Comparte y recibe el historial de mensajes directos con tus dispositivos vinculados.",
+    "otherSyncUnavailable": "Los mensajes de canales y archivos adjuntos, el perfil, la apariencia y los contactos aún no se pueden sincronizar.",
+    "syncLoadFailed": "No se pudieron cargar las opciones de sincronización: {{error}}",
+    "syncSaveFailed": "No se pudo guardar la opción de sincronización: {{error}}",
     "trigger": "Vincular un dispositivo",
     "title": "Tus dispositivos",
     "thisAccount": "Cuenta de este dispositivo:",

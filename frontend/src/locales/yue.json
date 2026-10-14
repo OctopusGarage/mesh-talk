@@ -467,6 +467,12 @@
     "folderLoadFailed": "載入下載資料夾失敗：{{error}}"
   },
   "linkDevice": {
+    "syncTitle": "喺呢部裝置同步",
+    "historySync": "私訊紀錄",
+    "historySyncDescription": "同已連結嘅裝置分享同接收私訊紀錄。",
+    "otherSyncUnavailable": "頻道訊息同附件、個人資料、外觀同聯絡人暫時未支援同步。",
+    "syncLoadFailed": "載入同步選項失敗：{{error}}",
+    "syncSaveFailed": "儲存同步選項失敗：{{error}}",
     "trigger": "連結裝置",
     "title": "你的裝置",
     "thisAccount": "此裝置的帳戶：",

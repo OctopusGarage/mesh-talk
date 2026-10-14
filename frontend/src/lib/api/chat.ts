@@ -1,11 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type SyncCategory =
-  | "history"
-  | "attachments"
-  | "profile"
-  | "appearance"
-  | "contacts";
+  "history" | "attachments" | "profile" | "appearance" | "contacts";
 
 export type DeviceSyncPolicy = Record<SyncCategory, boolean>;
 import type {
@@ -31,8 +27,7 @@ function nextBadgeRevision(): number {
 }
 
 export const chat = {
-  getDeviceSyncPolicy: () =>
-    invoke<DeviceSyncPolicy>("get_device_sync_policy"),
+  getDeviceSyncPolicy: () => invoke<DeviceSyncPolicy>("get_device_sync_policy"),
   setDeviceSyncCategory: (category: SyncCategory, enabled: boolean) =>
     invoke<DeviceSyncPolicy>("set_device_sync_category", {
       category,
