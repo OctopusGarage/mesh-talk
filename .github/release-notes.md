@@ -5,25 +5,15 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.3.0
+### What's new in v0.3.1
 
-- Install and remove avatar, theme, and sticker ZIP libraries, including your own packs.
-- Choose the default edition with 14 optional packs and animated Noto stickers, or the lite
-  edition with no optional packs and emoji-only built-in stickers. Both keep light, dark, and OLED.
-- Browse and install shared packs from the [OctopusGarage Marketplace](https://octopusgarage.github.io/marketplace/),
-  with versioned downloads and SHA-256 verification. The [Pack Studio](https://octopusgarage.github.io/marketplace/studio/)
-  builds and checks packs locally in your browser.
-- Show sender progress and time remaining for file, image, and folder transfers based on chunks
-  confirmed by the recipient. Failed sends stay visible with an actionable error.
-- Ask before receiving generic attachments, with automatic receive controls for all contacts or
-  an individual contact. Received folders save to the configured Downloads directory.
-- Keep conversation, Dock, and macOS menu bar unread counts aligned, including messages that
-  arrive while the app is in the background.
-- Support large folders with a compact manifest and reduce reconciliation overhead by batching
-  existing file followups. Smaller attachments keep the format supported by older clients.
-- Load bundled stickers and other built-in images directly, reducing chat startup work.
-- Capture and annotate screenshots on macOS, Windows, and Linux, subject to desktop capture
-  permissions and portal support.
+- Give channel owners controls to dissolve a channel and complete the invitation and membership
+  lifecycle.
+- Hide invisible peers from online presence while keeping their messaging available.
+- Let you remove the default Google Noto sticker pack and reinstall it when wanted.
+- Improve settings layout and guide users through release updates.
+- Fix macOS 12 WebView compatibility in packaged frontend bundles and retain graphics
+  configuration in release diagnostics.
 
 
 ### Downloads
