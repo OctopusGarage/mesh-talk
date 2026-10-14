@@ -3588,6 +3588,141 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
     assert_eq!(b.read_file(file).unwrap(), bytes);
 }
 
+#[tokio::test]
+async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
+    b.set_attachment_global_auto(false).unwrap();
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
+
+    let po = DeviceIdentity::generate();
+    let keys = po.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(&po, "Relay", listener.local_addr().unwrap().port());
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", po).unwrap(),
+    ));
+    let relay_task = tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        listener,
+        relay.clone(),
+    ));
+    for peer in [&a, &b] {
+        peer.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &peer.user_id(),
+        );
+    }
+
+    let source = ad.path().join("offline-file.bin");
+    let bytes = vec![7; crate::file::CHUNK_SIZE + 17];
+    std::fs::write(&source, &bytes).unwrap();
+    let (card, file) = a
+        .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    a.flush_delivery(card).await;
+    b.drain_from_post_office().await;
+    let offer = tokio::time::timeout(std::time::Duration::from_secs(5), offers.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offer.file_conv, file);
+    b.decide_attachment(file, true).unwrap();
+
+    let recipient_task = tokio::spawn(b.clone().run_accept_loop(bl));
+    let recipient = a.routing_peer(&b.user_id()).unwrap();
+    let mut channel = a
+        .privacy_dial(recipient.addr, &recipient.public)
+        .await
+        .unwrap();
+    let binding = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .destinations[0]
+        .binding
+        .event_id;
+    let status = super::session::request_file_consent(&mut channel, file, binding)
+        .await
+        .unwrap();
+    assert_eq!(status, crate::eventlog::sync::FileConsentStatus::Accepted);
+    a.outgoing_file_consents
+        .lock()
+        .unwrap()
+        .insert((card, binding), status);
+    drop(channel);
+    recipient_task.abort();
+    let _ = recipient_task.await;
+
+    a.flush_file_delivery(card).await;
+    assert!(
+        b.read_file(file).is_err(),
+        "recipient was offline during upload"
+    );
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &a.identity,
+        &b.identity.public(),
+        &proof.public(),
+    )
+    .unwrap();
+    assert!(
+        relay.lock().unwrap().has(
+            &mailbox
+                .wrap(
+                    a.log
+                        .lock()
+                        .unwrap()
+                        .events(&file)
+                        .into_iter()
+                        .find(|event| event.id == final_chunk)
+                        .unwrap(),
+                )
+                .unwrap()
+                .id
+        )
+    );
+    assert!(!relay.lock().unwrap().has(&final_chunk));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            b.drain_from_post_office().await;
+            if b.read_file(file)
+                .as_ref()
+                .is_ok_and(|actual| actual == &bytes)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    relay_task.abort();
+    let _ = relay_task.await;
+}
+
 /// Real LAN custody tests require the installed relay's signed device ID.
 /// The sender has no accept loop, so its file worker cannot race the
 /// controlled consent and offline handoffs below.
@@ -3651,6 +3786,7 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     let (a, _) = node(ad.path(), alice, aa, &bp);
     let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
     b.set_attachment_global_auto(false).unwrap();
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
     for peer in [&a, &b] {
         peer.roster
             .lock()
