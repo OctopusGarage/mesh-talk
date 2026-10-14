@@ -591,7 +591,7 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         user_id.clone(),
         args.discovery_port,
         None,
-        Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false)),
+        Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::default()),
         Some(Arc::new(
             mesh_talk_core::discovery::service::RoutedDiscovery::new(Arc::new(
                 move |nonce, announce| {
