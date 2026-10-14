@@ -16,6 +16,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
 | [`docs/routed-network-discovery.md`](routed-network-discovery.md) | Optional routed discovery over existing Tailscale or manually supplied addresses, identity boundary, route selection, and release checks. |
+| [`docs/routed-network-discovery-research.md`](routed-network-discovery-research.md) | Historical cited research and design options behind routed discovery; see the implementation guide for current behavior. |
 | [`docs/network-topologies.md`](network-topologies.md) | A–F LAN/Tailscale/post-office scenarios, peer visibility, message paths, required opt-in, and tested limits. |
 | [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md) | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility. |
 | [`docs/post-office-release.md`](post-office-release.md) | Signed headless relay release archives and Linux GHCR container deployment. |
