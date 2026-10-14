@@ -281,6 +281,7 @@ pub struct Node {
     /// account is injected by [`Node::open_with_account`]. Holds the secret so this
     /// device can serve a pairing request (transfer the account to a new device).
     pub(in crate::node) account: Account,
+    pub(in crate::node) account_devices: Mutex<super::account_devices::AccountDevices>,
     /// One-time pairing code while in "link a device" mode (linker side). Set by
     /// [`Node::start_linking`], cleared on success or [`Node::stop_linking`].
     pub(in crate::node) pending_link: Mutex<Option<PendingLink>>,
@@ -640,6 +641,15 @@ impl Node {
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
+        let mut account_devices = super::account_devices::AccountDevices::open(
+            &super::account_devices::file_path(dir, &account.account_id()),
+            password,
+            &account.account_id(),
+        )?;
+        account_devices.insert(super::account_devices::AccountDevice {
+            public: identity.public(),
+            certificate: account.certify(&identity.public().ed25519_pub),
+        })?;
         let node = Arc::new(Self {
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
@@ -657,6 +667,7 @@ impl Node {
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
             account,
+            account_devices: Mutex::new(account_devices),
             profiles: Mutex::new(profiles),
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
@@ -714,6 +725,14 @@ impl Node {
     /// This node's cryptographic account id (cross-device handle).
     pub fn account_id(&self) -> String {
         self.account.account_id()
+    }
+
+    /// Certified devices known to share this account, including this device.
+    pub fn linked_devices(&self) -> Vec<super::account_devices::AccountDevice> {
+        self.account_devices
+            .lock()
+            .expect("account_devices mutex not poisoned")
+            .devices()
     }
 
     /// Build a freshly-signed account-bound announce advertising `display_name` and

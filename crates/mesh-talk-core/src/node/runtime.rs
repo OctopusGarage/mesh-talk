@@ -744,6 +744,24 @@ impl NodeRuntime {
             .link_to_device(peer.addr, &peer.public, code)
             .await?;
         let account = crate::identity::account::Account::from_secret_bytes(linked.secret);
+        let device_dir = self
+            .account_path
+            .parent()
+            .ok_or_else(|| NodeError::Channel("account path has no parent".into()))?;
+        let mut devices = super::account_devices::AccountDevices::open(
+            &super::account_devices::file_path(device_dir, &linked.account_id),
+            &self.password,
+            &linked.account_id,
+        )
+        .map_err(NodeError::Log)?;
+        for public in [self.node.identity.public(), peer.public] {
+            devices
+                .insert(super::account_devices::AccountDevice {
+                    certificate: account.certify(&public.ed25519_pub),
+                    public,
+                })
+                .map_err(NodeError::Log)?;
+        }
         self.node
             .persist_account_adoption(&account.account_id(), || {
                 crate::identity::account_keystore::save(

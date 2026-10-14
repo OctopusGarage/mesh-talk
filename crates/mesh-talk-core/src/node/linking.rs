@@ -157,6 +157,18 @@ impl Node {
             }
         }
         let cert = self.account.certify(&req.joiner.ed25519_pub);
+        if self
+            .account_devices
+            .lock()
+            .expect("account_devices mutex not poisoned")
+            .insert(super::account_devices::AccountDevice {
+                public: req.joiner.clone(),
+                certificate: cert.clone(),
+            })
+            .is_err()
+        {
+            return;
+        }
         let resp = PairingResponse {
             account_secret: self.account.secret_bytes(),
             account_ed25519_pub: self.account.public().ed25519_pub,
