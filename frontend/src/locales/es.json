@@ -688,7 +688,13 @@
     "joinTitle": "El otro dispositivo se conecta",
     "joinBody": "Conecta el segundo dispositivo a esa zona Wi-Fi y vuelve a abrir Mesh-Talk. Apareceréis en la lista del otro en segundos, o abre el diagnóstico de red y pulsa Reescanear.",
     "wiredNote": "¿Sin Wi-Fi? Un cable Ethernet o el anclaje por USB entre los dos dispositivos funciona igual.",
-    "gotIt": "Entendido"
+    "gotIt": "Entendido",
+    "manualTitle": "Conectar por dirección",
+    "manualBody": "¿Ya usas una VPN u otra red accesible? Introduce la IP o el nombre del otro dispositivo. Mesh-Talk verificará su identidad antes de conectarse.",
+    "manualAddress": "IP o nombre del dispositivo",
+    "manualPlaceholder": "100.x.x.x o device.example",
+    "manualProbe": "Buscar dispositivo",
+    "manualSent": "Consulta enviada. El dispositivo aparecerá cuando responda y se verifique su identidad."
   },
   "profile": {
     "title": "Perfil",

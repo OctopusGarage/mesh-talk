@@ -3,8 +3,10 @@
 //! holds the handles. Tauri-agnostic — inbound DMs are delivered via an injected
 //! `on_dm` callback, so this is unit-testable without a GUI.
 
+use crate::discovery::candidates::CandidateSource;
 use crate::discovery::service::{
-    SharedAnnounce, shared_announce, spawn_discovery_with_visibility, swap_announce,
+    RoutedDiscovery, SharedAnnounce, shared_announce, spawn_discovery_with_routed,
+    spawn_routed_listener, swap_announce,
 };
 use crate::discovery::{Announce, PeerRecord, Roster};
 use crate::eventlog::LogError;
@@ -13,7 +15,7 @@ use crate::identity::device::PublicIdentity;
 use crate::identity::keystore;
 use crate::node::name_directory::NameDirectory;
 use crate::node::{HistoryEntry, Node, NodeError, ReceivedDm};
-use crate::transport::net::discovery_socket;
+use crate::transport::net::{discovery_socket, routed_ipv6_socket};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -106,6 +108,8 @@ pub struct RuntimeConfig<'a> {
     pub password: &'a str,
     pub discovery_port: u16,
     pub post_office_enabled: bool,
+    /// Optional host-owned routed address inventory; the core never starts a VPN.
+    pub candidate_source: Option<Arc<dyn CandidateSource>>,
 }
 
 /// Inbound events forwarded to the host from independent runtime tasks.
@@ -135,6 +139,11 @@ pub struct NodeRuntime {
     /// The OS-assigned TCP port the accept loop listens on (also needed to re-sign the
     /// announce on a rename).
     tcp_port: u16,
+    discovery_port: u16,
+    discovery_socket_v4: Arc<tokio::net::UdpSocket>,
+    discovery_socket_v6: Option<Arc<tokio::net::UdpSocket>>,
+    routed_discovery: Arc<RoutedDiscovery>,
+    visibility: Arc<crate::discovery::DiscoveryVisibility>,
     /// Where the account keystore lives, so a successful device link can persist the
     /// adopted account secret (effective on next login).
     account_path: std::path::PathBuf,
@@ -233,6 +242,7 @@ impl NodeRuntime {
                 password,
                 discovery_port,
                 post_office_enabled: true,
+                candidate_source: None,
             },
             RuntimeEvents {
                 on_dm: Box::new(on_dm),
@@ -262,6 +272,7 @@ impl NodeRuntime {
             password,
             discovery_port,
             post_office_enabled,
+            candidate_source,
         } = config;
         let RuntimeEvents {
             on_dm,
@@ -382,6 +393,12 @@ impl NodeRuntime {
             .await;
 
         let socket = Arc::new(discovery_socket(discovery_port)?);
+        let socket_v6 = routed_ipv6_socket(discovery_port).ok().map(Arc::new);
+        let routed = Arc::new(RoutedDiscovery::new({
+            let node = Arc::clone(&node);
+            Arc::new(move |nonce, announce| node.signed_discovery_response(nonce, announce))
+        }));
+        let mut candidate_source = candidate_source;
 
         let mut launch = Some(move |current_name: &str| {
             let current_announce = node.signed_announce(current_name, tcp_port);
@@ -389,15 +406,66 @@ impl NodeRuntime {
             swap_announce(&announce, &current_announce);
             let discovery_trigger = Arc::new(Notify::new());
             let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-            tasks.extend(spawn_discovery_with_visibility(
+            tasks.extend(spawn_discovery_with_routed(
                 Arc::clone(&socket),
                 Arc::clone(&roster),
                 Arc::clone(&announce),
                 self_uid.clone(),
                 discovery_port,
                 Some(Arc::clone(&discovery_trigger)),
-                visibility,
+                Arc::clone(&visibility),
+                Some(Arc::clone(&routed)),
             ));
+            if let Some(socket_v6) = socket_v6.as_ref() {
+                tasks.push(spawn_routed_listener(
+                    Arc::clone(socket_v6),
+                    Arc::clone(&roster),
+                    Arc::clone(&announce),
+                    self_uid.clone(),
+                    discovery_port,
+                    Arc::clone(&visibility),
+                    Arc::clone(&routed),
+                ));
+            }
+            if let Some(source) = candidate_source.take() {
+                let socket = Arc::clone(&socket);
+                let socket_v6 = socket_v6.clone();
+                let visibility = Arc::clone(&visibility);
+                let routed = Arc::clone(&routed);
+                let trigger = Arc::clone(&discovery_trigger);
+                tasks.push(tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(25));
+                    loop {
+                        tokio::select! {
+                            _ = tick.tick() => {},
+                            _ = trigger.notified() => {},
+                        }
+                        if visibility.is_public().await
+                            && let Ok(candidates) =
+                                tokio::time::timeout(Duration::from_secs(3), source.snapshot())
+                                    .await
+                        {
+                            let mut unique = std::collections::HashSet::new();
+                            for endpoint in candidates
+                                .into_iter()
+                                .filter(|addr| unique.insert(*addr))
+                                .take(256)
+                            {
+                                if !visibility.is_public().await {
+                                    break;
+                                }
+                                if let Some(sender) = match endpoint {
+                                    std::net::SocketAddr::V4(_) => Some(&socket),
+                                    std::net::SocketAddr::V6(_) => socket_v6.as_ref(),
+                                } {
+                                    let _ = routed.probe(sender, endpoint).await;
+                                }
+                                tokio::time::sleep(Duration::from_millis(63)).await;
+                            }
+                        }
+                    }
+                }));
+            }
             tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
             {
                 let node = Arc::clone(&node);
@@ -506,6 +574,11 @@ impl NodeRuntime {
                 display_name: current_name.to_string(),
                 announce,
                 tcp_port,
+                discovery_port,
+                discovery_socket_v4: Arc::clone(&socket),
+                discovery_socket_v6: socket_v6.clone(),
+                routed_discovery: Arc::clone(&routed),
+                visibility,
                 account_path: dir.join("account.keystore"),
                 password: password.to_string(),
                 discovery_trigger,
@@ -518,6 +591,35 @@ impl NodeRuntime {
     /// This node's own user-id fingerprint.
     pub fn user_id(&self) -> &str {
         &self.user_id
+    }
+
+    pub fn discovery_port(&self) -> u16 {
+        self.discovery_port
+    }
+
+    /// Probe a user-supplied address without revealing this device's identity
+    /// until the other end returns a fresh, signed Mesh Talk response.
+    pub async fn probe_endpoint(&self, endpoint: std::net::SocketAddr) -> std::io::Result<()> {
+        if !self.visibility.is_public().await {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "public discovery is disabled",
+            ));
+        }
+        let socket = match endpoint {
+            std::net::SocketAddr::V4(_) => &self.discovery_socket_v4,
+            std::net::SocketAddr::V6(_) => self.discovery_socket_v6.as_ref().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "IPv6 unavailable")
+            })?,
+        };
+        if self.routed_discovery.probe(socket, endpoint).await? {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "too many pending discovery queries",
+            ))
+        }
     }
 
     /// The display name this node advertises to peers.
@@ -939,6 +1041,195 @@ mod retirement_tests;
 mod tests {
     use super::*;
 
+    struct FixedCandidates(std::net::SocketAddr);
+
+    impl crate::discovery::candidates::CandidateSource for FixedCandidates {
+        fn snapshot(&self) -> futures_util::future::BoxFuture<'_, Vec<std::net::SocketAddr>> {
+            Box::pin(async move { vec![self.0] })
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_automatically_queries_a_host_supplied_routed_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let reserve = crate::transport::net::discovery_socket(0).unwrap();
+        let b_port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let b = NodeRuntime::start(
+            root.path(),
+            "bob",
+            "Bob",
+            "pw",
+            b_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let reserve = crate::transport::net::discovery_socket(0).unwrap();
+        let a_port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let source = Arc::new(FixedCandidates(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            b_port,
+        ))));
+        let a = NodeRuntime::start_configured(
+            RuntimeConfig {
+                base_dir: root.path(),
+                account_id: "alice",
+                display_name: "Alice",
+                password: "pw",
+                discovery_port: a_port,
+                post_office_enabled: false,
+                candidate_source: Some(source),
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_| {}),
+                on_channel: Box::new(|_| {}),
+                on_file: Box::new(|_| {}),
+                on_profile: Box::new(|_| {}),
+                on_call_signal: Box::new(|_| {}),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while !a
+                .peers()
+                .iter()
+                .any(|peer| peer.public.user_id() == b.user_id())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("candidate query discovered peer");
+        a.stop().await;
+        b.stop().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_automatically_queries_ipv6_candidate_when_ipv6_is_available() {
+        let Ok(reserve) = routed_ipv6_socket(0) else {
+            return;
+        };
+        let b_port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let root = tempfile::tempdir().unwrap();
+        let b = NodeRuntime::start(
+            root.path(),
+            "bob",
+            "Bob",
+            "pw",
+            b_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let reserve = routed_ipv6_socket(0).unwrap();
+        let a_port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let source = Arc::new(FixedCandidates(std::net::SocketAddr::from((
+            std::net::Ipv6Addr::LOCALHOST,
+            b_port,
+        ))));
+        let a = NodeRuntime::start_configured(
+            RuntimeConfig {
+                base_dir: root.path(),
+                account_id: "alice",
+                display_name: "Alice",
+                password: "pw",
+                discovery_port: a_port,
+                post_office_enabled: false,
+                candidate_source: Some(source),
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_| {}),
+                on_channel: Box::new(|_| {}),
+                on_file: Box::new(|_| {}),
+                on_profile: Box::new(|_| {}),
+                on_call_signal: Box::new(|_| {}),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while !a
+                .peers()
+                .iter()
+                .any(|peer| peer.public.user_id() == b.user_id())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("IPv6 candidate query discovered peer");
+        a.stop().await;
+        b.stop().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_manual_endpoint_probe_uses_the_same_query_protocol() {
+        let root = tempfile::tempdir().unwrap();
+        let reserve = crate::transport::net::discovery_socket(0).unwrap();
+        let b_port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let b = NodeRuntime::start(
+            root.path(),
+            "bob",
+            "Bob",
+            "pw",
+            b_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let reserve = crate::transport::net::discovery_socket(0).unwrap();
+        let a_port = reserve.local_addr().unwrap().port();
+        drop(reserve);
+        let a = NodeRuntime::start(
+            root.path(),
+            "alice",
+            "Alice",
+            "pw",
+            a_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        a.probe_endpoint(std::net::SocketAddr::from(([127, 0, 0, 1], b_port)))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !a
+                .peers()
+                .iter()
+                .any(|peer| peer.public.user_id() == b.user_id())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("manual candidate discovered peer");
+        a.stop().await;
+        b.stop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_node_or_privacy_initialization_joins_already_started_names_writer() {
         for failure_path in ["messages.log", "privacy.policy"] {
@@ -1032,6 +1323,7 @@ mod tests {
         PeerRecord {
             public: crate::identity::device::DeviceIdentity::generate().public(),
             addr: "127.0.0.1:1".parse().unwrap(),
+            routes: Vec::new(),
             name: "p".into(),
             post_office,
             account_id: None,
@@ -1081,6 +1373,7 @@ mod tests {
                 password: "pw",
                 discovery_port: dp,
                 post_office_enabled: false,
+                candidate_source: None,
             },
             RuntimeEvents {
                 on_dm: Box::new(|_dm| {}),

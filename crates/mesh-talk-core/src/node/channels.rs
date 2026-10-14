@@ -1138,6 +1138,7 @@ mod fanout_tests {
             .map(|port| PeerRecord {
                 public: DeviceIdentity::generate().public(),
                 addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 4000 + port)),
+                routes: Vec::new(),
                 name: String::new(),
                 post_office: false,
                 account_id: None,
@@ -1162,6 +1163,7 @@ mod fanout_tests {
             .map(|port| PeerRecord {
                 public: DeviceIdentity::generate().public(),
                 addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 4100 + port)),
+                routes: Vec::new(),
                 name: String::new(),
                 post_office: false,
                 account_id: None,
@@ -1187,6 +1189,7 @@ mod fanout_tests {
             .map(|port| PeerRecord {
                 public: DeviceIdentity::generate().public(),
                 addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 4200 + port)),
+                routes: Vec::new(),
                 name: String::new(),
                 post_office: false,
                 account_id: None,

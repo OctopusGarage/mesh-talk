@@ -688,7 +688,13 @@
     "joinTitle": "The other device joins it",
     "joinBody": "Connect the second device to that hotspot, then reopen Mesh-Talk. You'll appear in each other's list within seconds — or open Network diagnostics and tap Rescan.",
     "wiredNote": "No Wi-Fi at all? An Ethernet cable or USB tethering between the two devices works the same way.",
-    "gotIt": "Got it"
+    "gotIt": "Got it",
+    "manualTitle": "Connect by address",
+    "manualBody": "Already on a VPN or another reachable network? Enter the other device's IP address or hostname. Mesh-Talk will verify its identity before connecting.",
+    "manualAddress": "Device IP address or hostname",
+    "manualPlaceholder": "100.x.x.x or device.example",
+    "manualProbe": "Find device",
+    "manualSent": "Discovery query sent. The device will appear when it responds and its identity is verified."
   },
   "profile": {
     "title": "Profile",

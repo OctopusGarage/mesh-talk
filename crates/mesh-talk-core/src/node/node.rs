@@ -287,6 +287,8 @@ pub struct Node {
     pub(in crate::node) log: Mutex<PersistentEventLog>,
     pub(in crate::node) sentlog: Mutex<SentLog>,
     pub(in crate::node) roster: Arc<Mutex<Roster>>,
+    /// Session-local preferred address after a successful pinned Noise handshake.
+    pub(in crate::node) preferred_routes: Mutex<HashMap<UserId, std::net::SocketAddr>>,
     pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
     pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
@@ -697,6 +699,7 @@ impl Node {
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
             opaque_seen: Mutex::new(HashMap::new()),
+            preferred_routes: Mutex::new(HashMap::new()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
@@ -730,6 +733,21 @@ impl Node {
             &self.account,
             display_name,
             tcp_port,
+        )
+    }
+
+    /// Produce only the domain-separated response to a routed discovery query.
+    /// The host never receives this node's private signing key.
+    pub fn signed_discovery_response(
+        &self,
+        nonce: crate::discovery::query::Nonce,
+        announce: &crate::discovery::Announce,
+    ) -> Option<Vec<u8>> {
+        crate::discovery::query::encode_response_signed(
+            nonce,
+            announce,
+            &self.identity.public(),
+            |input| self.identity.sign(input),
         )
     }
 

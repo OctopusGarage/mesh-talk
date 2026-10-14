@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useMotionOK } from "@/lib/motion";
 import { diag } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
@@ -130,6 +131,10 @@ export function OfflineConnectDialog({
   const [announced, setAnnounced] = useState(false);
   const [announceError, setAnnounceError] = useState<string | null>(null);
   const [showHotspot, setShowHotspot] = useState(false);
+  const [endpoint, setEndpoint] = useState("");
+  const [probing, setProbing] = useState(false);
+  const [probeSent, setProbeSent] = useState(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
   const announceRequest = useRef(0);
   const announce = async () => {
     const request = ++announceRequest.current;
@@ -146,6 +151,19 @@ export function OfflineConnectDialog({
       if (request === announceRequest.current) setAnnouncing(false);
     }
   };
+  const probe = async () => {
+    setProbing(true);
+    setProbeSent(false);
+    setProbeError(null);
+    try {
+      await diag.probeEndpoint(endpoint.trim());
+      setProbeSent(true);
+    } catch (error) {
+      setProbeError(errorMessage(error));
+    } finally {
+      setProbing(false);
+    }
+  };
   return (
     <Dialog
       open={open}
@@ -157,6 +175,8 @@ export function OfflineConnectDialog({
           setAnnounced(false);
           setAnnounceError(null);
           setShowHotspot(false);
+          setProbeSent(false);
+          setProbeError(null);
         }
       }}
     >
@@ -181,6 +201,50 @@ export function OfflineConnectDialog({
         {!includeSharedNetwork && <DirectLinkGlyph />}
 
         <div className="space-y-3">
+          <section className="space-y-2 rounded-lg border p-3">
+            <p className="text-sm font-semibold">
+              {t("offlineConnect.manualTitle")}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {t("offlineConnect.manualBody")}
+            </p>
+            <form
+              className="flex gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void probe();
+              }}
+            >
+              <Input
+                aria-label={t("offlineConnect.manualAddress")}
+                placeholder={t("offlineConnect.manualPlaceholder")}
+                value={endpoint}
+                onChange={(event) => {
+                  setEndpoint(event.target.value);
+                  setProbeSent(false);
+                }}
+              />
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={!endpoint.trim() || probing}
+              >
+                {probing
+                  ? t("common.loading")
+                  : t("offlineConnect.manualProbe")}
+              </Button>
+            </form>
+            {probeSent && (
+              <p role="status" className="text-xs text-muted-foreground">
+                {t("offlineConnect.manualSent")}
+              </p>
+            )}
+            {probeError && (
+              <p role="alert" className="break-words text-xs text-destructive">
+                {probeError}
+              </p>
+            )}
+          </section>
           {includeSharedNetwork && (
             <section className="space-y-2 rounded-lg border p-3">
               <p className="flex items-center gap-2 text-sm font-semibold">

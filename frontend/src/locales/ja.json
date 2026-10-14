@@ -688,7 +688,13 @@
     "joinTitle": "もう片方がそれに接続",
     "joinBody": "2台目をそのホットスポットに接続し、Mesh-Talk を開き直します。数秒でお互いの一覧に表示されます——またはネットワーク診断を開いて「再スキャン」をタップしてください。",
     "wiredNote": "Wi-Fiが全くない場合は、2台をLANケーブルやUSBテザリングでつないでも同じように動作します。",
-    "gotIt": "OK"
+    "gotIt": "OK",
+    "manualTitle": "アドレスで接続",
+    "manualBody": "VPN などの到達可能なネットワークを利用中ですか？相手の IP アドレスまたはホスト名を入力してください。Mesh-Talk が接続前に本人確認します。",
+    "manualAddress": "デバイスの IP アドレスまたはホスト名",
+    "manualPlaceholder": "100.x.x.x または device.example",
+    "manualProbe": "デバイスを探す",
+    "manualSent": "探索要求を送信しました。応答と本人確認が完了するとデバイスが表示されます。"
   },
   "profile": {
     "title": "プロフィール",

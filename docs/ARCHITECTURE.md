@@ -248,7 +248,15 @@ command names for Tauri registration. Commands clone a node handle from
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
   + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
   Startup burst and scan times are measured from launch; a manual trigger works during
-  startup. The fallback scan visits each /24 once and omits every local interface address.
+  startup. The fallback scan visits each LAN /24 once, omits every local interface address,
+  and excludes Tailscale's 100.64.0.0/10 overlay range.
+  Desktop builds can additionally obtain candidate IPs from an already-running local
+  Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
+  query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
+  these endpoints remain separate from device identity and from Noise authorization.
+  The roster and encrypted route cache retain multiple addresses per device and
+  a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
+  for the protocol, limitations, and cross-network release checks.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).

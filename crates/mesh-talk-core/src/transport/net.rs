@@ -38,6 +38,22 @@ pub fn discovery_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
     Ok(sock)
 }
 
+/// Optional IPv6 unicast socket for routed discovery. Kept separate from the
+/// IPv4 multicast socket so LAN behavior and platform multicast binding stay
+/// unchanged. A host without IPv6 can omit it.
+pub fn routed_ipv6_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_only_v6(true)?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    let bind_addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, discovery_port).into();
+    socket.bind(&bind_addr.into())?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket.into())
+}
+
 /// Join [`DISCOVERY_MULTICAST_GROUP`] on every current non-loopback IPv4 interface
 /// (plus an unspecified-interface fallback). A single interface (the default route)
 /// is not enough on a multi-NIC / multi-WiFi host. Individual joins may fail (the
@@ -149,6 +165,24 @@ mod tests {
         // Port 0 → OS-assigned; just proves the bind + option-setting path works.
         let a = discovery_socket(0).unwrap();
         assert!(a.local_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn routed_ipv6_socket_receives_loopback_datagrams() {
+        let socket = routed_ipv6_socket(0).unwrap();
+        let target = socket.local_addr().unwrap();
+        let client = UdpSocket::bind("[::1]:0").await.unwrap();
+        client
+            .send_to(b"query", (Ipv6Addr::LOCALHOST, target.port()))
+            .await
+            .unwrap();
+        let mut buf = [0; 16];
+        let (n, source) = tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"query");
+        assert!(source.is_ipv6());
     }
 
     #[tokio::test]

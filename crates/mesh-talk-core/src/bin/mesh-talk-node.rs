@@ -12,9 +12,7 @@ use clap::Parser;
 use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
 use mesh_talk_core::node::run_relay_accept_loop;
-use mesh_talk_core::node::{
-    DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket, spawn_discovery,
-};
+use mesh_talk_core::node::{DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket};
 use mesh_talk_core::postoffice::PostOffice;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -338,7 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
-    mesh_talk_core::discovery::service::spawn_discovery_with_visibility(
+    mesh_talk_core::discovery::service::spawn_discovery_with_routed(
         Arc::clone(&socket),
         Arc::clone(&roster),
         mesh_talk_core::discovery::service::shared_announce(&announce),
@@ -346,6 +344,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.discovery_port,
         None,
         visibility,
+        Some(Arc::new(
+            mesh_talk_core::discovery::service::RoutedDiscovery::new({
+                let node = Arc::clone(&node);
+                Arc::new(move |nonce, announce| node.signed_discovery_response(nonce, announce))
+            }),
+        )),
     );
 
     // Inbound: serve sync rounds on each accepted connection.
@@ -579,12 +583,26 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Discovery: advertise ourselves (and harmlessly track peers) on the shared socket.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
-    spawn_discovery(
+    let discovery_identity = DeviceIdentity::from_secret_bytes(ed, x);
+    mesh_talk_core::discovery::service::spawn_discovery_with_routed(
         Arc::clone(&socket),
         Arc::clone(&roster),
-        announce,
+        mesh_talk_core::discovery::service::shared_announce(&announce),
         user_id.clone(),
         args.discovery_port,
+        None,
+        Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false)),
+        Some(Arc::new(
+            mesh_talk_core::discovery::service::RoutedDiscovery::new(Arc::new(
+                move |nonce, announce| {
+                    mesh_talk_core::discovery::query::encode_response(
+                        nonce,
+                        announce,
+                        &discovery_identity,
+                    )
+                },
+            )),
+        )),
     );
 
     emit(&format!(
@@ -1087,6 +1105,7 @@ mod tests {
         PeerRecord {
             public: DeviceIdentity::generate().public(),
             addr: "127.0.0.1:4000".parse::<SocketAddr>().unwrap(),
+            routes: Vec::new(),
             name: name.to_string(),
             post_office: false,
             account_id: None,

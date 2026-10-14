@@ -688,7 +688,13 @@
     "joinTitle": "另一台连上这个热点",
     "joinBody": "把第二台设备连到这个热点，然后重新打开 Mesh-Talk。几秒内双方就会出现在彼此的列表里——也可以打开网络诊断点「重新扫描」。",
     "wiredNote": "完全没有 Wi-Fi？两台设备之间用网线或 USB 网络共享，效果一样。",
-    "gotIt": "知道了"
+    "gotIt": "知道了",
+    "manualTitle": "通过地址连接",
+    "manualBody": "已连接 VPN 或其他可达网络？输入对方设备的 IP 地址或主机名。Mesh-Talk 会先验证设备身份。",
+    "manualAddress": "设备 IP 地址或主机名",
+    "manualPlaceholder": "100.x.x.x 或 device.example",
+    "manualProbe": "查找设备",
+    "manualSent": "已发送发现请求。设备回应并通过身份验证后会显示。"
   },
   "profile": {
     "title": "个人资料",

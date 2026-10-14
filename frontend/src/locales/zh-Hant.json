@@ -688,7 +688,13 @@
     "joinTitle": "另一台連上這個熱點",
     "joinBody": "把第二台裝置連到這個熱點，然後重新開啟 Mesh-Talk。幾秒內雙方就會出現在彼此的清單裡——也可以開啟網路診斷點「重新掃描」。",
     "wiredNote": "完全沒有 Wi-Fi？兩台裝置之間用網路線或 USB 網路共享，效果一樣。",
-    "gotIt": "知道了"
+    "gotIt": "知道了",
+    "manualTitle": "透過位址連線",
+    "manualBody": "已連接 VPN 或其他可達網路？輸入對方裝置的 IP 位址或主機名稱。Mesh-Talk 會先驗證裝置身分。",
+    "manualAddress": "裝置 IP 位址或主機名稱",
+    "manualPlaceholder": "100.x.x.x 或 device.example",
+    "manualProbe": "尋找裝置",
+    "manualSent": "已送出探索請求。裝置回應並通過身分驗證後就會顯示。"
   },
   "profile": {
     "title": "個人資料",

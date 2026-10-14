@@ -32,6 +32,7 @@ pub mod services;
 pub mod session_store;
 pub mod settings;
 pub mod state;
+mod tailscale_discovery;
 pub mod tray;
 pub mod trust;
 pub mod updates;
@@ -414,6 +415,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::diag_network_info,
                 crate::chat_commands::get_presence,
                 crate::chat_commands::rescan_peers,
+                crate::chat_commands::probe_peer_endpoint,
                 crate::chat_commands::write_temp_file,
                 crate::chat_commands::delete_temp_file,
                 crate::chat_commands::capture_screen,

@@ -61,6 +61,55 @@ pub async fn rescan_peers(state: tauri::State<'_, NodeState>) -> Result<(), Comm
     Ok(())
 }
 
+/// Query one address supplied by the user. A successful send only means that a
+/// query was queued; the normal signed-response and Noise checks still apply.
+#[tauri::command]
+pub async fn probe_peer_endpoint(
+    state: tauri::State<'_, NodeState>,
+    host: String,
+    port: Option<u16>,
+) -> Result<(), CommandError> {
+    let host = host.trim();
+    if host.is_empty()
+        || host.len() > 253
+        || host
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+        || (host.contains(':') && host.parse::<std::net::Ipv6Addr>().is_err())
+    {
+        return Err(CommandError::InvalidInput(
+            "enter an IP address or hostname without a port".into(),
+        ));
+    }
+    let port = port.unwrap_or(mesh_talk_core::node::DEFAULT_DISCOVERY_PORT);
+    if port == 0 {
+        return Err(CommandError::InvalidInput(
+            "discovery port must be nonzero".into(),
+        ));
+    }
+    let addresses: Vec<_> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| CommandError::Io(error.to_string()))?
+        .take(8)
+        .collect();
+    if addresses.is_empty() {
+        return Err(CommandError::InvalidInput("no address found".into()));
+    }
+    let guard = state.0.lock().await;
+    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
+    let mut last_error = None;
+    for address in addresses {
+        match rt.probe_endpoint(address).await {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(CommandError::Io(last_error.map_or_else(
+        || "query failed".into(),
+        |error| error.to_string(),
+    )))
+}
+
 /// This device's own identity + LAN/discovery facts, for the Diagnostics page.
 #[tauri::command]
 pub async fn diag_network_info(

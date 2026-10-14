@@ -9,6 +9,34 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[tokio::test]
+async fn pinned_dial_falls_back_to_second_verified_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let good = listener.local_addr().unwrap();
+    let bad = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), good.port());
+    let proof = bob.signed_announce("Bob", good.port());
+    {
+        let mut roster = alice.roster.lock().unwrap();
+        roster.update(&proof, good.ip(), &alice.user_id());
+        roster.update_routed(&proof, bad.ip(), &alice.user_id());
+    }
+    let expected = bob.identity.public();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        bob.privacy_accept(stream).await.unwrap()
+    });
+    let connected =
+        tokio::time::timeout(Duration::from_secs(8), alice.privacy_dial(bad, &expected))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(connected.peer_identity(), &expected);
+    server.abort();
+}
+
 #[test]
 fn authenticated_private_peer_keeps_route_but_clears_online_roster() {
     let dir = tempfile::tempdir().unwrap();
@@ -54,6 +82,41 @@ fn authenticated_private_peer_keeps_route_but_clears_online_roster() {
             .iter()
             .any(|p| p.public == bob.identity.public())
     );
+}
+
+#[test]
+fn discovery_snapshot_caches_both_verified_addresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &dir.path().join("alice"),
+            "pw",
+            &alice.signed_announce("Alice", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let proof = bob.signed_announce("Bob", 4321);
+    let lan: IpAddr = "192.168.1.20".parse().unwrap();
+    let vpn: IpAddr = "100.101.1.20".parse().unwrap();
+    {
+        let mut roster = alice.roster.lock().unwrap();
+        roster.update(&proof, lan, &alice.user_id());
+        roster.update_routed(&proof, vpn, &alice.user_id());
+    }
+    alice.cached_peer_snapshot().unwrap();
+    let routes = alice
+        .privacy
+        .state
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .routes
+        .routes();
+    assert!(routes.contains(&(bob.identity.public(), lan)));
+    assert!(routes.contains(&(bob.identity.public(), vpn)));
 }
 
 #[test]

@@ -15,6 +15,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`PROJECT.md`](../PROJECT.md) | Top-level context pointer for AI tools / new contributors. |
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
+| [`docs/routed-network-discovery.md`](routed-network-discovery.md) | Optional routed discovery over existing Tailscale or manually supplied addresses, identity boundary, route selection, and release checks. |
 | [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md) | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility. |
 | [`docs/post-office-release.md`](post-office-release.md) | Signed headless relay release archives and Linux GHCR container deployment. |
 | [`docs/post-office-macos-service.md`](post-office-macos-service.md) | mac2015 relay service paths, Intel build, update, and health commands. |
