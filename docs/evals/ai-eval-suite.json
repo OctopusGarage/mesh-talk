@@ -118,6 +118,21 @@
         "Separately tests offline DM and channel delivery, file offer, complete encrypted file bytes, and multi-relay election against the installed Windows relay.",
         "States that recipient consent needs sender overlap, queued custody is not replicated, and routing metadata remains exposed."
       ]
+    },
+    {
+      "id": "MT-AI-009",
+      "name": "routed discovery and bridge document keeps network and identity boundaries clear",
+      "subject_file": "docs/routed-network-discovery.md",
+      "min_score": 0.9,
+      "scenario": "A user runs A and B on one LAN, C on another, and E as a post office on A and B's LAN. Only C and E have an existing Tailscale connection. Evaluate whether the document explains what is required for bidirectional Mesh Talk discovery and messaging without promising arbitrary LAN bridging.",
+      "rubric": [
+        "Says Mesh Talk never installs, configures, or authorizes Tailscale and treats its addresses only as candidates.",
+        "Requires signed discovery and Noise identity verification before an endpoint is trusted for communication.",
+        "States that E is bridge-enabled, A/B/C explicitly opt in, and A/B do not need Tailscale when they can reach E over LAN.",
+        "Explains that the directory shares self-signed short-lived introductions and cross-LAN encrypted DMs travel through E's opaque mailbox rather than IP subnet forwarding.",
+        "States that the bridge is default off, invisible nodes do not participate, and disabling it ends local participation.",
+        "Does not promise WebRTC media, arbitrary TCP forwarding, or delivery while E is unavailable."
+      ]
     }
   ]
 }

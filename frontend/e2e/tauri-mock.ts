@@ -494,6 +494,7 @@ export const test = base.extend({
         retention_days: 0,
         calls_enabled: false,
         post_office_enabled: true,
+        bridge_discovery_enabled: false,
         ringtone: "classic",
         privacy_level: "balanced",
         notification_preview: true,

@@ -190,7 +190,7 @@ export function SettingsDialog({
         setRetentionDays(s.retention_days);
         setCallsEnabled(s.calls_enabled);
         setPostOfficeEnabled(s.post_office_enabled);
-        setBridgeDiscoveryEnabled(s.bridge_discovery_enabled);
+        setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
         setRingtone(asRingtoneId(s.ringtone));
         const policy = privacyFromSettings(s);
         setPrivacy(policy);

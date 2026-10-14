@@ -30,6 +30,7 @@ This makes C visible to opted-in A/B and A/B visible to opted-in C, with bidirec
 
 `cargo test -p mesh-talk-core --test bridge_cross_lan --features fast-test-kdf -- --ignored` runs a four-process A/B/C/E rig with isolated UDP discovery scopes and checks peer introductions plus DMs in both directions.
 With two Macs already connected to Tailscale, `python3 scripts/e2e-tailnet-bridge.py mac2015` runs A/B/E on the current Mac and C on the remote Mac, checks the same introductions and DMs through E, then removes its temporary profiles. It does not configure Tailscale.
+To exercise three operating-system peers, cross-build the Windows GNU test binary and run `python3 scripts/e2e-tailnet-bridge.py mac2015 --windows-host windows10`. This places B on Windows in E's LAN while C reaches E over the existing Mac tailnet. The rig temporarily opens only its randomly selected Windows test ports, checks A/B direct LAN messaging and bidirectional A/C and B/C messaging through E, then removes the firewall rules, binary, and test identities. It also restarts E with the same identity and checks delivery of a message queued during the outage. Windows does not need Tailscale for this scenario. Separate discovery ports and explicit E endpoints isolate the test paths even when the two Macs share one physical LAN; the rig does not prove a two-site firewall or DERP configuration.
 
 ## Two-Mac tailnet test
 

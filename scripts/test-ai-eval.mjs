@@ -132,3 +132,14 @@ test("Windows post-office runbook eval covers task recovery and delivery", () =>
   assert.ok(service.rubric.some((item) => item.includes("stale lock")));
   assert.ok(service.rubric.some((item) => item.includes("encrypted file bytes")));
 });
+
+test("routed discovery eval covers the opt-in bridge and its limits", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const bridge = suite.cases.find((entry) => entry.id === "MT-AI-009");
+  assert.equal(bridge?.subject_file, "docs/routed-network-discovery.md");
+  assert.ok(bridge.rubric.some((item) => item.includes("A/B do not need Tailscale")));
+  assert.ok(bridge.rubric.some((item) => item.includes("Noise identity")));
+  assert.ok(bridge.rubric.some((item) => item.includes("WebRTC")));
+});
