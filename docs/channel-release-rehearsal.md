@@ -45,18 +45,43 @@ subsequent channel messages. Upgrade every group member before enabling the
 replica toggle. The safety behavior is an interrupted sync, not seamless
 mixed-version interoperability.
 
-## Physical LAN trial before release
+## Physical LAN rehearsal
 
-Run the same 5/20/50-member scenarios on separate devices on the intended LAN.
-Record sender upload, time until every online member reads the message, and
-time until a disconnected member recovers after the origin exits. Repeat with
-loss of a seeded replica, a stale reachable replica, and enough completed files
-to cross the 64 MiB channel-file replica budget. Confirm that retained files
-remain downloadable and evicted files are reported unavailable when no source
-remains. Run the full health gate and relevant Playwright recovery scenario on
-the candidate revision.
+On 2026-10-14, release CLI binaries from commit `f369c45` ran over the same
+`192.168.3.0/24` LAN on the local Apple Silicon Mac, `mac2015` (Intel macOS),
+and `windows10`. Each peer was a separate process. The 5-member case placed
+2/2/1 peers on those hosts; 20 and 50 placed 18/1/1 and 48/1/1. The sender
+discovered every peer before channel creation. For each run, the sender created
+a channel, sent a message and waited for every online CLI to print it. Windows
+then went offline; the sender sent another message, waited for every remaining
+online member, and exited. Windows restarted with its saved identity and log
+and received the missed message from a peer. All four runs completed.
+An initial two-peer Noise/TCP check delivered a Mac-to-Windows DM in 172 ms
+and a Windows-to-Mac DM in 232 ms after the temporary firewall rule was added.
 
-The loopback harness does not model Wi-Fi contention, multicast filtering,
-cross-device clocks, or multiple operating systems. The current anti-entropy
-engine streams full event-id sets on a mismatch. Use measured `have_kib`, diff,
-and round counts before adding range-based reconciliation or a gossip mesh.
+| Members | Channel creation | First message: slowest online peer | Offline send: slowest online peer | Windows recovery after restart |
+|---:|---:|---:|---:|---:|
+| 5 | 108 ms | 65 ms | 152 ms | 1,071 ms |
+| 20, first run | 2,827 ms | 4,999 ms | 15,212 ms | 1,185 ms |
+| 20, repeat | 904 ms | 6,901 ms | 29,101 ms | 1,093 ms |
+| 50 | 4,293 ms | 4,827 ms | 3,823 ms | 1,111 ms |
+
+Timing begins when the CLI command is written; a delivery ends when the
+receiver prints the decrypted channel message. Recovery timing begins just
+before the Windows process restarts, so it includes startup. These are small
+samples, not latency percentiles. The 20-member runs show substantial tail
+variation, so this evidence does not support a fixed low-latency guarantee.
+The 50-member group comprised 50 processes on three physical machines, not
+50 independent devices. This rehearsal did not measure sender upload bytes or
+channel-file download, inject packet loss, or evict a seeded replica. Windows
+needed a temporary inbound firewall rule for the test binary; the rule was
+removed afterward.
+
+Before a release performance claim, repeat with more independent devices on
+the intended LAN. Record sender upload and the `mesh_talk::sync` metrics,
+investigate the 20-member tail, and test loss of a seeded replica, a stale
+reachable replica, and completed files crossing the 64 MiB replica budget.
+Confirm retained files remain downloadable and evicted files report
+unavailability when no source remains. The current anti-entropy engine streams
+full event-id sets on a mismatch; use measured `have_kib`, diff, and round
+counts before adding range-based reconciliation or a gossip mesh.
