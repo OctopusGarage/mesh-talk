@@ -185,7 +185,7 @@ mod tests {
                 password: "test-only",
                 discovery_port: port,
                 post_office_enabled: false,
-                candidate_source: Some(source),
+                candidate_source: Some(source.clone()),
             },
             RuntimeEvents {
                 on_dm: Box::new(|_| {}),
@@ -197,7 +197,7 @@ mod tests {
         )
         .await
         .expect("start local runtime");
-        tokio::time::timeout(Duration::from_secs(45), async {
+        let discovery = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 if runtime.peers().iter().any(|peer| {
                     peer.routes.iter().any(|route| {
@@ -209,8 +209,15 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
-        .await
-        .expect("automatic Tailscale candidate produced a verified routed peer");
+        .await;
+        if discovery.is_err() {
+            eprintln!(
+                "automatic discovery timed out; peers: {:?}",
+                runtime.peers()
+            );
+            eprintln!("candidate snapshot: {:?}", source.snapshot().await);
+        }
+        discovery.expect("automatic Tailscale candidate produced a verified routed peer");
         runtime.stop().await;
     }
 }
