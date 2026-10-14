@@ -32,7 +32,7 @@ test("About checks a stable release and guides a verified manual install", async
     internals.invoke = async (cmd, args) => {
       if (cmd === "check_for_update")
         return {
-          current_version: "0.3.1",
+          current_version: "0.3.2",
           latest_version: "0.4.0",
           is_newer: true,
           release_url:
@@ -99,7 +99,7 @@ test("About reports an up-to-date app and a retryable check error", async ({
       if (cmd === "check_for_update") {
         if (checks++ === 0) throw new Error("Network unavailable");
         return {
-          current_version: "0.3.1",
+          current_version: "0.3.2",
           latest_version: "0.3.0",
           is_newer: false,
           release_url:
@@ -119,7 +119,7 @@ test("About reports an up-to-date app and a retryable check error", async ({
     "Network unavailable",
   );
   await page.getByTestId("check-for-updates").click();
-  await expect(page.getByText("You're up to date (0.3.1).")).toBeVisible();
+  await expect(page.getByText("You're up to date (0.3.2).")).toBeVisible();
   await expect(page.getByTestId("update-error")).toHaveCount(0);
 });
 
@@ -141,7 +141,7 @@ test("a long update download can be canceled and retried", async ({ page }) => {
     internals.invoke = async (cmd, args) => {
       if (cmd === "check_for_update")
         return {
-          current_version: "0.3.1",
+          current_version: "0.3.2",
           latest_version: "0.4.0",
           is_newer: true,
           release_url:
