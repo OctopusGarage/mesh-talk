@@ -738,12 +738,20 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
         .await
         .unwrap();
     let dm = super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        sync_delivery_test_stage(&a, &b, &bl, dm).await;
-        sync_delivery_test_stage(&a, &b, &bl, file).await;
-    })
+    // Each independent sync needs its own bound: a busy Windows runner can
+    // spend several seconds on one authenticated handshake.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sync_delivery_test_stage(&a, &b, &bl, dm),
+    )
     .await
-    .unwrap();
+    .expect("DM setup sync completes");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sync_delivery_test_stage(&a, &b, &bl, file),
+    )
+    .await
+    .expect("file setup sync completes");
     let ids = a.sync_store(&bp.public()).lock().unwrap().event_ids(&file);
     assert_eq!(
         b.sync_store(&ap.public()).lock().unwrap().event_ids(&file),
