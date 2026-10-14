@@ -88,6 +88,74 @@ fn select_custody_peer(mut peers: Vec<PeerRecord>, cycle: usize) -> Option<PeerR
 }
 
 impl Node {
+    /// Pick one verified account sibling for an owner-signed channel invitation.
+    /// Discovery and the durable route cache only expose account ids from verified
+    /// device certificates; never infer account ownership from display names.
+    pub(in crate::node) fn auto_enrollment_candidate(
+        &self,
+    ) -> Option<(ConversationId, PublicIdentity)> {
+        let me = self.user_id();
+        let own_account = self.account_id();
+        let mut peers = self.routing_peers();
+        peers.retain(|peer| !peer.post_office && peer.account_id.is_some());
+        peers.sort_unstable_by_key(|peer| peer.public.user_id());
+        let by_device: HashMap<_, _> = peers
+            .iter()
+            .map(|peer| (peer.public.user_id(), peer))
+            .collect();
+
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        let mut channel_ids = book.channel_ids();
+        channel_ids.sort_unstable_by_key(|id| *id.as_bytes());
+        for channel in channel_ids {
+            let Some(state) = book.state(&channel) else {
+                continue;
+            };
+            if state.owner() != me || state.is_dissolved() {
+                continue;
+            }
+            let accepted_accounts: HashSet<&str> = state
+                .members()
+                .iter()
+                .filter_map(|member| {
+                    let id = member.user_id();
+                    if !state.is_accepted_member(&id) {
+                        return None;
+                    }
+                    if id == me {
+                        Some(own_account.as_str())
+                    } else {
+                        by_device
+                            .get(&id)
+                            .filter(|peer| peer.public == *member)
+                            .and_then(|peer| peer.account_id.as_deref())
+                    }
+                })
+                .collect();
+            for peer in &peers {
+                if peer
+                    .account_id
+                    .as_deref()
+                    .is_some_and(|account| accepted_accounts.contains(account))
+                    && !state.is_member(&peer.public.user_id())
+                {
+                    return Some((channel, peer.public.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Persist an owner-signed invitation for one sibling per pass. The ordinary
+    /// channel distribution and recovery paths deliver it to the new device.
+    pub(in crate::node) async fn auto_enroll_one_channel_sibling(&self) -> Result<bool, NodeError> {
+        let Some((channel, device)) = self.auto_enrollment_candidate() else {
+            return Ok(false);
+        };
+        self.add_channel_member(channel, device).await?;
+        Ok(true)
+    }
+
     /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
     pub(in crate::node) async fn run_channel_recovery_loop(self: Arc<Self>, changes: Arc<Notify>) {
         let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
@@ -104,6 +172,9 @@ impl Node {
                 _ = changes.notified() => true,
                 _ = tick.tick() => false,
             };
+            if let Err(error) = self.auto_enroll_one_channel_sibling().await {
+                log::warn!("linked channel invitation failed; will retry: {error}");
+            }
             let batch = if startup || discovered {
                 self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH)
             } else {

@@ -9,6 +9,155 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+#[tokio::test]
+async fn auto_enrollment_candidate_requires_accepted_certified_account_sibling() {
+    use crate::identity::account::Account;
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_sibling = DeviceIdentity::generate();
+    let bob_relay = DeviceIdentity::generate();
+    let outsider = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let outsider_account = Account::generate();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let owner = Node::open_with_account(
+        alice,
+        alice_account,
+        Arc::clone(&roster),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let self_id = owner.user_id();
+    for announce in [
+        Announce::new_with_account(&bob, &bob_account, "Bob", 47001),
+        Announce::new_with_account(&bob_sibling, &bob_account, "Bob laptop", 47002),
+        Announce::new_post_office_with_account(&bob_relay, &bob_account, "Relay", 47003),
+        Announce::new_with_account(&outsider, &outsider_account, "Mallory", 47004),
+    ] {
+        roster
+            .lock()
+            .unwrap()
+            .update(&announce, IpAddr::V4(Ipv4Addr::LOCALHOST), &self_id);
+    }
+    let invited = owner
+        .create_channel_invited("pending", vec![bob.public()])
+        .await
+        .unwrap();
+    assert!(owner.auto_enrollment_candidate().is_none());
+
+    let accepted = owner
+        .create_channel("accepted", vec![bob.public()])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.auto_enrollment_candidate(),
+        Some((accepted, bob_sibling.public()))
+    );
+    assert_ne!(invited, accepted);
+}
+
+#[tokio::test]
+async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
+    use crate::identity::account::Account;
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice_account = Account::generate();
+    let bob_account = Account::generate();
+    let bob_secret = bob_account.secret_bytes();
+    let open = |name: &str, identity: DeviceIdentity, account: Account| {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open_with_account(
+            identity,
+            account,
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join(format!("{name}-node.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap()
+    };
+    let alice = open("alice", DeviceIdentity::generate(), alice_account);
+    let bob = open("bob", DeviceIdentity::generate(), bob_account);
+    let sibling = open(
+        "sibling",
+        DeviceIdentity::generate(),
+        Account::from_secret_bytes(bob_secret),
+    );
+    let bob_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let sibling_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
+    let sibling_port = sibling_listener.local_addr().unwrap().port();
+    let bob_task = tokio::spawn(Arc::clone(&bob).run_accept_loop(bob_listener));
+    let sibling_task = tokio::spawn(Arc::clone(&sibling).run_accept_loop(sibling_listener));
+    let announce = |target: &Arc<Node>, peer: &Arc<Node>, name: &str, port| {
+        target.roster.lock().unwrap().update(
+            &Announce::new_with_account(&peer.identity, &peer.account, name, port),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &target.user_id(),
+        );
+    };
+    announce(&alice, &bob, "Bob", bob_port);
+    announce(&alice, &sibling, "Bob laptop", sibling_port);
+    announce(&bob, &alice, "Alice", 47005);
+    announce(&sibling, &alice, "Alice", 47005);
+
+    let channel = alice
+        .create_channel("team", vec![bob.identity.public()])
+        .await
+        .unwrap();
+    assert!(alice.auto_enroll_one_channel_sibling().await.unwrap());
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if sibling
+                .list_channels()
+                .iter()
+                .any(|item| item.id == channel && item.pending_invite)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("sibling receives owner-signed invitation");
+    let epoch = alice
+        .channels
+        .lock()
+        .unwrap()
+        .state(&channel)
+        .unwrap()
+        .epoch();
+    assert!(!alice.auto_enroll_one_channel_sibling().await.unwrap());
+    assert_eq!(
+        alice
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .epoch(),
+        epoch
+    );
+    sibling_task.abort();
+    bob_task.abort();
+}
+
 #[test]
 fn post_office_use_can_be_disabled_and_reenabled() {
     let dir = tempfile::tempdir().unwrap();

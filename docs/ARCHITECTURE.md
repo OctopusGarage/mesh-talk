@@ -89,9 +89,12 @@ command names for Tauri registration. Commands clone a node handle from
   membership controls before granting a group route.
   Departure, acceptance, and ownership-transfer delivery are retried to channel
   members after an offline first push (bounded batches).
-  Membership is keyed to the device identity, so another device of the same account
-  must be invited separately. Restored groups remain read-only archives until that
-  new device is invited. In Invisible mode, a manually trusted carrier may send
+  Membership is keyed to the device identity. When a channel owner discovers a
+  certified sibling of an accepted member, it signs and distributes one invitation
+  per recovery pass; the sibling must still accept it. If the owner is offline, the
+  invitation waits until its node runs and learns the sibling's verified route.
+  Restored groups remain read-only archives until the new device is invited.
+  In Invisible mode, a manually trusted carrier may send
   a new channel's earlier signed ancestry, but the receiving sync connection
   stages it only in bounded memory (8 MiB). It is never advertised as durable
   custody and disappears on disconnect. A signed, causally valid invitation
