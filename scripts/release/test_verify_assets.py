@@ -119,6 +119,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "architecture"):
             verify_post_office_binary(windows, "windows_x86_64")
 
+    @unittest.skipIf(sys.platform == "win32", "container preparation runs on the Linux release runner")
     def test_container_input_requires_verified_linux_zip_hashes(self):
         input_dir = self.root / "container-input"
         input_dir.mkdir()
