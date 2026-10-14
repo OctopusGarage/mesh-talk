@@ -239,11 +239,17 @@ def main(host, windows_host=None):
                         peer(node, target)
             print("PASS: A/B and C/D discover one another through E/F", flush=True)
 
-            a.send(f"/msg {d_id[:8]} A-to-D-through-two-bridges")
-            d.expect(lambda line: "A-to-D-through-two-bridges" in line, 60)
-            c.send(f"/msg {b_id[:8]} C-to-B-through-two-bridges")
-            b.expect(lambda line: "C-to-B-through-two-bridges" in line, 60)
-            print("PASS: bidirectional encrypted DMs between the LANs", flush=True)
+            clients = (("A", a, a_id), ("B", b, b_id),
+                       ("C", c, c_id), ("D", d, d_id))
+            for sender_name, sender, sender_id in clients:
+                for recipient_name, recipient, recipient_id in clients:
+                    if sender_id == recipient_id:
+                        continue
+                    token = f"two-bridges-{sender_name}-to-{recipient_name}-{base}"
+                    sender.send(f"/msg {recipient_id[:8]} {token}")
+                    recipient.expect(lambda line, token=token: token in line, 90)
+                    print(f"PASS: {sender_name} -> {recipient_name} encrypted DM", flush=True)
+            print("PASS: all 12 directed encrypted DM paths", flush=True)
     finally:
         for node in reversed(nodes):
             node.stop()
