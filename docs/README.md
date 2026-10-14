@@ -18,7 +18,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/routed-network-discovery.md`](routed-network-discovery.md) | Optional routed discovery over existing Tailscale or manually supplied addresses, identity boundary, route selection, and release checks. |
 | [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md) | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility. |
 | [`docs/post-office-release.md`](post-office-release.md) | Signed headless relay release archives and Linux GHCR container deployment. |
-| [`docs/post-office-macos-service.md`](post-office-macos-service.md) | mac2015 relay service paths, Intel build, update, and health commands. |
+| [`docs/post-office-macos-service.md`](post-office-macos-service.md) | mac2015 relay service paths, Intel build, first install, update, and health commands. |
 | [`docs/post-office-windows-service.md`](post-office-windows-service.md) | Windows relay Scheduled Task, secure install, update, health, and LAN tests. |
 | [`docs/backup-recovery.md`](backup-recovery.md) | Manual encrypted backup, offline restore, recovery key handling, and coverage limits. |
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md) | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks. |
