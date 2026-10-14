@@ -32,6 +32,7 @@
   **`cargo clippy --all-targets -- -D warnings`** (must match CI — `--all-targets` covers
   tests/benches).
 - Frontend: `npm run format` (Prettier) + `npm run lint` (ESLint flat config).
+- Write documentation and reusable prompts in English unless a specific exception is needed.
 - Reference `specifications/development_conventions.md` for naming nuances.
 
 ## Architecture & Components
