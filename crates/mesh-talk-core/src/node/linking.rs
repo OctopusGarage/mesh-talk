@@ -229,6 +229,16 @@ impl Node {
             for conv in sentlog.conversations() {
                 for e in sentlog.entries(&conv) {
                     if let Some(env) = DmEnvelope::decode(&e.plaintext) {
+                        if env.route.sender_account != my_account
+                            || *super::conversation::account_conversation_id(
+                                &my_account,
+                                &env.route.recipient_account,
+                            )
+                            .as_bytes()
+                                != *conv.as_bytes()
+                        {
+                            continue;
+                        }
                         out.push(BackfillRecord {
                             conv: *conv.as_bytes(),
                             from: my_account.clone(),
@@ -245,6 +255,20 @@ impl Node {
             for conv in received.conversations() {
                 for e in received.entries(&conv) {
                     if let Some(envelope) = DmEnvelope::decode(&e.plaintext) {
+                        let other = if envelope.route.sender_account == my_account {
+                            &envelope.route.recipient_account
+                        } else if envelope.route.recipient_account == my_account {
+                            &envelope.route.sender_account
+                        } else {
+                            continue;
+                        };
+                        if envelope.route.sender_account != e.from
+                            || *super::conversation::account_conversation_id(&my_account, other)
+                                .as_bytes()
+                                != *conv.as_bytes()
+                        {
+                            continue;
+                        }
                         out.push(BackfillRecord {
                             conv: *conv.as_bytes(),
                             from: e.from.clone(),

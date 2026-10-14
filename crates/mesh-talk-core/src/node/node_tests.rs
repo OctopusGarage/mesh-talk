@@ -5879,6 +5879,31 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
         .unwrap();
     assert_eq!(node.account_history(&bob_id, 10).len(), 1);
     assert_eq!(node.received.lock().unwrap().entries(&conv).len(), 1);
+    let previous_account = Account::generate();
+    let previous_conv = account_conversation_id(&previous_account.account_id(), &bob_id);
+    let previous_plaintext = DmEnvelope::new(
+        bob_id.clone(),
+        previous_account.account_id(),
+        [19; 32],
+        MessageBody::new(b"previous identity".to_vec(), None).encode(),
+    )
+    .encode();
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            previous_conv,
+            bob_id.clone(),
+            1,
+            &previous_plaintext,
+            EventId::new([20; 32]),
+        )
+        .unwrap();
+    assert_eq!(node.export_account_backfill().len(), 1);
+    let mut invalid = record.clone();
+    invalid.conv = *previous_conv.as_bytes();
+    node.import_account_backfill(&[invalid]).unwrap();
+    assert!(node.received.lock().unwrap().entries(&previous_conv).len() == 1);
     node.delete_account_message(&bob_id, EventId::new(msg_id))
         .unwrap();
     node.import_account_backfill(&[record]).unwrap();

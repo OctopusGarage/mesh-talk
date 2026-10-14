@@ -57,6 +57,24 @@ test("device-linking fields are named and failed clipboard writes are announced"
   await expect(dialog.getByRole("alert")).toContainText("Couldn't copy");
 });
 
+test("device linking offers user devices but excludes post office nodes", async ({
+  page,
+}) => {
+  await enterChat(page, "tester", "/?data=post-office");
+  const linkAction = page.getByTestId("sidebar-action-link");
+  if (!(await linkAction.isVisible())) {
+    await page.getByTestId("sidebar-overflow").click();
+  }
+  await linkAction.click();
+  const devices = page
+    .getByTestId("link-device-dialog")
+    .getByRole("combobox", { name: "Device" });
+  await expect(devices.getByRole("option", { name: /bob/ })).toBeAttached();
+  await expect(devices.getByRole("option", { name: /relay node/ })).toHaveCount(
+    0,
+  );
+});
+
 test("diagnostics copy controls report clipboard failure", async ({ page }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-connection");

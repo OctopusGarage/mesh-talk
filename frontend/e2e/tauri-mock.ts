@@ -90,6 +90,15 @@ export const test = base.extend({
           account_id: CAROL.account_id,
         },
       ];
+      if (dataMode === "post-office") {
+        peers.push({
+          user_id: "device_relay_4444",
+          name: "relay node",
+          addr: "192.168.1.50:47100",
+          post_office: true,
+          account_id: "acc_relay_eeee5555",
+        });
+      }
 
       (window as unknown as Record<string, unknown>).__mockRotateBobDevice =
         () => {

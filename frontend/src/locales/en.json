@@ -472,7 +472,7 @@
     "thisAccount": "This device's account:",
     "addDevice": "Add another of your devices",
     "showCode": "Show pairing code",
-    "showOnOther": "Generate a code on this device, then enter it on the device you want to link.",
+    "showOnOther": "On your other device, create a local profile and sign in first. Then generate a code here and enter it there. Linking makes both devices share this account.",
     "qrHint": "Scan the QR with a phone, or copy the code and enter it on your other device.",
     "enterCodeHint": "Enter this code on your other device, below.",
     "haveCode": "Have a code from your other device?",

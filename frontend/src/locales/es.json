@@ -472,7 +472,7 @@
     "thisAccount": "Cuenta de este dispositivo:",
     "addDevice": "Añadir otro de tus dispositivos",
     "showCode": "Mostrar código de emparejamiento",
-    "showOnOther": "Genera un código en este dispositivo y luego introdúcelo en el dispositivo que quieres vincular.",
+    "showOnOther": "Primero crea un perfil local e inicia sesión en el otro dispositivo. Después, genera un código aquí e introdúcelo allí. Al vincularlos, ambos dispositivos compartirán esta cuenta.",
     "qrHint": "Escanea el QR con un teléfono, o copia el código e introdúcelo en tu otro dispositivo.",
     "enterCodeHint": "Introduce este código en tu otro dispositivo, abajo.",
     "haveCode": "¿Tienes un código de tu otro dispositivo?",
