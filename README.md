@@ -288,6 +288,17 @@ Mesh-Talk is end-to-end encrypted with forward secrecy and has no servers or tel
 report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not open a public issue for
 security reports.
 
+Want a second opinion before installing? Ask an AI coding agent to review the source:
+
+1. Clone the repository: `git clone https://github.com/OctopusGarage/mesh-talk.git`.
+2. Enter it: `cd mesh-talk`.
+3. Start an AI agent with access to local files, such as Codex, Claude Code, or Gemini CLI.
+4. Copy the prompt from the [independent AI-assisted review guide](docs/evals/prompts/independent-review.md),
+   paste it into the agent, and press Enter.
+
+The prompt asks for evidence, risks, and a conditional install recommendation. An AI-generated
+review is not a security certification.
+
 ## License
 
 Open source under the [MIT License](LICENSE).
