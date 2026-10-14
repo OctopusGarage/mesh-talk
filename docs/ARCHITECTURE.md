@@ -279,7 +279,12 @@ command names for Tauri registration. Commands clone a node handle from
   guarantee, the protocol would need renewable leases or periodic exact probes
   and a policy for peers that permanently leave; the UI does not claim one.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
-  `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
+  `post_office`); `drain_from_post_office` every 3 s. Each account may disable
+  relay use in Settings; the default remains enabled. This gates uploads and
+  downloads on that device. New clients wrap signed events for each recipient
+  in a pairwise opaque mailbox before relay sync. The relay sees mailbox IDs,
+  pseudonymous outer headers, size buckets, and traffic timing, but cannot
+  open event headers, channel controls, DM text, or file contents.
 
 Tracked DMs are accepted into an encrypted, bounded transaction journal and
 immutable outbox before transport. Retries reuse the original logical message ID,
@@ -715,8 +720,15 @@ Standard primitives + consistent domain separation; AEAD everywhere; PBKDF2-600k
 Noise XX with identity binding; Double-Ratchet + sender-key forward secrecy with
 zeroize-on-drop; signed content-addressed log with fork detection; deterministic relay
 election; the sync `have` id-set is streamed in chunks so arbitrarily large conversations
-reconcile; the relay bounds its storage (LRU whole-conversation eviction) and its serve
+reconcile; the relay bounds its storage by event count and 512 MiB of ciphertext
+(LRU whole-conversation eviction) and its serve
 loop (round cap + idle timeout). Known limitations (by design): device linking relies on
 the one-time pairing code (no separate SAS UX); backfill history travels as plaintext over
-the Noise channel; a relay inevitably sees event authors + the participant pair (content
-stays encrypted).
+the Noise channel. A new client's relay upload contains a pairwise opaque
+mailbox event: original authors, conversation IDs, kinds, timestamps, channel
+names, members, and file metadata are recipient-encrypted. The relay still
+sees authenticated connection identities, mailbox use, size buckets, and
+traffic timing. The mailbox wrapping has no forward secrecy against later
+device-key compromise. Previously stored V1 events remain readable until
+evicted. Details and operational limits are in
+[`post-office-metadata-privacy.md`](post-office-metadata-privacy.md).

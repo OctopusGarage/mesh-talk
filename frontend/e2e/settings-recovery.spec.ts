@@ -2,6 +2,20 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { expect, test } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
+test("post-office preference is on by default and persists across settings reopen", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const relay = page.getByRole("switch", { name: "Use post-office relays" });
+  await expect(relay).toHaveAttribute("aria-checked", "true");
+  await relay.click();
+  await expect(relay).toHaveAttribute("aria-checked", "false");
+  await page.getByRole("button", { name: "Close" }).click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(relay).toHaveAttribute("aria-checked", "false");
+});
+
 test("a failed settings save keeps the stored value and offers recovery", async ({
   page,
 }) => {

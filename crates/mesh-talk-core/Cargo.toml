@@ -60,6 +60,10 @@ tar = "0.4.46"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Probe the PID recorded by the CLI data-dir lock after a Windows service restart.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 rand_chacha = "0.3" # seeded CSPRNG for deterministic property tests (rand_core 0.6 SeedableRng)
 # Self-dev-dependency on our OWN crate, activating `fast-test-kdf`. This is the lever that

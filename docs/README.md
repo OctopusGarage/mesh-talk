@@ -15,6 +15,10 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`PROJECT.md`](../PROJECT.md) | Top-level context pointer for AI tools / new contributors. |
 | [`CONTEXT.md`](../CONTEXT.md) | Domain model — entities, layers, invariants, what the project does *not* own. |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI. |
+| [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md) | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility. |
+| [`docs/post-office-release.md`](post-office-release.md) | Signed headless relay release archives and Linux GHCR container deployment. |
+| [`docs/post-office-macos-service.md`](post-office-macos-service.md) | mac2015 relay service paths, Intel build, update, and health commands. |
+| [`docs/post-office-windows-service.md`](post-office-windows-service.md) | Windows relay Scheduled Task, secure install, update, health, and LAN tests. |
 | [`docs/backup-recovery.md`](backup-recovery.md) | Manual encrypted backup, offline restore, recovery key handling, and coverage limits. |
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md) | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks. |
 | [`docs/updates.md`](updates.md) | Manual release check, verified package download, and platform install steps. |
@@ -62,6 +66,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`SECURITY.md`](../SECURITY.md) | Vulnerability-reporting policy and supported versions. |
 | [`docs/ARCHITECTURE.md` § Security posture](ARCHITECTURE.md#8-security-posture-summary) | Crypto primitives, domain separation, forward secrecy, and known limitations by design. |
 | [`docs/evals/managed-device-security-audit.md`](evals/managed-device-security-audit.md) | App-specific macOS managed-device exposure paths, risk ranking, and hardening sequence. |
+| [`docs/evals/prompts/independent-review.md`](evals/prompts/independent-review.md) | Clone-and-review steps plus a copyable English prompt for an evidence-based AI-assisted security and product review. |
 | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Community conduct expectations. |
 
 ## Current design

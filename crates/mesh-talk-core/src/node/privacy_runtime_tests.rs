@@ -476,7 +476,14 @@ async fn public_relay_delivery_survives_recipient_restart_without_sender_route()
         .await
         .unwrap();
     let event = alice.log.lock().unwrap().events(&conv)[0].clone();
-    assert!(store.lock().unwrap().has(&event.id));
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &alice.identity,
+        &bob.identity.public(),
+        &relay_proof.public(),
+    )
+    .unwrap();
+    assert!(store.lock().unwrap().has(&mailbox.wrap(&event).unwrap().id));
+    assert!(!store.lock().unwrap().has(&event.id));
     let keys = bob.identity.secret_bytes();
     let account = crate::identity::account::Account::from_secret_bytes(bob.account.secret_bytes());
     drop(alice);

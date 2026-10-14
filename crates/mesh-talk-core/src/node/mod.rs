@@ -30,6 +30,7 @@ pub(crate) mod media_store;
 pub(crate) mod message;
 pub(crate) mod name_directory;
 pub(crate) mod node;
+mod opaque_relay;
 pub(crate) mod pairing;
 pub(crate) mod peer_directory;
 pub(crate) mod postbox;

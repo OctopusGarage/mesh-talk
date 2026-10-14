@@ -493,6 +493,7 @@ export const test = base.extend({
         last_user: null as string | null,
         retention_days: 0,
         calls_enabled: false,
+        post_office_enabled: true,
         ringtone: "classic",
         privacy_level: "balanced",
         notification_preview: true,

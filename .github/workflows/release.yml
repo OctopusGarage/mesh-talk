@@ -147,6 +147,10 @@ jobs:
           # smaller single-unit binary on every release target and edition.
           node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} -- --config profile.release.package.mesh-talk.codegen-units=1
 
+      - name: Build headless post-office node
+        if: matrix.variant == 'default'
+        run: cargo build --locked --release --target ${{ matrix.target }} -p mesh-talk-core --bin mesh-talk-node
+
       - name: Verify edition assets
         shell: bash
         run: node scripts/release/check-variant-assets.mjs "$MESH_TALK_VARIANT"
@@ -286,6 +290,14 @@ jobs:
           echo "✅ Bundle signature generated: $BUNDLE_FILE"
           ls -lh release_zips
 
+      - name: Package and sign post-office node
+        if: matrix.variant == 'default'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(bash scripts/release/package-post-office.sh '${{ matrix.target }}' "$ARTIFACT_TAG")"
+          cosign sign-blob --yes --bundle "${archive}.bundle" "$archive"
+
       # 🔏 SLSA build provenance: a GitHub-native, signed attestation of exactly which
       # repo/commit/workflow produced this artifact. Verified by `gh attestation verify`.
       - name: Attest build provenance
@@ -391,6 +403,7 @@ jobs:
       contents: write
       checks: read
       security-events: read
+      packages: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SOURCE_REPO: ${{ github.repository }}
@@ -407,5 +420,46 @@ jobs:
         with:
           name: verified-release-evidence
           path: .
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mesh-talk-default-linux-*
+          merge-multiple: true
+          path: container-input
+      - name: Prepare verified Linux binaries for the image
+        run: bash scripts/release/prepare-post-office-container.sh container-input verification.txt "$RELEASE_TAG"
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Smoke-test both Linux image architectures
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" --load \
+              -t "mesh-talk-post-office-smoke:$arch" \
+              -f docker/post-office/Dockerfile docker/post-office
+            docker run --rm --platform "linux/$arch" \
+              "mesh-talk-post-office-smoke:$arch" --help > /dev/null
+          done
+      - name: Set container image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mesh-talk-post-office" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish verified multi-platform post-office image
+        uses: docker/build-push-action@v7
+        with:
+          context: docker/post-office
+          file: docker/post-office/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ needs.preflight.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.preflight.outputs.tag }}
+          provenance: true
+          sbom: true
       - name: Publish only the verified draft
         run: node scripts/release/release-state.mjs publish "$RELEASE_TAG"
