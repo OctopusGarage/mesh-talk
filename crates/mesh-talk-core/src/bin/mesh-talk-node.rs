@@ -2,6 +2,7 @@
 //! persistent identity, runs signed-announce LAN discovery and a TCP listener,
 //! and drives 1:1 DMs, channels, and file transfers from a line-based REPL
 //! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
+//! `/probe <ip:discovery-port>`,
 //! `/channel-new <name> <member-prefix>...`, `/channel-msg <chan-id-prefix> <text>`,
 //! `/channel-replica <chan-id-prefix> on|off`,
 //! `/verify-peer <full-device-fingerprint>`,
@@ -15,6 +16,7 @@ use mesh_talk_core::node::run_relay_accept_loop;
 use mesh_talk_core::node::{DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket};
 use mesh_talk_core::postoffice::PostOffice;
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -336,6 +338,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
+    let routed = Arc::new(mesh_talk_core::discovery::service::RoutedDiscovery::new({
+        let node = Arc::clone(&node);
+        Arc::new(move |nonce, announce| node.signed_discovery_response(nonce, announce))
+    }));
     mesh_talk_core::discovery::service::spawn_discovery_with_routed(
         Arc::clone(&socket),
         Arc::clone(&roster),
@@ -344,12 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.discovery_port,
         None,
         visibility,
-        Some(Arc::new(
-            mesh_talk_core::discovery::service::RoutedDiscovery::new({
-                let node = Arc::clone(&node);
-                Arc::new(move |nonce, announce| node.signed_discovery_response(nonce, announce))
-            }),
-        )),
+        Some(Arc::clone(&routed)),
     );
 
     // Inbound: serve sync rounds on each accepted connection.
@@ -428,6 +429,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                 }
             }
+        } else if let Some(endpoint) = line.strip_prefix("/probe ") {
+            match endpoint.parse::<SocketAddr>() {
+                Ok(endpoint) => match routed.probe(&socket, endpoint).await {
+                    Ok(true) => emit(&format!("discovery query sent to {endpoint}")),
+                    Ok(false) => emit("discovery query already pending for that address"),
+                    Err(error) => emit(&format!("discovery query failed: {error}")),
+                },
+                Err(_) => emit("usage: /probe <ip:discovery-port>"),
+            }
+        } else if line == "/probe" {
+            emit("usage: /probe <ip:discovery-port>");
         } else if let Some(fingerprint) = line.strip_prefix("/verify-peer ") {
             let fingerprint = fingerprint.trim();
             let Some(fingerprint) = canonical_verified_peer(fingerprint) else {
@@ -496,7 +508,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if !line.is_empty() {
             emit(
-                "commands: /peers, /verify-peer <full-device-fingerprint>, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+                "commands: /peers, /probe <ip:discovery-port>, /verify-peer <full-device-fingerprint>, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
             );
         }
     }

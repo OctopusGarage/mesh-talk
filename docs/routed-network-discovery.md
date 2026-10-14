@@ -16,6 +16,12 @@ The roster keeps up to eight endpoints for each device identity. Paths carry the
 
 The desktop runtime refreshes the optional candidate snapshot periodically and on Rescan, sends bounded unicast queries over IPv4 and IPv6 sockets, and continues LAN multicast discovery. The headless CLI answers routed queries and retains LAN behavior. Existing encrypted TCP chat, files, synchronization, and post-office delivery use the selected path. Calls use a separate WebRTC ICE media path; successful TCP signaling alone does not establish that a Tailscale ICE candidate is available. Cross-network call media needs a separate platform matrix before it can be promised.
 
+The CLI's `/probe <ip:discovery-port>` command sends the same identity-free query to an explicit candidate. It is useful for manual diagnosis and for the two-Mac tailnet test; it does not consult or configure Tailscale.
+
+## Two-Mac tailnet test
+
+With Tailscale already running on both Macs and SSH access to the Intel remote Mac, build the test binaries and run `python3 scripts/e2e-tailnet-macos.py <ssh-host>`. The script uses fresh temporary Mesh Talk identities and different discovery ports to keep LAN multicast from satisfying its routed-path assertions. It checks signed discovery at both Tailscale IPs, Noise-encrypted DMs in both directions, a consented file transfer with matching SHA-256, and the desktop Tailscale inventory adapter's automatic `RoutedQuery` route. It removes the temporary remote binary and profiles afterward. Build instructions are in the script header. The script does not exercise WebRTC media or force a Tailscale DERP path.
+
 ## Limits and release checks
 
 - No tailnet account creation, membership management, ACL changes, address-range scanning, or trust based on Tailscale identity.
