@@ -34,10 +34,10 @@ export const avatars = {
   set: (owner: string, id: string, dataUrl: string | null) =>
     invoke<void>("set_avatar", { owner, id, dataUrl }),
   /**
-   * Every avatar peers PROPAGATED to us, as `account_id -> data-URL`. Merged under local
-   * overrides so a received avatar survives a relaunch (the node persists it).
+   * Every signed profile peers propagated, including null clear tombstones. The node
+   * persists them so a linked-device clear survives a relaunch.
    */
-  peers: () => invoke<Record<string, string>>("peer_avatars"),
+  peers: () => invoke<Record<string, string | null>>("peer_avatars"),
   /**
    * Publish (or clear with null) THIS user's own avatar to peers as a signed profile.
    * Call when the user sets/removes their own photo; contacts then render it.

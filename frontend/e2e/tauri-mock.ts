@@ -937,16 +937,19 @@ export const test = base.extend({
           get_device_sync_policy: () =>
             JSON.parse(
               localStorage.getItem(`mock-device-sync-policy-${SELF.device}`) ??
-                '{"history":true,"attachments":false,"profile":false,"appearance":false,"contacts":false}',
+                '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
             ),
           set_device_sync_category: (a) => {
-            if (a.category !== "history")
+            if (a.category !== "history" && a.category !== "profile")
               throw new Error("this sync category is not available yet");
             const policy = responses.get_device_sync_policy({}) as Record<
               string,
               boolean
             >;
-            const next = { ...policy, history: Boolean(a.enabled) };
+            const next = {
+              ...policy,
+              [String(a.category)]: Boolean(a.enabled),
+            };
             localStorage.setItem(
               `mock-device-sync-policy-${SELF.device}`,
               JSON.stringify(next),

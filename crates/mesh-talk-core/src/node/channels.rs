@@ -156,6 +156,47 @@ impl Node {
         Ok(true)
     }
 
+    /// An invitation may be accepted automatically only when an already accepted
+    /// member is a certified sibling of this device's account. Ordinary invitations
+    /// continue to require the user's explicit consent.
+    pub(in crate::node) fn linked_invite_candidate(&self) -> Option<ConversationId> {
+        let me = self.user_id();
+        let account = self.account_id();
+        let peers: HashMap<_, _> = self
+            .routing_peers()
+            .into_iter()
+            .map(|peer| (peer.public.user_id(), peer))
+            .collect();
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        let mut channels = book.channel_ids();
+        channels.sort_unstable_by_key(|id| *id.as_bytes());
+        channels.into_iter().find(|channel| {
+            let Some(state) = book.state(channel) else {
+                return false;
+            };
+            state.pending_invite()
+                && !state.is_dissolved()
+                && state.is_member(&me)
+                && state.members().iter().any(|member| {
+                    member.user_id() != me
+                        && state.is_accepted_member(&member.user_id())
+                        && peers.get(&member.user_id()).is_some_and(|peer| {
+                            peer.public == *member
+                                && !peer.post_office
+                                && peer.account_id.as_deref() == Some(account.as_str())
+                        })
+                })
+        })
+    }
+
+    pub(in crate::node) async fn auto_accept_one_linked_invite(&self) -> Result<bool, NodeError> {
+        let Some(channel) = self.linked_invite_candidate() else {
+            return Ok(false);
+        };
+        self.accept_channel_invite(channel).await?;
+        Ok(true)
+    }
+
     /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
     pub(in crate::node) async fn run_channel_recovery_loop(self: Arc<Self>, changes: Arc<Notify>) {
         let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
@@ -174,6 +215,9 @@ impl Node {
             };
             if let Err(error) = self.auto_enroll_one_channel_sibling().await {
                 log::warn!("linked channel invitation failed; will retry: {error}");
+            }
+            if let Err(error) = self.auto_accept_one_linked_invite().await {
+                log::warn!("linked channel acceptance failed; will retry: {error}");
             }
             let batch = if startup || discovered {
                 self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH)

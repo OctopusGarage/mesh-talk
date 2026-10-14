@@ -533,6 +533,13 @@ impl Node {
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let my_profile = profiles
+            .snapshot_entries()
+            .into_iter()
+            .find(|(id, _, _)| id == &account.account_id())
+            .map(|(_, updated_at, avatar)| {
+                crate::node::profile::ProfilePayload::new(&account, avatar, updated_at)
+            });
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
@@ -690,7 +697,7 @@ impl Node {
             call_signal_rx: Mutex::new(Some(call_signal_rx)),
             profiles_emitted: Mutex::new(HashSet::new()),
             reaction_cache: Mutex::new(HashMap::new()),
-            my_profile: Mutex::new(None),
+            my_profile: Mutex::new(my_profile),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
             sentlog: Mutex::new(sentlog),
@@ -803,6 +810,17 @@ impl Node {
             .lock()
             .expect("profiles mutex not poisoned")
             .all()
+    }
+
+    /// Durable signed profile state, including clear tombstones for startup reconciliation.
+    pub fn peer_profile_states(&self) -> HashMap<String, Option<Vec<u8>>> {
+        self.profiles
+            .lock()
+            .expect("profiles mutex not poisoned")
+            .snapshot_entries()
+            .into_iter()
+            .map(|(account, _, avatar)| (account, avatar))
+            .collect()
     }
 
     /// Summaries of all channels this node is a member of.

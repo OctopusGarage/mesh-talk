@@ -94,7 +94,7 @@ impl Node {
         category: SyncCategory,
         enabled: bool,
     ) -> Result<(), NodeError> {
-        if category != SyncCategory::History {
+        if !matches!(category, SyncCategory::History | SyncCategory::Profile) {
             return Err(NodeError::Channel(
                 "this sync category is not available yet".into(),
             ));
@@ -106,6 +106,16 @@ impl Node {
             .map_err(NodeError::Log)?;
         if category == SyncCategory::History && enabled {
             self.account_sync_notify.notify_one();
+        }
+        if category == SyncCategory::Profile && enabled {
+            let conversations = self
+                .log
+                .lock()
+                .expect("log mutex not poisoned")
+                .conversations();
+            for conversation in conversations {
+                self.process_profile_events(conversation);
+            }
         }
         Ok(())
     }
@@ -142,11 +152,12 @@ impl Node {
             return;
         }
         let peer = channel.peer_identity();
-        if !self
-            .linked_devices()
-            .iter()
-            .any(|device| device.public == *peer && device.certificate.verify())
-        {
+        if !self.linked_devices().iter().any(|device| {
+            device.public == *peer
+                && device.certificate.verify()
+                && device.certificate.account_id() == account_id
+                && device.certificate.device_ed25519_pub == peer.ed25519_pub
+        }) {
             return;
         }
         for device in self.linked_devices() {
@@ -234,10 +245,12 @@ impl Node {
         }
         let own = self.account_id();
         if peer.account_id.as_deref() != Some(own.as_str())
-            || !self
-                .linked_devices()
-                .iter()
-                .any(|device| device.public == peer.public)
+            || !self.linked_devices().iter().any(|device| {
+                device.public == peer.public
+                    && device.certificate.verify()
+                    && device.certificate.account_id() == own
+                    && device.certificate.device_ed25519_pub == peer.public.ed25519_pub
+            })
         {
             return Err(NodeError::Authorization(
                 "peer is not a certified linked device".into(),
@@ -294,6 +307,11 @@ impl Node {
                             "too many account-history records".into(),
                         ));
                     }
+                    if total_len == 0 || total_len as usize > MAX_RECORD {
+                        return Err(NodeError::Channel(
+                            "account-history record too large".into(),
+                        ));
+                    }
                     pending = Some(PendingRecord {
                         conversation,
                         from,
@@ -304,6 +322,9 @@ impl Node {
                     });
                 }
                 AccountHistoryFrame::RecordChunk { bytes } => {
+                    if bytes.is_empty() || bytes.len() > MAX_CHUNK {
+                        return Err(NodeError::Channel("invalid account-history chunk".into()));
+                    }
                     let Some(record) = pending.as_mut() else {
                         return Err(NodeError::Channel("unexpected history chunk".into()));
                     };

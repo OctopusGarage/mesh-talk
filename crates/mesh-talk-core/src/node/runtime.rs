@@ -690,6 +690,10 @@ impl NodeRuntime {
         self.node.peer_avatars()
     }
 
+    pub fn peer_profile_states(&self) -> std::collections::HashMap<String, Option<Vec<u8>>> {
+        self.node.peer_profile_states()
+    }
+
     /// The session password held for re-encrypting the keystore — used only to
     /// re-spawn the runtime when adopting a freshly-linked account (no re-login).
     /// `pub` so the desktop shell can re-spawn after linking (it lives in another crate).

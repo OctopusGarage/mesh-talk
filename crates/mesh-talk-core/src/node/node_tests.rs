@@ -116,6 +116,7 @@ async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
     announce(&alice, &sibling, "Bob laptop", sibling_port);
     announce(&bob, &alice, "Alice", 47005);
     announce(&sibling, &alice, "Alice", 47005);
+    announce(&sibling, &bob, "Bob", bob_port);
 
     let channel = alice
         .create_channel("team", vec![bob.identity.public()])
@@ -136,6 +137,35 @@ async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
     })
     .await
     .expect("sibling receives owner-signed invitation");
+    assert_eq!(sibling.linked_invite_candidate(), Some(channel));
+    assert!(sibling.auto_accept_one_linked_invite().await.unwrap());
+    assert!(
+        sibling
+            .list_channels()
+            .iter()
+            .any(|item| item.id == channel && !item.pending_invite)
+    );
+    assert!(!sibling.auto_accept_one_linked_invite().await.unwrap());
+    let ordinary = alice
+        .create_channel_invited("ordinary", vec![sibling.identity.public()])
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if sibling
+                .list_channels()
+                .iter()
+                .any(|item| item.id == ordinary && item.pending_invite)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("ordinary invitation reaches sibling device");
+    assert_eq!(sibling.linked_invite_candidate(), None);
+    assert!(!sibling.auto_accept_one_linked_invite().await.unwrap());
     let epoch = alice
         .channels
         .lock()
@@ -6840,6 +6870,114 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
         bob_node.peer_avatar(&alice_acct.account_id()),
         Some(newer),
         "the newer avatar is preserved"
+    );
+}
+
+// An oversized avatar is rejected at the publish boundary (never sealed/appended).
+#[tokio::test]
+async fn own_signed_profile_and_clear_survive_restart_for_new_peers() {
+    let identity = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let dir = tempfile::tempdir().unwrap();
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open_with_account(
+            DeviceIdentity::from_secret_bytes(identity.secret_bytes().0, identity.secret_bytes().1),
+            crate::identity::account::Account::from_secret_bytes(account.secret_bytes()),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("me.log"),
+            &dir.path().join("me-sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open();
+    node.set_avatar(Some(b"data:image/png;base64,QQ==".to_vec()))
+        .await
+        .unwrap();
+    drop(node);
+    let node = open();
+    let profile = node.my_profile.lock().unwrap().clone().unwrap();
+    assert_eq!(profile.avatar, Some(b"data:image/png;base64,QQ==".to_vec()));
+    assert!(profile.verify());
+    node.set_avatar(None).await.unwrap();
+    drop(node);
+    let node = open();
+    let profile = node.my_profile.lock().unwrap().clone().unwrap();
+    assert_eq!(profile.avatar, None);
+    assert!(profile.verify());
+    assert_eq!(
+        node.peer_profile_states().get(&account.account_id()),
+        Some(&None)
+    );
+}
+
+// An oversized avatar is rejected at the publish boundary (never sealed/appended).
+#[tokio::test]
+async fn disabled_profile_sync_defers_sibling_avatar_until_enabled() {
+    let account = crate::identity::account::Account::generate();
+    let source = DeviceIdentity::generate();
+    let target = DeviceIdentity::generate();
+    let dir = tempfile::tempdir().unwrap();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    add_account_peer(
+        &roster,
+        &source,
+        &account,
+        "Sibling",
+        4000,
+        &target.public().user_id(),
+    );
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open_with_account(
+        target,
+        crate::identity::account::Account::from_secret_bytes(account.secret_bytes()),
+        roster,
+        dm,
+        channel,
+        file,
+        &dir.path().join("target.log"),
+        &dir.path().join("target-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    node.set_device_sync_category(crate::node::SyncCategory::Profile, false)
+        .unwrap();
+    let avatar = b"data:image/png;base64,QQ==".to_vec();
+    let profile = crate::node::profile::ProfilePayload::new(&account, Some(avatar.clone()), 42);
+    let conversation = dm_conversation_id(&source.public(), &node.identity.public());
+    let ciphertext = crate::dm::seal(
+        &source,
+        &node.identity.public().x25519_pub,
+        &profile.encode(),
+    )
+    .unwrap();
+    let event = Event::new(
+        &source,
+        conversation,
+        1,
+        vec![],
+        1,
+        42,
+        EventKind::Profile,
+        ciphertext,
+    );
+    node.log.lock().unwrap().append(event).unwrap();
+    node.process_profile_events(conversation);
+    assert_eq!(node.peer_avatar(&account.account_id()), None);
+    node.set_device_sync_category(crate::node::SyncCategory::Profile, true)
+        .unwrap();
+    assert_eq!(node.peer_avatar(&account.account_id()), Some(avatar));
+    assert_eq!(
+        node.my_profile.lock().unwrap().as_ref().unwrap().updated_at,
+        42
     );
 }
 

@@ -31,7 +31,7 @@ impl Default for DeviceSyncPolicy {
         Self {
             history: true,
             attachments: false,
-            profile: false,
+            profile: true,
             appearance: false,
             contacts: false,
         }

@@ -58,6 +58,48 @@
         "Persistence failures propagate instead of silently proceeding with an erase.",
         "The erase remains local; it does not claim to delete copies on other devices."
       ]
+    },
+    {
+      "id": "MT-SYNC-AI-005",
+      "name": "signed sibling avatar updates respect the local profile choice",
+      "subject_file": "crates/mesh-talk-core/src/node/profile_io.rs",
+      "min_score": 0.85,
+      "scenario": "Review signed account-avatar propagation between linked devices. Check whether a sibling can impersonate another account, whether a disabled local profile choice defers sibling updates, and whether a newer update becomes the state republished to future peers.",
+      "rubric": [
+        "The profile payload signature verifies and its account ID matches the authenticated sender device's certified account.",
+        "A disabled profile choice defers an own-account sibling update so it can be applied after re-enabling.",
+        "The durable profile store applies only newer updates and retains avatar clears.",
+        "An applied own-account update refreshes the profile republished to newly discovered peers.",
+        "Local avatar publication uses a timestamp newer than the durable own-account profile state."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-006",
+      "name": "linked avatar restart does not resurrect stale local state",
+      "subject_file": "frontend/src/store/avatars.ts",
+      "min_score": 0.85,
+      "scenario": "Review the frontend avatar store for a linked-device update or clear arriving before or after startup loads. Check whether an older local own-avatar override can reappear or be republished, and whether a user's newer local edit remains authoritative.",
+      "rubric": [
+        "A signed own-account update removes the stale local override and persists that removal without republishing it.",
+        "Durable clear tombstones are recognized on startup, rather than treated as absent data.",
+        "Startup republish does not turn a stale local avatar into a newer signed update after a sibling changed it.",
+        "In-flight local edits and owner changes are guarded against stale asynchronous loads.",
+        "A local override for another contact is not removed by that contact's propagated avatar."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-007",
+      "name": "automatic channel enrollment preserves invitation consent",
+      "subject_file": "crates/mesh-talk-core/src/node/channels.rs",
+      "min_score": 0.85,
+      "scenario": "Review automatic channel invitation and acceptance for linked devices. Check whether an unrelated invite or relay can gain automatic acceptance, whether owners alone issue invitations, and whether the work is bounded and repeatable.",
+      "rubric": [
+        "Only the channel owner proposes a certified sibling of an accepted account member.",
+        "Relays, unrelated accounts, dissolved channels, and existing members are excluded.",
+        "A pending invitation is accepted automatically only when another accepted channel member is a verified sibling of the local account.",
+        "An ordinary invitation remains pending for explicit consent.",
+        "The recovery loop processes at most one invitation and one acceptance per pass."
+      ]
     }
   ]
 }

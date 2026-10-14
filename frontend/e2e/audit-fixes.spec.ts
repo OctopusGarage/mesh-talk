@@ -82,10 +82,16 @@ test("linked-device history choice is local and survives reopening", async ({
   await page.getByTestId("sidebar-overflow").click();
   await page.getByTestId("sidebar-action-link").click();
   const dialog = page.getByTestId("link-device-dialog");
-  const history = dialog.getByRole("switch", { name: "Direct message history" });
+  const history = dialog.getByRole("switch", {
+    name: "Direct message history",
+  });
+  const profile = dialog.getByRole("switch", { name: "Account avatar" });
   await expect(history).toHaveAttribute("aria-checked", "true");
+  await expect(profile).toHaveAttribute("aria-checked", "true");
   await history.click();
+  await profile.click();
   await expect(history).toHaveAttribute("aria-checked", "false");
+  await expect(profile).toHaveAttribute("aria-checked", "false");
   await expect(dialog).toContainText("Channel messages and attachments");
 
   await dialog.getByRole("button", { name: "Close" }).click();
@@ -94,15 +100,21 @@ test("linked-device history choice is local and survives reopening", async ({
     await page.getByTestId("sidebar-overflow").click();
   await linkAction.click();
   await expect(history).toHaveAttribute("aria-checked", "false");
+  await expect(profile).toHaveAttribute("aria-checked", "false");
 });
 
-test("failed sync choice leaves the device policy unchanged", async ({ page }) => {
+test("failed sync choice leaves the device policy unchanged", async ({
+  page,
+}) => {
   await enterChat(page);
   await page.evaluate(() => {
     const tauri = (
       window as unknown as {
         __TAURI_INTERNALS__: {
-          invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+          invoke: (
+            cmd: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
         };
       }
     ).__TAURI_INTERNALS__;
@@ -115,7 +127,9 @@ test("failed sync choice leaves the device policy unchanged", async ({ page }) =
   await page.getByTestId("sidebar-overflow").click();
   await page.getByTestId("sidebar-action-link").click();
   const dialog = page.getByTestId("link-device-dialog");
-  const history = dialog.getByRole("switch", { name: "Direct message history" });
+  const history = dialog.getByRole("switch", {
+    name: "Direct message history",
+  });
   await expect(history).toHaveAttribute("aria-checked", "true");
   await history.click();
   await expect(dialog.getByRole("alert")).toContainText("disk write failed");

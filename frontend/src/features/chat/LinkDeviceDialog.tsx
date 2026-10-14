@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { auth, chat } from "@/lib/api";
-import type { DeviceSyncPolicy } from "@/lib/api/chat";
+import type { DeviceSyncPolicy, SyncCategory } from "@/lib/api/chat";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
@@ -65,12 +65,12 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     };
   }, [open, t]);
 
-  const setHistorySync = async (enabled: boolean) => {
+  const setSyncCategory = async (category: SyncCategory, enabled: boolean) => {
     if (!syncPolicy || syncBusy) return;
     setSyncBusy(true);
     setSyncError(null);
     try {
-      const policy = await chat.setDeviceSyncCategory("history", enabled);
+      const policy = await chat.setDeviceSyncCategory(category, enabled);
       if (openRef.current) setSyncPolicy(policy);
     } catch (error) {
       if (openRef.current)
@@ -360,7 +360,27 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
               checked={syncPolicy?.history ?? false}
               disabled={!syncPolicy || syncBusy}
               aria-label={t("linkDevice.historySync")}
-              onCheckedChange={(enabled) => void setHistorySync(enabled)}
+              onCheckedChange={(enabled) =>
+                void setSyncCategory("history", enabled)
+              }
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                {t("linkDevice.profileSync")}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("linkDevice.profileSyncDescription")}
+              </p>
+            </div>
+            <Switch
+              checked={syncPolicy?.profile ?? false}
+              disabled={!syncPolicy || syncBusy}
+              aria-label={t("linkDevice.profileSync")}
+              onCheckedChange={(enabled) =>
+                void setSyncCategory("profile", enabled)
+              }
             />
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground">
