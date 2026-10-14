@@ -158,6 +158,7 @@ export function SettingsDialog({
   const [staySignedIn, setStaySignedIn] = useState(true);
   const [retentionDays, setRetentionDays] = useState(0);
   const [callsEnabled, setCallsEnabled] = useState(false);
+  const [postOfficeEnabled, setPostOfficeEnabled] = useState(true);
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
   const [privacy, setPrivacy] = useState(balancedPrivacy);
   const settingsScroll = useRef<HTMLDivElement>(null);
@@ -187,6 +188,7 @@ export function SettingsDialog({
         setStaySignedIn(s.stay_signed_in);
         setRetentionDays(s.retention_days);
         setCallsEnabled(s.calls_enabled);
+        setPostOfficeEnabled(s.post_office_enabled);
         setRingtone(asRingtoneId(s.ringtone));
         const policy = privacyFromSettings(s);
         setPrivacy(policy);
@@ -251,6 +253,12 @@ export function SettingsDialog({
     void saveSetting(
       () => settingsApi.update({ notifications: v }),
       () => setNotifications(v),
+    );
+  };
+  const onPostOffice = (enabled: boolean) => {
+    void saveSetting(
+      () => settingsApi.update({ post_office_enabled: enabled }),
+      () => setPostOfficeEnabled(enabled),
     );
   };
   const savePrivacy = (patch: Partial<AppSettings>) => {
@@ -454,6 +462,20 @@ export function SettingsDialog({
               id="settings-security"
               title={t("settings.securitySection")}
             >
+              <Row
+                id="setting-post-office"
+                icon={<ShieldCheck className="h-4 w-4" />}
+                title={t("settings.postOffice")}
+                desc={t("settings.postOfficeDesc")}
+                control={
+                  <Switch
+                    id="setting-post-office"
+                    checked={postOfficeEnabled}
+                    onCheckedChange={onPostOffice}
+                    disabled={!settingsLoaded || saving}
+                  />
+                }
+              />
               <Row
                 id="setting-privacy-level"
                 icon={<ShieldCheck className="h-4 w-4" />}

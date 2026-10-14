@@ -267,6 +267,11 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) accepted_hook: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
+    /// Host preference. Relay selection and every relay dial consult this live flag.
+    pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
+    /// Session-only IDs of relay envelopes already processed. Losing this cache
+    /// on restart causes a safe re-download, never a lost inner event.
+    pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
     // private to the `node` module (no wider exposure).
@@ -690,6 +695,8 @@ impl Node {
             verified_dm_pull_peers: Mutex::new(HashSet::new()),
             delivery_control_ids: Mutex::new(delivery_control_ids),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
+            post_office_enabled: std::sync::atomic::AtomicBool::new(true),
+            opaque_seen: Mutex::new(HashMap::new()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),

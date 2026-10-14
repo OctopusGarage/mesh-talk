@@ -1,7 +1,7 @@
 //! Post-office integration: find the elected post office in the roster, and run
 //! the relay's server side (sync rounds over a durable [`PostOffice`]). The
-//! sender-replication and recipient-drain logic that USES the elected PO lands in
-//! the next plan; this module provides the election lookup and the serving loop.
+//! Client upload and drain live in `opaque_relay` and `serving`;
+//! this module provides election lookup and the serving loop.
 
 use crate::discovery::roster::{PeerRecord, Roster};
 use crate::identity::device::DeviceIdentity;
@@ -69,6 +69,10 @@ pub async fn run_relay_accept_loop(
     listener: TcpListener,
     store: Arc<Mutex<PostOffice>>,
 ) {
+    store
+        .lock()
+        .expect("relay store lock not poisoned")
+        .require_opaque_envelopes();
     let conns = Arc::new(Semaphore::new(MAX_CONCURRENT_RELAY_CONNS));
     let identity = Arc::new(identity);
     loop {
@@ -206,5 +210,71 @@ mod tests {
             relay_store.lock().unwrap().has(&event_id),
             "relay persisted the pushed event"
         );
+    }
+
+    #[tokio::test]
+    async fn production_relay_rejects_clear_event_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let relay = DeviceIdentity::generate();
+        let relay_keys = relay.secret_bytes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(&dir.path().join("relay.log"), "pw", relay).unwrap(),
+        ));
+        let task = tokio::spawn(run_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+            listener,
+            Arc::clone(&store),
+        ));
+        let event = Event::new(
+            &sender,
+            ConversationId::new([8; 32]),
+            1,
+            vec![],
+            1,
+            1234,
+            EventKind::MembershipChange,
+            b"readable channel name".to_vec(),
+        );
+        let mut log = EventLog::default();
+        log.append(event.clone()).unwrap();
+        let mut channel = SecureChannel::connect(
+            tokio::net::TcpStream::connect(addr).await.unwrap(),
+            &sender,
+            None,
+        )
+        .await
+        .unwrap();
+        let _ = request_round(&mut channel, &Mutex::new(log), event.conversation_id).await;
+        assert!(!store.lock().unwrap().has(&event.id));
+        task.abort();
+    }
+
+    #[test]
+    fn wrapped_file_chunk_fits_one_sync_frame() {
+        let sender = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let relay = DeviceIdentity::generate();
+        let chunk = Event::new(
+            &sender,
+            ConversationId::new([6; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![7; crate::file::crypto::CHUNK_SIZE + 16],
+        );
+        let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+            &sender,
+            &recipient.public(),
+            &relay.public(),
+        )
+        .unwrap();
+        assert!(super::super::session::event_fits_frame(
+            &mailbox.wrap(&chunk).unwrap()
+        ));
     }
 }

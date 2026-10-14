@@ -3,13 +3,14 @@
 import hashlib
 import json
 import plistlib
+import subprocess
 import tempfile
 import sys
 import unittest
 import zipfile
 from pathlib import Path
 
-from verify_assets import archive_member, elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory
+from verify_assets import archive_member, elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory, verify_post_office_binary
 
 
 class ReleaseAssetsTests(unittest.TestCase):
@@ -30,6 +31,8 @@ class ReleaseAssetsTests(unittest.TestCase):
             for variant in ("default", "lite"):
                 self.write_archive(platform, variant=variant)
                 (self.root / (self.name(platform, variant) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
+            self.write_post_office_archive(platform)
+            (self.root / (self.post_office_name(platform) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
         (self.root / "mesh-talk.cdx.json").write_text(json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "mesh-talk"}]}))
 
     @staticmethod
@@ -46,13 +49,31 @@ class ReleaseAssetsTests(unittest.TestCase):
                 archive.writestr(name, data)
             archive.writestr("release/SHA256SUMS", checksums)
 
+    @staticmethod
+    def post_office_name(platform):
+        return f"mesh-talk-post-office_v0.1.5_{platform}.zip"
+
+    def write_post_office_archive(self, platform, entries=None, checksums=None):
+        binary = "mesh-talk-node.exe" if platform.startswith("windows_") else "mesh-talk-node"
+        entries = entries or {
+            f"release/{binary}": b"relay binary",
+            "release/README.md": b"installation guide",
+            **({"release/install-post-office-windows.ps1": b"installer"} if platform.startswith("windows_") else {}),
+        }
+        if checksums is None:
+            checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in entries.items())
+        with zipfile.ZipFile(self.root / self.post_office_name(platform), "w") as archive:
+            for name, data in entries.items():
+                archive.writestr(name, data)
+            archive.writestr("release/SHA256SUMS", checksums)
+
     def verify(self):
         # Structural tests intentionally use non-executable installer fixtures.
         # The CLI's production path always validates native installer metadata.
         return verify_directory(self.root, "v0.1.5", "0.1.5", check_installers=False)
 
     def test_complete_release(self):
-        self.assertEqual(len(self.verify()), 12)
+        self.assertEqual(len(self.verify()), 18)
 
     def test_macos_archive_needs_only_the_dmg(self):
         for platform in ("macos_arm64", "macos_x86_64"):
@@ -61,7 +82,64 @@ class ReleaseAssetsTests(unittest.TestCase):
                     {name for name in archive.namelist() if not name.endswith("SHA256SUMS")},
                     {"release/installer 0.1.5.dmg"},
                 )
-        self.assertEqual(len(self.verify()), 12)
+        self.assertEqual(len(self.verify()), 18)
+
+    def test_missing_post_office_archive(self):
+        (self.root / self.post_office_name("linux_x86_64")).unlink()
+        with self.assertRaisesRegex(ValueError, "asset set"):
+            self.verify()
+
+    def test_post_office_archive_requires_exact_files_and_checksums(self):
+        self.write_post_office_archive("windows_x86_64", entries={
+            "release/mesh-talk-node.exe": b"relay binary",
+            "release/README.md": b"installation guide",
+        })
+        with self.assertRaisesRegex(ValueError, "post-office.*contents"):
+            self.verify()
+        self.write_post_office_archive("windows_x86_64", checksums=f"{'0' * 64}  ./mesh-talk-node.exe\n")
+        with self.assertRaisesRegex(ValueError, "post-office.*checksum"):
+            self.verify()
+
+    def test_post_office_binary_architecture(self):
+        mac = b"\xcf\xfa\xed\xfe" + (0x01000007).to_bytes(4, "little")
+        verify_post_office_binary(mac, "macos_x86_64")
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            verify_post_office_binary(mac, "macos_arm64")
+        linux = bytearray(64)
+        linux[:6] = b"\x7fELF\x02\x01"
+        linux[18:20] = b"\xb7\0"
+        verify_post_office_binary(linux, "linux_aarch64")
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            verify_post_office_binary(linux, "linux_x86_64")
+        windows = bytearray(128)
+        windows[:2] = b"MZ"
+        windows[0x3C:0x40] = (80).to_bytes(4, "little")
+        windows[80:86] = b"PE\0\0\x64\xaa"
+        verify_post_office_binary(windows, "windows_arm64")
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            verify_post_office_binary(windows, "windows_x86_64")
+
+    def test_container_input_requires_verified_linux_zip_hashes(self):
+        input_dir = self.root / "container-input"
+        input_dir.mkdir()
+        lines = []
+        for platform in ("linux_x86_64", "linux_aarch64"):
+            name = self.post_office_name(platform)
+            archive = input_dir / name
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr("release/mesh-talk-node", platform.encode())
+            lines.append(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  workflow-assets/{name}\n")
+        evidence = self.root / "verification.txt"
+        evidence.write_text("".join(lines))
+        script = Path(__file__).with_name("prepare-post-office-container.sh")
+        command = ["bash", str(script), str(input_dir), str(evidence), "v0.1.5"]
+        subprocess.run(command, cwd=self.root, check=True, capture_output=True)
+        for platform, arch in (("linux_x86_64", "amd64"), ("linux_aarch64", "arm64")):
+            binary = self.root / "docker" / "post-office" / "binaries" / arch / "mesh-talk-node"
+            self.assertEqual(binary.read_bytes(), platform.encode())
+        with (input_dir / self.post_office_name("linux_aarch64")).open("ab") as output:
+            output.write(b"tampered")
+        self.assertNotEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
 
     def test_missing_lite_variant(self):
         (self.root / self.name("windows_arm64", "lite")).unlink()
@@ -309,12 +387,12 @@ class ReleaseAssetsTests(unittest.TestCase):
             if extension == "dmg":
                 return {}
             return {"elf": original}
-        with patch("verify_assets.native_metadata", side_effect=metadata):
+        with patch("verify_assets.native_metadata", side_effect=metadata), patch("verify_assets.verify_post_office_archive"):
             verify_directory(self.root, "v0.1.5", "0.1.5")
         for binary in [self.elf_fixture(text=b"changed"), self.elf_fixture(constants=b"different version")]:
             def wrong_appimage(path, extension, version, platform):
                 return {"elf": elf_fingerprint(binary)} if extension == "AppImage" else metadata(path, extension, version, platform)
-            with patch("verify_assets.native_metadata", side_effect=wrong_appimage):
+            with patch("verify_assets.native_metadata", side_effect=wrong_appimage), patch("verify_assets.verify_post_office_archive"):
                 with self.assertRaisesRegex(ValueError, "AppImage/versioned Debian"):
                     verify_directory(self.root, "v0.1.5", "0.1.5")
 

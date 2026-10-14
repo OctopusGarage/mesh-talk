@@ -10,6 +10,32 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[test]
+fn post_office_use_can_be_disabled_and_reenabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let relay = DeviceIdentity::generate().public();
+
+    assert!(node.relay_allowed(&relay));
+    node.set_post_office_enabled(false);
+    assert!(!node.relay_allowed(&relay));
+    node.set_post_office_enabled(true);
+    assert!(node.relay_allowed(&relay));
+}
+
+#[test]
 fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     use crate::eventlog::event::{ConversationId, EventId};
     use crate::recovery::snapshot::{SnapshotRecordV1, read_snapshot};
@@ -1118,6 +1144,62 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
     assert_eq!(received.from, alice_uid);
     assert_eq!(received.from_name, "Alice");
     assert_eq!(received.text, b"held-hello");
+
+    let conv = dm_conversation_id(&alice_node.identity.public(), &bob_node.identity.public());
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &alice_node.identity,
+        &bob_node.identity.public(),
+        &po_seed.public(),
+    )
+    .unwrap();
+    let stored = po_store.lock().unwrap().held_events(&mailbox.id());
+    assert!(!stored.is_empty());
+    assert!(po_store.lock().unwrap().held_ids(&conv).is_empty());
+    for outer in &stored {
+        assert_eq!(outer.wall_clock, 0);
+        assert_eq!(outer.kind, EventKind::Message);
+        assert!(outer.parents.is_empty());
+        assert_ne!(
+            outer.author.ed25519_pub(),
+            &alice_node.identity.public().ed25519_pub
+        );
+        assert!(
+            !outer
+                .ciphertext
+                .windows(b"held-hello".len())
+                .any(|w| w == b"held-hello")
+        );
+    }
+
+    let group = alice_node
+        .create_channel("relay-secret-room", vec![bob_node.identity.public()])
+        .await
+        .unwrap();
+    assert!(po_store.lock().unwrap().held_ids(&group).is_empty());
+    let group_wrappers = po_store.lock().unwrap().held_events(&mailbox.id());
+    assert!(group_wrappers.len() > stored.len());
+    assert!(group_wrappers.iter().all(|outer| {
+        !outer
+            .ciphertext
+            .windows(b"relay-secret-room".len())
+            .any(|window| window == b"relay-secret-room")
+    }));
+    bob_node.drain_from_post_office().await;
+    assert!(
+        bob_node
+            .list_channels()
+            .iter()
+            .any(|summary| summary.id == group && summary.name == "relay-secret-room")
+    );
+
+    // Turning relay use off keeps later messages local while Bob remains offline.
+    let held_before = po_store.lock().unwrap().held_ids(&mailbox.id());
+    alice_node.set_post_office_enabled(false);
+    alice_node.send_dm(&bob_uid, b"direct-only").await.unwrap();
+    assert_eq!(
+        po_store.lock().unwrap().held_ids(&mailbox.id()),
+        held_before
+    );
 }
 
 #[tokio::test]

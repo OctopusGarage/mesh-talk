@@ -371,6 +371,8 @@
     "loadFailed": "Couldn’t load settings: {{error}}",
     "saveFailed": "Couldn’t save the change: {{error}}",
     "securitySection": "Privacy & security",
+    "postOffice": "Use post-office relays",
+    "postOfficeDesc": "Use an available LAN relay for offline delivery. Event details are encrypted, but relays can infer contacts from connections and timing. Turning this off stops relay uploads and downloads on this device.",
     "privacyLevel": "Privacy level",
     "privacyLevelDesc": "Choose a starting point, then adjust the controls below.",
     "level_balanced": "Balanced",

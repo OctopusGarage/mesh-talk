@@ -37,9 +37,16 @@ struct Args {
     /// Path to the encrypted identity keystore (created if absent).
     #[arg(long)]
     keystore: String,
-    /// Password that encrypts the keystore.
-    #[arg(long)]
-    password: String,
+    /// Password that encrypts the keystore. Prefer --password-file for a service.
+    #[arg(
+        long,
+        required_unless_present = "password_file",
+        conflicts_with = "password_file"
+    )]
+    password: Option<String>,
+    /// Read the keystore password from a private regular file (mode 0600 on Unix).
+    #[arg(long, conflicts_with = "password")]
+    password_file: Option<std::path::PathBuf>,
     /// Display name advertised to peers.
     #[arg(long)]
     name: String,
@@ -218,10 +225,32 @@ fn pid_is_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// Non-unix fallback: assume any recorded holder is alive (no cheap PID probe), so the
-/// lock is strict. A leftover lockfile must then be removed by hand — surfaced in the
-/// error message.
-#[cfg(not(unix))]
+/// Windows service managers terminate a process without running `Drop`, so a PID
+/// in the lockfile must be checked before refusing a restart. Failure to open or
+/// query a process is treated as alive: only a confirmed exit makes it safe to
+/// reclaim the lock.
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: this opens a query-only handle for a numeric PID, checks its exit
+    // code, and closes the handle. No process memory is accessed or modified.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return std::io::Error::last_os_error().raw_os_error()
+            != Some(ERROR_INVALID_PARAMETER as i32);
+    }
+    let mut exit_code = 0;
+    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    unsafe { CloseHandle(handle) };
+    queried == 0 || exit_code == STILL_ACTIVE as u32
+}
+
+/// Other platforms conservatively retain a lock whose holder cannot be probed.
+#[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: u32) -> bool {
     true
 }
@@ -234,7 +263,10 @@ impl Drop for DataDirLock {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if let Some(path) = args.password_file.as_deref() {
+        args.password = Some(read_password_file(path)?);
+    }
 
     // Fail fast if another CLI node is already using this keystore's data dir (the GUI is
     // guarded by single_instance; the CLI isn't). Held for the process lifetime via Drop.
@@ -247,11 +279,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.post_office {
         return run_post_office(args).await;
     }
+    let password = args
+        .password
+        .as_deref()
+        .expect("Clap requires a password source");
 
     // Persistent identity (created on first run).
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
-        &args.password,
+        password,
     )?;
     let user_id = identity.public().user_id();
 
@@ -261,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("account.keystore");
     let account =
-        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, &args.password)?;
+        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, password)?;
 
     // TCP listener for peer connections; dual-stack (IPv6 + IPv4-mapped, falling back to
     // IPv4) so the node is reachable over IPv6/link-local too. Resolve the actual port.
@@ -291,13 +327,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_tx,
         &log_path,
         &sent_path,
-        &args.password,
+        password,
     )?;
     let verified_path = verified_peer_path(data_dir);
     let mut verified_peers = load_verified_peers(&verified_path);
     node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
-    node.configure_privacy(data_dir, &args.password, &announce, visibility.clone())?;
+    node.configure_privacy(data_dir, password, &announce, visibility.clone())?;
 
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
@@ -463,6 +499,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn read_password_file(path: &std::path::Path) -> std::io::Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "password file must be a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "password file must be readable only by its owner (mode 0600)",
+            ));
+        }
+    }
+    let password = std::fs::read_to_string(path)?;
+    let password = password.trim_end_matches(['\r', '\n']);
+    if password.is_empty() || password.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "password file must contain one nonempty line",
+        ));
+    }
+    Ok(password.to_string())
+}
+
 /// Run as a post office: load the identity, advertise the post-office role,
 /// serve a durable `PostOffice` relay. No DM send/drain — a pure relay. Runs the
 /// accept loop forever (stop with Ctrl-C / kill).
@@ -472,9 +537,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// line can take ~15s to appear on first run. Tooling that waits for a relay to
 /// come up should poll for the startup line, not fixed-sleep.
 async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    let password = args
+        .password
+        .as_deref()
+        .expect("Clap requires a password source");
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
-        &args.password,
+        password,
     )?;
     let user_id = identity.public().user_id();
 
@@ -484,7 +553,7 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("account.keystore");
     let account =
-        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, &args.password)?;
+        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, password)?;
 
     let listener = mesh_talk_core::node::bind_dual_stack_listener(args.port).await?;
     let tcp_port = listener.local_addr()?.port();
@@ -503,7 +572,7 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .join("relay.log");
     let store = Arc::new(Mutex::new(PostOffice::open(
         &relay_path,
-        &args.password,
+        password,
         identity,
     )?));
 
@@ -776,6 +845,88 @@ mod tests {
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;
     use std::time::Instant;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_reclaims_dead_pid_but_rejects_live_holder() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join("node.lock");
+        assert!(pid_is_alive(std::process::id()));
+        assert!(!pid_is_alive(0));
+        std::fs::write(&lock_path, "0").unwrap();
+        let lock = DataDirLock::acquire(root.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).unwrap(),
+            std::process::id().to_string()
+        );
+        assert_eq!(
+            DataDirLock::acquire(root.path()).err().unwrap().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        drop(lock);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn cli_accepts_exactly_one_password_source() {
+        let base = [
+            "mesh-talk-node",
+            "--keystore",
+            "node.keystore",
+            "--name",
+            "relay",
+        ];
+        assert!(Args::try_parse_from(base).is_err());
+        assert!(
+            Args::try_parse_from([
+                "mesh-talk-node",
+                "--keystore",
+                "node.keystore",
+                "--name",
+                "relay",
+                "--password-file",
+                "secret.txt",
+                "--post-office",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "mesh-talk-node",
+                "--keystore",
+                "node.keystore",
+                "--name",
+                "relay",
+                "--password",
+                "pw",
+                "--password-file",
+                "secret.txt",
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn password_file_requires_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("password");
+        std::fs::write(&path, b"private-value\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_password_file(&path).unwrap(), "private-value");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            read_password_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, b"line one\nline two\n").unwrap();
+        assert_eq!(
+            read_password_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
 
     #[test]
     fn verified_peer_fingerprint_is_canonical_across_cli_restart() {

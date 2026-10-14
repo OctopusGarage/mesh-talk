@@ -371,6 +371,8 @@
     "loadFailed": "无法加载设置：{{error}}",
     "saveFailed": "无法保存更改：{{error}}",
     "securitySection": "隐私与安全",
+    "postOffice": "使用邮局中继节点",
+    "postOfficeDesc": "使用局域网中可用的中继节点进行离线投递。事件详情已加密，但中继节点仍可通过连接和时间推断通信对象。关闭后，此设备将停止通过中继节点上传和下载。",
     "privacyLevel": "隐私级别",
     "privacyLevelDesc": "选择一个预设，然后按需调整下方选项。",
     "level_balanced": "均衡",

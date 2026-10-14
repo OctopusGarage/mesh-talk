@@ -44,6 +44,10 @@ Before deploying Mesh-Talk, ensure you have the following tools installed:
 
 `mesh-talk-node` is the headless node binary — a CLI over the same core, useful for
 testing on a server and for running an always-on **post office** relay.
+Tagged releases provide separate signed post-office ZIPs for macOS, Windows,
+and Linux. Linux also has an `amd64`/`arm64` GHCR image. See the
+[post-office release guide](../docs/post-office-release.md) for packages,
+verification, and a persistent Docker Engine setup.
 
 ### Building the node
 
@@ -67,17 +71,35 @@ testing on a server and for running an always-on **post office** relay.
 # a normal headless node
 ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore --password "<pw>" --name "YourName"
 # run as a store-and-forward relay
-./mesh-talk-node --keystore ~/.mesh-talk/relay.keystore --password "<pw>" --name "relay" --post-office
+./mesh-talk-node --keystore ~/.mesh-talk/relay.keystore --password-file ~/.mesh-talk/relay.password --name "relay" --post-office
 ```
 
 Parameters:
 - `--keystore`: path to the encrypted identity keystore (created if absent) — **required**
-- `--password`: password that encrypts the keystore — **required**
+- `--password` or `--password-file`: password that encrypts the keystore and
+  relay log — **one is required**. A service should use a private regular file
+  (mode `0600`) so its password is absent from process arguments and the
+  launch-agent plist. Store that file in a directory accessible only to its
+  owner. Back it up alongside the keystore; losing it makes the stored relay
+  identity and ciphertext unreadable.
 - `--name`: this node's display name on the LAN — **required**
 - `--port`: TCP port for peer connections (default: OS-assigned)
 - `--discovery-port`: UDP discovery port (default: 47474; must match across peers)
-- `--post-office`: run in relay mode (stores-and-forwards still-encrypted events for
-  offline peers)
+- `--post-office`: run in relay mode (stores-and-forwards recipient-encrypted
+  opaque event wrappers for offline peers)
+
+Desktop users can turn off use of discovered relays in **Settings → Privacy & security →
+Use post-office relays**. The account-scoped preference is on by default and takes
+effect on the running node. Turning it off stops that device's relay uploads and
+downloads, so offline delivery may wait until a peer is reachable directly.
+Several relay machines may advertise on the same LAN; clients select the
+lowest-fingerprint available relay. These are standbys, not replicated
+storage; a sender must retry when election changes. The production relay rejects old
+clear-header uploads. It cannot read the inner event or channel names, but
+its authenticated connections and timing can reveal communication patterns.
+Pending events stored only in the older clear-header format require the
+original sender to retry through an opaque mailbox or deliver directly.
+See [relay metadata privacy](../docs/post-office-metadata-privacy.md).
 
 Discovery uses signed UDP **multicast** (group `224.0.0.167`, port 47474 by default);
 peer connections are Noise-encrypted TCP on an OS-assigned (or `--port`) port. The host
@@ -90,8 +112,21 @@ firewall must permit UDP 47474 (multicast 224.0.0.167) and the chosen TCP port.
 sudo cp target/release/mesh-talk-node /usr/local/bin/
 ```
 
+For an Intel Mac, build with the `x86_64-apple-darwin` target and verify the
+artifact with `file` before copying it. A macOS LaunchAgent can start the node
+at user login with `RunAtLoad` and `KeepAlive`; use an absolute binary path and
+pass `--keystore`, `--password-file`, `--name`, `--post-office`, and fixed
+`--port`/`--discovery-port` arguments. The agent must run as the same user that
+owns the private password file and relay data directory. A LaunchAgent stops
+when that user logs out. See the [macOS relay service runbook](../docs/post-office-macos-service.md)
+for the deployed `mac2015` paths and health commands.
+
 #### Windows
 Copy the `mesh-talk-node.exe` file to a directory in your PATH, or add the target directory to your PATH environment variable.
+For an always-on relay, install it as a `SYSTEM` Scheduled Task with a private
+password file and LAN-scoped firewall rules. See the
+[Windows relay service runbook](../docs/post-office-windows-service.md) for the
+tested build, update, health, and cross-machine E2E commands.
 
 ## GUI Version Deployment
 

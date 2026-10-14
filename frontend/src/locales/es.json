@@ -371,6 +371,8 @@
     "loadFailed": "No se pudo cargar la configuración: {{error}}",
     "saveFailed": "No se pudo guardar el cambio: {{error}}",
     "securitySection": "Privacidad y seguridad",
+    "postOffice": "Usar nodos de retransmisión",
+    "postOfficeDesc": "Usa un nodo disponible en la red local para entregar mensajes sin conexión. Los detalles de los eventos están cifrados, pero el nodo puede inferir los contactos por las conexiones y los horarios. Desactivarlo detiene los envíos y descargas a través del nodo en este dispositivo.",
     "privacyLevel": "Nivel de privacidad",
     "privacyLevelDesc": "Elige un ajuste inicial y modifica las opciones de abajo.",
     "level_balanced": "Equilibrado",

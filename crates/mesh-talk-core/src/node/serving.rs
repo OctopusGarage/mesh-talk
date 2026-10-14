@@ -3,7 +3,7 @@
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
-use crate::node::conversation::{account_conversation_id, dm_conversation_id};
+use crate::node::conversation::account_conversation_id;
 use crate::node::session::{Served, SessionError, request_round, serve_one, serve_wire_bytes};
 use crate::transport::SecureChannel;
 use std::sync::Arc;
@@ -21,6 +21,12 @@ const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const MAX_CONCURRENT_CONNS: usize = 256;
 
 impl Node {
+    /// Enable or disable use of discovered post offices for this node.
+    pub fn set_post_office_enabled(&self, enabled: bool) {
+        self.post_office_enabled
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
     /// peer may be offline, in which case the dial fails.
     pub(in crate::node) async fn deliver_direct(
@@ -28,6 +34,9 @@ impl Node {
         peer: &PeerRecord,
         conv: ConversationId,
     ) -> Result<(), SessionError> {
+        if peer.post_office {
+            return Err(SessionError::UnexpectedMessage);
+        }
         let mut channel = self
             .privacy_dial(peer.addr, &peer.public)
             .await
@@ -43,6 +52,28 @@ impl Node {
         &self,
         conv: ConversationId,
     ) -> Result<bool, SessionError> {
+        let me = self.identity.public();
+        let targets = self
+            .historical_dm_peers()
+            .into_iter()
+            .map(|proof| proof.public())
+            .filter(|recipient| {
+                conv == crate::node::conversation::dm_conversation_id(&me, recipient)
+                    || conv
+                        == crate::node::delivery_receipt::delivery_conversation_id(&me, recipient)
+            })
+            .collect();
+        self.replicate_to_post_office_targets(conv, targets).await
+    }
+
+    pub(in crate::node) async fn replicate_to_post_office_targets(
+        &self,
+        conv: ConversationId,
+        targets: Vec<crate::identity::device::PublicIdentity>,
+    ) -> Result<bool, SessionError> {
+        if targets.is_empty() {
+            return Ok(false);
+        }
         let po = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
             elected_post_office(&roster)
@@ -57,9 +88,17 @@ impl Node {
             .privacy_dial(po.addr, &po.public)
             .await
             .map_err(SessionError::Transport)?;
-        let store = self.sync_store(channel.peer_identity());
-        request_round(&mut channel, &store, conv).await?;
-        Ok(true)
+        let mut uploaded = false;
+        for recipient in targets {
+            if !self.relay_allowed(&po.public) {
+                return Ok(false);
+            }
+            uploaded |= !self
+                .opaque_relay_round(&mut channel, &recipient, Some(conv))
+                .await?
+                .is_empty();
+        }
+        Ok(uploaded)
     }
 
     /// Accept inbound connections and maintain deferred profile compactions.
@@ -135,6 +174,24 @@ impl Node {
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
     pub async fn serve_connection(&self, mut channel: SecureChannel<TcpStream>) {
+        // A relay may initiate a sync round too. The account preference applies to
+        // inbound relay sessions as well as our own upload/drain dials.
+        let is_relay = channel.peer_announcement().is_some_and(|a| a.post_office)
+            || self
+                .roster
+                .lock()
+                .expect("roster mutex not poisoned")
+                .get(&channel.peer_identity().user_id())
+                .is_some_and(|peer| peer.public == *channel.peer_identity() && peer.post_office);
+        if is_relay && !self.relay_allowed(channel.peer_identity()) {
+            return;
+        }
+        // Relay traffic is initiated by this node through opaque pairwise
+        // mailboxes. An inbound relay must never be able to request the local
+        // signed event log, whose headers and channel controls are readable.
+        if is_relay {
+            return;
+        }
         let store = self.serve_sync_store(channel.peer_identity());
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
@@ -142,6 +199,9 @@ impl Node {
             Ok(Ok(b)) => b,
             _ => return, // peer error or idle past the timeout
         };
+        if is_relay && !self.relay_allowed(channel.peer_identity()) {
+            return;
+        }
         if let Some(req) = PairingRequest::decode(&first) {
             if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
                 return;
@@ -180,6 +240,9 @@ impl Node {
             _ => return,
         }
         for _ in 0..MAX_SERVE_ROUNDS {
+            if is_relay && !self.relay_allowed(channel.peer_identity()) {
+                break;
+            }
             match tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
                 Ok(Ok(Served::Handled(conv))) => {
                     self.emit_new_messages(conv);
@@ -504,54 +567,20 @@ impl Node {
             Ok(c) => c,
             Err(_) => return,
         };
-        let store = self.sync_store(channel.peer_identity());
-        // Drain a DM conversation per non-PO peer (we never DM a post office).
+        // A pairwise mailbox can contain DMs, channel invitations, controls,
+        // and file chunks, including conversations not known before this pull.
         for peer in self.historical_dm_peers() {
             if !self.verified_dm_pull_peer(&peer.public().user_id()) {
                 continue;
             }
-            let conv = dm_conversation_id(&self.identity.public(), &peer.public());
-            if request_round(&mut channel, &store, conv).await.is_err() {
-                return; // channel broke; the next drain re-dials
-            }
-            self.emit_new_messages(conv);
-            self.process_file_events(conv);
-            self.process_profile_events(conv);
-        }
-        // Drain known channel conversations as well.
-        let channel_ids: Vec<ConversationId> = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.channel_ids()
-        };
-        for cid in channel_ids {
-            if request_round(&mut channel, &store, cid).await.is_err() {
+            if !self.relay_allowed(&po.public)
+                || self
+                    .opaque_relay_round(&mut channel, &peer.public(), None)
+                    .await
+                    .is_err()
+            {
                 return;
             }
-            self.process_channel(cid);
-            self.process_file_events(cid);
-        }
-        // Drain per-file conversations the file book knows (so a recipient pulls
-        // chunks the PO holds).
-        let file_convs: Vec<ConversationId> = {
-            let book = self.files.lock().expect("files mutex not poisoned");
-            book.file_convs()
-        };
-        for fc in file_convs {
-            if self.attachment_consent_status(fc)
-                != Some(super::attachment_consent::ReceiveDecision::Accepted)
-            {
-                continue;
-            }
-            if request_round(&mut channel, &store, fc).await.is_err() {
-                // A bad legacy file conversation must not stall later approved files.
-                let Ok(reconnected) = self.privacy_dial(po.addr, &po.public).await else {
-                    return;
-                };
-                channel = reconnected;
-                continue;
-            }
-            // Drained all chunks for a media file from the PO? Persist it durably + prune.
-            self.persist_media_if_complete(fc);
         }
     }
 

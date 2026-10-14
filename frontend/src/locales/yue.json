@@ -371,6 +371,8 @@
     "loadFailed": "載入設定失敗：{{error}}",
     "saveFailed": "儲存變更失敗：{{error}}",
     "securitySection": "私隱同安全",
+    "postOffice": "使用郵局中繼節點",
+    "postOfficeDesc": "用區域網絡上可用嘅中繼節點做離線傳送。事件詳情已加密，但中繼節點仍可透過連線同時間推斷邊個同邊個通訊。關閉之後，呢部裝置會停止經中繼節點上傳同下載。",
     "privacyLevel": "私隱級別",
     "privacyLevelDesc": "揀一個預設，再按需要調整下面嘅選項。",
     "level_balanced": "均衡",

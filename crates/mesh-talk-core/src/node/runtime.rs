@@ -105,6 +105,7 @@ pub struct RuntimeConfig<'a> {
     pub display_name: &'a str,
     pub password: &'a str,
     pub discovery_port: u16,
+    pub post_office_enabled: bool,
 }
 
 /// Inbound events forwarded to the host from independent runtime tasks.
@@ -231,6 +232,7 @@ impl NodeRuntime {
                 display_name,
                 password,
                 discovery_port,
+                post_office_enabled: true,
             },
             RuntimeEvents {
                 on_dm: Box::new(on_dm),
@@ -259,6 +261,7 @@ impl NodeRuntime {
             display_name,
             password,
             discovery_port,
+            post_office_enabled,
         } = config;
         let RuntimeEvents {
             on_dm,
@@ -352,6 +355,7 @@ impl NodeRuntime {
         let names_result = names_handle.await;
         let node = node_result
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??;
+        node.set_post_office_enabled(post_office_enabled);
         let names = Arc::new(Mutex::new(names_result.map_err(|e| {
             RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
         })??));
@@ -1076,6 +1080,7 @@ mod tests {
                 display_name: "Alice",
                 password: "pw",
                 discovery_port: dp,
+                post_office_enabled: false,
             },
             RuntimeEvents {
                 on_dm: Box::new(|_dm| {}),
@@ -1092,6 +1097,11 @@ mod tests {
         assert_eq!(runtime.user_id().len(), 32); // user_id is 32 hex chars
         assert!(runtime.peers().is_empty());
         assert!(runtime.peer_public("nobody").is_none());
+        assert!(
+            !runtime
+                .handle()
+                .relay_allowed(&crate::identity::device::DeviceIdentity::generate().public())
+        );
 
         // Per-user files were created on disk under accounts/<user_id>/.
         let node_dir = dir.path().join("accounts").join("alice-user-id");

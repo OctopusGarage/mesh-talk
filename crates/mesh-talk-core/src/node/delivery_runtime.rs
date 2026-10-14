@@ -1220,20 +1220,32 @@ impl Node {
         {
             return false;
         }
-        let store = self.sync_store(channel.peer_identity());
-        if super::session::request_round(&mut channel, &store, destination.event.conversation_id)
+        let Ok(uploaded) = self
+            .opaque_relay_round(
+                &mut channel,
+                &destination.device,
+                Some(destination.event.conversation_id),
+            )
             .await
-            .is_err()
-        {
+        else {
             return false;
-        }
-        let held = super::session::request_durable_have(
-            &mut channel,
-            destination.event.conversation_id,
-            destination.event.id,
-        )
-        .await
-        .unwrap_or(false);
+        };
+        let Some((_, outer_id)) = uploaded
+            .iter()
+            .find(|(inner_id, _)| *inner_id == destination.event.id)
+        else {
+            return false;
+        };
+        let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
+            &self.identity,
+            &destination.device,
+            &po.public,
+        ) else {
+            return false;
+        };
+        let held = super::session::request_durable_have(&mut channel, mailbox.id(), *outer_id)
+            .await
+            .unwrap_or(false);
         held && self.delivery_destination_allowed(destination) && self.relay_allowed(&po.public)
     }
 
@@ -1439,10 +1451,16 @@ impl Node {
         {
             return false;
         }
-        let store = self.pull_sync_store(channel.peer_identity());
-        super::session::request_round(&mut channel, &store, conv)
-            .await
-            .is_ok()
+        if relay {
+            self.opaque_relay_round(&mut channel, &proof.public(), None)
+                .await
+                .is_ok()
+        } else {
+            let store = self.pull_sync_store(channel.peer_identity());
+            super::session::request_round(&mut channel, &store, conv)
+                .await
+                .is_ok()
+        }
     }
 
     async fn retry_one_destination(&self, destination: &DeliveryDestination) -> bool {
@@ -1923,6 +1941,49 @@ impl Node {
                         .is_some_and(|proof| proof.account_id() != peer.account_id)
                 {
                     return false;
+                }
+                if relay {
+                    if self
+                        .opaque_relay_round(&mut channel, &binding.device, Some(manifest_conv))
+                        .await
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    let Ok(uploaded) = self
+                        .opaque_relay_round(
+                            &mut channel,
+                            &binding.device,
+                            Some(file.file_conversation),
+                        )
+                        .await
+                    else {
+                        return false;
+                    };
+                    let Some(final_chunk) = file.final_chunk else {
+                        return false;
+                    };
+                    let Some((_, outer_id)) = uploaded
+                        .iter()
+                        .find(|(inner_id, _)| *inner_id == final_chunk)
+                    else {
+                        return false;
+                    };
+                    let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
+                        &self.identity,
+                        &binding.device,
+                        &peer.public,
+                    ) else {
+                        return false;
+                    };
+                    return super::session::request_durable_have(
+                        &mut channel,
+                        mailbox.id(),
+                        *outer_id,
+                    )
+                    .await
+                    .unwrap_or(false)
+                        && current();
                 }
                 let store = self.sync_store(channel.peer_identity());
                 // Publish the manifest first so private recipients/relays can

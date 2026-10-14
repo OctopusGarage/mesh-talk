@@ -72,6 +72,52 @@
         "States when human review is still required.",
         "Does not claim model-output quality is proven without running a model-backed eval."
       ]
+    },
+    {
+      "id": "MT-AI-006",
+      "name": "post-office privacy documentation states the actual trust boundary",
+      "subject_file": "docs/post-office-metadata-privacy.md",
+      "min_score": 0.9,
+      "scenario": "A future relay change or documentation edit overstates metadata privacy. Evaluate whether the design document accurately describes what a post office can and cannot learn or guarantee.",
+      "rubric": [
+        "Explains which original event fields are encrypted and which outer routing fields stay visible.",
+        "States that authenticated connections, timing, counts, and size buckets can expose communication patterns.",
+        "States that the relay can withhold or delete events and that several relays do not replicate custody.",
+        "Discloses the lack of metadata forward secrecy under later static device-key compromise.",
+        "Explains that V1 clear-header copies are not retroactively hidden and may require sender retry.",
+        "Distinguishes tested behavior from privacy guarantees that require a different protocol."
+      ]
+    },
+    {
+      "id": "MT-AI-007",
+      "name": "post-office macOS service runbook is operable and protects credentials",
+      "subject_file": "docs/post-office-macos-service.md",
+      "min_score": 0.9,
+      "scenario": "An operator installs or updates the headless post office on an Intel Mac. Evaluate whether the runbook supports a safe, verifiable service lifecycle and states its limits accurately.",
+      "rubric": [
+        "Names the installed binary, data, logs, LaunchAgent, and listening/discovery ports.",
+        "Keeps the keystore password out of process arguments and the plist, and requires owner-only password file permissions.",
+        "Gives reproducible build, update, health, and restart commands without discarding queued events or identity.",
+        "Explains that a LaunchAgent runs only in the logged-in user's GUI session.",
+        "States that other relays do not replicate queued events and identifies remaining routing metadata exposure.",
+        "Provides an executable cross-machine delivery test that stops the sender before the recipient returns.",
+        "Separately verifies a relayed offline file offer and encrypted file bytes recovered from the relay after its restart with the sender stopped; explains that recipient consent still requires direct overlap with the sender."
+      ]
+    },
+    {
+      "id": "MT-AI-008",
+      "name": "post-office Windows service runbook is operable and protects credentials",
+      "subject_file": "docs/post-office-windows-service.md",
+      "min_score": 0.9,
+      "scenario": "An operator installs or updates the headless post office on Windows. Evaluate whether the runbook supports a safe, verifiable Scheduled Task lifecycle and accurately distinguishes the cross-machine test layers.",
+      "rubric": [
+        "Names the Windows binary, data directory, Scheduled Task identity, and TCP and UDP ports.",
+        "Keeps the keystore password out of process arguments and restricts relay data access to SYSTEM and Administrators.",
+        "Gives reproducible build, install, update, health, and restart commands that preserve queued events and the relay identity.",
+        "Explains stale lock recovery after a task restart and requires evidence that the service is listening.",
+        "Separately tests offline DM and channel delivery, file offer, complete encrypted file bytes, and multi-relay election against the installed Windows relay.",
+        "States that recipient consent needs sender overlap, queued custody is not replicated, and routing metadata remains exposed."
+      ]
     }
   ]
 }

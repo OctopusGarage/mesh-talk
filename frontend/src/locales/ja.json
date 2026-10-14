@@ -371,6 +371,8 @@
     "loadFailed": "設定を読み込めませんでした: {{error}}",
     "saveFailed": "変更を保存できませんでした: {{error}}",
     "securitySection": "プライバシーとセキュリティ",
+    "postOffice": "ポストオフィスを使用",
+    "postOfficeDesc": "LAN 上の中継ノードをオフライン配信に使用します。イベントの詳細は暗号化されますが、中継ノードは接続と時刻から通信相手を推測できます。オフにすると、この端末での中継経由の送受信が停止します。",
     "privacyLevel": "プライバシーレベル",
     "privacyLevelDesc": "プリセットを選び、下の項目を個別に調整できます。",
     "level_balanced": "バランス",

@@ -116,19 +116,36 @@ pub async fn list_accounts(
     let live = rt
         .peers()
         .into_iter()
-        .filter_map(|p| p.account_id.map(|account_id| (account_id, p.name)))
+        .filter_map(|p| {
+            p.account_id
+                .map(|account_id| (account_id, p.name, p.post_office))
+        })
         .collect();
     Ok(merge_account_rows(live, rt.known_account_ids()))
 }
 
-fn merge_account_rows(live: Vec<(String, String)>, known: Vec<String>) -> Vec<AccountInfo> {
-    use std::collections::BTreeMap;
+fn merge_account_rows(live: Vec<(String, String, bool)>, known: Vec<String>) -> Vec<AccountInfo> {
+    use std::collections::{BTreeMap, HashSet};
+    let normal_accounts: HashSet<String> = live
+        .iter()
+        .filter_map(|(account_id, _, post_office)| (!post_office).then_some(account_id.clone()))
+        .collect();
+    let relay_only_accounts: HashSet<String> = live
+        .iter()
+        .filter_map(|(account_id, _, post_office)| {
+            (*post_office && !normal_accounts.contains(account_id)).then_some(account_id.clone())
+        })
+        .collect();
     let mut by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for account_id in known {
-        by_account.entry(account_id).or_default();
+        if !relay_only_accounts.contains(&account_id) {
+            by_account.entry(account_id).or_default();
+        }
     }
-    for (account_id, name) in live {
-        by_account.entry(account_id).or_default().push(name);
+    for (account_id, name, post_office) in live {
+        if !post_office {
+            by_account.entry(account_id).or_default().push(name);
+        }
     }
     by_account
         .into_iter()
@@ -155,8 +172,40 @@ mod recovery_accounts_tests {
 
     #[test]
     fn live_and_history_accounts_are_not_duplicated() {
-        let rows = merge_account_rows(vec![("abcd".into(), "Alice".into())], vec!["abcd".into()]);
+        let rows = merge_account_rows(
+            vec![("abcd".into(), "Alice".into(), false)],
+            vec!["abcd".into()],
+        );
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].device_count, 1);
+        assert_eq!(rows[0].names, vec!["Alice"]);
+    }
+
+    #[test]
+    fn discovered_post_office_is_not_listed_as_a_dm_account() {
+        let rows = merge_account_rows(
+            vec![
+                ("relay-account".into(), "mac2015-post-office".into(), true),
+                ("friend-account".into(), "Alice".into(), false),
+            ],
+            vec!["relay-account".into()],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id, "friend-account");
+        assert_eq!(rows[0].names, vec!["Alice"]);
+    }
+
+    #[test]
+    fn normal_device_sharing_a_relay_account_remains_a_dm_contact() {
+        let rows = merge_account_rows(
+            vec![
+                ("shared-account".into(), "Relay".into(), true),
+                ("shared-account".into(), "Alice".into(), false),
+            ],
+            vec!["shared-account".into()],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id, "shared-account");
         assert_eq!(rows[0].device_count, 1);
         assert_eq!(rows[0].names, vec!["Alice"]);
     }

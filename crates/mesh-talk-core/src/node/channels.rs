@@ -756,7 +756,16 @@ impl Node {
         .await
         .into_iter()
         .fold(0u64, u64::saturating_add);
-        let _ = self.replicate_to_post_office(channel).await;
+        let _ = self
+            .replicate_to_post_office_targets(
+                channel,
+                members
+                    .iter()
+                    .filter(|member| member.user_id() != me)
+                    .cloned()
+                    .collect(),
+            )
+            .await;
         #[cfg(test)]
         {
             *self
@@ -1040,7 +1049,16 @@ impl Node {
             })
             .await;
         if replicate_to_post_office {
-            let _ = self.replicate_to_post_office(channel).await;
+            let _ = self
+                .replicate_to_post_office_targets(
+                    channel,
+                    members
+                        .iter()
+                        .filter(|member| member.user_id() != me)
+                        .cloned()
+                        .collect(),
+                )
+                .await;
         }
     }
 

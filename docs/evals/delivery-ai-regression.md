@@ -53,6 +53,11 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
 - AI-assisted UI reviews use the screenshot evidence and interaction checks described in
   `docs/evals/ui-ux-ai-review.md`; the agent-contract eval does not assess app usability.
 
+For a backend-only change, the complete real backend smoke is `make test &&
+make e2e`. For a frontend-only change, run `cd frontend && npm test && npm run
+e2e` (plus the relevant visual snapshot review). For changes across both
+sides, run `make smoke-full`, which includes both workflows and the eval smoke.
+
 ## Trigger Rules
 
 - Local pre-commit runs `./scripts/check-health.sh --fast`, which includes `make eval-smoke`.
@@ -65,8 +70,13 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
 - Claude Code runs `scripts/ai-eval-smoke.sh --changed <file>` after edits to key files.
   Non-critical files are ignored; critical prompt, workflow, script, and core-flow files run
   the smoke gate immediately.
-- Codex and other agents are covered through the shared git hooks, `AGENTS.md`, PR template,
-  and CI gate.
+- Codex runs `make eval-smoke` after edits to code, agent rules, prompts, eval
+  files, CI, or core workflow scripts; Claude Code's changed-file hook provides
+  the same deterministic gate during its own edits. Before either agent claims
+  a prompt, model, agent rule, eval suite, or AI-assisted workflow change is
+  ready for review, run `make ai-eval` with a configured model provider and
+  record the result. A provider-less deterministic pass is not an AI eval pass.
+- Git hooks, the PR template, and CI repeat these gates for both agents.
 
 ## Known Gaps
 

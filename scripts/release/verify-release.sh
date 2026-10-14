@@ -30,6 +30,16 @@ for platform in macos_arm64 macos_x86_64 windows_arm64 windows_x86_64 linux_aarc
         --signer-workflow "$repository/.github/workflows/release.yml" \
         --deny-self-hosted-runners
   done
+  archive="$asset_dir/mesh-talk-post-office_${tag}_${platform}.zip"
+  test -f "$archive" && test ! -L "$archive" && test -s "$archive"
+  test -f "$archive.bundle" && test ! -L "$archive.bundle" && test -s "$archive.bundle"
+  cosign verify-blob --bundle "$archive.bundle" \
+      --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@$source_ref" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
+  gh attestation verify "$archive" --repo "$repository" \
+      --source-ref "$source_ref" --source-digest "$source_sha" \
+      --signer-workflow "$repository/.github/workflows/release.yml" \
+      --deny-self-hosted-runners
 done
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
