@@ -11,6 +11,7 @@ use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::transport::SecureChannel;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -137,6 +138,14 @@ impl Node {
         {
             return;
         }
+        for device in self.linked_devices() {
+            if send_frame(channel, &AccountHistoryFrame::Device { device })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
         let records = self.export_sync_records();
         let start = (cursor as usize).min(records.len());
         let end = start.saturating_add(RECORDS_PER_PAGE).min(records.len());
@@ -203,6 +212,8 @@ impl Node {
         .await?;
         let mut pending: Option<PendingRecord> = None;
         let mut page = Vec::new();
+        let mut seen_devices = HashSet::new();
+        let mut started_records = false;
         loop {
             let bytes = tokio::time::timeout(READ_TIMEOUT, channel.recv())
                 .await
@@ -211,6 +222,18 @@ impl Node {
             let frame = AccountHistoryFrame::decode(&bytes)
                 .ok_or_else(|| NodeError::Channel("invalid account-history response".into()))?;
             match frame {
+                AccountHistoryFrame::Device { device }
+                    if !started_records && pending.is_none() && seen_devices.len() < 64 =>
+                {
+                    if !seen_devices.insert(device.public.user_id()) {
+                        return Err(NodeError::Channel("duplicate linked device".into()));
+                    }
+                    self.account_devices
+                        .lock()
+                        .expect("account devices mutex not poisoned")
+                        .insert(device)
+                        .map_err(NodeError::Log)?;
+                }
                 AccountHistoryFrame::RecordHeader {
                     conversation,
                     from,
@@ -218,6 +241,7 @@ impl Node {
                     event_id,
                     total_len,
                 } if pending.is_none() => {
+                    started_records = true;
                     if page.len() >= RECORDS_PER_PAGE {
                         return Err(NodeError::Channel(
                             "too many account-history records".into(),

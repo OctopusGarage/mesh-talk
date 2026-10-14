@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const MAGIC: &[u8; 6] = b"MTACDV";
+const MAX_LINKED_DEVICES: usize = 64;
 
 pub(crate) fn file_path(dir: &Path, account_id: &str) -> std::path::PathBuf {
     dir.join(format!("account-devices-{account_id}.log"))
@@ -37,6 +38,9 @@ impl AccountDevices {
                     "conflicting linked-device certificate".into(),
                 ));
             }
+            if by_user.len() > MAX_LINKED_DEVICES {
+                return Err(LogError::CorruptFile("too many linked devices".into()));
+            }
         }
         Ok(Self {
             file,
@@ -67,6 +71,9 @@ impl AccountDevices {
                 ));
             }
             return Ok(false);
+        }
+        if self.by_user.len() >= MAX_LINKED_DEVICES {
+            return Err(LogError::CorruptFile("too many linked devices".into()));
         }
         self.file.append(&device)?;
         self.by_user.insert(id, device);

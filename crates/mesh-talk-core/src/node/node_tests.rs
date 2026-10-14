@@ -5743,6 +5743,16 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             certificate: alice_account.certify(&a1_node.identity.public().ed25519_pub),
         })
         .unwrap();
+    let a3 = DeviceIdentity::generate();
+    a1_node
+        .account_devices
+        .lock()
+        .unwrap()
+        .insert(crate::node::account_devices::AccountDevice {
+            public: a3.public(),
+            certificate: alice_account.certify(&a3.public().ed25519_pub),
+        })
+        .unwrap();
     a2_node
         .set_device_sync_category(crate::node::SyncCategory::History, false)
         .unwrap();
@@ -5789,6 +5799,13 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     assert_eq!(history.len(), 1, "A2 must recover the DM from A1");
     assert_eq!(history[0].text, b"while A2 was offline");
     assert!(!history[0].from_me);
+    assert!(
+        a2_node
+            .linked_devices()
+            .iter()
+            .any(|device| device.public == a3.public()),
+        "A2 must learn A3's certified key through A1"
+    );
 
     a1_node
         .send_to_account(&bob_account.account_id(), b"from A1 to Bob", None)

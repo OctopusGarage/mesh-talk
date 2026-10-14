@@ -1,5 +1,6 @@
 //! Versioned, bounded control frames for account-history reconciliation.
 
+use super::account_devices::AccountDevice;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,9 @@ pub(super) enum AccountHistoryFrame {
         version: u16,
         account_id: String,
         cursor: u32,
+    },
+    Device {
+        device: AccountDevice,
     },
     RecordHeader {
         conversation: [u8; 32],
@@ -66,6 +70,10 @@ impl AccountHistoryFrame {
                 account_id: id,
                 ..
             } => *version == VERSION && account_id(id),
+            Self::Device { device } => {
+                device.certificate.verify()
+                    && device.certificate.device_ed25519_pub == device.public.ed25519_pub
+            }
             Self::RecordHeader {
                 from, total_len, ..
             } => account_id(from) && *total_len > 0 && (*total_len as usize) <= MAX_RECORD,
@@ -81,11 +89,19 @@ mod tests {
 
     #[test]
     fn valid_frames_round_trip() {
+        let account = crate::identity::account::Account::generate();
+        let public = crate::identity::device::DeviceIdentity::generate().public();
         for frame in [
             AccountHistoryFrame::Request {
                 version: VERSION,
                 account_id: "ab".repeat(16),
                 cursor: 7,
+            },
+            AccountHistoryFrame::Device {
+                device: AccountDevice {
+                    certificate: account.certify(&public.ed25519_pub),
+                    public,
+                },
             },
             AccountHistoryFrame::RecordHeader {
                 conversation: [1; 32],
