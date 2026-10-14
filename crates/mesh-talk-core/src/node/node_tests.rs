@@ -5743,6 +5743,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             certificate: alice_account.certify(&a1_node.identity.public().ed25519_pub),
         })
         .unwrap();
+    a2_node
+        .set_device_sync_category(crate::node::SyncCategory::History, false)
+        .unwrap();
 
     let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
     bob_node
@@ -5766,6 +5769,16 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     );
 
     let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        a2_node
+            .account_history(&bob_account.account_id(), 10)
+            .is_empty(),
+        "disabled history sync must not import sibling messages"
+    );
+    a2_node
+        .set_device_sync_category(crate::node::SyncCategory::History, true)
+        .unwrap();
     for _ in 0..50 {
         if a2_node.account_history(&bob_account.account_id(), 10).len() == 1 {
             break;
@@ -5890,6 +5903,9 @@ async fn start_linking_is_idempotent_until_stopped() {
 #[tokio::test]
 async fn linking_transfers_the_account_secret_with_a_valid_code() {
     use crate::identity::account::Account;
+    use crate::node::conversation::account_conversation_id;
+    use crate::node::dm_envelope::DmEnvelope;
+    use crate::node::message::MessageBody;
     let linker_id = DeviceIdentity::generate();
     let linker_account = Account::generate();
     let joiner_id = DeviceIdentity::generate();
@@ -5931,6 +5947,28 @@ async fn linking_transfers_the_account_secret_with_a_valid_code() {
     )
     .unwrap();
 
+    let contact = Account::generate();
+    let conv = account_conversation_id(&linker_account.account_id(), &contact.account_id());
+    let historical = DmEnvelope::new(
+        contact.account_id(),
+        linker_account.account_id(),
+        [41; 32],
+        MessageBody::new(b"before linking".to_vec(), None).encode(),
+    )
+    .encode();
+    linker
+        .received
+        .lock()
+        .unwrap()
+        .record(
+            conv,
+            contact.account_id(),
+            1,
+            &historical,
+            EventId::new([42; 32]),
+        )
+        .unwrap();
+
     let code = linker.start_linking();
     tokio::spawn(Arc::clone(&linker).run_accept_loop(listener));
 
@@ -5940,6 +5978,7 @@ async fn linking_transfers_the_account_secret_with_a_valid_code() {
         .expect("linking succeeds");
     assert_eq!(linked.secret, linker_account.secret_bytes());
     assert_eq!(linked.account_id, linker_account.account_id());
+    assert_eq!(joiner.received.lock().unwrap().entries(&conv).len(), 1);
     assert_eq!(linker.linked_devices().len(), 2);
     assert!(linker.linked_devices().iter().any(|device| {
         device.public.user_id() == joiner.user_id() && device.certificate.verify()

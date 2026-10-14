@@ -14,6 +14,8 @@ use tokio::net::TcpStream;
 const PAIRING_TTL_MS: u64 = 120_000;
 /// Wrong proofs before a pending code is invalidated (anti-brute-force, belt-and-braces).
 const MAX_PAIRING_ATTEMPTS: u32 = 5;
+const MAX_PAIRING_BACKFILL_RECORDS: usize = 4_096;
+const MAX_PAIRING_BACKFILL_BYTES: usize = 64 * 1024 * 1024;
 
 impl Node {
     /// Enter "link a device" mode: generate a one-time code to display. The next valid
@@ -88,6 +90,7 @@ impl Node {
         // Receive the linker's account-history backfill (records until an empty frame),
         // so this device starts populated. Best-effort: stop on any recv error.
         let mut backfill = Vec::new();
+        let mut backfill_bytes = 0usize;
         loop {
             let frame = match channel.recv().await {
                 Ok(f) => f,
@@ -96,13 +99,17 @@ impl Node {
             if frame.is_empty() {
                 break; // terminator
             }
+            backfill_bytes = backfill_bytes.saturating_add(frame.len());
+            if backfill.len() >= MAX_PAIRING_BACKFILL_RECORDS
+                || backfill_bytes > MAX_PAIRING_BACKFILL_BYTES
+            {
+                return Err(NodeError::Channel("pairing history exceeds limit".into()));
+            }
             match BackfillRecord::decode(&frame) {
                 Some(rec) => backfill.push(rec),
                 None => break,
             }
         }
-        self.import_account_backfill(&backfill)?;
-
         let account = Account::from_secret_bytes(resp.account_secret);
         // Defense-in-depth: the cert binds `account_ed25519_pub`; make sure the secret we were
         // handed actually derives that same key, so a buggy/malicious linker can't pair us onto
@@ -111,6 +118,9 @@ impl Node {
             return Err(NodeError::Channel(
                 "pairing account secret does not match the certified account key".into(),
             ));
+        }
+        if self.device_sync_policy().history {
+            self.import_account_backfill_for_account(&account.account_id(), &backfill)?;
         }
         Ok(LinkedAccount {
             secret: resp.account_secret,
@@ -187,9 +197,21 @@ impl Node {
         // Backfill: stream our account history so the new device starts populated,
         // then an empty frame as terminator. Best-effort — failures just mean the
         // joiner backfills nothing.
-        for rec in self.export_account_backfill() {
-            if channel.send(&rec.encode()).await.is_err() {
-                return;
+        if self.device_sync_policy().history {
+            let mut total_bytes = 0usize;
+            for rec in self
+                .export_account_backfill()
+                .into_iter()
+                .take(MAX_PAIRING_BACKFILL_RECORDS)
+            {
+                let encoded = rec.encode();
+                if total_bytes.saturating_add(encoded.len()) > MAX_PAIRING_BACKFILL_BYTES {
+                    break;
+                }
+                total_bytes += encoded.len();
+                if channel.send(&encoded).await.is_err() {
+                    return;
+                }
             }
         }
         let _ = channel.send(&[]).await;
@@ -244,11 +266,19 @@ impl Node {
         &self,
         records: &[BackfillRecord],
     ) -> Result<(), NodeError> {
+        self.import_account_backfill_for_account(&self.account_id(), records)
+    }
+
+    fn import_account_backfill_for_account(
+        &self,
+        account_id: &str,
+        records: &[BackfillRecord],
+    ) -> Result<(), NodeError> {
         for r in records {
             let Some(envelope) = DmEnvelope::decode(&r.plaintext) else {
                 continue;
             };
-            let own = self.account_id();
+            let own = account_id;
             let other = if envelope.route.sender_account == own {
                 &envelope.route.recipient_account
             } else if envelope.route.recipient_account == own {
@@ -257,7 +287,7 @@ impl Node {
                 continue;
             };
             if envelope.route.sender_account != r.from
-                || *super::conversation::account_conversation_id(&own, other).as_bytes() != r.conv
+                || *super::conversation::account_conversation_id(own, other).as_bytes() != r.conv
                 || envelope.msg_id != r.event_id
             {
                 continue;

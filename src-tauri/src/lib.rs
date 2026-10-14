@@ -366,6 +366,8 @@ pub fn run_tauri_configured(
                 crate::chat_commands::start_linking,
                 crate::chat_commands::stop_linking,
                 crate::chat_commands::link_device,
+                crate::chat_commands::get_device_sync_policy,
+                crate::chat_commands::set_device_sync_category,
                 crate::chat_commands::rekey_account,
                 crate::chat_commands::list_accounts,
                 crate::chat_commands::send_file_to_account,

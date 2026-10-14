@@ -1,5 +1,6 @@
 //! Bounded direct history catch-up between certified devices on one account.
 
+use super::account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 use super::account_sync_wire::{AccountHistoryFrame, MAX_CHUNK, MAX_RECORD, VERSION};
 use super::conversation::account_conversation_id;
 use super::dm_envelope::DmEnvelope;
@@ -72,6 +73,29 @@ async fn send_frame(
 }
 
 impl Node {
+    pub fn device_sync_policy(&self) -> DeviceSyncPolicy {
+        self.account_sync_policy
+            .lock()
+            .expect("account sync policy mutex not poisoned")
+            .current()
+    }
+
+    pub fn set_device_sync_category(
+        &self,
+        category: SyncCategory,
+        enabled: bool,
+    ) -> Result<(), NodeError> {
+        self.account_sync_policy
+            .lock()
+            .expect("account sync policy mutex not poisoned")
+            .set(category, enabled)
+            .map_err(NodeError::Log)?;
+        if category == SyncCategory::History && enabled {
+            self.account_sync_notify.notify_one();
+        }
+        Ok(())
+    }
+
     fn export_sync_records(&self) -> Vec<BackfillRecord> {
         let own = self.account_id();
         let mut records = self.export_account_backfill();
@@ -99,7 +123,10 @@ impl Node {
         account_id: &str,
         cursor: u32,
     ) {
-        if account_id != self.account_id() || !channel.io_admitted() {
+        if account_id != self.account_id()
+            || !channel.io_admitted()
+            || !self.device_sync_policy().history
+        {
             return;
         }
         let peer = channel.peer_identity();
@@ -147,6 +174,9 @@ impl Node {
         peer: &PeerRecord,
         cursor: u32,
     ) -> Result<Option<u32>, NodeError> {
+        if !self.device_sync_policy().history {
+            return Ok(None);
+        }
         let own = self.account_id();
         if peer.account_id.as_deref() != Some(own.as_str())
             || !self
@@ -219,7 +249,9 @@ impl Node {
                     }
                 }
                 AccountHistoryFrame::Complete { next_cursor } if pending.is_none() => {
-                    self.import_account_backfill(&page)?;
+                    if self.device_sync_policy().history {
+                        self.import_account_backfill(&page)?;
+                    }
                     return Ok(next_cursor);
                 }
                 _ => return Err(NodeError::Channel("unexpected history frame".into())),
@@ -232,7 +264,14 @@ impl Node {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursors: HashMap<String, u32> = HashMap::new();
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = self.account_sync_notify.notified() => {}
+            }
+            if !self.device_sync_policy().history {
+                cursors.clear();
+                continue;
+            }
             for device in self.linked_devices() {
                 let id = device.public.user_id();
                 if id == self.user_id() {

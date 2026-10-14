@@ -9,6 +9,7 @@
 pub(crate) mod account_devices;
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
+pub(crate) mod account_sync_policy;
 pub(crate) mod account_sync_wire;
 pub(crate) mod attachment_consent;
 pub(crate) mod call;
@@ -68,6 +69,7 @@ pub use crate::transport::net::{
     ipv4_interface_addrs,
 };
 pub use account_devices::AccountDevice;
+pub use account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
 pub use channel::{ChannelActivity, ReceivedChannelMessage};
