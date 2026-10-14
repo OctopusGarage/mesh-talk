@@ -101,7 +101,7 @@ impl Node {
                 None => break,
             }
         }
-        self.import_account_backfill(&backfill);
+        self.import_account_backfill(&backfill)?;
 
         let account = Account::from_secret_bytes(resp.account_secret);
         // Defense-in-depth: the cert binds `account_ed25519_pub`; make sure the secret we were
@@ -222,13 +222,13 @@ impl Node {
             let received = self.received.lock().expect("received mutex not poisoned");
             for conv in received.conversations() {
                 for e in received.entries(&conv) {
-                    if DmEnvelope::decode(&e.plaintext).is_some() {
+                    if let Some(envelope) = DmEnvelope::decode(&e.plaintext) {
                         out.push(BackfillRecord {
                             conv: *conv.as_bytes(),
                             from: e.from.clone(),
                             wall_clock: e.wall_clock,
                             plaintext: e.plaintext.clone(),
-                            event_id: *e.event_id.as_bytes(),
+                            event_id: envelope.msg_id,
                         });
                     }
                 }
@@ -240,16 +240,67 @@ impl Node {
     /// Import backfilled account history into our received store (used by a freshly
     /// linked device). Each record is keyed by its account conversation id, which is
     /// identical on both devices once they share the account.
-    pub(in crate::node) fn import_account_backfill(&self, records: &[BackfillRecord]) {
-        let mut received = self.received.lock().expect("received mutex not poisoned");
+    pub(in crate::node) fn import_account_backfill(
+        &self,
+        records: &[BackfillRecord],
+    ) -> Result<(), NodeError> {
         for r in records {
-            let _ = received.record(
-                ConversationId::new(r.conv),
-                r.from.clone(),
-                r.wall_clock,
-                &r.plaintext,
-                EventId::new(r.event_id),
-            );
+            let Some(envelope) = DmEnvelope::decode(&r.plaintext) else {
+                continue;
+            };
+            let own = self.account_id();
+            let other = if envelope.route.sender_account == own {
+                &envelope.route.recipient_account
+            } else if envelope.route.recipient_account == own {
+                &envelope.route.sender_account
+            } else {
+                continue;
+            };
+            if envelope.route.sender_account != r.from
+                || *super::conversation::account_conversation_id(&own, other).as_bytes() != r.conv
+                || envelope.msg_id != r.event_id
+            {
+                continue;
+            }
+            let conversation = ConversationId::new(r.conv);
+            if self
+                .account_suppression
+                .lock()
+                .expect("account suppression mutex not poisoned")
+                .contains(conversation, EventId::new(envelope.msg_id))
+            {
+                continue;
+            }
+            let already_sent = self
+                .sentlog
+                .lock()
+                .expect("sentlog mutex not poisoned")
+                .entries_ref(&conversation)
+                .iter()
+                .any(|entry| {
+                    DmEnvelope::decode(&entry.plaintext)
+                        .is_some_and(|existing| existing.msg_id == envelope.msg_id)
+                });
+            if already_sent {
+                continue;
+            }
+            let mut received = self.received.lock().expect("received mutex not poisoned");
+            if received.entries_ref(&conversation).iter().any(|entry| {
+                DmEnvelope::decode(&entry.plaintext)
+                    .is_some_and(|existing| existing.msg_id == envelope.msg_id)
+            }) {
+                continue;
+            }
+            received
+                .record(
+                    conversation,
+                    r.from.clone(),
+                    r.wall_clock,
+                    &r.plaintext,
+                    EventId::new(r.event_id),
+                )
+                .map_err(NodeError::Log)?;
         }
+        Ok(())
     }
 }

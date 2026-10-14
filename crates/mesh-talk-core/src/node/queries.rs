@@ -155,6 +155,11 @@ impl Node {
         // text by wall-clock.
         entries.extend(self.conversation_files(conv));
 
+        // A logical account DM can arrive directly and later be imported from a
+        // sibling with a different transport-event id. Keep its first local copy.
+        let mut seen = std::collections::HashSet::new();
+        entries.retain(|entry| seen.insert(entry.id));
+
         // Tombstone recalled messages: keep the slot (sender + position) but drop the content.
         tombstone_recalled(
             &mut entries,

@@ -5625,6 +5625,237 @@ async fn send_to_account_self_syncs_to_own_other_device() {
 }
 
 #[tokio::test]
+async fn linked_device_catches_up_incoming_dm_after_reconnect() {
+    use crate::identity::account::Account;
+
+    let a1 = DeviceIdentity::generate();
+    let a2 = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let dir = tempfile::tempdir().unwrap();
+
+    let a1_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a1_port = a1_listener.local_addr().unwrap().port();
+    let a2_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a2_port = a2_listener.local_addr().unwrap().port();
+
+    let a1_roster = Arc::new(Mutex::new(Roster::default()));
+    add_account_peer(
+        &a1_roster,
+        &a2,
+        &alice_account,
+        "A2",
+        a2_port,
+        &a1.public().user_id(),
+    );
+    add_account_peer(
+        &a1_roster,
+        &bob,
+        &bob_account,
+        "Bob",
+        4000,
+        &a1.public().user_id(),
+    );
+    let a2_roster = Arc::new(Mutex::new(Roster::default()));
+    add_account_peer(
+        &a2_roster,
+        &a1,
+        &alice_account,
+        "A1",
+        a1_port,
+        &a2.public().user_id(),
+    );
+    let bob_roster = Arc::new(Mutex::new(Roster::default()));
+    add_account_peer(
+        &bob_roster,
+        &a1,
+        &alice_account,
+        "A1",
+        a1_port,
+        &bob.public().user_id(),
+    );
+
+    let (a1_dm, _a1_dm_rx) = mpsc::unbounded_channel();
+    let (a1_ch, _a1_ch_rx) = mpsc::unbounded_channel();
+    let (a1_file, _a1_file_rx) = mpsc::unbounded_channel();
+    let (a2_dm, _a2_dm_rx) = mpsc::unbounded_channel();
+    let (a2_ch, _a2_ch_rx) = mpsc::unbounded_channel();
+    let (a2_file, _a2_file_rx) = mpsc::unbounded_channel();
+    let (bob_dm, _bob_dm_rx) = mpsc::unbounded_channel();
+    let (bob_ch, _bob_ch_rx) = mpsc::unbounded_channel();
+    let (bob_file, _bob_file_rx) = mpsc::unbounded_channel();
+
+    let a1_node = Node::open_with_account(
+        a1,
+        Account::from_secret_bytes(alice_account.secret_bytes()),
+        a1_roster,
+        a1_dm,
+        a1_ch,
+        a1_file,
+        &dir.path().join("a1.log"),
+        &dir.path().join("a1-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let a2_node = Node::open_with_account(
+        a2,
+        Account::from_secret_bytes(alice_account.secret_bytes()),
+        a2_roster,
+        a2_dm,
+        a2_ch,
+        a2_file,
+        &dir.path().join("a2.log"),
+        &dir.path().join("a2-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let bob_node = Node::open_with_account(
+        bob,
+        Account::from_secret_bytes(bob_account.secret_bytes()),
+        bob_roster,
+        bob_dm,
+        bob_ch,
+        bob_file,
+        &dir.path().join("bob.log"),
+        &dir.path().join("bob-sent.log"),
+        "pw",
+    )
+    .unwrap();
+
+    // These certificates are recorded by pairing in a real runtime. This test starts
+    // with an already-linked account and seeds the same trusted sibling directory.
+    a1_node
+        .account_devices
+        .lock()
+        .unwrap()
+        .insert(crate::node::account_devices::AccountDevice {
+            public: a2_node.identity.public(),
+            certificate: alice_account.certify(&a2_node.identity.public().ed25519_pub),
+        })
+        .unwrap();
+    a2_node
+        .account_devices
+        .lock()
+        .unwrap()
+        .insert(crate::node::account_devices::AccountDevice {
+            public: a1_node.identity.public(),
+            certificate: alice_account.certify(&a1_node.identity.public().ed25519_pub),
+        })
+        .unwrap();
+
+    let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
+    bob_node
+        .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
+        .await
+        .unwrap();
+    for _ in 0..50 {
+        if a1_node.account_history(&bob_account.account_id(), 10).len() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        a1_node.account_history(&bob_account.account_id(), 10).len(),
+        1
+    );
+    assert!(
+        a2_node
+            .account_history(&bob_account.account_id(), 10)
+            .is_empty()
+    );
+
+    let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
+    for _ in 0..50 {
+        if a2_node.account_history(&bob_account.account_id(), 10).len() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let history = a2_node.account_history(&bob_account.account_id(), 10);
+    assert_eq!(history.len(), 1, "A2 must recover the DM from A1");
+    assert_eq!(history[0].text, b"while A2 was offline");
+    assert!(!history[0].from_me);
+
+    a1_node
+        .send_to_account(&bob_account.account_id(), b"from A1 to Bob", None)
+        .await
+        .unwrap();
+    for _ in 0..50 {
+        if a2_node.account_history(&bob_account.account_id(), 10).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let history = a2_node.account_history(&bob_account.account_id(), 10);
+    assert_eq!(history.len(), 2, "A2 must recover A1's outgoing DM once");
+    assert_eq!(history[1].text, b"from A1 to Bob");
+    assert!(history[1].from_me);
+
+    a1_task.abort();
+    a2_task.abort();
+}
+
+#[test]
+fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
+    use crate::identity::account::Account;
+    use crate::node::conversation::account_conversation_id;
+    use crate::node::dm_envelope::DmEnvelope;
+    use crate::node::message::MessageBody;
+    use crate::node::pairing::BackfillRecord;
+
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let bob = Account::generate();
+    let own_id = account.account_id();
+    let bob_id = bob.account_id();
+    let conv = account_conversation_id(&own_id, &bob_id);
+    let (dm, _dm_rx) = mpsc::unbounded_channel();
+    let (ch, _ch_rx) = mpsc::unbounded_channel();
+    let (file, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open_with_account(
+        DeviceIdentity::generate(),
+        account,
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        ch,
+        file,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let msg_id = [7; 32];
+    let plaintext = DmEnvelope::new(
+        bob_id.clone(),
+        own_id,
+        msg_id,
+        MessageBody::new(b"one logical DM".to_vec(), None).encode(),
+    )
+    .encode();
+    node.received
+        .lock()
+        .unwrap()
+        .record(conv, bob_id.clone(), 1, &plaintext, EventId::new([8; 32]))
+        .unwrap();
+    let record = BackfillRecord {
+        conv: *conv.as_bytes(),
+        from: bob_id.clone(),
+        wall_clock: 1,
+        plaintext,
+        event_id: msg_id,
+    };
+    node.import_account_backfill(std::slice::from_ref(&record))
+        .unwrap();
+    assert_eq!(node.account_history(&bob_id, 10).len(), 1);
+    assert_eq!(node.received.lock().unwrap().entries(&conv).len(), 1);
+    node.delete_account_message(&bob_id, EventId::new(msg_id))
+        .unwrap();
+    node.import_account_backfill(&[record]).unwrap();
+    assert!(node.account_history(&bob_id, 10).is_empty());
+}
+
+#[tokio::test]
 async fn start_linking_is_idempotent_until_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let me = DeviceIdentity::generate();
@@ -5709,6 +5940,10 @@ async fn linking_transfers_the_account_secret_with_a_valid_code() {
         .expect("linking succeeds");
     assert_eq!(linked.secret, linker_account.secret_bytes());
     assert_eq!(linked.account_id, linker_account.account_id());
+    assert_eq!(linker.linked_devices().len(), 2);
+    assert!(linker.linked_devices().iter().any(|device| {
+        device.public.user_id() == joiner.user_id() && device.certificate.verify()
+    }));
     // Code is single-use: a second attempt is refused.
     let again = joiner
         .link_to_device(linker_addr, &linker_public, &code)
@@ -6033,7 +6268,7 @@ async fn account_history_backfills_to_a_linked_device() {
         "pw",
     )
     .unwrap();
-    alice2_node.import_account_backfill(&records);
+    alice2_node.import_account_backfill(&records).unwrap();
 
     let hist = alice2_node.account_history(&bob_acct.account_id(), 10);
     assert_eq!(

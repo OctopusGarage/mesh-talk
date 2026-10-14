@@ -7,6 +7,9 @@
 //! re-exports, not every internal type.
 
 pub(crate) mod account_devices;
+pub(crate) mod account_suppression;
+pub(crate) mod account_sync;
+pub(crate) mod account_sync_wire;
 pub(crate) mod attachment_consent;
 pub(crate) mod call;
 pub(crate) mod channel;

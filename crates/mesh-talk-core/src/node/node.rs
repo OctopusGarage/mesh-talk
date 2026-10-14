@@ -282,6 +282,7 @@ pub struct Node {
     /// device can serve a pairing request (transfer the account to a new device).
     pub(in crate::node) account: Account,
     pub(in crate::node) account_devices: Mutex<super::account_devices::AccountDevices>,
+    pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
     /// One-time pairing code while in "link a device" mode (linker side). Set by
     /// [`Node::start_linking`], cleared on success or [`Node::stop_linking`].
     pub(in crate::node) pending_link: Mutex<Option<PendingLink>>,
@@ -650,6 +651,10 @@ impl Node {
             public: identity.public(),
             certificate: account.certify(&identity.public().ed25519_pub),
         })?;
+        let account_suppression = super::account_suppression::AccountSuppression::open(
+            &dir.join("account-suppression.log"),
+            password,
+        )?;
         let node = Arc::new(Self {
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
@@ -668,6 +673,7 @@ impl Node {
             identity,
             account,
             account_devices: Mutex::new(account_devices),
+            account_suppression: Mutex::new(account_suppression),
             profiles: Mutex::new(profiles),
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),

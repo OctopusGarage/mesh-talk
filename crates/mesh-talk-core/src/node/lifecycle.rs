@@ -46,6 +46,13 @@ impl Node {
         target: EventId,
         account: bool,
     ) -> Result<usize, NodeError> {
+        if account {
+            self.account_suppression
+                .lock()
+                .expect("account suppression mutex not poisoned")
+                .suppress(conv, target)
+                .map_err(NodeError::Log)?;
+        }
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
@@ -179,6 +186,42 @@ impl Node {
         &self,
         should_remove: impl Fn(ConversationId, u64) -> bool,
     ) -> Result<usize, NodeError> {
+        let mut suppressed = Vec::new();
+        {
+            let received = self.received.lock().expect("received mutex not poisoned");
+            for conv in received.conversations() {
+                for entry in received.entries_ref(&conv) {
+                    if should_remove(conv, entry.wall_clock)
+                        && let Some(envelope) =
+                            super::dm_envelope::DmEnvelope::decode(&entry.plaintext)
+                    {
+                        suppressed.push((conv, EventId::new(envelope.msg_id)));
+                    }
+                }
+            }
+        }
+        {
+            let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
+            for conv in sent.conversations() {
+                for entry in sent.entries_ref(&conv) {
+                    if should_remove(conv, entry.wall_clock)
+                        && let Some(envelope) =
+                            super::dm_envelope::DmEnvelope::decode(&entry.plaintext)
+                    {
+                        suppressed.push((conv, EventId::new(envelope.msg_id)));
+                    }
+                }
+            }
+        }
+        {
+            let mut suppression = self
+                .account_suppression
+                .lock()
+                .expect("account suppression mutex not poisoned");
+            for (conv, id) in suppressed {
+                suppression.suppress(conv, id).map_err(NodeError::Log)?;
+            }
+        }
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
