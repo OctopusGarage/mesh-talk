@@ -27,10 +27,12 @@ time, size, and counts on this device; it never stores the recovery key.
 
 The recovered account fingerprint stays the same. A new device fingerprint is
 created. Old device keys and live encryption ratchets are never copied. Channel
-messages recovered from the old device are readable as archives; sending in those
-channels requires a new secure invitation. File cards without locally managed
-bytes remain visible but their contents may be unavailable. Messages after the
-backup date may be missing until peers sync them.
+messages recovered from the old device are readable as archives; sending and
+receiving future channel messages requires the channel owner to invite the new
+device. Other members can supply old encrypted events, but the new device
+cannot decrypt channel messages missing from its backup. File cards without
+locally managed bytes remain visible but their contents may be unavailable.
+Some direct messages after the backup date may return through peer sync.
 
 The backup includes visible message history, received peer avatars, file
 cards, and locally managed media referenced by those cards. It excludes local UI

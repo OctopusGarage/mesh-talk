@@ -97,6 +97,8 @@ pub enum EventKind {
     ChannelLeave = 12,
     /// A current invited member's signed acceptance.
     ChannelAccept = 13,
+    /// Self-signed channel replica availability: one byte, 0 disabled / 1 enabled.
+    ChannelReplica = 14,
 }
 
 /// A single, content-addressed, signed log event.
@@ -396,6 +398,7 @@ mod tests {
             (EventKind::ChannelOwnerTransfer, 11),
             (EventKind::ChannelLeave, 12),
             (EventKind::ChannelAccept, 13),
+            (EventKind::ChannelReplica, 14),
         ];
         for (kind, index) in cases {
             assert_eq!(bincode::serialize(&kind).unwrap(), index.to_le_bytes());

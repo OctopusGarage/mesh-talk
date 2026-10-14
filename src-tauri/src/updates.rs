@@ -822,13 +822,13 @@ mod tests {
     #[test]
     fn release_description_distinguishes_current_and_unavailable_packages() {
         let mut release: Release = serde_json::from_value(serde_json::json!({
-            "tag_name": "v0.3.1", "body": "x".repeat(1300),
+            "tag_name": "v0.3.2", "body": "x".repeat(1300),
             "draft": false, "prerelease": false, "assets": []
         }))
         .unwrap();
         let current = describe_release(&release, "macos", "aarch64", "default").unwrap();
         assert!(!current.is_newer);
-        assert_eq!(current.latest_version, "0.3.1");
+        assert_eq!(current.latest_version, "0.3.2");
         assert_eq!(current.notes.chars().count(), 1200);
         assert!(current.package_name.is_none());
 

@@ -2,7 +2,9 @@
 //! persistent identity, runs signed-announce LAN discovery and a TCP listener,
 //! and drives 1:1 DMs, channels, and file transfers from a line-based REPL
 //! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
-//! `/channel-new <name> <member-prefix>`, `/channel-msg <chan-id-prefix> <text>`,
+//! `/channel-new <name> <member-prefix>...`, `/channel-msg <chan-id-prefix> <text>`,
+//! `/channel-replica <chan-id-prefix> on|off`,
+//! `/verify-peer <full-device-fingerprint>`,
 //! `/sendfile <peer-prefix> <path>`, `/quit`), printing inbound DMs, channel
 //! messages, and files as they arrive.
 
@@ -14,6 +16,7 @@ use mesh_talk_core::node::{
     DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket, spawn_discovery,
 };
 use mesh_talk_core::postoffice::PostOffice;
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -97,6 +100,41 @@ fn resolve_recipient(peers: &[PeerRecord], prefix: &str) -> Result<UserId, Resol
         1 => Ok(matches.into_iter().next().expect("len checked == 1")),
         n => Err(ResolveError::Ambiguous(n)),
     }
+}
+
+fn verified_peer_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("verified-dm-peers")
+}
+
+fn canonical_verified_peer(fingerprint: &str) -> Option<String> {
+    (fingerprint.len() == 32 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| fingerprint.to_ascii_lowercase())
+}
+
+fn load_verified_peers(path: &std::path::Path) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(canonical_verified_peer)
+        .collect()
+}
+
+fn save_verified_peers(path: &std::path::Path, peers: &BTreeSet<String>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file =
+        tempfile::NamedTempFile::new_in(path.parent().unwrap_or(std::path::Path::new(".")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    for peer in peers {
+        writeln!(file, "{peer}")?;
+    }
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Write one line to stdout and FLUSH it. Piped stdout is block-buffered, so a
@@ -255,6 +293,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &sent_path,
         &args.password,
     )?;
+    let verified_path = verified_peer_path(data_dir);
+    let mut verified_peers = load_verified_peers(&verified_path);
+    node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
     node.configure_privacy(data_dir, &args.password, &announce, visibility.clone())?;
 
@@ -347,6 +388,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                 }
             }
+        } else if let Some(fingerprint) = line.strip_prefix("/verify-peer ") {
+            let fingerprint = fingerprint.trim();
+            let Some(fingerprint) = canonical_verified_peer(fingerprint) else {
+                emit(
+                    "usage: /verify-peer <full-device-fingerprint> (compare it out of band first)",
+                );
+                continue;
+            };
+            let mut next = verified_peers.clone();
+            next.insert(fingerprint);
+            match save_verified_peers(&verified_path, &next) {
+                Ok(()) => {
+                    verified_peers = next;
+                    node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
+                    emit("peer verified for automatic DM recovery");
+                }
+                Err(error) => emit(&format!("could not save verification: {error}")),
+            }
+        } else if line == "/verify-peer" {
+            emit("usage: /verify-peer <full-device-fingerprint> (compare it out of band first)");
         } else if let Some(rest) = line.strip_prefix("/msg ") {
             handle_msg(&node, &roster, rest);
         } else if let Some(rest) = line.strip_prefix("/account-msg ") {
@@ -368,6 +429,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_channel_new(&node, &roster, rest);
         } else if let Some(rest) = line.strip_prefix("/channel-msg ") {
             handle_channel_msg(&node, rest);
+        } else if let Some(rest) = line.strip_prefix("/channel-replica ") {
+            handle_channel_replica(&node, rest);
         } else if let Some(rest) = line.strip_prefix("/sendfile ") {
             handle_sendfile(&node, &roster, rest);
         } else if let Some((accept, rest)) = line
@@ -393,7 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if !line.is_empty() {
             emit(
-                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+                "commands: /peers, /verify-peer <full-device-fingerprint>, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
             );
         }
     }
@@ -536,42 +599,48 @@ fn handle_history(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
     }
 }
 
-/// Parse and dispatch `/channel-new <name> <member-prefix>`: resolve one peer to
-/// include as a member, create the channel (the creator is added automatically),
+/// Parse and dispatch `/channel-new <name> <member-prefix>...`: resolve peers to
+/// include as members, create the channel (the creator is added automatically),
 /// then print the new channel id (hex). Runs on a spawned task (create distributes
 /// sender keys to members over the network).
 fn handle_channel_new(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
     let mut parts = rest.split_whitespace();
     let name = parts.next().unwrap_or("").to_string();
-    let prefix = parts.next().unwrap_or("").to_string();
-    if name.is_empty() || prefix.is_empty() {
-        emit("usage: /channel-new <name> <member-prefix>");
+    let prefixes: Vec<_> = parts.collect();
+    if name.is_empty() || prefixes.is_empty() {
+        emit("usage: /channel-new <name> <member-prefix>...");
         return;
     }
-    // Resolve the member under the roster lock, then DROP it before the async call
+    // Resolve members under the roster lock, then DROP it before the async call
     // (the node locks the roster again; std Mutex is not reentrant).
-    let member = {
+    let members = {
         let roster = roster.lock().expect("roster mutex not poisoned");
         let peers = roster.peers();
-        match resolve_recipient(&peers, &prefix) {
-            Ok(uid) => roster.get(&uid).map(|p| p.public.clone()),
-            Err(ResolveError::NotFound) => {
-                emit(&format!("no peer matches prefix '{prefix}'"));
-                return;
-            }
-            Err(ResolveError::Ambiguous(n)) => {
-                emit(&format!("'{prefix}' matches {n} peers; be more specific"));
-                return;
+        let mut members = Vec::new();
+        for prefix in prefixes {
+            match resolve_recipient(&peers, prefix) {
+                Ok(uid) => {
+                    let Some(peer) = roster.get(&uid) else {
+                        emit("peer vanished from roster");
+                        return;
+                    };
+                    members.push(peer.public.clone());
+                }
+                Err(ResolveError::NotFound) => {
+                    emit(&format!("no peer matches prefix '{prefix}'"));
+                    return;
+                }
+                Err(ResolveError::Ambiguous(n)) => {
+                    emit(&format!("'{prefix}' matches {n} peers; be more specific"));
+                    return;
+                }
             }
         }
-    };
-    let Some(member) = member else {
-        emit("peer vanished from roster");
-        return;
+        members
     };
     let node = Arc::clone(node);
     tokio::spawn(async move {
-        match node.create_channel(&name, vec![member]).await {
+        match node.create_channel(&name, members).await {
             Ok(id) => emit(&format!("channel {} created", hex::encode(id.as_bytes()))),
             Err(e) => emit(&format!("channel create failed: {e}")),
         }
@@ -612,6 +681,55 @@ fn handle_channel_msg(node: &Arc<Node>, rest: &str) {
     tokio::spawn(async move {
         if let Err(e) = node.send_channel_message(channel, text.as_bytes()).await {
             emit(&format!("channel send failed: {e}"));
+        }
+    });
+}
+
+fn parse_replica_command(rest: &str) -> Option<(&str, bool)> {
+    let mut parts = rest.split_whitespace();
+    let prefix = parts.next()?;
+    let enabled = match parts.next()? {
+        "on" => true,
+        "off" => false,
+        _ => return None,
+    };
+    parts.next().is_none().then_some((prefix, enabled))
+}
+
+fn handle_channel_replica(node: &Arc<Node>, rest: &str) {
+    let Some((prefix, enabled)) = parse_replica_command(rest) else {
+        emit("usage: /channel-replica <chan-id-prefix> on|off");
+        return;
+    };
+    let matches: Vec<_> = node
+        .list_channels()
+        .into_iter()
+        .filter(|channel| hex::encode(channel.id.as_bytes()).starts_with(prefix))
+        .map(|channel| channel.id)
+        .collect();
+    let channel = match matches.as_slice() {
+        [] => {
+            emit(&format!("no channel matches prefix '{prefix}'"));
+            return;
+        }
+        [channel] => *channel,
+        _ => {
+            emit(&format!(
+                "'{prefix}' matches {} channels; be more specific",
+                matches.len()
+            ));
+            return;
+        }
+    };
+    let node = Arc::clone(node);
+    tokio::spawn(async move {
+        match node.set_channel_replica_enabled(channel, enabled).await {
+            Ok(()) => emit(&format!(
+                "channel {} replica {}",
+                hex::encode(channel.as_bytes()),
+                if enabled { "enabled" } else { "disabled" }
+            )),
+            Err(error) => emit(&format!("channel replica change failed: {error}")),
         }
     });
 }
@@ -658,6 +776,29 @@ mod tests {
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;
     use std::time::Instant;
+
+    #[test]
+    fn verified_peer_fingerprint_is_canonical_across_cli_restart() {
+        let upper = "AB".repeat(16);
+        let lower = "ab".repeat(16);
+        assert_eq!(canonical_verified_peer(&upper), Some(lower.clone()));
+        assert_eq!(canonical_verified_peer("not-a-device-id"), None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = verified_peer_path(dir.path());
+        std::fs::write(&path, format!("{upper}\ninvalid\n")).unwrap();
+        assert_eq!(load_verified_peers(&path), BTreeSet::from([lower.clone()]));
+        save_verified_peers(&path, &load_verified_peers(&path)).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{lower}\n"));
+    }
+
+    #[test]
+    fn channel_replica_parser_accepts_only_a_prefix_and_on_or_off() {
+        assert_eq!(parse_replica_command("abc on"), Some(("abc", true)));
+        assert_eq!(parse_replica_command("abc off"), Some(("abc", false)));
+        for input in ["", "abc", "abc maybe", "abc on extra"] {
+            assert_eq!(parse_replica_command(input), None);
+        }
+    }
 
     #[test]
     fn account_message_parser_requires_a_full_account_and_preserves_text() {

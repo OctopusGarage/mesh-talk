@@ -774,6 +774,14 @@ impl NodeRuntime {
         self.node.channel_members(channel)
     }
 
+    pub fn channel_replica_enabled(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+        member: &str,
+    ) -> bool {
+        self.node.channel_replica_enabled(channel, member)
+    }
+
     pub fn channel_pending_members(
         &self,
         channel: crate::eventlog::event::ConversationId,

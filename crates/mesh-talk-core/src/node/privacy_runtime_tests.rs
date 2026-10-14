@@ -510,6 +510,7 @@ async fn public_relay_delivery_survives_recipient_restart_without_sender_route()
         .lock()
         .unwrap()
         .update(&relay_proof, addr.ip(), &bob.user_id());
+    bob.replace_verified_dm_pull_peers(vec![proof.user_id.clone()]);
     bob.drain_from_post_office().await;
     let received = rx
         .try_recv()

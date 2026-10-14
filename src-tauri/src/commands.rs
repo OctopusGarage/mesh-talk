@@ -832,6 +832,19 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 if !permit.install(runtime).await {
                     return;
                 }
+                // Serialize with mark_verified so startup cannot replace a newer
+                // in-memory allowlist with an older trust-file snapshot.
+                let guard = node_handle.0.lock().await;
+                if let Some(runtime) = guard
+                    .as_ref()
+                    .filter(|runtime| runtime.host_account_id() == Some(&account_id))
+                    && let Some(path) =
+                        crate::config_store::account_path(&base_dir, &account_id, "trust.json")
+                {
+                    runtime.handle().replace_verified_dm_pull_peers(
+                        crate::trust::verified_fingerprints_at(&path),
+                    );
+                }
                 // Keep lifecycle diagnostics without persisting an account identifier.
                 log::info!("Node started");
             }

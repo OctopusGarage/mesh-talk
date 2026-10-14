@@ -64,6 +64,7 @@ export interface ChannelMemberInfo {
   name: string;
   account_id?: string | null;
   pending?: boolean;
+  replica_enabled?: boolean;
 }
 
 export interface ChannelActivityInfo {

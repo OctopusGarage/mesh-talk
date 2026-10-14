@@ -175,7 +175,7 @@
     "snapshotDate": "Created {{date}}",
     "previewCounts": "{{messages}} messages · {{channels}} channels · {{files}} file cards",
     "missingMedia": "{{count}} file cards have no local media bytes",
-    "newerMissing": "Messages newer than this backup may be missing until peers sync them.",
+    "newerMissing": "Messages newer than this backup may be missing. Peer sync cannot restore channel messages that were not in the backup.",
     "oldDeviceRisk": "An old device may be lost or in someone else’s hands.",
     "compromiseWarning": "Restoring keeps the old account identity. It cannot revoke an old device. If it may be compromised, create a new identity and ask contacts to verify it.",
     "startFresh": "Start with a new identity",
@@ -190,7 +190,7 @@
   },
   "conversation": {
     "archivedChannel": "Archived channel",
-    "archivedChannelHint": "This channel is a read-only archive from your previous device. New messages cannot be sent here.",
+    "archivedChannelHint": "This is a read-only archive restored from your backup. Ask the channel owner to invite this new device for future messages. Peers cannot decrypt missing old channel history for it.",
     "dissolvedChannel": "Dissolved channel",
     "dissolvedChannelHint": "The owner dissolved this channel. You can read its history, but cannot send new messages.",
     "leftChannel": "Left channel",
@@ -237,6 +237,12 @@
       "help": "Automatic receipt from the target account. Not a read receipt.",
       "fileHelp": "File card delivered. File download and reading are separate.",
       "metadataPending": "File details pending"
+    },
+    "custody": {
+      "local": "No member copy confirmed",
+      "one": "Last confirmed: 1 member copy",
+      "multiple": "Last confirmed: 2+ member copies",
+      "help": "Confirmed when an online member reported durable storage. Copies can later be lost; this is not a delivery or read receipt."
     },
     "sending": "sending…",
     "reply": "Reply",
@@ -607,6 +613,11 @@
     "activity_transferred": "{{actor}} transferred ownership to {{target}}",
     "activity_left": "{{actor}} left the channel",
     "activity_accepted": "{{actor}} accepted the invitation",
+    "replicaDisabled": "Replica off",
+    "disableReplica": "Stop sharing",
+    "enableReplica": "Resume sharing",
+    "replicaError": "Could not update replica sharing.",
+    "replicaHelp": "Sharing helps members recover missed messages and saved attachments from this device. Turning it off does not stop incoming messages.",
     "pendingAcceptance": "Awaiting acceptance",
     "trigger": "Members",
     "title": "Members",

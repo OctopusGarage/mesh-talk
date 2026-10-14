@@ -5,6 +5,7 @@ use crate::identity::device::PublicIdentity;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 /// A peer's stable fingerprint id.
 pub type UserId = String;
@@ -59,9 +60,16 @@ pub struct Roster {
     announcements: HashMap<UserId, Announce>,
     historical: BTreeMap<UserId, Announce>,
     conflicting_history: HashSet<UserId>,
+    changes: std::sync::Arc<Notify>,
 }
 
 impl Roster {
+    /// Wakes recovery when discovery learns a new peer or a peer's route changes.
+    /// Notifications coalesce; consumers must inspect the roster after waking.
+    pub fn changes(&self) -> std::sync::Arc<Notify> {
+        std::sync::Arc::clone(&self.changes)
+    }
+
     pub(crate) fn historical_announcement(&self, public: &PublicIdentity) -> Option<&Announce> {
         let id = public.user_id();
         self.historical
@@ -114,7 +122,11 @@ impl Roster {
             self.historical
                 .insert(announce.user_id.clone(), announce.clone());
         }
-        let existed = self.peers.contains_key(&announce.user_id);
+        let addr = SocketAddr::new(source_ip, announce.tcp_port);
+        let previous = self.peers.get(&announce.user_id);
+        let existed = previous.is_some();
+        let route_changed =
+            previous.is_none_or(|peer| peer.addr != addr || peer.public != announce.public());
         // Cap enforcement: a NEW peer that would push us over MAX_PEERS evicts the
         // least-recently-seen existing peer first, so a flood of distinct fake ids can
         // churn the table but never grows it past the cap. Known peers (refreshes) are
@@ -136,13 +148,16 @@ impl Roster {
             announce.user_id.clone(),
             PeerRecord {
                 public: announce.public(),
-                addr: SocketAddr::new(source_ip, announce.tcp_port),
+                addr,
                 name: announce.name.clone(),
                 post_office: announce.post_office,
                 account_id: announce.account_id(),
                 last_seen: Instant::now(),
             },
         );
+        if route_changed {
+            self.changes.notify_one();
+        }
         if existed {
             UpdateOutcome::Refreshed
         } else {
@@ -225,6 +240,22 @@ mod tests {
 
     fn ip() -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))
+    }
+
+    #[tokio::test]
+    async fn new_or_relocated_peer_wakes_recovery() {
+        let alice = DeviceIdentity::generate();
+        let mut roster = Roster::default();
+        let changed = roster.changes();
+        roster.update(&Announce::new(&alice, "Alice", 4000), ip(), "self");
+        tokio::time::timeout(Duration::from_secs(1), changed.notified())
+            .await
+            .expect("new peer wakes recovery");
+
+        roster.update(&Announce::new(&alice, "Alice", 4001), ip(), "self");
+        tokio::time::timeout(Duration::from_secs(1), changed.notified())
+            .await
+            .expect("changed route wakes recovery");
     }
 
     #[test]

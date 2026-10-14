@@ -804,6 +804,11 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
     )
     .unwrap();
 
+    assert!(
+        !bob_node.verified_dm_pull_peer(&alice_uid),
+        "a direct incoming DM must not require a verified pull contact"
+    );
+
     // Bob accepts and serves connections.
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
 
@@ -821,6 +826,68 @@ async fn two_nodes_exchange_a_dm_over_loopback_tcp() {
     assert_eq!(received.from, alice_uid);
     assert_eq!(received.from_name, "Alice");
     assert_eq!(received.text, b"meet at 5");
+}
+
+#[tokio::test]
+async fn reconnecting_dm_recipient_pulls_from_sender_without_sender_route_or_relay() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let alice_uid = alice.public().user_id();
+    let bob_uid = bob.public().user_id();
+    let alice_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let alice_port = alice_listener.local_addr().unwrap().port();
+    let bob_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let dead = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let bob_old_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let alice_roster = seed_roster(&bob, "Bob", bob_old_port, &alice_uid);
+    let bob_roster = seed_roster(&alice, "Alice", alice_port, &bob_uid);
+    let dir = tempfile::tempdir().unwrap();
+    let open = |identity, roster, name: &str| {
+        let (dm_tx, dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, dm_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
+    alice_node
+        .send_dm(&bob_uid, b"offline direct pull")
+        .await
+        .unwrap();
+    assert!(bob_rx.try_recv().is_err());
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), alice_listener.accept())
+            .await
+            .is_err(),
+        "unverified discovery must not initiate a TCP pull from Alice"
+    );
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "discovery alone must not authorize recipient-initiated DM pulls"
+    );
+    bob_node.replace_verified_dm_pull_peers(vec![alice_uid.clone()]);
+    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    let received = tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
+        .await
+        .expect("Bob pulls from Alice after reconnecting without a relay")
+        .expect("DM stream open");
+    assert_eq!(received.from, alice_uid);
+    assert_eq!(received.text, b"offline direct pull");
+    alice_task.abort();
+    bob_task.abort();
 }
 
 #[tokio::test]
@@ -1030,6 +1097,13 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         .send_dm(&bob_uid, b"held-hello")
         .await
         .expect("send_dm succeeds via the post office despite offline recipient");
+
+    bob_node.drain_from_post_office().await;
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "discovery alone must not authorize a relay DM pull"
+    );
+    bob_node.replace_verified_dm_pull_peers(vec![alice_uid.clone()]);
 
     // Bob drains from the PO (retry to absorb the relay's async ingest).
     let mut received = None;
@@ -1723,6 +1797,618 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
         "a rejected transfer must not report success"
     );
     assert_eq!(alice_node.channel_owner(channel), owner);
+}
+
+#[tokio::test]
+async fn stalled_channel_peer_does_not_delay_healthy_member() {
+    let alice = DeviceIdentity::generate();
+    let mut slow = DeviceIdentity::generate();
+    let mut fast = DeviceIdentity::generate();
+    if slow.public().user_id() > fast.public().user_id() {
+        std::mem::swap(&mut slow, &mut fast);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let slow_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let slow_port = slow_listener.local_addr().unwrap().port();
+    let fast_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let fast_port = fast_listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&slow, "Slow", slow_port, &alice.public().user_id());
+    add_peer(
+        &alice_roster,
+        &fast,
+        "Fast",
+        fast_port,
+        &alice.public().user_id(),
+    );
+    let open = |identity, roster, name: &str| {
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, ch_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
+    let (fast_node, mut fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
+    let fast_task = tokio::spawn(Arc::clone(&fast_node).run_accept_loop(fast_listener));
+    let channel = alice_node
+        .create_channel(
+            "stalled-peer",
+            vec![slow_node.identity.public(), fast_node.identity.public()],
+        )
+        .await
+        .unwrap();
+
+    slow_task.abort();
+    let _ = slow_task.await;
+    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
+        .await
+        .unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let stalled_task = tokio::spawn(async move {
+        let (socket, _) = stalled_listener.accept().await.unwrap();
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        drop(socket);
+    });
+
+    let sender = tokio::spawn({
+        let node = Arc::clone(&alice_node);
+        async move {
+            node.send_channel_message(channel, b"healthy peer first")
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+        .await
+        .expect("sender contacted the stalled peer")
+        .expect("stalled listener accepted a connection");
+    let received = tokio::time::timeout(Duration::from_secs(5), fast_rx.recv())
+        .await
+        .expect("healthy peer must receive before the stalled handshake times out")
+        .expect("channel stream open");
+    assert_eq!(received.text, b"healthy peer first");
+    let status_sender = tokio::spawn({
+        let node = Arc::clone(&alice_node);
+        async move { node.set_channel_replica_enabled(channel, false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fast_node.channel_replica_enabled(channel, &alice_node.user_id()) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("healthy peer must receive a control event despite the stalled peer");
+    stalled_task.abort();
+    sender.await.unwrap().unwrap();
+    status_sender.await.unwrap().unwrap();
+    fast_task.abort();
+}
+
+/// A restarted member recovers from another member when the author and post office
+/// are unavailable. Discovery of the serving member wakes recovery immediately.
+#[tokio::test]
+async fn channel_member_recovers_missed_message_from_peer() {
+    let alice = DeviceIdentity::generate();
+    let alice_secrets = alice.secret_bytes();
+    let bob = DeviceIdentity::generate();
+    let carol = DeviceIdentity::generate();
+    let carol_secrets = carol.secret_bytes();
+    let alice_id = alice.public().user_id();
+    let carol_id = carol.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
+    let carol_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let carol_port = carol_listener.local_addr().unwrap().port();
+
+    let alice_roster = seed_roster(&bob, "Bob", bob_port, &alice_id);
+    add_peer(&alice_roster, &carol, "Carol", carol_port, &alice_id);
+    let bob_roster = Arc::new(Mutex::new(Roster::default()));
+    let carol_roster = Arc::new(Mutex::new(Roster::default()));
+    let carol_roster_for_discovery = Arc::clone(&carol_roster);
+    let bob_pub = bob.public();
+    let carol_pub = carol.public();
+    let open = |identity, roster, name: &str| {
+        let node_dir = dir.path().join(name);
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &node_dir.join("messages.log"),
+            &node_dir.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        (node, ch_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
+    let (carol_node, carol_rx) = open(carol, carol_roster, "carol");
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let carol_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
+
+    let channel = alice_node
+        .create_channel("general", vec![bob_pub, carol_pub.clone()])
+        .await
+        .unwrap();
+    assert!(
+        carol_node
+            .list_channels()
+            .iter()
+            .any(|item| item.id == channel)
+    );
+    carol_task.abort();
+    carol_task.await.unwrap_err();
+    drop(carol_node);
+    drop(carol_rx);
+    alice_node.roster.lock().unwrap().forget(&carol_pub);
+    assert!(alice_node.routing_peer(&carol_id).is_none());
+
+    alice_node
+        .send_channel_message(channel, b"recover from Bob")
+        .await
+        .unwrap();
+    let sent_id = alice_node.channel_history(channel, 10)[0].id;
+    assert_eq!(alice_node.channel_custody_count(channel, sent_id), Some(1));
+    assert_eq!(
+        alice_node.channel_custody_count(channel, EventId::new([0; 32])),
+        None
+    );
+    drop(alice_node);
+    let (reopened_alice, _alice_rx) = open(
+        DeviceIdentity::from_secret_bytes(alice_secrets.0, alice_secrets.1),
+        Arc::new(Mutex::new(Roster::default())),
+        "alice",
+    );
+    assert_eq!(
+        reopened_alice.channel_custody_count(channel, sent_id),
+        Some(1)
+    );
+    drop(reopened_alice);
+    tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
+        .await
+        .expect("Bob received the original push");
+    let (carol_node, mut carol_rx) = open(
+        DeviceIdentity::from_secret_bytes(carol_secrets.0, carol_secrets.1),
+        Arc::clone(&carol_roster_for_discovery),
+        "carol",
+    );
+    let before_recovery = carol_node.channel_history(channel, 10);
+    assert!(before_recovery.is_empty(), "{before_recovery:?}");
+    assert!(
+        !carol_node.verified_dm_pull_peer(&bob_node.user_id()),
+        "channel recovery must not depend on DM safety-number verification"
+    );
+
+    let changed = carol_roster_for_discovery.lock().unwrap().changes();
+    let recovery_task = tokio::spawn(Arc::clone(&carol_node).run_channel_recovery_loop(changed));
+    add_peer(
+        &carol_roster_for_discovery,
+        &bob_node.identity,
+        "Bob",
+        bob_port,
+        &carol_id,
+    );
+    let recovered = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
+        .await
+        .expect("Carol recovered from Bob")
+        .expect("channel stream open");
+    assert_eq!(recovered.text, b"recover from Bob");
+    assert_eq!(carol_node.channel_history(channel, 10).len(), 1);
+    let resumed_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, carol_port))
+        .await
+        .unwrap();
+    let resumed_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(resumed_listener));
+    let (reopened_alice, _alice_rx) = open(
+        DeviceIdentity::from_secret_bytes(alice_secrets.0, alice_secrets.1),
+        Arc::new(Mutex::new(Roster::default())),
+        "alice",
+    );
+    let alice_changes = reopened_alice.roster.lock().unwrap().changes();
+    let alice_recovery =
+        tokio::spawn(Arc::clone(&reopened_alice).run_channel_recovery_loop(alice_changes));
+    add_peer(
+        &reopened_alice.roster,
+        &carol_node.identity,
+        "Carol",
+        carol_port,
+        &alice_id,
+    );
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while reopened_alice.channel_custody_count(channel, sent_id) != Some(2) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("restart retries the missing second member copy");
+    alice_recovery.abort();
+    resumed_task.abort();
+    reopened_alice
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&carol_node.identity.public());
+    reopened_alice
+        .send_channel_message(channel, b"local only")
+        .await
+        .unwrap();
+    let local_id = reopened_alice
+        .channel_history(channel, 10)
+        .last()
+        .unwrap()
+        .id;
+    assert_eq!(
+        reopened_alice.channel_custody_count(channel, local_id),
+        Some(0)
+    );
+    recovery_task.abort();
+    bob_task.abort();
+}
+
+/// Real Noise/TCP sockets and complete Nodes, with deterministic signed routes.
+/// Run each size with MESH_TALK_CHANNEL_MEMBERS=5, 20, or 50. Multicast and
+/// separate physical hosts still require a device trial.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real TCP scale rehearsal; run with MESH_TALK_CHANNEL_MEMBERS=5/20/50"]
+async fn channel_real_tcp_scale_rehearsal() {
+    let count: usize = std::env::var("MESH_TALK_CHANNEL_MEMBERS")
+        .unwrap_or_else(|_| "5".into())
+        .parse()
+        .unwrap();
+    assert!([5, 20, 50].contains(&count));
+    let started = std::time::Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let identities: Vec<_> = (0..count).map(|_| DeviceIdentity::generate()).collect();
+    let public: Vec<_> = identities.iter().map(DeviceIdentity::public).collect();
+    let mut listeners = Vec::new();
+    let mut ports = Vec::new();
+    for _ in 0..count {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        ports.push(listener.local_addr().unwrap().port());
+        listeners.push(listener);
+    }
+    let rosters: Vec<_> = (0..count)
+        .map(|_| Arc::new(Mutex::new(Roster::default())))
+        .collect();
+    for i in 0..count {
+        for j in 0..count {
+            if i != j {
+                add_peer(
+                    &rosters[i],
+                    &identities[j],
+                    &format!("member-{j}"),
+                    ports[j],
+                    &public[i].user_id(),
+                );
+            }
+        }
+    }
+    let mut receivers = Vec::new();
+    let mut nodes = Vec::new();
+    for (i, identity) in identities.into_iter().enumerate() {
+        let path = dir.path().join(format!("member-{i}"));
+        std::fs::create_dir_all(&path).unwrap();
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        receivers.push(ch_rx);
+        nodes.push(
+            Node::open(
+                identity,
+                Arc::clone(&rosters[i]),
+                dm_tx,
+                ch_tx,
+                file_tx,
+                &path.join("messages.log"),
+                &path.join("sent.log"),
+                "pw",
+            )
+            .unwrap(),
+        );
+    }
+    let mut tasks: Vec<_> = listeners
+        .into_iter()
+        .enumerate()
+        .map(|(i, listener)| tokio::spawn(Arc::clone(&nodes[i]).run_accept_loop(listener)))
+        .collect();
+    let channel = tokio::time::timeout(
+        Duration::from_secs(90),
+        nodes[0].create_channel("scale", public[1..].to_vec()),
+    )
+    .await
+    .expect("channel creation deadline")
+    .unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node.list_channels().iter().any(|item| item.id == channel))
+    );
+    // In a five-member channel everyone is a direct target, so take one
+    // listener down before the send to exercise actual missed-message recovery.
+    if count == 5 {
+        tasks[4].abort();
+        let _ = (&mut tasks[4]).await;
+    }
+    let send_started = std::time::Instant::now();
+    nodes[0]
+        .send_channel_message(channel, b"scale-check")
+        .await
+        .unwrap();
+    let sender_ms = send_started.elapsed().as_millis();
+    let event_id = nodes[0].channel_history(channel, 10)[0].id;
+    let (contacts, sender_frame_bytes) = nodes[0].channel_last_send.lock().unwrap().unwrap();
+    assert_eq!(contacts, if count <= 5 { count - 1 } else { 2 });
+    assert!(sender_frame_bytes > 0);
+    let initially_holding: Vec<_> = (1..count)
+        .filter(|&i| nodes[i].log.lock().unwrap().has(&event_id))
+        .collect();
+    assert!(!initially_holding.is_empty());
+    let mut offline: Vec<_> = if count == 5 {
+        vec![4]
+    } else {
+        (1..count)
+            .filter(|i| i % 5 == 4 && !initially_holding.contains(i))
+            .collect()
+    };
+    if initially_holding.iter().all(|i| offline.contains(i)) {
+        offline.retain(|i| *i != initially_holding[0]);
+    }
+    for &i in &offline {
+        if count != 5 {
+            tasks[i].abort();
+        }
+    }
+    tasks[0].abort();
+    for &i in offline.iter().chain(std::iter::once(&0)) {
+        if i != 4 || count != 5 {
+            let _ = (&mut tasks[i]).await;
+        }
+    }
+    let converge_started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            if (1..count).filter(|i| !offline.contains(i)).all(|i| {
+                nodes[i]
+                    .channel_history(channel, 10)
+                    .iter()
+                    .any(|entry| entry.text == b"scale-check")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("online members converged without the sender");
+    let online_ms = converge_started.elapsed().as_millis();
+    let offline_started = std::time::Instant::now();
+    for &i in &offline {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, ports[i]))
+            .await
+            .unwrap();
+        tasks[i] = tokio::spawn(Arc::clone(&nodes[i]).run_accept_loop(listener));
+    }
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            if offline.iter().all(|&i| {
+                nodes[i]
+                    .channel_history(channel, 10)
+                    .iter()
+                    .any(|entry| entry.text == b"scale-check")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("offline members recovered from replicas");
+    eprintln!(
+        "channel-tcp members={count} contacts={contacts} initial_holders={} offline={} sender_frame_bytes={sender_frame_bytes} send_ms={sender_ms} online_converge_ms={online_ms} offline_recovery_ms={} total_ms={}",
+        initially_holding.len(),
+        offline.len(),
+        offline_started.elapsed().as_millis(),
+        started.elapsed().as_millis(),
+    );
+    for task in tasks {
+        task.abort();
+    }
+    drop(receivers);
+}
+
+#[tokio::test]
+async fn signed_channel_replica_preference_survives_restart_and_ignores_outsiders() {
+    let identity = DeviceIdentity::generate();
+    let secrets = identity.secret_bytes();
+    let dir = tempfile::tempdir().unwrap();
+    let open = |identity| {
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        Node::open(
+            identity,
+            Arc::new(Mutex::new(Roster::default())),
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join("messages.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open(identity);
+    let channel = node.create_channel("replicas", vec![]).await.unwrap();
+    assert!(node.channel_replica_enabled(channel, &node.user_id()));
+    node.set_channel_replica_enabled(channel, false)
+        .await
+        .unwrap();
+    let outsider = DeviceIdentity::generate();
+    let (parents, lamport) = node.log.lock().unwrap().prepare(&channel);
+    let forged = Event::new(
+        &outsider,
+        channel,
+        1,
+        parents,
+        lamport,
+        1,
+        EventKind::ChannelReplica,
+        vec![0],
+    );
+    node.log.lock().unwrap().append(forged).unwrap();
+    node.process_channel(channel);
+    assert!(node.channel_replica_enabled(channel, &outsider.public().user_id()));
+    drop(node);
+    let reopened = open(DeviceIdentity::from_secret_bytes(secrets.0, secrets.1));
+    assert!(!reopened.channel_replica_enabled(channel, &reopened.user_id()));
+    assert!(reopened.channel_replica_enabled(channel, &outsider.public().user_id()));
+}
+
+/// In a large group Alice knows only Bob's address, while Dana knows no route
+/// at all. Bob must forward the channel and later message after receiving them.
+#[tokio::test]
+async fn large_channel_member_forwards_to_peer_without_author_route() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let dana = DeviceIdentity::generate();
+    let extra: Vec<_> = (0..3)
+        .map(|_| DeviceIdentity::generate().public())
+        .collect();
+    let alice_id = alice.public().user_id();
+    let bob_id = bob.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
+    let dana_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dana_port = dana_listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&bob, "Bob", bob_port, &alice_id);
+    let bob_roster = seed_roster(&dana, "Dana", dana_port, &bob_id);
+    let dana_roster = Arc::new(Mutex::new(Roster::default()));
+    let bob_pub = bob.public();
+    let dana_pub = dana.public();
+    let open = |identity, roster, name: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &path.join("messages.log"),
+            &path.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        (node, ch_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, _bob_rx) = open(bob, bob_roster, "bob");
+    let (dana_node, mut dana_rx) = open(dana, dana_roster, "dana");
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let dana_task = tokio::spawn(Arc::clone(&dana_node).run_accept_loop(dana_listener));
+
+    let mut members = vec![bob_pub, dana_pub];
+    members.extend(extra);
+    let channel = alice_node.create_channel("relay", members).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while !dana_node
+            .list_channels()
+            .iter()
+            .any(|item| item.id == channel)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Bob forwarded the channel membership to Dana");
+
+    alice_node
+        .send_channel_message(channel, b"via Bob")
+        .await
+        .unwrap();
+    let forwarded = tokio::time::timeout(Duration::from_secs(8), dana_rx.recv())
+        .await
+        .expect("Bob forwarded the message to Dana")
+        .expect("Dana's channel stream open");
+    assert_eq!(forwarded.text, b"via Bob");
+    add_peer(
+        &dana_node.roster,
+        &bob_node.identity,
+        "Bob",
+        bob_port,
+        &dana_node.user_id(),
+    );
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&dana_node.identity.public());
+
+    bob_node
+        .set_channel_replica_enabled(channel, false)
+        .await
+        .unwrap();
+    assert!(!bob_node.channel_replica_enabled(channel, &bob_node.user_id()));
+    assert!(dana_node.channel_replica_enabled(channel, &bob_node.user_id()));
+    add_peer(
+        &bob_node.roster,
+        &dana_node.identity,
+        "Dana",
+        dana_port,
+        &bob_id,
+    );
+    bob_node.retry_channel_controls().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while dana_node.channel_replica_enabled(channel, &bob_node.user_id()) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Dana sees Bob's signed replica preference");
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&dana_node.identity.public());
+    alice_node
+        .send_channel_message(channel, b"Bob does not relay")
+        .await
+        .unwrap();
+    dana_node.pull_one_channel_from_member(0).await;
+    assert_eq!(dana_node.channel_history(channel, 10).len(), 1);
+
+    // Bob resumes sharing, but has no direct address for Dana: only Dana's pull
+    // from Bob can deliver the missed second message.
+    bob_node
+        .set_channel_replica_enabled(channel, true)
+        .await
+        .unwrap();
+    dana_node.pull_one_channel_from_member(0).await;
+    assert_eq!(dana_node.channel_history(channel, 10).len(), 2);
+    bob_task.abort();
+    dana_task.abort();
 }
 
 /// Bidirectional channel rig: Alice (creator) + Bob both run accept loops and know
@@ -3553,9 +4239,10 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     .await
     .expect("bob saved the channel file within 5s");
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
-    assert!(
-        bob_node.log.lock().unwrap().events(&file_conv).is_empty(),
-        "untracked channel export reclaims completed chunks"
+    assert_eq!(
+        bob_node.log.lock().unwrap().events(&file_conv).len(),
+        rf.size.div_ceil(crate::file::CHUNK_SIZE as u64) as usize,
+        "a saved channel file stays available as a bounded peer replica"
     );
 
     // Reverse direction: Bob -> Alice. Bob is a non-creator member; his
@@ -3594,6 +4281,140 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     .await
     .expect("alice saved Bob's channel file within 5s");
     assert_eq!(std::fs::read(&dest2).unwrap(), payload2);
+}
+
+#[tokio::test]
+async fn saved_channel_file_remains_downloadable_from_member_after_author_disconnects() {
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let carol = DeviceIdentity::generate();
+    let alice_id = alice.public().user_id();
+    let carol_id = carol.public().user_id();
+    let dir = tempfile::tempdir().unwrap();
+    let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_port = alice_listener.local_addr().unwrap().port();
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = bob_listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&bob, "Bob", bob_port, &alice_id);
+    let bob_roster = seed_roster(&alice, "Alice", alice_port, &bob.public().user_id());
+    let carol_roster = seed_roster(&alice, "Alice", alice_port, &carol_id);
+    let open = |identity, roster, name: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, _ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &path.join("messages.log"),
+            &path.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        (node, file_rx)
+    };
+    let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
+    let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
+    let (carol_node, mut carol_rx) = open(carol, carol_roster, "carol");
+    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let carol_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let carol_port = carol_listener.local_addr().unwrap().port();
+    let carol_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
+    add_peer(
+        &alice_node.roster,
+        &carol_node.identity,
+        "Carol",
+        carol_port,
+        &alice_id,
+    );
+    let channel = alice_node
+        .create_channel(
+            "files",
+            vec![bob_node.identity.public(), carol_node.identity.public()],
+        )
+        .await
+        .unwrap();
+    let payload = vec![0xA5; crate::file::CHUNK_SIZE + 17];
+    let source = dir.path().join("source.bin");
+    std::fs::write(&source, &payload).unwrap();
+    let file = alice_node
+        .send_file_channel(channel, &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), bob_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    bob_node.decide_attachment(file, true).unwrap();
+    let bob_dest = dir.path().join("bob.bin");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            bob_node.pull_pending_files().await;
+            if bob_node.save_file(file, &bob_dest).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&bob_dest).unwrap(), payload);
+    assert_eq!(bob_node.log.lock().unwrap().events(&file).len(), 2);
+
+    alice_task.abort();
+    alice_task.await.unwrap_err();
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&alice_node.identity.public());
+    carol_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&alice_node.identity.public());
+    add_peer(
+        &carol_node.roster,
+        &bob_node.identity,
+        "Bob",
+        bob_port,
+        &carol_id,
+    );
+    carol_node.decide_attachment(file, true).unwrap();
+    bob_node
+        .set_channel_replica_enabled(channel, false)
+        .await
+        .unwrap();
+    carol_node.pull_pending_files().await;
+    assert_eq!(carol_node.file_progress(file).unwrap().done, 0);
+    bob_node
+        .set_channel_replica_enabled(channel, true)
+        .await
+        .unwrap();
+    let carol_dest = dir.path().join("carol.bin");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            carol_node.pull_pending_files().await;
+            if carol_node.save_file(file, &carol_dest).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Carol downloaded from Bob after Alice disconnected");
+    assert_eq!(std::fs::read(&carol_dest).unwrap(), payload);
+    bob_task.abort();
+    carol_task.abort();
 }
 
 /// Channel reactions over the wire. They use a per-member `SealedPayload`

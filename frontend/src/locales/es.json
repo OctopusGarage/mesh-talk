@@ -175,7 +175,7 @@
     "snapshotDate": "Creada el {{date}}",
     "previewCounts": "{{messages}} mensajes · {{channels}} canales · {{files}} tarjetas de archivo",
     "missingMedia": "{{count}} tarjetas no tienen datos multimedia locales",
-    "newerMissing": "Los mensajes posteriores a esta copia pueden faltar hasta que se sincronicen con otros contactos.",
+    "newerMissing": "Pueden faltar mensajes posteriores a esta copia. La sincronización con otros miembros no recupera los mensajes de canal ausentes de la copia.",
     "oldDeviceRisk": "Un dispositivo anterior puede estar perdido o en manos de otra persona.",
     "compromiseWarning": "Restaurar conserva la identidad anterior y no revoca el dispositivo antiguo. Si pudo quedar comprometido, crea una identidad nueva y pide a tus contactos que la verifiquen.",
     "startFresh": "Empezar con una identidad nueva",
@@ -190,7 +190,7 @@
   },
   "conversation": {
     "archivedChannel": "Canal archivado",
-    "archivedChannelHint": "Este canal es un archivo de solo lectura de tu dispositivo anterior. No puedes enviar mensajes nuevos aquí.",
+    "archivedChannelHint": "Este archivo de la copia de seguridad es de solo lectura. Pide al propietario que invite a este dispositivo nuevo para recibir mensajes futuros. Otros miembros no pueden recuperar aquí el historial antiguo que falta.",
     "dissolvedChannel": "Canal disuelto",
     "dissolvedChannelHint": "El propietario disolvió este canal. Puedes leer el historial, pero no enviar mensajes nuevos.",
     "leftChannel": "Canal abandonado",
@@ -237,6 +237,12 @@
       "help": "Recibo automático de la cuenta destinataria. No confirma lectura.",
       "fileHelp": "Tarjeta del archivo entregada. La descarga y la lectura son independientes.",
       "metadataPending": "Detalles del archivo pendientes"
+    },
+    "custody": {
+      "local": "Ninguna copia de miembro confirmada",
+      "one": "Última confirmación: 1 copia de un miembro",
+      "multiple": "Última confirmación: 2 o más copias de miembros",
+      "help": "Confirmado cuando un miembro informó que guardó el mensaje. Las copias pueden perderse; no confirma entrega ni lectura."
     },
     "sending": "enviando…",
     "reply": "Responder",
@@ -607,6 +613,11 @@
     "activity_transferred": "{{actor}} transfirió la propiedad a {{target}}",
     "activity_left": "{{actor}} salió del canal",
     "activity_accepted": "{{actor}} aceptó la invitación",
+    "replicaDisabled": "Réplica desactivada",
+    "disableReplica": "Dejar de compartir",
+    "enableReplica": "Volver a compartir",
+    "replicaError": "No se pudo actualizar la réplica.",
+    "replicaHelp": "Compartir permite que otros miembros recuperen mensajes y archivos guardados desde este dispositivo. Desactivarlo no impide recibir mensajes.",
     "pendingAcceptance": "Pendiente de aceptación",
     "trigger": "Miembros",
     "title": "Miembros",

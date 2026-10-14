@@ -175,6 +175,14 @@ fn offline_dm_delivered_via_post_office() {
     await_peer(&mut alice, &po_uid, "Alice→PO");
     await_peer(&mut bob, &alice_uid, "Bob→Alice");
     await_peer(&mut bob, &po_uid, "Bob→PO");
+    // The receiver explicitly compares and verifies the sender's full device
+    // fingerprint before automatic catch-up is permitted. This persists over restart.
+    bob.send(&format!("/verify-peer {alice_uid}"));
+    bob.wait_for(
+        |line| line == "peer verified for automatic DM recovery",
+        Duration::from_secs(5),
+    )
+    .expect("Bob verified Alice before going offline");
 
     // Bob goes offline.
     drop(bob);

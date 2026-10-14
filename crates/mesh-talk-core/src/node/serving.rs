@@ -66,10 +66,16 @@ impl Node {
     /// Maintenance runs on the blocking pool and stops when this future is dropped;
     /// CLI and SDK hosts get the same log maintenance as the desktop runtime.
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
+        let changes = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .changes();
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
             _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
+            _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
             _ = self.accept_connections(listener) => {}
         }
     }
@@ -129,7 +135,7 @@ impl Node {
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
     pub async fn serve_connection(&self, mut channel: SecureChannel<TcpStream>) {
-        let store = self.sync_store(channel.peer_identity());
+        let store = self.serve_sync_store(channel.peer_identity());
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
         let first = match tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {
@@ -501,6 +507,9 @@ impl Node {
         let store = self.sync_store(channel.peer_identity());
         // Drain a DM conversation per non-PO peer (we never DM a post office).
         for peer in self.historical_dm_peers() {
+            if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+                continue;
+            }
             let conv = dm_conversation_id(&self.identity.public(), &peer.public());
             if request_round(&mut channel, &store, conv).await.is_err() {
                 return; // channel broke; the next drain re-dials

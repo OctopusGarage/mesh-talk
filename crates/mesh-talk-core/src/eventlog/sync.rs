@@ -16,7 +16,7 @@
 //! at worst its events are rejected with `MissingParents`.
 
 use crate::eventlog::LogError;
-use crate::eventlog::event::{ConversationId, Event, EventId};
+use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::eventlog::store::{AppendOutcome, EventLog};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -121,6 +121,20 @@ pub struct ApplyReport {
 /// The data operations sync needs from an event store. Implemented by both the
 /// in-memory [`EventLog`] and the durable `PersistentEventLog`.
 pub trait SyncStore {
+    /// True if the visible log can contain event kinds introduced with channel v2.
+    /// Custom stores take the safe scanning path unless they provide an index.
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        self.events_excluding(conversation, &HashSet::new())
+            .iter()
+            .any(|event| event.kind == EventKind::ChannelReplica)
+    }
+    /// Digest and size of the currently visible event set. Implementations with
+    /// unfiltered durable logs may cache this across idle recovery ticks.
+    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+        let ids = self.event_ids(conversation);
+        let len = ids.len();
+        (fingerprint(ids), len)
+    }
     /// The authenticated peer may transfer chunks of this exact offered file.
     /// Stores without an attachment policy fail closed for this optional query.
     fn file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> FileConsentStatus {
@@ -162,6 +176,9 @@ pub enum FileConsentStatus {
 // NOTE: this impl is structurally identical to `impl SyncStore for
 // PersistentEventLog` in persist.rs — keep the two in sync.
 impl SyncStore for EventLog {
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        EventLog::requires_channel_v2(self, conversation)
+    }
     fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
         self.events(conversation).iter().map(|e| e.id).collect()
     }
