@@ -190,11 +190,19 @@ jobs:
             cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
 
-      - name: CLI channel and file coverage (Linux)
+      - name: Multi-process core coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         shell: bash
-        run: cargo llvm-cov --no-clean -p mesh-talk-core --test channel_and_file_cli --lcov --output-path cli-lcov.info -- --ignored --test-threads=1
+        run: >-
+          cargo llvm-cov --no-clean -p mesh-talk-core
+          --test two_node_cli
+          --test persistent_history
+          --test post_office_offline
+          --test channel_and_file_cli
+          --test bridge_cross_lan
+          --lcov --output-path e2e-lcov.info
+          -- --ignored --test-threads=1
 
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
@@ -215,7 +223,7 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/cli-lcov.info
+          files: frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/e2e-lcov.info
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
 

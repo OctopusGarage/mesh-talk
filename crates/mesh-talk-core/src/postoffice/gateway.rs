@@ -138,3 +138,93 @@ async fn proxy_connections(listener: TcpListener, remote: SocketAddr) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::query::{decode_query, encode_response};
+    use crate::identity::account::Account;
+    use crate::identity::device::DeviceIdentity;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn gateway_publishes_only_a_pinned_relay_with_a_distinct_port() {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let port_holder = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_tcp_port = port_holder.local_addr().unwrap().port();
+        drop(port_holder);
+        let proof = Announce::new_post_office_with_account(
+            &identity,
+            &account,
+            "remote relay",
+            remote_tcp_port,
+        );
+        let expected_id = identity.user_id();
+        let local_tcp_port = if remote_tcp_port == u16::MAX {
+            remote_tcp_port - 1
+        } else {
+            remote_tcp_port + 1
+        };
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = socket.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (len, source) = socket.recv_from(&mut buf).await.unwrap();
+            let nonce = decode_query(&buf[..len]).unwrap();
+            socket
+                .send_to(&encode_response(nonce, &proof, &identity).unwrap(), source)
+                .await
+                .unwrap();
+        });
+        let shared = Arc::new(Mutex::new(None));
+        let gateway = tokio::spawn(run_bridge_gateway(
+            Arc::clone(&shared),
+            local_tcp_port,
+            remote,
+            expected_id,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if shared.lock().unwrap().is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pinned proof should become available after binding the proxy");
+        assert_eq!(
+            shared.lock().unwrap().as_ref().unwrap().tcp_port,
+            remote_tcp_port
+        );
+        responder.await.unwrap();
+        gateway.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_forwards_bytes_to_its_explicit_upstream() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = upstream.local_addr().unwrap();
+        let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = local.local_addr().unwrap();
+        let proxy = tokio::spawn(proxy_connections(local, remote));
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = [0u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+        });
+        let mut client = TcpStream::connect(local_addr).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut response = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response, b"pong");
+        upstream_task.await.unwrap();
+        proxy.abort();
+    }
+}

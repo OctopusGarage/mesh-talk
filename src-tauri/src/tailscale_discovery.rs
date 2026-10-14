@@ -87,7 +87,11 @@ fn cli_locations() -> Vec<PathBuf> {
 }
 
 async fn local_inventory(port: u16) -> Vec<SocketAddr> {
-    for executable in cli_locations() {
+    local_inventory_from(cli_locations(), port).await
+}
+
+async fn local_inventory_from(executables: Vec<PathBuf>, port: u16) -> Vec<SocketAddr> {
+    for executable in executables {
         let mut command = tokio::process::Command::new(executable);
         command
             .args(["status", "--json"])
@@ -148,77 +152,61 @@ mod tests {
         assert!(parse_status(b"not json", 47474).is_empty());
     }
 
-    /// Run only against an already connected tailnet and a compatible remote
-    /// Mesh Talk node. The route-source assertion distinguishes the automatic
-    /// routed query from coincidental LAN multicast on nearby Macs.
-    #[tokio::test]
-    #[ignore = "requires a live remote Mesh Talk node on the same tailnet"]
-    async fn live_tailnet_inventory_automatically_discovers_remote_node() {
-        use mesh_talk_core::discovery::roster::RouteSource;
-        use mesh_talk_core::node::{NodeRuntime, RuntimeConfig, RuntimeEvents};
-        use std::sync::Arc;
-
-        let remote_ip: IpAddr = std::env::var("MESH_TALK_E2E_REMOTE_IP")
-            .expect("set MESH_TALK_E2E_REMOTE_IP")
-            .parse()
-            .expect("remote Tailscale IP");
-        let port: u16 = std::env::var("MESH_TALK_E2E_DISCOVERY_PORT")
-            .expect("set MESH_TALK_E2E_DISCOVERY_PORT")
-            .parse()
-            .expect("remote discovery port");
-        let source = Arc::new(TailscaleCandidates {
-            discovery_port: port,
+    #[test]
+    fn status_bounds_candidate_count_without_including_our_own_ip() {
+        let peers: serde_json::Map<String, serde_json::Value> = (0..260)
+            .map(|index| {
+                (
+                    format!("nodekey:{index}"),
+                    serde_json::json!({
+                        "Online": true,
+                        "TailscaleIPs": [format!("100.101.{}.{}", index / 256, index % 256)]
+                    }),
+                )
+            })
+            .collect();
+        let status = serde_json::json!({
+            "BackendState": "Running",
+            "Self": { "TailscaleIPs": ["100.101.0.0"] },
+            "Peer": peers,
         });
+        let endpoints = parse_status(&serde_json::to_vec(&status).unwrap(), 47474);
+        assert_eq!(endpoints.len(), 256);
         assert!(
-            source
-                .snapshot()
-                .await
-                .contains(&SocketAddr::new(remote_ip, port)),
-            "running Tailscale inventory must contain the remote node"
+            !endpoints
+                .iter()
+                .any(|endpoint| endpoint.ip().to_string() == "100.101.0.0")
         );
+    }
 
-        let root = tempfile::tempdir().expect("isolated profile");
-        let runtime = NodeRuntime::start_configured(
-            RuntimeConfig {
-                base_dir: root.path(),
-                account_id: "tailnet-e2e",
-                display_name: "Automatic Tailnet Probe",
-                password: "test-only",
-                discovery_port: port,
-                post_office_enabled: false,
-                candidate_source: Some(source.clone()),
-            },
-            RuntimeEvents {
-                on_dm: Box::new(|_| {}),
-                on_channel: Box::new(|_| {}),
-                on_file: Box::new(|_| {}),
-                on_profile: Box::new(|_| {}),
-                on_call_signal: Box::new(|_| {}),
-            },
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inventory_uses_an_available_cli_without_changing_the_client() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let failed = dir.path().join("failed-client");
+        let ready = dir.path().join("running-client");
+        std::fs::write(&failed, "#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::write(
+            &ready,
+            "#!/bin/sh\nprintf '%s' '{\"BackendState\":\"Running\",\"Peer\":{\"peer\":{\"Online\":true,\"TailscaleIPs\":[\"100.101.2.3\"]}}}'\n",
         )
-        .await
-        .expect("start local runtime");
-        let discovery = tokio::time::timeout(Duration::from_secs(45), async {
-            loop {
-                if runtime.peers().iter().any(|peer| {
-                    peer.routes.iter().any(|route| {
-                        route.addr.ip() == remote_ip && route.source == RouteSource::RoutedQuery
-                    })
-                }) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await;
-        if discovery.is_err() {
-            eprintln!(
-                "automatic discovery timed out; peers: {:?}",
-                runtime.peers()
-            );
-            eprintln!("candidate snapshot: {:?}", source.snapshot().await);
+        .unwrap();
+        for path in [&failed, &ready] {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(path, permissions).unwrap();
         }
-        discovery.expect("automatic Tailscale candidate produced a verified routed peer");
-        runtime.stop().await;
+        let candidates = local_inventory_from(
+            vec![dir.path().join("missing-client"), failed, ready],
+            47474,
+        )
+        .await;
+        assert_eq!(candidates, vec!["100.101.2.3:47474".parse().unwrap()]);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/tailscale_live.rs"]
+mod live_tests;

@@ -4,6 +4,7 @@ use crate::discovery::announce::Announce;
 use crate::node::conversation::dm_conversation_id;
 use crate::node::message::MessageBody;
 use crate::node::postbox::run_relay_accept_loop;
+use crate::node::{SyncCategory, SyncPhase};
 use crate::postoffice::PostOffice;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -6671,6 +6672,17 @@ async fn linking_transfers_the_account_secret_with_a_valid_code() {
     assert!(linker.linked_devices().iter().any(|device| {
         device.public.user_id() == joiner.user_id() && device.certificate.verify()
     }));
+    let status = linker.device_sync_status();
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].device_id, joiner.user_id());
+    assert_eq!(status[0].phase, SyncPhase::Offline);
+    linker
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    linker
+        .set_device_sync_category(SyncCategory::Profile, false)
+        .unwrap();
+    assert_eq!(linker.device_sync_status()[0].phase, SyncPhase::Disabled);
     // Code is single-use: a second attempt is refused.
     let again = joiner
         .link_to_device(linker_addr, &linker_public, &code)
