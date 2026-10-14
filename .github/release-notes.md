@@ -5,15 +5,18 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.3.1
+### What's new in v0.3.2
 
-- Give channel owners controls to dissolve a channel and complete the invitation and membership
-  lifecycle.
-- Hide invisible peers from online presence while keeping their messaging available.
-- Let you remove the default Google Noto sticker pack and reinstall it when wanted.
-- Improve settings layout and guide users through release updates.
-- Fix macOS 12 WebView compatibility in packaged frontend bundles and retain graphics
-  configuration in release diagnostics.
+- Recover missed channel messages from available group members after reconnecting, even when
+  the original sender has gone offline.
+- Share encrypted channel history and retained attachments among group members by default,
+  with a visible per-member option to disable replica sharing.
+- Bound sender fanout for larger channels and retry delivery until enough member copies are
+  confirmed. Small channels continue direct delivery.
+- Restrict automatic direct-message catch-up to contacts whose safety number you manually
+  verified. Incoming direct messages can still arrive by direct push.
+- Improve offline recovery and delivery status while keeping file transfers separate from
+  message propagation.
 
 
 ### Downloads
