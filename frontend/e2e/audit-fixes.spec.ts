@@ -86,13 +86,24 @@ test("linked-device history choice is local and survives reopening", async ({
     name: "Message history",
   });
   const profile = dialog.getByRole("switch", { name: "Account avatar" });
+  const attachments = dialog.getByRole("switch", { name: "Attachments" });
+  const appearance = dialog.getByRole("switch", { name: "Appearance" });
+  const contacts = dialog.getByRole("switch", { name: "Contacts" });
   await expect(history).toHaveAttribute("aria-checked", "true");
   await expect(profile).toHaveAttribute("aria-checked", "true");
+  await expect(attachments).toHaveAttribute("aria-checked", "false");
+  await expect(appearance).toHaveAttribute("aria-checked", "false");
+  await expect(contacts).toHaveAttribute("aria-checked", "false");
   await history.click();
   await profile.click();
+  await attachments.click();
+  await appearance.click();
+  await contacts.click();
   await expect(history).toHaveAttribute("aria-checked", "false");
   await expect(profile).toHaveAttribute("aria-checked", "false");
-  await expect(dialog).toContainText("Attachments, appearance, and contacts");
+  await expect(attachments).toHaveAttribute("aria-checked", "true");
+  await expect(appearance).toHaveAttribute("aria-checked", "true");
+  await expect(contacts).toHaveAttribute("aria-checked", "true");
 
   await dialog.getByRole("button", { name: "Close" }).click();
   const linkAction = page.getByTestId("sidebar-action-link");
@@ -101,6 +112,44 @@ test("linked-device history choice is local and survives reopening", async ({
   await linkAction.click();
   await expect(history).toHaveAttribute("aria-checked", "false");
   await expect(profile).toHaveAttribute("aria-checked", "false");
+  await expect(attachments).toHaveAttribute("aria-checked", "true");
+  await expect(appearance).toHaveAttribute("aria-checked", "true");
+  await expect(contacts).toHaveAttribute("aria-checked", "true");
+});
+
+test("linked-device status shows pending attachments and failures", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const tauri = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const invoke = tauri.invoke.bind(tauri);
+    tauri.invoke = (cmd, args) =>
+      cmd === "get_device_sync_status"
+        ? Promise.resolve([
+            {
+              device_id: "abcd1234".repeat(4),
+              phase: "error",
+              pending_attachments: 2,
+              error: "source offline",
+            },
+          ])
+        : invoke(cmd, args);
+  });
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-link").click();
+  const dialog = page.getByTestId("link-device-dialog");
+  await expect(dialog).toContainText("2 attachments pending");
+  await expect(dialog.getByRole("alert")).toContainText("source offline");
 });
 
 test("failed sync choice leaves the device policy unchanged", async ({

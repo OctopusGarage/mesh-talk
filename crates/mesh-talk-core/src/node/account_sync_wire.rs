@@ -1,6 +1,8 @@
 //! Versioned, bounded control frames for account-history reconciliation.
 
 use super::account_devices::AccountDevice;
+use super::account_preferences::AccountPreference;
+use super::account_sync_policy::DeviceSyncPolicy;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
@@ -9,13 +11,21 @@ pub(super) const VERSION: u16 = 1;
 pub(super) const MAX_CHUNK: usize = 16 * 1024;
 pub(super) const MAX_RECORD: usize = 256 * 1024;
 
+/// Exclusive, content-addressed position in the history archive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(super) struct HistoryCursor {
+    pub tag: u8,
+    pub id: [u8; 32],
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum AccountHistoryFrame {
     Request {
         version: u16,
         account_id: String,
-        cursor: u32,
+        cursor: Option<HistoryCursor>,
         known_digest: [u8; 32],
+        wanted: DeviceSyncPolicy,
     },
     Device {
         device: AccountDevice,
@@ -31,7 +41,7 @@ pub(super) enum AccountHistoryFrame {
         bytes: Vec<u8>,
     },
     Complete {
-        next_cursor: Option<u32>,
+        next_cursor: Option<HistoryCursor>,
         digest: [u8; 32],
     },
     ChannelHeader {
@@ -41,6 +51,32 @@ pub(super) enum AccountHistoryFrame {
         event_id: [u8; 32],
         total_len: u32,
     },
+    Preference {
+        record: AccountPreference,
+    },
+    FileCardHeader {
+        host: [u8; 32],
+        peer_account: Option<String>,
+        from: String,
+        wall_clock: u64,
+        event_id: [u8; 32],
+        total_len: u32,
+    },
+    AttachmentRequest {
+        version: u16,
+        account_id: String,
+        file_conv: [u8; 32],
+    },
+    AttachmentStart {
+        file_conv: [u8; 32],
+        name: String,
+        size: u64,
+        sha256: [u8; 32],
+    },
+    AttachmentChunk {
+        bytes: Vec<u8>,
+    },
+    AttachmentComplete,
 }
 
 impl AccountHistoryFrame {
@@ -77,8 +113,15 @@ impl AccountHistoryFrame {
             Self::Request {
                 version,
                 account_id: id,
+                cursor,
+                wanted,
                 ..
-            } => *version == VERSION && account_id(id),
+            } => {
+                *version == VERSION
+                    && account_id(id)
+                    && cursor.is_none_or(|position| position.tag <= 2)
+                    && (wanted.history || wanted.attachments || cursor.is_none())
+            }
             Self::Device { device } => {
                 device.certificate.verify()
                     && device.certificate.device_ed25519_pub == device.public.ed25519_pub
@@ -89,8 +132,32 @@ impl AccountHistoryFrame {
             Self::ChannelHeader {
                 from, total_len, ..
             } => account_id(from) && *total_len > 0 && (*total_len as usize) <= MAX_RECORD,
+            Self::Preference { record } => record.valid(),
+            Self::FileCardHeader {
+                peer_account,
+                from,
+                total_len,
+                ..
+            } => {
+                account_id(from)
+                    && peer_account.as_ref().is_none_or(|id| account_id(id))
+                    && *total_len > 0
+                    && (*total_len as usize) <= MAX_RECORD
+            }
+            Self::AttachmentRequest {
+                version,
+                account_id: id,
+                ..
+            } => *version == VERSION && account_id(id),
+            Self::AttachmentStart { name, size, .. } => {
+                !name.is_empty() && name.len() <= 255 && *size <= super::node::MAX_FILE_SIZE
+            }
+            Self::AttachmentChunk { bytes } => !bytes.is_empty() && bytes.len() <= MAX_CHUNK,
+            Self::AttachmentComplete => true,
             Self::RecordChunk { bytes } => !bytes.is_empty() && bytes.len() <= MAX_CHUNK,
-            Self::Complete { .. } => true,
+            Self::Complete { next_cursor, .. } => {
+                next_cursor.is_none_or(|position| position.tag <= 2)
+            }
         }
     }
 }
@@ -107,8 +174,12 @@ mod tests {
             AccountHistoryFrame::Request {
                 version: VERSION,
                 account_id: "ab".repeat(16),
-                cursor: 7,
+                cursor: Some(HistoryCursor {
+                    tag: 0,
+                    id: [7; 32],
+                }),
                 known_digest: [0; 32],
+                wanted: DeviceSyncPolicy::default(),
             },
             AccountHistoryFrame::Device {
                 device: AccountDevice {
@@ -127,7 +198,10 @@ mod tests {
                 bytes: vec![3; MAX_CHUNK],
             },
             AccountHistoryFrame::Complete {
-                next_cursor: Some(8),
+                next_cursor: Some(HistoryCursor {
+                    tag: 1,
+                    id: [8; 32],
+                }),
                 digest: [9; 32],
             },
             AccountHistoryFrame::ChannelHeader {
@@ -137,6 +211,38 @@ mod tests {
                 event_id: [4; 32],
                 total_len: 1024,
             },
+            AccountHistoryFrame::Preference {
+                record: AccountPreference {
+                    category: super::super::account_sync_policy::SyncCategory::Appearance,
+                    key: "theme".into(),
+                    value: Some("dark".into()),
+                    revision: 1,
+                    device_id: "ab".repeat(16),
+                },
+            },
+            AccountHistoryFrame::FileCardHeader {
+                host: [1; 32],
+                peer_account: Some("ab".repeat(16)),
+                from: "cd".repeat(16),
+                wall_clock: 42,
+                event_id: [5; 32],
+                total_len: 1024,
+            },
+            AccountHistoryFrame::AttachmentRequest {
+                version: VERSION,
+                account_id: "ab".repeat(16),
+                file_conv: [6; 32],
+            },
+            AccountHistoryFrame::AttachmentStart {
+                file_conv: [6; 32],
+                name: "photo.png".into(),
+                size: 5,
+                sha256: [7; 32],
+            },
+            AccountHistoryFrame::AttachmentChunk {
+                bytes: vec![8; MAX_CHUNK],
+            },
+            AccountHistoryFrame::AttachmentComplete,
         ] {
             let encoded = frame.encode().expect("valid frame encodes");
             assert!(encoded.starts_with(MAGIC));
@@ -150,8 +256,9 @@ mod tests {
             AccountHistoryFrame::Request {
                 version: VERSION + 1,
                 account_id: "ab".repeat(16),
-                cursor: 0,
+                cursor: None,
                 known_digest: [0; 32],
+                wanted: DeviceSyncPolicy::default(),
             }
             .encode()
             .is_none()

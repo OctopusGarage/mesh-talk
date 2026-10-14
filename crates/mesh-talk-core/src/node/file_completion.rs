@@ -285,7 +285,14 @@ impl Node {
                 .lock()
                 .expect("log lock not poisoned")
                 .get(&row.event_id)
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    self.account_file_proofs
+                        .lock()
+                        .expect("file proofs lock not poisoned")
+                        .get(&row.event_id)
+                        .cloned()
+                });
             let Some(event) = event else {
                 continue;
             };
@@ -297,7 +304,13 @@ impl Node {
                     .expect("channels lock not poisoned")
                     .state(&row.conversation)
                     .is_some();
-            if (own || channel)
+            let sibling_proof = self
+                .account_file_proofs
+                .lock()
+                .expect("file proofs lock not poisoned")
+                .get(&row.event_id)
+                .is_some();
+            if (own || channel || sibling_proof)
                 && event.kind == EventKind::FileManifest
                 && event.author.user_id() == row.from
                 && event.verify_integrity()

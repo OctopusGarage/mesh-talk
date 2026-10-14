@@ -5813,6 +5813,13 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let bob = DeviceIdentity::generate();
     let bob_account = Account::generate();
     let dir = tempfile::tempdir().unwrap();
+    // Each simulated device needs its own private sidecars and media key.
+    let a1_store = dir.path().join("a1");
+    let a2_store = dir.path().join("a2");
+    let bob_store = dir.path().join("bob");
+    for store in [&a1_store, &a2_store, &bob_store] {
+        std::fs::create_dir_all(store).unwrap();
+    }
 
     let a1_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a1_port = a1_listener.local_addr().unwrap().port();
@@ -5872,8 +5879,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         a1_dm,
         a1_ch,
         a1_file,
-        &dir.path().join("a1.log"),
-        &dir.path().join("a1-sent.log"),
+        &a1_store.join("events.log"),
+        &a1_store.join("sent.log"),
         "pw",
     )
     .unwrap();
@@ -5884,8 +5891,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         a2_dm,
         a2_ch,
         a2_file,
-        &dir.path().join("a2.log"),
-        &dir.path().join("a2-sent.log"),
+        &a2_store.join("events.log"),
+        &a2_store.join("sent.log"),
         "pw",
     )
     .unwrap();
@@ -5896,8 +5903,8 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         bob_dm,
         bob_ch,
         bob_file,
-        &dir.path().join("bob.log"),
-        &dir.path().join("bob-sent.log"),
+        &bob_store.join("events.log"),
+        &bob_store.join("sent.log"),
         "pw",
     )
     .unwrap();
@@ -5942,6 +5949,51 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .await
         .unwrap();
     let old_channel_id = a1_node.channel_history(channel, 10)[0].id;
+    let channel_attachment_bytes = vec![0x35u8; 24_000];
+    let channel_attachment_path = dir.path().join("old-channel.bin");
+    std::fs::write(&channel_attachment_path, &channel_attachment_bytes).unwrap();
+    let channel_attachment_file = a1_node
+        .send_file_channel(
+            channel,
+            &channel_attachment_path,
+            crate::file::FileKind::File,
+        )
+        .await
+        .unwrap();
+    let channel_attachment_id = a1_node
+        .channel_history(channel, 10)
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file
+                .as_ref()
+                .is_some_and(|file| file.file_conv == channel_attachment_file)
+        })
+        .unwrap()
+        .id;
+    let attachment_bytes = vec![0x42u8; 90_000];
+    let attachment_path = dir.path().join("before-link.bin");
+    std::fs::write(&attachment_path, &attachment_bytes).unwrap();
+    let (attachment_id, attachment_file) = a1_node
+        .enqueue_file_to_account(
+            &bob_account.account_id(),
+            &attachment_path,
+            crate::file::FileKind::File,
+        )
+        .await
+        .unwrap();
+    let dm_texts = |node: &Arc<Node>| {
+        node.account_history(&bob_account.account_id(), 10)
+            .into_iter()
+            .filter(|entry| entry.file.is_none())
+            .collect::<Vec<_>>()
+    };
+    let channel_texts = |node: &Arc<Node>| {
+        node.channel_history(channel, 10)
+            .into_iter()
+            .filter(|entry| entry.file.is_none())
+            .collect::<Vec<_>>()
+    };
 
     let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
     bob_node
@@ -5949,20 +6001,13 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .await
         .unwrap();
     for _ in 0..50 {
-        if a1_node.account_history(&bob_account.account_id(), 10).len() == 1 {
+        if dm_texts(&a1_node).len() == 1 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(
-        a1_node.account_history(&bob_account.account_id(), 10).len(),
-        1
-    );
-    assert!(
-        a2_node
-            .account_history(&bob_account.account_id(), 10)
-            .is_empty()
-    );
+    assert_eq!(dm_texts(&a1_node).len(), 1);
+    assert!(dm_texts(&a2_node).is_empty());
 
     let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -5980,11 +6025,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .await
     .expect("certified sibling joins the existing channel");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(a2_node.channel_history(channel, 10).is_empty());
+    assert!(channel_texts(&a2_node).is_empty());
     assert!(
-        a2_node
-            .account_history(&bob_account.account_id(), 10)
-            .is_empty(),
+        dm_texts(&a2_node).is_empty(),
         "disabled history sync must not import sibling messages"
     );
     a2_node
@@ -5992,8 +6035,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if a2_node
-                .channel_history(channel, 10)
+            if channel_texts(&a2_node)
                 .iter()
                 .any(|item| item.id == old_channel_id)
             {
@@ -6004,7 +6046,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     })
     .await
     .expect("old channel plaintext reaches the linked device");
-    let archived = a2_node.channel_history(channel, 10);
+    let archived = channel_texts(&a2_node);
     assert_eq!(archived.len(), 1);
     assert_eq!(archived[0].id, old_channel_id);
     assert_eq!(archived[0].text, b"before sibling joined");
@@ -6021,8 +6063,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if a2_node
-                .channel_history(channel, 10)
+            if channel_texts(&a2_node)
                 .iter()
                 .any(|item| item.text == b"after sibling joined")
             {
@@ -6034,7 +6075,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .await
     .expect("new channel messages still arrive");
     tokio::time::sleep(Duration::from_secs(11)).await;
-    let history = a2_node.channel_history(channel, 10);
+    let history = channel_texts(&a2_node);
     assert_eq!(
         history.len(),
         1,
@@ -6042,12 +6083,12 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     );
     assert_eq!(history[0].text, b"after sibling joined");
     for _ in 0..50 {
-        if a2_node.account_history(&bob_account.account_id(), 10).len() == 1 {
+        if dm_texts(&a2_node).len() == 1 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let history = a2_node.account_history(&bob_account.account_id(), 10);
+    let history = dm_texts(&a2_node);
     assert_eq!(history.len(), 1, "A2 must recover the DM from A1");
     assert_eq!(history[0].text, b"while A2 was offline");
     assert!(!history[0].from_me);
@@ -6064,18 +6105,244 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .await
         .unwrap();
     for _ in 0..50 {
-        if a2_node.account_history(&bob_account.account_id(), 10).len() == 2 {
+        if dm_texts(&a2_node).len() == 2 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let history = a2_node.account_history(&bob_account.account_id(), 10);
+    let history = dm_texts(&a2_node);
     assert_eq!(history.len(), 2, "A2 must recover A1's outgoing DM once");
     assert_eq!(history[1].text, b"from A1 to Bob");
     assert!(history[1].from_me);
 
-    a1_task.abort();
+    a1_node
+        .set_device_sync_category(crate::node::SyncCategory::Appearance, true)
+        .unwrap();
+    a2_node
+        .set_device_sync_category(crate::node::SyncCategory::Appearance, true)
+        .unwrap();
+    a1_node
+        .set_account_preference(
+            crate::node::SyncCategory::Appearance,
+            "theme".into(),
+            Some("light".into()),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if a2_node
+                .account_preferences(crate::node::SyncCategory::Appearance)
+                .iter()
+                .any(|entry| entry.key == "theme" && entry.value.as_deref() == Some("light"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("appearance preference reaches certified sibling");
+    a2_node
+        .set_device_sync_category(crate::node::SyncCategory::Appearance, false)
+        .unwrap();
+    a1_node
+        .set_account_preference(
+            crate::node::SyncCategory::Appearance,
+            "theme".into(),
+            Some("dark".into()),
+        )
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        a2_node.account_preferences(crate::node::SyncCategory::Appearance)[0]
+            .value
+            .as_deref(),
+        Some("light")
+    );
+    a2_node
+        .set_device_sync_category(crate::node::SyncCategory::Appearance, true)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if a2_node
+                .account_preferences(crate::node::SyncCategory::Appearance)
+                .iter()
+                .any(|entry| entry.key == "theme" && entry.value.as_deref() == Some("dark"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("re-enabling appearance catches up");
+
+    a1_node
+        .set_device_sync_category(crate::node::SyncCategory::Contacts, true)
+        .unwrap();
+    a2_node
+        .set_device_sync_category(crate::node::SyncCategory::Contacts, true)
+        .unwrap();
+    let contact_key = format!("favorite:{}", bob_account.account_id());
+    a1_node
+        .set_account_preference(
+            crate::node::SyncCategory::Contacts,
+            contact_key.clone(),
+            Some(r#"{"pinned":true,"custom_alias":"Bob","hidden":false}"#.into()),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if a2_node
+                .account_preferences(crate::node::SyncCategory::Contacts)
+                .iter()
+                .any(|entry| {
+                    entry.key == contact_key
+                        && entry
+                            .value
+                            .as_deref()
+                            .is_some_and(|value| value.contains("Bob"))
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("contact preference reaches certified sibling");
+
+    a1_node
+        .set_device_sync_category(crate::node::SyncCategory::Attachments, true)
+        .unwrap();
+    a2_node
+        .set_device_sync_category(crate::node::SyncCategory::Attachments, true)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(35), async {
+        loop {
+            if a2_node
+                .account_history(&bob_account.account_id(), 20)
+                .iter()
+                .any(|entry| entry.id == attachment_id && entry.file.is_some())
+                && a2_node.file_ready_to_save(attachment_file)
+                && a2_node.media.contains(attachment_file)
+                && a2_node
+                    .channel_history(channel, 20)
+                    .iter()
+                    .any(|entry| entry.id == channel_attachment_id && entry.file.is_some())
+                && a2_node.file_ready_to_save(channel_attachment_file)
+                && a2_node.media.contains(channel_attachment_file)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "old attachment card and bytes reach certified sibling: status={:?}, account_card={}, channel_card={}, account_ready={}, channel_ready={}",
+            a2_node.device_sync_status(),
+            a2_node.account_history(&bob_account.account_id(), 20).iter().any(|entry| entry.id == attachment_id && entry.file.is_some()),
+            a2_node.channel_history(channel, 20).iter().any(|entry| entry.id == channel_attachment_id && entry.file.is_some()),
+            a2_node.file_ready_to_save(attachment_file),
+            a2_node.file_ready_to_save(channel_attachment_file),
+        )
+    });
+    assert!(
+        a2_node
+            .account_file_proofs
+            .lock()
+            .unwrap()
+            .get(&attachment_id)
+            .is_some()
+    );
+    assert!(
+        a2_node
+            .account_file_proofs
+            .lock()
+            .unwrap()
+            .get(&channel_attachment_id)
+            .is_some()
+    );
+    let saved = dir.path().join("sibling-copy.bin");
+    a2_node.save_file(attachment_file, &saved).unwrap();
+    assert_eq!(std::fs::read(saved).unwrap(), attachment_bytes);
+    let channel_saved = dir.path().join("sibling-channel-copy.bin");
+    a2_node
+        .save_file(channel_attachment_file, &channel_saved)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(channel_saved).unwrap(),
+        channel_attachment_bytes
+    );
+
+    let (ed25519_secret, x25519_secret) = a2_node.identity.secret_bytes();
     a2_task.abort();
+    let _ = a2_task.await;
+    drop(a2_node);
+    let (reopen_dm, _reopen_dm_rx) = mpsc::unbounded_channel();
+    let (reopen_ch, _reopen_ch_rx) = mpsc::unbounded_channel();
+    let (reopen_file, _reopen_file_rx) = mpsc::unbounded_channel();
+    let reopened = Node::open_with_account(
+        DeviceIdentity::from_secret_bytes(ed25519_secret, x25519_secret),
+        Account::from_secret_bytes(alice_account.secret_bytes()),
+        Arc::new(Mutex::new(Roster::default())),
+        reopen_dm,
+        reopen_ch,
+        reopen_file,
+        &a2_store.join("events.log"),
+        &a2_store.join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    assert!(
+        reopened
+            .account_history(&bob_account.account_id(), 20)
+            .iter()
+            .any(|entry| entry.id == attachment_id && entry.file.is_some())
+    );
+    let ready = reopened.file_ready_to_save(attachment_file);
+    let progress = reopened.file_progress(attachment_file);
+    let (has_manifest, manifest_events) = {
+        let files = reopened.files.lock().unwrap();
+        (
+            files.manifest(&attachment_file).is_some(),
+            files.manifest_events(attachment_file).len(),
+        )
+    };
+    let media_exists = reopened
+        .media
+        .path_for(attachment_file, "before-link.bin")
+        .exists();
+    let has_proof = reopened
+        .account_file_proofs
+        .lock()
+        .unwrap()
+        .get(&attachment_id)
+        .is_some();
+    assert!(
+        ready,
+        "account file after reopen: progress={progress:?} manifest={has_manifest} media_exists={media_exists} manifest_events={manifest_events} proof={has_proof}"
+    );
+    assert!(reopened.file_ready_to_save(channel_attachment_file));
+    let reopened_account_copy = dir.path().join("reopened-sibling-copy.bin");
+    reopened
+        .save_file(attachment_file, &reopened_account_copy)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(reopened_account_copy).unwrap(),
+        attachment_bytes
+    );
+    let reopened_channel_copy = dir.path().join("reopened-channel-copy.bin");
+    reopened
+        .save_file(channel_attachment_file, &reopened_channel_copy)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(reopened_channel_copy).unwrap(),
+        channel_attachment_bytes
+    );
+    a1_task.abort();
 }
 
 #[test]
@@ -6107,11 +6374,9 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
         "pw",
     )
     .unwrap();
-    assert!(
-        node.set_device_sync_category(crate::node::SyncCategory::Appearance, true)
-            .is_err(),
-        "unsupported categories must not report a successful sync setting"
-    );
+    node.set_device_sync_category(crate::node::SyncCategory::Attachments, true)
+        .unwrap();
+    assert!(node.device_sync_policy().attachments);
     let msg_id = [7; 32];
     let plaintext = DmEnvelope::new(
         bob_id.clone(),

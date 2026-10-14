@@ -7,6 +7,8 @@
 //! re-exports, not every internal type.
 
 pub(crate) mod account_devices;
+pub(crate) mod account_file_proofs;
+pub(crate) mod account_preferences;
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
 pub(crate) mod account_sync_policy;
@@ -69,6 +71,8 @@ pub use crate::transport::net::{
     ipv4_interface_addrs,
 };
 pub use account_devices::AccountDevice;
+pub use account_preferences::AccountPreference;
+pub use account_sync::{DeviceSyncStatus, SyncPhase};
 pub use account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};

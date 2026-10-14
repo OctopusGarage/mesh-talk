@@ -214,11 +214,26 @@ impl Node {
             account_id,
             cursor,
             known_digest,
+            wanted,
             ..
         }) = super::account_sync_wire::AccountHistoryFrame::decode(&first)
         {
-            self.serve_account_history(&mut channel, &account_id, cursor, known_digest)
+            self.serve_account_history(&mut channel, &account_id, cursor, known_digest, wanted)
                 .await;
+            return;
+        }
+        if let Some(super::account_sync_wire::AccountHistoryFrame::AttachmentRequest {
+            account_id,
+            file_conv,
+            ..
+        }) = super::account_sync_wire::AccountHistoryFrame::decode(&first)
+        {
+            self.serve_account_attachment(
+                &mut channel,
+                &account_id,
+                crate::eventlog::event::ConversationId::new(file_conv),
+            )
+            .await;
             return;
         }
         // A call signal (SDP/bye): surface it live (bound to the authenticated peer) and

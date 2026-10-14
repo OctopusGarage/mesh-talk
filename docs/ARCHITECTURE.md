@@ -113,8 +113,12 @@ command names for Tauri registration. Commands clone a node handle from
   devices; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
-  Message-history reconciliation and signed account-avatar updates obey
-  separate device-local switches. Profile updates use the existing per-peer
+  Message history, attachment catch-up, signed account-avatar updates, appearance,
+  and contact presentation preferences obey separate device-local switches.
+  Appearance and contact records use a versioned, encrypted local store with a
+  deterministic revision/device tie-break and clear tombstones. Only certified
+  sibling devices exchange these records over the Noise account-sync channel.
+  Profile updates use the existing per-peer
   event delivery path; a device with avatar sync disabled defers sibling updates
   until it is re-enabled. The received-profile store retains clear tombstones,
   and each device also stores its own signed profile state so it can republish
@@ -123,7 +127,17 @@ command names for Tauri registration. Commands clone a node handle from
   already accepted member has its own certified account. Once accepted, bounded
   account reconciliation transfers available older channel plaintext with stable
   event IDs. Locally erased channel messages carry durable suppression markers.
-  File cards and attachment bytes still require a separate authenticated path.
+  Historical file cards carry their signed manifest event as a detached proof when
+  the original device-pair event DAG is unavailable. A sibling can request an
+  available attachment through a separate authenticated stream; the receiver checks
+  the manifest size and SHA-256 before encrypting its local copy. Complete local
+  chunk transfers are likewise verified and copied into encrypted managed storage
+  while attachment sync is enabled, so a later generic-file save cannot remove
+  the linked device's only retained bytes. File cards and
+  bytes remain local to eligible account conversations and accepted channels.
+  The file-card sidecar permits identical signed manifest content under both a
+  device conversation and its account conversation; the message sidecar still
+  rejects reused event IDs across conversations.
 
 ## 3. Event log & sync (`eventlog/`)
 
@@ -605,7 +619,9 @@ macOS menu-bar title and the OS app-icon badge through one session-guarded comma
 **Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
 the signed-in local user's hidden account IDs and last-known names are stored separately
 in `accounts/<local-user-id>/hidden-contacts.json`. Mutations validate the session owner
-and replace the file atomically; this metadata is local to the device, not synced.
+and replace the file atomically. A linked device may optionally synchronize these
+presentation choices through the account preference log; each device keeps its
+own contact-sync switch.
 Settings provides a searchable management dialog and offline restoration; contact rows
 also offer a hide action in their context menu, with an explicit confirmation.
 Visibility filters are projections over the raw roster: contact lists, new-group invite
@@ -661,9 +677,10 @@ The recovered account fingerprint remains the same; the new device fingerprint
 differs. Restored channels are read-only archives because their old sender keys
 are excluded. A new device must be invited into an active channel as a new member
 to receive fresh sender keys and participate in future messages. Peer replicas
-can restore signed ciphertext events but cannot give the new device the retired
-device's sender chains or decrypt past channel history. Users who need readable
-past history must restore a backup containing its plaintext archive. Offline DM
+  can restore signed ciphertext events but cannot give the new device the retired
+  device's sender chains or decrypt past channel history. A certified linked device
+  with retained plaintext can share its available archive after channel enrollment;
+  otherwise a backup containing that plaintext is required. Offline DM
 peers are discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,

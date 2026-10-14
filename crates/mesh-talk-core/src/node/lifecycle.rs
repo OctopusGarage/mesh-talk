@@ -234,6 +234,16 @@ impl Node {
             }
         }
         {
+            let files = self.received_files.lock().expect("files lock not poisoned");
+            for conv in files.conversations() {
+                for entry in files.entries_ref(&conv) {
+                    if should_remove(conv, entry.wall_clock) {
+                        suppressed.push((conv, entry.event_id));
+                    }
+                }
+            }
+        }
+        {
             let mut suppression = self
                 .account_suppression
                 .lock()

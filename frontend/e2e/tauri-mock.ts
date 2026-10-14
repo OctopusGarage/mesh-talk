@@ -939,8 +939,17 @@ export const test = base.extend({
               localStorage.getItem(`mock-device-sync-policy-${SELF.device}`) ??
                 '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
             ),
+          get_device_sync_status: () => [],
           set_device_sync_category: (a) => {
-            if (a.category !== "history" && a.category !== "profile")
+            if (
+              ![
+                "history",
+                "attachments",
+                "profile",
+                "appearance",
+                "contacts",
+              ].includes(String(a.category))
+            )
               throw new Error("this sync category is not available yet");
             const policy = responses.get_device_sync_policy({}) as Record<
               string,
@@ -955,6 +964,33 @@ export const test = base.extend({
               JSON.stringify(next),
             );
             return next;
+          },
+          get_account_preferences: (a) =>
+            JSON.parse(
+              localStorage.getItem(
+                `mock-account-preferences-${SELF.device}-${String(a.category)}`,
+              ) ?? "[]",
+            ),
+          set_account_preference: (a) => {
+            const key = `mock-account-preferences-${SELF.device}-${String(a.category)}`;
+            const rows = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<
+              Record<string, unknown>
+            >;
+            const record = {
+              category: String(a.category),
+              key: String(a.key),
+              value: a.value ?? null,
+              revision: Date.now(),
+              device_id: SELF.device,
+            };
+            localStorage.setItem(
+              key,
+              JSON.stringify([
+                ...rows.filter((row) => row.key !== record.key),
+                record,
+              ]),
+            );
+            return record;
           },
           start_linking: () => "0123456789abcdef0123456789abcdef", // 32 hex, like a real PairingCode
           stop_linking: ok,

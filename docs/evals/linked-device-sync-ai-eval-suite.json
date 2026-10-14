@@ -110,10 +110,52 @@
       "rubric": [
         "The server authenticates a certified sibling and exports only channels where its own device is accepted and the requester is a member.",
         "The importer requires accepted local membership before writing channel plaintext.",
-        "Channel record size, chunks, page count, and total allocation have explicit bounds.",
+        "Channel record size, chunks, page count, and per-request archive allocation have explicit bounds without materializing the whole plaintext history.",
         "When a signed event is present locally, its channel, kind, and author must match the imported record.",
-        "A durable local suppression marker prevents an erased channel message from being reimported when the source digest changes.",
-        "The transfer retains original event IDs and is deduplicated on import."
+        "The importer checks local account suppression before each channel write; marker creation and restart persistence are evaluated separately in MT-SYNC-AI-004 and its unit test.",
+        "The transfer retains original event IDs, and durable import rejects conflicting reuse of an ID."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-009",
+      "name": "versioned account preferences merge without syncing device choices",
+      "subject_file": "crates/mesh-talk-core/src/node/account_preferences.rs",
+      "min_score": 0.85,
+      "scenario": "Review the durable preference store used for appearance and contact choices. Check validation, bounded records, deterministic concurrent resolution, tombstones, and persistence. Judge only this file.",
+      "rubric": [
+        "Only appearance and contact categories can be stored; device-local sync choices cannot be imported as account preferences.",
+        "Keys, values, authors, and revisions have explicit validation and size bounds.",
+        "A deterministic revision and device-ID order resolves concurrent edits, while a stale edit cannot replace a newer one.",
+        "Clears are retained as versioned tombstones and survive reopen.",
+        "A failed durable append does not update the in-memory current value."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-010",
+      "name": "linked attachment transfer authenticates and verifies bytes",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
+      "min_score": 0.85,
+      "scenario": "Review old file-card and byte catch-up between linked devices. Check cross-account access, accepted channel membership, signed manifest proof, local erase, transfer bounds, checksum and size checks, and independent attachment choice. Judge only behavior visible in this file.",
+      "rubric": [
+        "Only certified account siblings can request history or attachment bytes; the source limits file cards to eligible account conversations or accepted channels containing the requester.",
+        "Imported file cards require an accepted channel invitation or a matching account conversation and a signed manifest proof bound to the original event ID, author, and clock.",
+        "The local attachment choice gates card import and byte requests independently of message history.",
+        "Byte transfer is chunked and writes to disk with cumulative size and manifest checksum verification before encrypted storage.",
+        "Local suppression and file erasure block reimport, and failed or incomplete transfers do not install bytes."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-011",
+      "name": "linked appearance does not overwrite a fresh device with defaults",
+      "subject_file": "frontend/src/lib/linkedAppearance.ts",
+      "min_score": 0.85,
+      "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Judge only this file.",
+      "rubric": [
+        "A new device does not automatically publish default appearance values that could overwrite another linked device.",
+        "Before issuing a pairing code, existing saved appearance values can be published when missing.",
+        "Remote values apply only while the local appearance choice is enabled.",
+        "Applying a remote value does not echo the same change back as a newer local edit.",
+        "Polls and subscriptions stop after cleanup, and asynchronous responses do not update state after cleanup."
       ]
     }
   ]

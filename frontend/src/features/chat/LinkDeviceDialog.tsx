@@ -14,10 +14,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { auth, chat } from "@/lib/api";
-import type { DeviceSyncPolicy, SyncCategory } from "@/lib/api/chat";
+import type {
+  DeviceSyncPolicy,
+  DeviceSyncStatus,
+  SyncCategory,
+} from "@/lib/api/chat";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
+import { publishAppearanceBeforeLink } from "@/lib/linkedAppearance";
 import { useChat } from "@/store/chat";
 
 export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
@@ -43,6 +48,8 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   const [syncPolicy, setSyncPolicy] = useState<DeviceSyncPolicy | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<DeviceSyncStatus[]>([]);
+  const [syncStatusError, setSyncStatusError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -64,6 +71,30 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
       active = false;
     };
   }, [open, t]);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const refresh = () => {
+      void chat.getDeviceSyncStatus().then(
+        (statuses) => {
+          if (active) {
+            setSyncStatus(statuses);
+            setSyncStatusError(null);
+          }
+        },
+        (error) => {
+          if (active) setSyncStatusError(errorMessage(error));
+        },
+      );
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [open]);
 
   const setSyncCategory = async (category: SyncCategory, enabled: boolean) => {
     if (!syncPolicy || syncBusy) return;
@@ -122,6 +153,9 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     try {
       if (stopRef.current) await stopRef.current;
       if (!openRef.current) return;
+      await publishAppearanceBeforeLink().catch((error) => {
+        console.warn("Could not prepare linked appearance", error);
+      });
       const nextCode = await chat.startLinking();
       if (openRef.current) setCode(nextCode);
       else await stopLinking();
@@ -368,6 +402,24 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0">
               <p className="text-sm font-medium">
+                {t("linkDevice.attachmentsSync")}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("linkDevice.attachmentsSyncDescription")}
+              </p>
+            </div>
+            <Switch
+              checked={syncPolicy?.attachments ?? false}
+              disabled={!syncPolicy || syncBusy}
+              aria-label={t("linkDevice.attachmentsSync")}
+              onCheckedChange={(enabled) =>
+                void setSyncCategory("attachments", enabled)
+              }
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
                 {t("linkDevice.profileSync")}
               </p>
               <p className="text-xs leading-relaxed text-muted-foreground">
@@ -383,12 +435,79 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
               }
             />
           </div>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            {t("linkDevice.otherSyncUnavailable")}
-          </p>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                {t("linkDevice.appearanceSync")}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("linkDevice.appearanceSyncDescription")}
+              </p>
+            </div>
+            <Switch
+              checked={syncPolicy?.appearance ?? false}
+              disabled={!syncPolicy || syncBusy}
+              aria-label={t("linkDevice.appearanceSync")}
+              onCheckedChange={(enabled) =>
+                void setSyncCategory("appearance", enabled)
+              }
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                {t("linkDevice.contactsSync")}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("linkDevice.contactsSyncDescription")}
+              </p>
+            </div>
+            <Switch
+              checked={syncPolicy?.contacts ?? false}
+              disabled={!syncPolicy || syncBusy}
+              aria-label={t("linkDevice.contactsSync")}
+              onCheckedChange={(enabled) =>
+                void setSyncCategory("contacts", enabled)
+              }
+            />
+          </div>
           {syncError && (
             <p role="alert" className="text-xs text-destructive">
               {syncError}
+            </p>
+          )}
+          {syncStatus.length > 0 && (
+            <div className="space-y-1 border-t pt-3" aria-live="polite">
+              {syncStatus.map((device) => (
+                <div
+                  key={device.device_id}
+                  className="text-xs text-muted-foreground"
+                >
+                  <span className="font-mono">
+                    {shortId(device.device_id, 8)}
+                  </span>{" "}
+                  <span>{t(`linkDevice.syncPhase.${device.phase}`)}</span>
+                  {device.pending_attachments > 0 && (
+                    <span>
+                      {" "}
+                      ·{" "}
+                      {t("linkDevice.pendingAttachments", {
+                        count: device.pending_attachments,
+                      })}
+                    </span>
+                  )}
+                  {device.error && (
+                    <p role="alert" className="text-destructive">
+                      {device.error}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {syncStatusError && (
+            <p role="alert" className="text-xs text-destructive">
+              {t("linkDevice.syncStatusFailed", { error: syncStatusError })}
             </p>
           )}
         </section>
