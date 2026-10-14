@@ -31,6 +31,7 @@ export function requiredBrowserPaths(tier) {
     ["media-lifecycle.spec.ts", "same UUID relogin revokes the old owned URL exactly once"],
     ["screenshot-portable.spec.ts", "screenshot selection annotation and explicit send produce cropped PNG"],
     ["screenshot-portable.spec.ts", "hidden screenshot capture cancels without sending"],
+    ["screenshot-portable.spec.ts", "sender previews a screenshot when media IPC returns fallback byte arrays"],
     ["screenshot-portable.spec.ts", "rectangle arrow text and undo remain usable before send"],
     ["screenshot-portable.spec.ts", "unavailable capture is disabled and failed save preserves the editor"],
     ["file-send-progress.spec.ts", "file sender keeps confirmed upload percent and ETA visible until recipient custody"],

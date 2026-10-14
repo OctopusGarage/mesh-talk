@@ -70,10 +70,11 @@ fn parse_status(bytes: &[u8], port: u16) -> Vec<SocketAddr> {
 
 fn cli_locations() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("tailscale")];
-    #[cfg(target_os = "macos")]
-    paths.push(PathBuf::from(
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ));
+    if cfg!(target_os = "macos") {
+        paths.push(PathBuf::from(
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        ));
+    }
     #[cfg(target_os = "windows")]
     if let Some(program_files) = std::env::var_os("ProgramFiles") {
         paths.push(
