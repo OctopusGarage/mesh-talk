@@ -89,7 +89,13 @@ impl Node {
         {
             let mut roster = self.roster.lock().expect("roster lock not poisoned");
             for proof in proofs {
-                if proof.public() == self.identity.public() || proof.post_office {
+                if proof.public() == self.identity.public() {
+                    continue;
+                }
+                if proof.post_office {
+                    if proof.public() != relay.public {
+                        roster.update_gateway(&proof, relay.addr.ip(), &self.user_id());
+                    }
                     continue;
                 }
                 if roster.update_relayed(&proof, relay.addr, &self.user_id())

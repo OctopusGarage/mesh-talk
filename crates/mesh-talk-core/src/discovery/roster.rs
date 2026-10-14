@@ -139,6 +139,20 @@ impl Roster {
         self.update_from(announce, source_ip, self_user_id, RouteSource::RoutedQuery)
     }
 
+    /// Signed relay proof supplied over a Noise-authenticated local bridge
+    /// directory. Its TCP port is served locally by that relay's gateway.
+    pub fn update_gateway(
+        &mut self,
+        announce: &Announce,
+        gateway_ip: IpAddr,
+        self_user_id: &str,
+    ) -> UpdateOutcome {
+        if !announce.post_office || announce.account_id().is_none() {
+            return UpdateOutcome::Rejected;
+        }
+        self.update_from(announce, gateway_ip, self_user_id, RouteSource::RoutedQuery)
+    }
+
     /// A signed identity introduced by a relay. The relay's address is useful
     /// for opaque mailbox delivery but is never a direct peer endpoint.
     pub fn update_relayed(

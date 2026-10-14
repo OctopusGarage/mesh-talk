@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub mod election;
+pub mod gateway;
 pub mod opaque;
 
 pub use election::{elect, is_post_office};

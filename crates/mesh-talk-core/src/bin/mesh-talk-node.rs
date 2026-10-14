@@ -13,7 +13,9 @@ use clap::Parser;
 use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
 use mesh_talk_core::node::{DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket};
-use mesh_talk_core::node::{run_bridge_relay_accept_loop, run_relay_accept_loop};
+use mesh_talk_core::node::{
+    run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway, run_relay_accept_loop,
+};
 use mesh_talk_core::postoffice::PostOffice;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -66,6 +68,20 @@ struct Args {
     /// Serve an opt-in bridge directory alongside the post-office mailbox.
     #[arg(long, requires = "post_office")]
     bridge: bool,
+    /// Existing routed endpoint of another bridge post office (UDP discovery).
+    #[arg(long, requires_all = ["post_office", "bridge", "bridge_peer_id"])]
+    bridge_peer: Option<SocketAddr>,
+    /// Exact 32-character Mesh Talk fingerprint of --bridge-peer.
+    #[arg(long, requires = "bridge_peer", value_parser = parse_fingerprint)]
+    bridge_peer_id: Option<String>,
+}
+
+fn parse_fingerprint(value: &str) -> Result<String, String> {
+    if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err("expected a full 32-character hexadecimal device fingerprint".into())
+    }
 }
 
 /// Account addressing is explicit: a full crypto account id, never a local
@@ -633,6 +649,19 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         )),
     );
 
+    let gateway = if let (Some(remote), Some(peer_id)) = (args.bridge_peer, args.bridge_peer_id) {
+        let proof = Arc::new(Mutex::new(None));
+        tokio::spawn(mesh_talk_core::postoffice::gateway::run_bridge_gateway(
+            Arc::clone(&proof),
+            tcp_port,
+            remote,
+            peer_id,
+        ));
+        Some(proof)
+    } else {
+        None
+    };
+
     emit(&format!(
         "post-office {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
         args.discovery_port
@@ -640,7 +669,10 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Serve relay connections until killed. This loop never returns; the trailing
     // Ok(()) is unreachable in practice (the process is stopped by a signal).
-    if args.bridge {
+    if let Some(gateway) = gateway {
+        run_bridge_relay_accept_loop_with_gateway(transport_identity, listener, store, gateway)
+            .await;
+    } else if args.bridge {
         run_bridge_relay_accept_loop(transport_identity, listener, store).await;
     } else {
         run_relay_accept_loop(transport_identity, listener, store).await;

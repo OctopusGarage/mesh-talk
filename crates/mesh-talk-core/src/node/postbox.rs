@@ -3,6 +3,7 @@
 //! Client upload and drain live in `opaque_relay` and `serving`;
 //! this module provides election lookup and the serving loop.
 
+use crate::discovery::Announce;
 use crate::discovery::roster::{PeerRecord, Roster};
 use crate::identity::device::DeviceIdentity;
 use crate::node::bridge_directory::{self, BridgeDirectory};
@@ -135,6 +136,23 @@ pub async fn run_bridge_relay_accept_loop(
         listener,
         store,
         Some(Arc::new(Mutex::new(BridgeDirectory::default()))),
+    )
+    .await;
+}
+
+/// Bridge relay with one pinned remote post-office gateway. Only clients that
+/// explicitly register with this directory receive the remote relay proof.
+pub async fn run_bridge_relay_accept_loop_with_gateway(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    gateway: Arc<Mutex<Option<Announce>>>,
+) {
+    run_relay_accept_loop_inner(
+        identity,
+        listener,
+        store,
+        Some(Arc::new(Mutex::new(BridgeDirectory::with_gateway(gateway)))),
     )
     .await;
 }

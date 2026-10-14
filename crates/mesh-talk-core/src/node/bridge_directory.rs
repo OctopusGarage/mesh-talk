@@ -7,6 +7,7 @@ use crate::identity::device::PublicIdentity;
 use crate::transport::MAX_PLAINTEXT;
 use bincode::Options;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const REQUEST: &[u8] = b"MTBD1Q";
@@ -17,9 +18,17 @@ const MAX_MEMBERS: usize = 128;
 #[derive(Default)]
 pub struct BridgeDirectory {
     members: HashMap<String, (Announce, Instant)>,
+    gateway: Option<Arc<Mutex<Option<Announce>>>>,
 }
 
 impl BridgeDirectory {
+    pub fn with_gateway(gateway: Arc<Mutex<Option<Announce>>>) -> Self {
+        Self {
+            members: HashMap::new(),
+            gateway: Some(gateway),
+        }
+    }
+
     /// The caller's Noise-authenticated presence is the only admissible proof.
     /// A request body cannot nominate an identity or an address on its behalf.
     pub fn register(
@@ -44,13 +53,26 @@ impl BridgeDirectory {
         }
         self.members
             .insert(proof.user_id.clone(), (proof.clone(), now));
-        Some(
-            self.members
-                .iter()
-                .filter(|(id, _)| *id != &proof.user_id)
-                .map(|(_, (proof, _))| proof.clone())
-                .collect(),
-        )
+        let mut proofs: Vec<_> = self
+            .members
+            .iter()
+            .filter(|(id, _)| *id != &proof.user_id)
+            .map(|(_, (proof, _))| proof.clone())
+            .collect();
+        if let Some(gateway) = &self.gateway
+            && let Some(remote) = gateway
+                .lock()
+                .expect("gateway proof lock not poisoned")
+                .clone()
+            && remote.post_office
+            && remote.verify()
+            && remote.account_id().is_some()
+            && remote.tcp_port != 0
+            && remote.name.len() <= 1024
+        {
+            proofs.push(remote);
+        }
+        Some(proofs)
     }
 }
 
@@ -173,6 +195,34 @@ mod tests {
         let mut trailing = encoded[0].clone();
         trailing.push(0);
         assert!(decode_response(&trailing).is_none());
+    }
+
+    #[test]
+    fn gateway_proof_is_shared_only_after_visible_self_registration() {
+        let a = DeviceIdentity::generate();
+        let e = DeviceIdentity::generate();
+        let account = Account::generate();
+        let a_proof = Announce::new_with_account(&a, &account, "A", 47475);
+        let remote = Announce::new_post_office_with_account(&e, &account, "E", 47476);
+        let gateway = Arc::new(Mutex::new(Some(remote.clone())));
+        let mut directory = BridgeDirectory::with_gateway(Arc::clone(&gateway));
+        let now = Instant::now();
+
+        assert!(directory.register(&a.public(), None, true, now).is_none());
+        assert!(
+            directory
+                .register(&a.public(), Some(&a_proof), false, now)
+                .is_none()
+        );
+        assert_eq!(
+            directory.register(&a.public(), Some(&a_proof), true, now),
+            Some(vec![remote])
+        );
+        *gateway.lock().unwrap() = None;
+        assert_eq!(
+            directory.register(&a.public(), Some(&a_proof), true, now),
+            Some(Vec::new())
+        );
     }
 
     #[test]

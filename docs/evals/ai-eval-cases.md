@@ -15,6 +15,7 @@ the real model-backed AI eval. The canonical executable suite is
 | MT-AI-007 | `docs/post-office-macos-service.md` | Intel Mac service setup, credential handling, health checks, lifecycle limits, and separate cross-machine offer and file-byte relay verification. |
 | MT-AI-008 | `docs/post-office-windows-service.md` | Windows Scheduled Task setup, credential and lock handling, health checks, and separate cross-machine delivery layers. |
 | MT-AI-009 | `docs/routed-network-discovery.md` | Tailscale candidate identity boundary, opt-in A/B/C/E bridge flow, opaque message delivery, and explicit network limits. |
+| MT-AI-010 | `docs/routed-network-discovery.md` | Two pinned post-office gateways share one elected directory and mailbox, with cross-LAN E2E evidence and no replication claim. |
 
 Run:
 

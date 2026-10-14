@@ -28,6 +28,33 @@ The app stores an introduced peer as a *post-office route*, not as a direct TCP 
 
 This makes C visible to opted-in A/B and A/B visible to opted-in C, with bidirectional encrypted DMs through E when they cannot connect directly. B and D remain ordinary LAN peers unless they each opt in and can reach E (or another bridge is explicitly deployed). E does not make WebRTC calls or arbitrary TCP traffic transit the post office. A reachable E is required for cross-LAN delivery; if E is offline, accepted messages remain queued locally for retry.
 
+### Two LANs with one post office on each LAN
+
+When only E in LAN X and F in LAN Y have an existing routed connection, both can run `--post-office --bridge` with a pinned `--bridge-peer`. Each relay queries the other's discovery endpoint with a fresh nonce, verifies the signed Mesh Talk announcement against the configured **full device fingerprint**, and opens a local TCP gateway on the other relay's signed port. The local bridge directory gives the remote relay's signed proof and gateway endpoint only to clients that enable bridge discovery. It never introduces clients that have not registered their own visible presence. The gateway copies encrypted TCP bytes; the client's Noise session terminates at the named remote relay, which still authenticates the client.
+
+```text
+LAN X: A, B → E ⇄ F ← C, D :LAN Y
+               existing routed IP path
+```
+
+For example, run E with `--post-office --bridge --port 47475 --bridge-peer <F-tailnet-IP>:47474 --bridge-peer-id <F-full-fingerprint>` and F with `--post-office --bridge --port 47476 --bridge-peer <E-tailnet-IP>:47474 --bridge-peer-id <E-full-fingerprint>`. Each side's `--bridge-peer-id` is the other relay's 32-character Mesh Talk device fingerprint, obtainable from its startup line before enabling the gateway. The relay TCP ports **must be distinct** so each machine can listen on its own port and proxy the other's signed port. Each participating A/B/C/D client enables bridge discovery and reaches its *local* relay through normal LAN discovery. No client needs Tailscale or access to the other LAN's IP subnet.
+
+All clients deterministically choose the same lowest-fingerprint post office once both signed relay proofs are available. Clients on that relay's LAN connect directly; clients on the other LAN use its local gateway. Thus one authenticated bridge directory and one opaque mailbox hold the participating clients and their recipient-encrypted events. This is **one shared elected mailbox through two gateways**, not mailbox replication or high availability. If the elected relay fails, cross-LAN introductions and delivery pause; the other relay does not inherit its queued events. The gateway requires the user's existing routed UDP discovery and TCP relay ports to be reachable between E and F. It does not configure Tailscale or claim its identity as Mesh Talk identity.
+
+`python3 scripts/e2e-tailnet-two-bridges.py mac2015` runs E/A/B on the current Mac and F/C/D on mac2015 over the existing tailnet, with separate LAN discovery scopes. It checks both relay introductions, all four clients' cross-LAN visibility, and encrypted DMs in both directions. The script creates temporary identities and removes them afterward.
+With a Windows GNU test binary, `python3 scripts/e2e-tailnet-two-bridges.py mac2015 --windows-host windows10` places B on Windows in LAN X; the script temporarily opens B's discovery UDP port and removes its firewall rule and temporary files afterward.
+
+Verified on 2026-10-14 with E/A on the current Mac, B on Windows, and F/C/D on mac2015: the three-machine command exited 0. Its assertions observed A, B, C, and D in every participating client's peer list. The temporary test identities were A `2cdf6314776d6fd8e61435ad212dc38a`, B `73e1bb26dbbe81ce3075add7b46d6bf8`, C `a3d5b2724b53e86d4940001a5613718e`, and D `875166af6d28ad42b4d70c4e5845646b`. The delivery log included:
+
+```text
+[D] from 2cdf6314776d6fd8e61435ad212dc38a (A): A-to-D-through-two-bridges
+[B-Windows] from a3d5b2724b53e86d4940001a5613718e (C): C-to-B-through-two-bridges
+PASS: A/B and C/D discover one another through E/F
+PASS: bidirectional encrypted DMs between the LANs
+```
+
+The test isolates LAN discovery with distinct UDP ports while the relays run on two real Macs over their existing tailnet. It does not validate arbitrary customer firewall rules, DERP-only routing, WebRTC media, or relay failover.
+
 `cargo test -p mesh-talk-core --test bridge_cross_lan --features fast-test-kdf -- --ignored` runs a four-process A/B/C/E rig with isolated UDP discovery scopes and checks peer introductions plus DMs in both directions.
 With two Macs already connected to Tailscale, `python3 scripts/e2e-tailnet-bridge.py mac2015` runs A/B/E on the current Mac and C on the remote Mac, checks the same introductions and DMs through E, then removes its temporary profiles. It does not configure Tailscale.
 To exercise three operating-system peers, cross-build the Windows GNU test binary and run `python3 scripts/e2e-tailnet-bridge.py mac2015 --windows-host windows10`. This places B on Windows in E's LAN while C reaches E over the existing Mac tailnet. The rig temporarily opens only its randomly selected Windows test ports, checks A/B direct LAN messaging and bidirectional A/C and B/C messaging through E, then removes the firewall rules, binary, and test identities. It also restarts E with the same identity and checks delivery of a message queued during the outage. Windows does not need Tailscale for this scenario. Separate discovery ports and explicit E endpoints isolate the test paths even when the two Macs share one physical LAN; the rig does not prove a two-site firewall or DERP configuration.
