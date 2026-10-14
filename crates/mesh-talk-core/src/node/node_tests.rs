@@ -35,6 +35,58 @@ fn post_office_use_can_be_disabled_and_reenabled() {
     assert!(node.relay_allowed(&relay));
 }
 
+#[tokio::test]
+async fn invisible_mode_clears_bridge_presence_and_recovery_permission() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let own = Announce::new_with_account(&identity, &account, "Me", 47475);
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open_with_account(
+        identity,
+        account,
+        Arc::clone(&roster),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    node.configure_privacy(
+        dir.path(),
+        "pw",
+        &own,
+        Arc::new(crate::discovery::DiscoveryVisibility::default()),
+    )
+    .unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(
+        &remote,
+        &crate::identity::account::Account::generate(),
+        "Remote",
+        47475,
+    );
+    node.set_bridge_discovery_enabled(true);
+    roster.lock().unwrap().update_relayed(
+        &proof,
+        "127.0.0.1:47500".parse().unwrap(),
+        &node.user_id(),
+    );
+    node.bridge_dm_pull_peers
+        .lock()
+        .unwrap()
+        .insert(proof.user_id.clone(), std::time::Instant::now());
+    assert!(node.verified_dm_pull_peer(&proof.user_id));
+    node.set_invisible(true).await.unwrap();
+    assert!(!node.verified_dm_pull_peer(&proof.user_id));
+    assert!(roster.lock().unwrap().get(&proof.user_id).is_none());
+}
+
 #[test]
 fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     use crate::eventlog::event::{ConversationId, EventId};

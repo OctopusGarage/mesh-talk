@@ -159,6 +159,7 @@ export function SettingsDialog({
   const [retentionDays, setRetentionDays] = useState(0);
   const [callsEnabled, setCallsEnabled] = useState(false);
   const [postOfficeEnabled, setPostOfficeEnabled] = useState(true);
+  const [bridgeDiscoveryEnabled, setBridgeDiscoveryEnabled] = useState(false);
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
   const [privacy, setPrivacy] = useState(balancedPrivacy);
   const settingsScroll = useRef<HTMLDivElement>(null);
@@ -189,6 +190,7 @@ export function SettingsDialog({
         setRetentionDays(s.retention_days);
         setCallsEnabled(s.calls_enabled);
         setPostOfficeEnabled(s.post_office_enabled);
+        setBridgeDiscoveryEnabled(s.bridge_discovery_enabled);
         setRingtone(asRingtoneId(s.ringtone));
         const policy = privacyFromSettings(s);
         setPrivacy(policy);
@@ -259,6 +261,12 @@ export function SettingsDialog({
     void saveSetting(
       () => settingsApi.update({ post_office_enabled: enabled }),
       () => setPostOfficeEnabled(enabled),
+    );
+  };
+  const onBridgeDiscovery = (enabled: boolean) => {
+    void saveSetting(
+      () => settingsApi.update({ bridge_discovery_enabled: enabled }),
+      () => setBridgeDiscoveryEnabled(enabled),
     );
   };
   const savePrivacy = (patch: Partial<AppSettings>) => {
@@ -473,6 +481,20 @@ export function SettingsDialog({
                     checked={postOfficeEnabled}
                     onCheckedChange={onPostOffice}
                     disabled={!settingsLoaded || saving}
+                  />
+                }
+              />
+              <Row
+                id="setting-bridge-discovery"
+                icon={<ShieldCheck className="h-4 w-4" />}
+                title={t("settings.bridgeDiscovery")}
+                desc={t("settings.bridgeDiscoveryDesc")}
+                control={
+                  <Switch
+                    id="setting-bridge-discovery"
+                    checked={bridgeDiscoveryEnabled}
+                    onCheckedChange={onBridgeDiscovery}
+                    disabled={!settingsLoaded || saving || !postOfficeEnabled}
                   />
                 }
               />

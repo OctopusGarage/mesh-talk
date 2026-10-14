@@ -7,6 +7,8 @@
 //! re-exports, not every internal type.
 
 pub(crate) mod attachment_consent;
+mod bridge_client;
+pub(crate) mod bridge_directory;
 pub(crate) mod call;
 pub(crate) mod channel;
 pub(crate) mod channel_custody;
@@ -77,7 +79,7 @@ pub use node::{
     SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
-pub use postbox::{elected_post_office, run_relay_accept_loop};
+pub use postbox::{elected_post_office, run_bridge_relay_accept_loop, run_relay_accept_loop};
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;

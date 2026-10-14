@@ -183,6 +183,8 @@ export interface AppSettings {
   calls_enabled: boolean;
   /** Use an available LAN post-office relay for offline delivery. */
   post_office_enabled: boolean;
+  /** Share public presence through an opt-in post-office bridge. */
+  bridge_discovery_enabled: boolean;
   /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */
   ringtone: string;
   /** Preset name; custom means individual privacy controls differ from a preset. */

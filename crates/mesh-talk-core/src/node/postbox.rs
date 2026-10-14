@@ -5,7 +5,8 @@
 
 use crate::discovery::roster::{PeerRecord, Roster};
 use crate::identity::device::DeviceIdentity;
-use crate::node::session::{Served, serve_one};
+use crate::node::bridge_directory::{self, BridgeDirectory};
+use crate::node::session::{Served, serve_one, serve_wire_bytes};
 use crate::node::transport::secure_accept;
 use crate::postoffice::{PostOffice, elect};
 use crate::transport::SecureChannel;
@@ -33,16 +34,66 @@ pub fn elected_post_office(roster: &Roster) -> Option<PeerRecord> {
 /// the shared durable store until the peer disconnects. The PostOffice ingests
 /// (validates + persists) pushed events and serves held events to pullers; it
 /// never decrypts. Generic over the IO so it is testable over an in-memory duplex.
-pub async fn serve_relay_connection<IO>(
+#[cfg(test)]
+pub async fn serve_relay_connection<IO>(channel: SecureChannel<IO>, store: Arc<Mutex<PostOffice>>)
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_relay_or_bridge_connection(channel, store, None).await;
+}
+
+async fn serve_relay_or_bridge_connection<IO>(
     mut channel: SecureChannel<IO>,
     store: Arc<Mutex<PostOffice>>,
+    directory: Option<Arc<Mutex<BridgeDirectory>>>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    let first = match tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.recv()).await {
+        Ok(Ok(bytes)) => bytes,
+        _ => return,
+    };
+    if bridge_directory::is_request(&first) {
+        if let Some(directory) = directory {
+            let response = {
+                let peers = directory
+                    .lock()
+                    .expect("bridge directory lock not poisoned")
+                    .register(
+                        channel.peer_identity(),
+                        channel.peer_announcement(),
+                        channel.peer_publicly_visible(),
+                        std::time::Instant::now(),
+                    );
+                peers.and_then(|peers| bridge_directory::encode_response(&peers))
+            };
+            if let Some(response) = response {
+                for page in response {
+                    if !matches!(
+                        tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.send(&page)).await,
+                        Ok(Ok(()))
+                    ) {
+                        break;
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if !matches!(
+        tokio::time::timeout(
+            RELAY_IDLE_TIMEOUT,
+            serve_wire_bytes(&mut channel, &store, &first)
+        )
+        .await,
+        Ok(Ok(Served::Handled(_)))
+    ) {
+        return;
+    }
     // Bound the connection so a buggy/malicious peer can't pin the always-on relay: cap
     // the number of sync rounds (a real reconciliation converges well under this) and
     // drop the connection if the peer goes idle mid-stream.
-    for _ in 0..MAX_RELAY_ROUNDS {
+    for _ in 1..MAX_RELAY_ROUNDS {
         match tokio::time::timeout(RELAY_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
             Ok(Ok(Served::Handled(_))) => continue,
             // peer closed, transport/protocol error, or idle past the timeout
@@ -68,6 +119,31 @@ pub async fn run_relay_accept_loop(
     identity: DeviceIdentity,
     listener: TcpListener,
     store: Arc<Mutex<PostOffice>>,
+) {
+    run_relay_accept_loop_inner(identity, listener, store, None).await;
+}
+
+/// Run an opt-in bridge directory on the existing authenticated relay port.
+/// Sync mailboxes remain available on the same listener.
+pub async fn run_bridge_relay_accept_loop(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+) {
+    run_relay_accept_loop_inner(
+        identity,
+        listener,
+        store,
+        Some(Arc::new(Mutex::new(BridgeDirectory::default()))),
+    )
+    .await;
+}
+
+async fn run_relay_accept_loop_inner(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    directory: Option<Arc<Mutex<BridgeDirectory>>>,
 ) {
     store
         .lock()
@@ -95,10 +171,11 @@ pub async fn run_relay_accept_loop(
         };
         let store = Arc::clone(&store);
         let identity = Arc::clone(&identity);
+        let directory = directory.clone();
         tokio::spawn(async move {
             let _permit = permit; // held for the connection's lifetime, freed on drop
             if let Ok(channel) = secure_accept(stream, &identity).await {
-                serve_relay_connection(channel, store).await;
+                serve_relay_or_bridge_connection(channel, store, directory).await;
             }
         });
     }

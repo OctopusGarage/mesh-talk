@@ -220,8 +220,11 @@ impl Node {
             return Err(error);
         }
         self.privacy.generation.fetch_add(1, Ordering::SeqCst);
-        if !invisible {
+        if invisible {
+            self.clear_bridge_introductions();
+        } else {
             visibility.set_public(true).await;
+            self.bridge_notify.notify_one();
         }
         Ok(())
     }
@@ -795,7 +798,13 @@ impl Node {
                 && (if peer.routes.is_empty() {
                     vec![peer.addr.ip()]
                 } else {
-                    peer.routes.iter().map(|route| route.addr.ip()).collect()
+                    peer.routes
+                        .iter()
+                        .filter(|route| {
+                            route.source != crate::discovery::roster::RouteSource::PostOffice
+                        })
+                        .map(|route| route.addr.ip())
+                        .collect()
                 })
                 .into_iter()
                 .any(|ip| state.routes.record(&peer.public, ip).is_err())
@@ -861,6 +870,7 @@ impl Node {
             candidates.push(preferred);
         }
         let mut current_ports = std::collections::HashMap::new();
+        let mut supplied_relay_address = false;
         if let Some(peer) = self
             .roster
             .lock()
@@ -870,6 +880,15 @@ impl Node {
             .cloned()
         {
             let mut routes = peer.routes;
+            supplied_relay_address = routes.iter().any(|route| {
+                route.source == crate::discovery::roster::RouteSource::PostOffice
+                    && route.addr == addr
+            }) && !routes.iter().any(|route| {
+                route.source != crate::discovery::roster::RouteSource::PostOffice
+                    && route.addr == addr
+            });
+            routes
+                .retain(|route| route.source != crate::discovery::roster::RouteSource::PostOffice);
             current_ports.extend(
                 routes
                     .iter()
@@ -906,7 +925,9 @@ impl Node {
         });
         // The caller may supply a fresh one-off endpoint (for example, a
         // pairing listener) before its signed port reaches the roster.
-        candidates.insert(0, addr);
+        if !supplied_relay_address {
+            candidates.insert(0, addr);
+        }
         let mut unique = std::collections::HashSet::new();
         candidates.retain(|candidate| unique.insert(*candidate));
         candidates.truncate(10);

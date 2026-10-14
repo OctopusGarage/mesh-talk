@@ -323,6 +323,12 @@ conversations from the post office periodically. The desktop trust file restores
 this allowlist at login; the CLI persists explicit `/verify-peer` decisions.
 Discovery or a valid handshake alone never authorizes recipient-initiated DM
 pulls. Unverified peers can still push messages directly.
+An explicit, default-off bridge-discovery preference is a separate authorization:
+while a public node participates in a bridge-enabled post office's authenticated
+directory, its fresh, self-signed introductions can be polled from that post
+office's opaque mailboxes. This does not mark safety numbers verified, persists
+no bridge permission, and expires with the directory membership. Invisible mode
+does not participate. See [routed network discovery](routed-network-discovery.md).
 The sender's retry worker independently attempts direct delivery before relay
 replication, so either side can initiate recovery when a route returns.
 

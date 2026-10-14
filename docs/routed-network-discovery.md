@@ -18,6 +18,19 @@ The desktop runtime refreshes the optional candidate snapshot periodically and o
 
 The CLI's `/probe <ip:discovery-port>` command sends the same identity-free query to an explicit candidate. It is useful for manual diagnosis and for the two-Mac tailnet test; it does not consult or configure Tailscale.
 
+## Opt-in post-office bridge
+
+A post office can additionally run a short-lived peer directory with `--post-office --bridge`. Each participating public node enables **Discover peers through a post office** in desktop Settings or starts the CLI with `--bridge-discovery`. A/B in LAN X discover E over ordinary LAN discovery; C discovers E over an existing routed path such as Tailscale. The clients register their own signed presence over Noise-authenticated TCP. E returns only self-signed proofs from other active participants. It does not forward their private LAN addresses, invent identities, configure the VPN, or bridge IP subnets.
+
+For a stable relay endpoint, start E with `mesh-talk-node --post-office --bridge --port 47475` and its normal keystore, password source, and name flags. The user's LAN and tailnet policy must permit the discovery UDP port (default 47474) and E's TCP port from participating devices. A/B need no Tailscale installation when they can reach E over LAN X; only C and E need a mutually reachable overlay path.
+
+The app stores an introduced peer as a *post-office route*, not as a direct TCP endpoint. An independently discovered LAN or routed endpoint remains preferred. When no direct path exists, the sender uploads recipient-encrypted events to E's existing opaque mailbox; the receiver drains that mailbox. Enabling bridge discovery also permits automatic mailbox recovery from peers currently introduced by that directory, similar to accepting messages from public LAN peers. The bridge setting is off by default, is ignored in invisible mode, and requires relay use to remain enabled. Directory membership expires after 45 seconds without renewal; disabling the setting stops local sharing and recovery immediately, while other clients can retain the last registration until it expires.
+
+This makes C visible to opted-in A/B and A/B visible to opted-in C, with bidirectional encrypted DMs through E when they cannot connect directly. B and D remain ordinary LAN peers unless they each opt in and can reach E (or another bridge is explicitly deployed). E does not make WebRTC calls or arbitrary TCP traffic transit the post office. A reachable E is required for cross-LAN delivery; if E is offline, accepted messages remain queued locally for retry.
+
+`cargo test -p mesh-talk-core --test bridge_cross_lan --features fast-test-kdf -- --ignored` runs a four-process A/B/C/E rig with isolated UDP discovery scopes and checks peer introductions plus DMs in both directions.
+With two Macs already connected to Tailscale, `python3 scripts/e2e-tailnet-bridge.py mac2015` runs A/B/E on the current Mac and C on the remote Mac, checks the same introductions and DMs through E, then removes its temporary profiles. It does not configure Tailscale.
+
 ## Two-Mac tailnet test
 
 With Tailscale already running on both Macs and SSH access to the Intel remote Mac, build the test binaries and run `python3 scripts/e2e-tailnet-macos.py <ssh-host>`. The script uses fresh temporary Mesh Talk identities and different discovery ports to keep LAN multicast from satisfying its routed-path assertions. It checks signed discovery at both Tailscale IPs, Noise-encrypted DMs in both directions, a consented file transfer with matching SHA-256, and the desktop Tailscale inventory adapter's automatic `RoutedQuery` route. It removes the temporary remote binary and profiles afterward. Build instructions are in the script header. The script does not exercise WebRTC media or force a Tailscale DERP path.

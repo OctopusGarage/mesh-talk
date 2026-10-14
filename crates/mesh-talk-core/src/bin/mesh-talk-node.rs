@@ -12,8 +12,8 @@
 use clap::Parser;
 use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
-use mesh_talk_core::node::run_relay_accept_loop;
 use mesh_talk_core::node::{DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket};
+use mesh_talk_core::node::{run_bridge_relay_accept_loop, run_relay_accept_loop};
 use mesh_talk_core::postoffice::PostOffice;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -60,6 +60,12 @@ struct Args {
     /// the post-office role (no DM REPL — it only relays).
     #[arg(long)]
     post_office: bool,
+    /// Share this public node with an opted-in post-office bridge directory.
+    #[arg(long)]
+    bridge_discovery: bool,
+    /// Serve an opt-in bridge directory alongside the post-office mailbox.
+    #[arg(long, requires = "post_office")]
+    bridge: bool,
 }
 
 /// Account addressing is explicit: a full crypto account id, never a local
@@ -334,6 +340,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
     node.configure_privacy(data_dir, password, &announce, visibility.clone())?;
+    node.set_bridge_discovery_enabled(args.bridge_discovery);
 
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
@@ -394,6 +401,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 node.drain_from_post_office().await;
                 tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)).await;
+            }
+        });
+    }
+    if args.bridge_discovery {
+        let node = Arc::clone(&node);
+        tokio::spawn(async move {
+            loop {
+                node.refresh_bridge_directory().await;
+                tokio::time::sleep(Duration::from_secs(10)).await;
             }
         });
     }
@@ -624,7 +640,11 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Serve relay connections until killed. This loop never returns; the trailing
     // Ok(()) is unreachable in practice (the process is stopped by a signal).
-    run_relay_accept_loop(transport_identity, listener, store).await;
+    if args.bridge {
+        run_bridge_relay_accept_loop(transport_identity, listener, store).await;
+    } else {
+        run_relay_accept_loop(transport_identity, listener, store).await;
+    }
     Ok(())
 }
 

@@ -867,6 +867,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         .get_for_owner(&account_id)
                     {
                         node.set_post_office_enabled(settings.post_office_enabled);
+                        node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
                     }
                 }
                 // Keep lifecycle diagnostics without persisting an account identifier.

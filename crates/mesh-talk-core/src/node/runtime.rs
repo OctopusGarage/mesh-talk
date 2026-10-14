@@ -489,6 +489,18 @@ impl NodeRuntime {
                 let node = Arc::clone(&node);
                 tasks.push(tokio::spawn(async move {
                     loop {
+                        node.refresh_bridge_directory().await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+                            _ = node.bridge_notify.notified() => {},
+                        }
+                    }
+                }));
+            }
+            {
+                let node = Arc::clone(&node);
+                tasks.push(tokio::spawn(async move {
+                    loop {
                         node.pull_pending_files().await;
                         tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
                     }
