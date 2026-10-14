@@ -11,6 +11,9 @@ the real model-backed AI eval. The canonical executable suite is
 | MT-AI-003 | `.claude/agents/bug-hunter.md` | Reports only verified bugs with repro, severity, blast radius, and fix direction. |
 | MT-AI-004 | `AGENTS.md` | Project guidance preserves module boundaries, validation commands, and security expectations. |
 | MT-AI-005 | `docs/evals/delivery-ai-regression.md` | Delivery guidance distinguishes deterministic and model-backed evaluation, trigger rules, and human review. |
+| MT-AI-006 | `docs/post-office-metadata-privacy.md` | Relay privacy claims match visible routing metadata, custody limits, key compromise, and V1 migration behavior. |
+| MT-AI-007 | `docs/post-office-macos-service.md` | Intel Mac service setup, credential handling, health checks, lifecycle limits, and separate cross-machine offer and file-byte relay verification. |
+| MT-AI-008 | `docs/post-office-windows-service.md` | Windows Scheduled Task setup, credential and lock handling, health checks, and separate cross-machine delivery layers. |
 
 Run:
 

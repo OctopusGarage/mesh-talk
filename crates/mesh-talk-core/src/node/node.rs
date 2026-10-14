@@ -14,6 +14,7 @@ use crate::eventlog::persist::PersistentEventLog;
 use crate::identity::account::Account;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::channel::{ChannelBook, ReceivedChannelMessage};
+use crate::node::channel_custody::ChannelCustodyStore;
 use crate::node::channel_senders::ChannelSenderStore;
 use crate::node::dm_ratchet::DmRatchet;
 use crate::node::filebook::{FileBook, ReceivedFile};
@@ -266,6 +267,11 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) accepted_hook: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
+    /// Host preference. Relay selection and every relay dial consult this live flag.
+    pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
+    /// Session-only IDs of relay envelopes already processed. Losing this cache
+    /// on restart causes a safe re-download, never a lost inner event.
+    pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
     // private to the `node` module (no wider exposure).
@@ -297,6 +303,10 @@ pub struct Node {
     /// lets us resume our sending chains so receivers (first-wins on chains they hold)
     /// can still decrypt our post-restart messages.
     pub(in crate::node) channel_senders: Mutex<ChannelSenderStore>,
+    /// Last confirmed durable holders of our own channel events.
+    pub(in crate::node) channel_custody: Mutex<ChannelCustodyStore>,
+    #[cfg(test)]
+    pub(in crate::node) channel_last_send: Mutex<Option<(usize, u64)>>,
     pub(in crate::node) emitted: Mutex<HashSet<EventId>>,
     pub(in crate::node) file_incoming: mpsc::UnboundedSender<ReceivedFile>,
     pub(in crate::node) files: Mutex<FileBook>,
@@ -325,6 +335,9 @@ pub struct Node {
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
+    /// Exact device fingerprints the host user has safety-number verified for
+    /// recipient-initiated DM catch-up. Discovery alone never adds entries.
+    pub(in crate::node) verified_dm_pull_peers: Mutex<HashSet<UserId>>,
     pub(in crate::node) delivery_control_ids:
         Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
     pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
@@ -436,6 +449,7 @@ impl Node {
             sessions_res,
             received_res,
             csenders_res,
+            custody_res,
             recv_files_res,
             profiles_res,
             recalls_res,
@@ -450,6 +464,8 @@ impl Node {
             let h_recv = s.spawn(|| ReceivedLog::open(&dir.join("received.log"), password));
             let h_csnd =
                 s.spawn(|| ChannelSenderStore::open(&dir.join("channel.senders"), password));
+            let h_custody =
+                s.spawn(|| ChannelCustodyStore::open(&dir.join("channel.custody"), password));
             // Durable record of surfaced file manifests (reuses the ReceivedLog format),
             // so the file book's emitted set survives restart WITHOUT marking unopened
             // manifests as emitted — see the seeding below.
@@ -492,6 +508,7 @@ impl Node {
                 h_sess.join(),
                 h_recv.join(),
                 h_csnd.join(),
+                h_custody.join(),
                 h_files.join(),
                 h_profiles.join(),
                 h_recalls.join(),
@@ -508,6 +525,7 @@ impl Node {
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -659,6 +677,9 @@ impl Node {
             recovery_contacts,
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
             channel_senders: Mutex::new(channel_senders),
+            channel_custody: Mutex::new(channel_custody),
+            #[cfg(test)]
+            channel_last_send: Mutex::new(None),
             emitted: Mutex::new(emitted),
             file_incoming,
             files: Mutex::new(files),
@@ -671,8 +692,11 @@ impl Node {
             outgoing_file_consents: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
             delivery_status_notify: tokio::sync::Notify::new(),
+            verified_dm_pull_peers: Mutex::new(HashSet::new()),
             delivery_control_ids: Mutex::new(delivery_control_ids),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
+            post_office_enabled: std::sync::atomic::AtomicBool::new(true),
+            opaque_seen: Mutex::new(HashMap::new()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
@@ -782,6 +806,13 @@ impl Node {
         book.state(&channel)
             .map(|s| s.members().to_vec())
             .unwrap_or_default()
+    }
+
+    pub fn channel_replica_enabled(&self, channel: ConversationId, member: &str) -> bool {
+        self.channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .replica_enabled(channel, member)
     }
 
     pub fn channel_pending_members(&self, channel: ConversationId) -> Vec<String> {

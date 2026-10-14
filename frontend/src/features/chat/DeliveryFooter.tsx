@@ -23,7 +23,23 @@ export function DeliveryFooter({
   const detail = delivery
     ? t(`message.delivery.${message.file ? "fileHelp" : "help"}`)
     : "";
-  if (!showTime && !message.pending && !delivery) return null;
+  const custody =
+    message.fromMe &&
+    isChannel &&
+    message.id &&
+    !message.file &&
+    !message.pending &&
+    !message.failed
+      ? Math.min(message.replicas ?? 0, 2)
+      : undefined;
+  const custodyLabel =
+    custody === undefined
+      ? ""
+      : t(
+          `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
+        );
+  if (!showTime && !message.pending && !delivery && custody === undefined)
+    return null;
   return (
     <span className="mt-1 flex items-center gap-1 px-1 text-xs tabular-nums text-muted-foreground">
       {showTime && (
@@ -47,6 +63,28 @@ export function DeliveryFooter({
             className="pointer-events-none absolute bottom-full right-0 z-10 mb-1 hidden w-56 rounded border bg-popover p-2 font-sans text-xs text-popover-foreground shadow group-hover:block group-focus:block"
           >
             {label} · {detail}
+          </span>
+        </span>
+      )}
+      {custody !== undefined && (
+        <span
+          className="group relative inline-flex items-center gap-1"
+          tabIndex={0}
+          role="img"
+          aria-label={custodyLabel}
+          aria-describedby={tooltip}
+          data-custody={custody}
+        >
+          <span aria-hidden="true">
+            {custody === 0 ? "◷" : custody === 1 ? "✓" : "✓✓"}
+          </span>
+          {custody === 0 && <span aria-hidden="true">{custodyLabel}</span>}
+          <span
+            id={tooltip}
+            role="tooltip"
+            className="pointer-events-none absolute bottom-full right-0 z-10 mb-1 hidden w-56 rounded border bg-popover p-2 font-sans text-xs text-popover-foreground shadow group-hover:block group-focus:block"
+          >
+            {custodyLabel} · {t("message.custody.help")}
           </span>
         </span>
       )}

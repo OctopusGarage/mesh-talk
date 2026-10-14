@@ -592,6 +592,12 @@ impl Node {
         Ok(())
     }
     pub(in crate::node) fn relay_allowed(&self, public: &PublicIdentity) -> bool {
+        if !self
+            .post_office_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
         let announce = self
             .roster
             .lock()

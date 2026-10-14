@@ -100,3 +100,35 @@ test("module coverage manifest includes every core module advertised in AGENTS.m
     assert.ok(modules.has(expected), `missing module coverage: ${expected}`);
   }
 });
+
+test("relay privacy eval is registered against the current design document", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const privacy = suite.cases.find((entry) => entry.id === "MT-AI-006");
+  assert.equal(privacy?.subject_file, "docs/post-office-metadata-privacy.md");
+  assert.ok(privacy.rubric.some((item) => item.includes("authenticated connections")));
+  assert.ok(privacy.rubric.some((item) => item.includes("forward secrecy")));
+});
+
+test("macOS post-office runbook eval covers credentials and delivery", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const service = suite.cases.find((entry) => entry.id === "MT-AI-007");
+  assert.equal(service?.subject_file, "docs/post-office-macos-service.md");
+  assert.ok(service.rubric.some((item) => item.includes("password")));
+  assert.ok(service.rubric.some((item) => item.includes("sender")));
+  assert.ok(service.rubric.some((item) => item.includes("encrypted file bytes")));
+});
+
+test("Windows post-office runbook eval covers task recovery and delivery", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const service = suite.cases.find((entry) => entry.id === "MT-AI-008");
+  assert.equal(service?.subject_file, "docs/post-office-windows-service.md");
+  assert.ok(service.rubric.some((item) => item.includes("password")));
+  assert.ok(service.rubric.some((item) => item.includes("stale lock")));
+  assert.ok(service.rubric.some((item) => item.includes("encrypted file bytes")));
+});

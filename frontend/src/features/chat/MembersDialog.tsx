@@ -21,7 +21,7 @@ import {
 import { useAuth } from "@/store/auth";
 import { displayName, useChat } from "@/store/chat";
 import { chat as chatApi } from "@/lib/api";
-import type { ChannelActivityInfo } from "@/lib/types";
+import type { ChannelActivityInfo, ChannelMemberInfo } from "@/lib/types";
 import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visiblePeers } from "@/lib/contactVisibility";
@@ -34,8 +34,12 @@ const SELF_ONLINE = presenceStatus({ online: true, last_seen_secs: 0 });
 export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
-  const members = useChat((s) => s.members);
+  const storedMembers = useChat((s) => s.members);
   const active = useChat((s) => s.active);
+  const [liveMembers, setLiveMembers] = useState<ChannelMemberInfo[] | null>(
+    null,
+  );
+  const members = liveMembers ?? storedMembers;
   const animateMembers = motionOK && members.length <= MAX_STAGGER_ITEMS;
   const channelOwner = useChat((s) => s.channelOwner);
   const peers = useChat((s) => s.peers);
@@ -69,6 +73,27 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [activity, setActivity] = useState<ChannelActivityInfo[]>([]);
+  const [replicaOverride, setReplicaOverride] = useState<boolean | null>(null);
+  const [replicaBusy, setReplicaBusy] = useState(false);
+  const [replicaError, setReplicaError] = useState(false);
+  useEffect(() => {
+    setReplicaOverride(null);
+    setReplicaError(false);
+    setLiveMembers(null);
+  }, [active?.id]);
+  useEffect(() => {
+    if (!open || active?.kind !== "channel") return;
+    let live = true;
+    void chatApi.channelMembers(active.id).then(
+      (info) => {
+        if (live) setLiveMembers(info.members);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [open, active?.id, active?.kind]);
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
     let live = true;
@@ -226,6 +251,14 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             </span>
           </DialogTitle>
           <DialogDescription>{t("members.description")}</DialogDescription>
+          <p className="text-xs text-muted-foreground">
+            {t("members.replicaHelp")}
+          </p>
+          {replicaError && (
+            <p role="alert" className="text-sm text-destructive">
+              {t("members.replicaError")}
+            </p>
+          )}
         </DialogHeader>
 
         <motion.div
@@ -259,6 +292,10 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 ? myAccountId || m.user_id
                 : (accountId ?? m.user_id);
               const memberIsOwner = m.user_id === channelOwner;
+              const replicaEnabled =
+                isSelf && replicaOverride !== null
+                  ? replicaOverride
+                  : m.replica_enabled !== false;
               // Tapping a member opens a 1:1 chat with them — but only when it's someone else
               // AND we know their account (a DM is account-addressed; an offline member we've
               // never met has no known account, so the row is non-interactive).
@@ -315,6 +352,41 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                     <span className="shrink-0 rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">
                       {t("members.pendingAcceptance")}
                     </span>
+                  )}
+                  {!replicaEnabled && (
+                    <span
+                      className="shrink-0 rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground"
+                      data-testid={`member-replica-disabled-${m.user_id}`}
+                    >
+                      {t("members.replicaDisabled")}
+                    </span>
+                  )}
+                  {isSelf && !dissolved && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={replicaBusy || m.pending}
+                      onClick={async () => {
+                        if (active?.kind !== "channel") return;
+                        setReplicaBusy(true);
+                        setReplicaError(false);
+                        try {
+                          await chatApi.setChannelReplicaEnabled(
+                            active.id,
+                            !replicaEnabled,
+                          );
+                          setReplicaOverride(!replicaEnabled);
+                        } catch {
+                          setReplicaError(true);
+                        } finally {
+                          setReplicaBusy(false);
+                        }
+                      }}
+                    >
+                      {replicaEnabled
+                        ? t("members.disableReplica")
+                        : t("members.enableReplica")}
+                    </Button>
                   )}
                   {/* Only the owner may remove members — the core rejects a non-owner's kick. */}
                   {isOwner && !memberIsOwner && !m.pending && (

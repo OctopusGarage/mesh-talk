@@ -26,6 +26,7 @@ use crate::eventlog::sync::SyncStore;
 use crate::storage::record_log::EncryptedRecordLog;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const MAGIC: &[u8; 6] = b"MTLOG1";
@@ -43,6 +44,7 @@ pub struct PersistentEventLog {
     file: EncryptedRecordLog<Event>,
     pending_profile_compactions: HashSet<ConversationId>,
     last_profile_compactions: HashMap<ConversationId, Instant>,
+    fingerprint_cache: Mutex<HashMap<ConversationId, ([u8; 32], usize)>>,
 }
 
 impl PersistentEventLog {
@@ -69,6 +71,7 @@ impl PersistentEventLog {
             file,
             pending_profile_compactions: HashSet::new(),
             last_profile_compactions: HashMap::new(),
+            fingerprint_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -78,6 +81,10 @@ impl PersistentEventLog {
             return Ok(AppendOutcome::Duplicate);
         }
         self.file.append(&event)?;
+        self.fingerprint_cache
+            .get_mut()
+            .expect("fingerprint cache lock not poisoned")
+            .remove(&event.conversation_id);
         self.log.index_trusted(event);
         Ok(AppendOutcome::Appended)
     }
@@ -94,6 +101,10 @@ impl PersistentEventLog {
             return Ok(AppendOutcome::Duplicate);
         }
         self.file.append_durable(&event)?;
+        self.fingerprint_cache
+            .get_mut()
+            .expect("fingerprint cache lock not poisoned")
+            .remove(&event.conversation_id);
         self.log.index_trusted(event);
         Ok(AppendOutcome::Appended)
     }
@@ -121,6 +132,10 @@ impl PersistentEventLog {
             validation.append(event.clone())?;
         }
         self.file.append_batch_atomic(events)?;
+        self.fingerprint_cache
+            .get_mut()
+            .expect("fingerprint cache lock not poisoned")
+            .remove(&first.conversation_id);
         for event in events {
             self.log.index_trusted(event.clone());
         }
@@ -130,11 +145,24 @@ impl PersistentEventLog {
     pub fn has(&self, id: &EventId) -> bool {
         self.log.has(id)
     }
+    pub fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v2(conversation)
+    }
     pub fn get(&self, id: &EventId) -> Option<&Event> {
         self.log.get(id)
     }
     pub fn events(&self, conversation: &ConversationId) -> Vec<&Event> {
         self.log.events(conversation)
+    }
+    pub fn message_keys_after(
+        &self,
+        conversation: ConversationId,
+        author: crate::eventlog::event::Author,
+        cursor: Option<(u64, EventId)>,
+        limit: usize,
+    ) -> Vec<(u64, EventId)> {
+        self.log
+            .message_keys_after(conversation, author, cursor, limit)
     }
     pub fn heads(&self, conversation: &ConversationId) -> Vec<EventId> {
         self.log.heads(conversation)
@@ -159,6 +187,23 @@ impl PersistentEventLog {
     /// Number of events held for `conversation`.
     pub fn conversation_len(&self, conversation: &ConversationId) -> usize {
         self.log.events(conversation).len()
+    }
+
+    pub fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+        let mut cache = self
+            .fingerprint_cache
+            .lock()
+            .expect("fingerprint cache lock not poisoned");
+        *cache.entry(*conversation).or_insert_with(|| {
+            let ids: Vec<_> = self
+                .log
+                .events(conversation)
+                .iter()
+                .map(|event| event.id)
+                .collect();
+            let len = ids.len();
+            (crate::eventlog::sync::fingerprint(ids), len)
+        })
     }
 
     /// Mark a conversation for profile compaction. Requests are coalesced until the
@@ -230,6 +275,10 @@ impl PersistentEventLog {
             log.index_trusted(event);
         }
         self.log = log;
+        self.fingerprint_cache
+            .get_mut()
+            .expect("fingerprint cache lock not poisoned")
+            .clear();
         Ok(dropped)
     }
 
@@ -261,6 +310,10 @@ impl PersistentEventLog {
             log.index_trusted(event);
         }
         self.log = log;
+        self.fingerprint_cache
+            .get_mut()
+            .expect("fingerprint cache lock not poisoned")
+            .remove(conversation);
         Ok(dropped)
     }
 
@@ -322,6 +375,10 @@ impl PersistentEventLog {
             log.index_trusted(event);
         }
         self.log = log;
+        self.fingerprint_cache
+            .get_mut()
+            .expect("fingerprint cache lock not poisoned")
+            .remove(conversation);
         Ok(drop.len())
     }
 }
@@ -333,6 +390,12 @@ const COMPACT_PROFILE_MIN: usize = 8;
 // NOTE: this impl is structurally identical to `impl SyncStore for EventLog`
 // in sync.rs — keep the two in sync.
 impl SyncStore for PersistentEventLog {
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        PersistentEventLog::requires_channel_v2(self, conversation)
+    }
+    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+        PersistentEventLog::fingerprint_and_len(self, conversation)
+    }
     fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
         self.events(conversation).iter().map(|e| e.id).collect()
     }
@@ -370,6 +433,50 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn cached_fingerprint_tracks_append_and_whole_file_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("events.log"), "pw").unwrap();
+        let conv = ConversationId::new([1u8; 32]);
+        let empty = log.fingerprint_and_len(&conv);
+        assert_eq!(empty.1, 0);
+        assert_eq!(log.fingerprint_and_len(&conv), empty);
+        let author = DeviceIdentity::generate();
+        log.append(mk(&author, 1, 1, b"one")).unwrap();
+        let first = log.fingerprint_and_len(&conv);
+        assert_eq!(first.1, 1);
+        assert_ne!(first.0, empty.0);
+        log.append(mk(&author, 2, 2, b"two")).unwrap();
+        assert_eq!(log.fingerprint_and_len(&conv).1, 2);
+        log.drop_conversation(&conv).unwrap();
+        assert_eq!(log.fingerprint_and_len(&conv), empty);
+    }
+
+    #[test]
+    fn authored_message_cursor_rebuilds_on_reopen_and_drops_with_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.log");
+        let author = DeviceIdentity::generate();
+        let conversation = ConversationId::new([1; 32]);
+        let event = mk(&author, 1, 1, b"retained");
+        let key = (1, event.id);
+        let by = crate::eventlog::event::Author::from_ed25519(author.public().ed25519_pub);
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        log.append(event).unwrap();
+        drop(log);
+        let mut reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.message_keys_after(conversation, by, None, 1),
+            vec![key]
+        );
+        reopened.drop_conversation(&conversation).unwrap();
+        assert!(
+            reopened
+                .message_keys_after(conversation, by, None, 1)
+                .is_empty()
+        );
     }
 
     #[test]

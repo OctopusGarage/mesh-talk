@@ -2,7 +2,9 @@
 //! persistent identity, runs signed-announce LAN discovery and a TCP listener,
 //! and drives 1:1 DMs, channels, and file transfers from a line-based REPL
 //! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
-//! `/channel-new <name> <member-prefix>`, `/channel-msg <chan-id-prefix> <text>`,
+//! `/channel-new <name> <member-prefix>...`, `/channel-msg <chan-id-prefix> <text>`,
+//! `/channel-replica <chan-id-prefix> on|off`,
+//! `/verify-peer <full-device-fingerprint>`,
 //! `/sendfile <peer-prefix> <path>`, `/quit`), printing inbound DMs, channel
 //! messages, and files as they arrive.
 
@@ -14,6 +16,7 @@ use mesh_talk_core::node::{
     DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket, spawn_discovery,
 };
 use mesh_talk_core::postoffice::PostOffice;
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -34,9 +37,16 @@ struct Args {
     /// Path to the encrypted identity keystore (created if absent).
     #[arg(long)]
     keystore: String,
-    /// Password that encrypts the keystore.
-    #[arg(long)]
-    password: String,
+    /// Password that encrypts the keystore. Prefer --password-file for a service.
+    #[arg(
+        long,
+        required_unless_present = "password_file",
+        conflicts_with = "password_file"
+    )]
+    password: Option<String>,
+    /// Read the keystore password from a private regular file (mode 0600 on Unix).
+    #[arg(long, conflicts_with = "password")]
+    password_file: Option<std::path::PathBuf>,
     /// Display name advertised to peers.
     #[arg(long)]
     name: String,
@@ -97,6 +107,41 @@ fn resolve_recipient(peers: &[PeerRecord], prefix: &str) -> Result<UserId, Resol
         1 => Ok(matches.into_iter().next().expect("len checked == 1")),
         n => Err(ResolveError::Ambiguous(n)),
     }
+}
+
+fn verified_peer_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("verified-dm-peers")
+}
+
+fn canonical_verified_peer(fingerprint: &str) -> Option<String> {
+    (fingerprint.len() == 32 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| fingerprint.to_ascii_lowercase())
+}
+
+fn load_verified_peers(path: &std::path::Path) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(canonical_verified_peer)
+        .collect()
+}
+
+fn save_verified_peers(path: &std::path::Path, peers: &BTreeSet<String>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file =
+        tempfile::NamedTempFile::new_in(path.parent().unwrap_or(std::path::Path::new(".")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    for peer in peers {
+        writeln!(file, "{peer}")?;
+    }
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Write one line to stdout and FLUSH it. Piped stdout is block-buffered, so a
@@ -180,10 +225,32 @@ fn pid_is_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// Non-unix fallback: assume any recorded holder is alive (no cheap PID probe), so the
-/// lock is strict. A leftover lockfile must then be removed by hand — surfaced in the
-/// error message.
-#[cfg(not(unix))]
+/// Windows service managers terminate a process without running `Drop`, so a PID
+/// in the lockfile must be checked before refusing a restart. Failure to open or
+/// query a process is treated as alive: only a confirmed exit makes it safe to
+/// reclaim the lock.
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: this opens a query-only handle for a numeric PID, checks its exit
+    // code, and closes the handle. No process memory is accessed or modified.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return std::io::Error::last_os_error().raw_os_error()
+            != Some(ERROR_INVALID_PARAMETER as i32);
+    }
+    let mut exit_code = 0;
+    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    unsafe { CloseHandle(handle) };
+    queried == 0 || exit_code == STILL_ACTIVE as u32
+}
+
+/// Other platforms conservatively retain a lock whose holder cannot be probed.
+#[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: u32) -> bool {
     true
 }
@@ -196,7 +263,10 @@ impl Drop for DataDirLock {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if let Some(path) = args.password_file.as_deref() {
+        args.password = Some(read_password_file(path)?);
+    }
 
     // Fail fast if another CLI node is already using this keystore's data dir (the GUI is
     // guarded by single_instance; the CLI isn't). Held for the process lifetime via Drop.
@@ -209,11 +279,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.post_office {
         return run_post_office(args).await;
     }
+    let password = args
+        .password
+        .as_deref()
+        .expect("Clap requires a password source");
 
     // Persistent identity (created on first run).
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
-        &args.password,
+        password,
     )?;
     let user_id = identity.public().user_id();
 
@@ -223,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("account.keystore");
     let account =
-        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, &args.password)?;
+        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, password)?;
 
     // TCP listener for peer connections; dual-stack (IPv6 + IPv4-mapped, falling back to
     // IPv4) so the node is reachable over IPv6/link-local too. Resolve the actual port.
@@ -253,10 +327,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_tx,
         &log_path,
         &sent_path,
-        &args.password,
+        password,
     )?;
+    let verified_path = verified_peer_path(data_dir);
+    let mut verified_peers = load_verified_peers(&verified_path);
+    node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
-    node.configure_privacy(data_dir, &args.password, &announce, visibility.clone())?;
+    node.configure_privacy(data_dir, password, &announce, visibility.clone())?;
 
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
@@ -347,6 +424,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                 }
             }
+        } else if let Some(fingerprint) = line.strip_prefix("/verify-peer ") {
+            let fingerprint = fingerprint.trim();
+            let Some(fingerprint) = canonical_verified_peer(fingerprint) else {
+                emit(
+                    "usage: /verify-peer <full-device-fingerprint> (compare it out of band first)",
+                );
+                continue;
+            };
+            let mut next = verified_peers.clone();
+            next.insert(fingerprint);
+            match save_verified_peers(&verified_path, &next) {
+                Ok(()) => {
+                    verified_peers = next;
+                    node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
+                    emit("peer verified for automatic DM recovery");
+                }
+                Err(error) => emit(&format!("could not save verification: {error}")),
+            }
+        } else if line == "/verify-peer" {
+            emit("usage: /verify-peer <full-device-fingerprint> (compare it out of band first)");
         } else if let Some(rest) = line.strip_prefix("/msg ") {
             handle_msg(&node, &roster, rest);
         } else if let Some(rest) = line.strip_prefix("/account-msg ") {
@@ -368,6 +465,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_channel_new(&node, &roster, rest);
         } else if let Some(rest) = line.strip_prefix("/channel-msg ") {
             handle_channel_msg(&node, rest);
+        } else if let Some(rest) = line.strip_prefix("/channel-replica ") {
+            handle_channel_replica(&node, rest);
         } else if let Some(rest) = line.strip_prefix("/sendfile ") {
             handle_sendfile(&node, &roster, rest);
         } else if let Some((accept, rest)) = line
@@ -393,11 +492,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if !line.is_empty() {
             emit(
-                "commands: /peers, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>, /channel-msg <chan-id-prefix> <text>, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+                "commands: /peers, /verify-peer <full-device-fingerprint>, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
             );
         }
     }
     Ok(())
+}
+
+fn read_password_file(path: &std::path::Path) -> std::io::Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "password file must be a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "password file must be readable only by its owner (mode 0600)",
+            ));
+        }
+    }
+    let password = std::fs::read_to_string(path)?;
+    let password = password.trim_end_matches(['\r', '\n']);
+    if password.is_empty() || password.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "password file must contain one nonempty line",
+        ));
+    }
+    Ok(password.to_string())
 }
 
 /// Run as a post office: load the identity, advertise the post-office role,
@@ -409,9 +537,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// line can take ~15s to appear on first run. Tooling that waits for a relay to
 /// come up should poll for the startup line, not fixed-sleep.
 async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    let password = args
+        .password
+        .as_deref()
+        .expect("Clap requires a password source");
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
-        &args.password,
+        password,
     )?;
     let user_id = identity.public().user_id();
 
@@ -421,7 +553,7 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("account.keystore");
     let account =
-        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, &args.password)?;
+        mesh_talk_core::identity::account_keystore::load_or_create(&account_path, password)?;
 
     let listener = mesh_talk_core::node::bind_dual_stack_listener(args.port).await?;
     let tcp_port = listener.local_addr()?.port();
@@ -440,7 +572,7 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .join("relay.log");
     let store = Arc::new(Mutex::new(PostOffice::open(
         &relay_path,
-        &args.password,
+        password,
         identity,
     )?));
 
@@ -536,42 +668,48 @@ fn handle_history(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
     }
 }
 
-/// Parse and dispatch `/channel-new <name> <member-prefix>`: resolve one peer to
-/// include as a member, create the channel (the creator is added automatically),
+/// Parse and dispatch `/channel-new <name> <member-prefix>...`: resolve peers to
+/// include as members, create the channel (the creator is added automatically),
 /// then print the new channel id (hex). Runs on a spawned task (create distributes
 /// sender keys to members over the network).
 fn handle_channel_new(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
     let mut parts = rest.split_whitespace();
     let name = parts.next().unwrap_or("").to_string();
-    let prefix = parts.next().unwrap_or("").to_string();
-    if name.is_empty() || prefix.is_empty() {
-        emit("usage: /channel-new <name> <member-prefix>");
+    let prefixes: Vec<_> = parts.collect();
+    if name.is_empty() || prefixes.is_empty() {
+        emit("usage: /channel-new <name> <member-prefix>...");
         return;
     }
-    // Resolve the member under the roster lock, then DROP it before the async call
+    // Resolve members under the roster lock, then DROP it before the async call
     // (the node locks the roster again; std Mutex is not reentrant).
-    let member = {
+    let members = {
         let roster = roster.lock().expect("roster mutex not poisoned");
         let peers = roster.peers();
-        match resolve_recipient(&peers, &prefix) {
-            Ok(uid) => roster.get(&uid).map(|p| p.public.clone()),
-            Err(ResolveError::NotFound) => {
-                emit(&format!("no peer matches prefix '{prefix}'"));
-                return;
-            }
-            Err(ResolveError::Ambiguous(n)) => {
-                emit(&format!("'{prefix}' matches {n} peers; be more specific"));
-                return;
+        let mut members = Vec::new();
+        for prefix in prefixes {
+            match resolve_recipient(&peers, prefix) {
+                Ok(uid) => {
+                    let Some(peer) = roster.get(&uid) else {
+                        emit("peer vanished from roster");
+                        return;
+                    };
+                    members.push(peer.public.clone());
+                }
+                Err(ResolveError::NotFound) => {
+                    emit(&format!("no peer matches prefix '{prefix}'"));
+                    return;
+                }
+                Err(ResolveError::Ambiguous(n)) => {
+                    emit(&format!("'{prefix}' matches {n} peers; be more specific"));
+                    return;
+                }
             }
         }
-    };
-    let Some(member) = member else {
-        emit("peer vanished from roster");
-        return;
+        members
     };
     let node = Arc::clone(node);
     tokio::spawn(async move {
-        match node.create_channel(&name, vec![member]).await {
+        match node.create_channel(&name, members).await {
             Ok(id) => emit(&format!("channel {} created", hex::encode(id.as_bytes()))),
             Err(e) => emit(&format!("channel create failed: {e}")),
         }
@@ -612,6 +750,55 @@ fn handle_channel_msg(node: &Arc<Node>, rest: &str) {
     tokio::spawn(async move {
         if let Err(e) = node.send_channel_message(channel, text.as_bytes()).await {
             emit(&format!("channel send failed: {e}"));
+        }
+    });
+}
+
+fn parse_replica_command(rest: &str) -> Option<(&str, bool)> {
+    let mut parts = rest.split_whitespace();
+    let prefix = parts.next()?;
+    let enabled = match parts.next()? {
+        "on" => true,
+        "off" => false,
+        _ => return None,
+    };
+    parts.next().is_none().then_some((prefix, enabled))
+}
+
+fn handle_channel_replica(node: &Arc<Node>, rest: &str) {
+    let Some((prefix, enabled)) = parse_replica_command(rest) else {
+        emit("usage: /channel-replica <chan-id-prefix> on|off");
+        return;
+    };
+    let matches: Vec<_> = node
+        .list_channels()
+        .into_iter()
+        .filter(|channel| hex::encode(channel.id.as_bytes()).starts_with(prefix))
+        .map(|channel| channel.id)
+        .collect();
+    let channel = match matches.as_slice() {
+        [] => {
+            emit(&format!("no channel matches prefix '{prefix}'"));
+            return;
+        }
+        [channel] => *channel,
+        _ => {
+            emit(&format!(
+                "'{prefix}' matches {} channels; be more specific",
+                matches.len()
+            ));
+            return;
+        }
+    };
+    let node = Arc::clone(node);
+    tokio::spawn(async move {
+        match node.set_channel_replica_enabled(channel, enabled).await {
+            Ok(()) => emit(&format!(
+                "channel {} replica {}",
+                hex::encode(channel.as_bytes()),
+                if enabled { "enabled" } else { "disabled" }
+            )),
+            Err(error) => emit(&format!("channel replica change failed: {error}")),
         }
     });
 }
@@ -658,6 +845,111 @@ mod tests {
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;
     use std::time::Instant;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_reclaims_dead_pid_but_rejects_live_holder() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join("node.lock");
+        assert!(pid_is_alive(std::process::id()));
+        assert!(!pid_is_alive(0));
+        std::fs::write(&lock_path, "0").unwrap();
+        let lock = DataDirLock::acquire(root.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).unwrap(),
+            std::process::id().to_string()
+        );
+        assert_eq!(
+            DataDirLock::acquire(root.path()).err().unwrap().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        drop(lock);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn cli_accepts_exactly_one_password_source() {
+        let base = [
+            "mesh-talk-node",
+            "--keystore",
+            "node.keystore",
+            "--name",
+            "relay",
+        ];
+        assert!(Args::try_parse_from(base).is_err());
+        assert!(
+            Args::try_parse_from([
+                "mesh-talk-node",
+                "--keystore",
+                "node.keystore",
+                "--name",
+                "relay",
+                "--password-file",
+                "secret.txt",
+                "--post-office",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "mesh-talk-node",
+                "--keystore",
+                "node.keystore",
+                "--name",
+                "relay",
+                "--password",
+                "pw",
+                "--password-file",
+                "secret.txt",
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn password_file_requires_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("password");
+        std::fs::write(&path, b"private-value\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_password_file(&path).unwrap(), "private-value");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            read_password_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&path, b"line one\nline two\n").unwrap();
+        assert_eq!(
+            read_password_file(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn verified_peer_fingerprint_is_canonical_across_cli_restart() {
+        let upper = "AB".repeat(16);
+        let lower = "ab".repeat(16);
+        assert_eq!(canonical_verified_peer(&upper), Some(lower.clone()));
+        assert_eq!(canonical_verified_peer("not-a-device-id"), None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = verified_peer_path(dir.path());
+        std::fs::write(&path, format!("{upper}\ninvalid\n")).unwrap();
+        assert_eq!(load_verified_peers(&path), BTreeSet::from([lower.clone()]));
+        save_verified_peers(&path, &load_verified_peers(&path)).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{lower}\n"));
+    }
+
+    #[test]
+    fn channel_replica_parser_accepts_only_a_prefix_and_on_or_off() {
+        assert_eq!(parse_replica_command("abc on"), Some(("abc", true)));
+        assert_eq!(parse_replica_command("abc off"), Some(("abc", false)));
+        for input in ["", "abc", "abc maybe", "abc on extra"] {
+            assert_eq!(parse_replica_command(input), None);
+        }
+    }
 
     #[test]
     fn account_message_parser_requires_a_full_account_and_preserves_text() {

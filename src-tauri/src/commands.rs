@@ -6,6 +6,7 @@ use crate::chat_commands::RuntimeAuthority;
 use crate::services::auth_service::AuthError;
 use crate::services::user::User;
 use crate::state::AppState;
+use tauri::Manager;
 
 /// An IPC command error, serialized to the frontend as a tagged `{ kind, message }` object
 /// so the UI can branch on the kind (e.g. route an `auth` failure to the login screen, or
@@ -753,6 +754,11 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             .unwrap_or_else(|| (crate::data_dir(), crate::configured_discovery_port()));
         #[cfg(not(test))]
         let (base_dir, discovery_port) = (crate::data_dir(), crate::configured_discovery_port());
+        let post_office_enabled = app_handle
+            .state::<crate::settings::SettingsState>()
+            .get_for_owner(&account_id)
+            .map(|settings| settings.post_office_enabled)
+            .unwrap_or(false);
         match mesh_talk_core::node::NodeRuntime::start_configured_guarded(
             mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
@@ -760,6 +766,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 display_name: &display_name,
                 password: &password,
                 discovery_port,
+                post_office_enabled,
             },
             mesh_talk_core::node::RuntimeEvents {
                 on_dm: Box::new(move |dm| {
@@ -831,6 +838,30 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             Ok(runtime) => {
                 if !permit.install(runtime).await {
                     return;
+                }
+                // Serialize with mark_verified so startup cannot replace a newer
+                // in-memory allowlist with an older trust-file snapshot. Read
+                // the relay preference under the same runtime lock so startup
+                // cannot overwrite a setting changed after publication.
+                let guard = node_handle.0.lock().await;
+                if let Some(runtime) = guard
+                    .as_ref()
+                    .filter(|runtime| runtime.host_account_id() == Some(&account_id))
+                {
+                    let node = runtime.handle();
+                    if let Some(path) =
+                        crate::config_store::account_path(&base_dir, &account_id, "trust.json")
+                    {
+                        node.replace_verified_dm_pull_peers(
+                            crate::trust::verified_fingerprints_at(&path),
+                        );
+                    }
+                    if let Ok(settings) = app_handle
+                        .state::<crate::settings::SettingsState>()
+                        .get_for_owner(&account_id)
+                    {
+                        node.set_post_office_enabled(settings.post_office_enabled);
+                    }
                 }
                 // Keep lifecycle diagnostics without persisting an account identifier.
                 log::info!("Node started");

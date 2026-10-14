@@ -124,6 +124,65 @@ command names for Tauri registration. Commands clone a node handle from
   `Response(missing + responder have)` → `Followup(what responder lacks)`, bounded by
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is
   re-verified (hash + signature) on ingest.
+  Channel recovery asks up to three online members per turn and continues past a
+  reachable but stale member. A completed generic channel attachment remains available from a
+  receiver after local save; complete attachment chunk conversations are retained
+  newest-first within a 64 MiB ciphertext budget, then whole old files are evicted.
+  Each accepted member shares its channel log and retained channel file chunks by
+  default. A member can publish a self-signed `ChannelReplica` preference (event
+  kind 14, one-byte enabled flag). Peers show the signed status in the member list.
+  Disabling sharing hides the local channel and channel-file logs from inbound
+  reconciliation while preserving incoming pushes and the member's local history.
+  The latest local preference is retried as a control event, so a member that was
+  offline when it changed can learn the status after reconnecting.
+  Because event-kind indices are positional in bincode, sync preflights the
+  channel version before transferring kind 14. A requester that holds a replica
+  preference starts with appended v2 sync frames; an older peer rejects those
+  frames and the exchange closes before the preference is transferred. A newer
+  responder with kind 14 answers a legacy fingerprint/request with an appended
+  `UpgradeRequired` frame; a newer requester retries using v2, while an older
+  requester closes. Channels without kind 14 keep their legacy sync frames.
+  A mixed-version group can therefore stop syncing that channel after a
+  replica preference is published. Upgrade all members before using the
+  replica toggle; this is a safe compatibility failure, not seamless interop.
+  Channel message sends ask each seeded member for an authenticated, exact
+  `DurableHave` response after synchronization. The sender records distinct
+  confirmations in a local password-encrypted `channel.custody` log. Its own
+  signed message events are the durable retry queue: after restart and on
+  discovery, a bounded recovery tick retries messages with fewer than two
+  confirmed, currently sharing members (or fewer if the group is smaller).
+  An ordered message-by-author index lets each tick inspect at most 128 of the
+  sender's events per selected channel without rebuilding a whole-history list.
+  Cursors rotate channels and resume within their histories. Each examined
+  message advances the retry cursor so a failed sync cannot starve later
+  messages; custody retries rotate eligible members, while rechecks rotate
+  confirmed members for each message.
+  The UI shows no-confirmed-copy, last-confirmed one-copy, or last-confirmed
+  two-or-more-copy status for the sender's message. Every 20 recovery ticks,
+  one historical claim is probed without first sending the event; a negative
+  durable answer is recorded as a revocation and normal retry can restore it.
+  An offline peer cannot be rechecked, so the count is still historical evidence,
+  not proof that a peer currently has the event, nor a delivery or read receipt.
+  Post offices are not counted as group-member copies.
+  The ignored `channel_replica_scale_rehearsal` test runs a repeatable 5/20/50
+  member Noise duplex exercise with every fifth recipient initially offline,
+  then recovers them from another member after the origin exits. It reports
+  contact count, serialized event payload estimate, and convergence time.
+  `channel_real_tcp_scale_rehearsal` runs complete Nodes over loopback TCP and
+  measures encrypted application-frame bytes sent by the origin to its initial
+  targets. See [channel release rehearsal](channel-release-rehearsal.md) for
+  the repeatable commands and mixed-version binary check.
+  This protocol rehearsal does not measure real LAN discovery, TCP overhead,
+  or sustained throughput; use the sync-cost debug metrics and a real LAN trial
+  before deciding whether a fuller gossip protocol is needed.
+  Locally saved channel attachments remain available as bounded complete-file
+  replicas until the channel-file budget evicts older files.
+  Direct-message files and inline media keep their existing completion and
+  cleanup paths.
+  A public channel's whole-set fingerprint is cached in the durable log and
+  invalidated on append or compaction, so idle anti-entropy probes do not sort
+  and hash the entire channel history every time. Invisible-mode projections
+  continue computing a fingerprint of only the events visible to that peer.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
@@ -193,8 +252,39 @@ command names for Tauri registration. Commands clone a node handle from
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
+  A background channel recovery tick also reconciles one joined channel with up to
+  three known member routes. It rotates channels and peers, so a member that missed
+  the original push can obtain signed events from another member even without a
+  post office or the original author online. Each peer attempt is time-bounded;
+  normal sync membership projection and event validation still apply.
+  Discovery of a new or relocated peer wakes a bounded recovery batch immediately;
+  the three-second tick remains a fallback for missed announcements and old routes.
+  Every TCP-serving node runs this bidirectional anti-entropy loop. For channels
+  with more than five members, a text sender seeds at most two routed members;
+  recipients' rounds then forward the signed log to other members. Smaller
+  channels and membership controls retain direct fanout. File manifests retain
+  direct fanout until chunk replication has an explicit retention policy.
+  Initial text/sticker contacts run concurrently (at most four for a small channel,
+  two for a larger one), so a stalled handshake cannot delay another member.
+  Membership and key controls contact every routed member with a four-connection
+  concurrency cap and a per-peer deadline. Sync rounds may share one authenticated
+  connection sequentially, but there is no global persistent connection pool or
+  one-socket-per-device invariant; independent operations may dial concurrently.
+  Each channel send emits a debug metric with member count, seeded peer count,
+  confirmed member copies, and elapsed milliseconds. The sync layer separately
+  logs have-set size, applied and pushed events, and round count. These provide
+  latency and metadata-bandwidth evidence before changing the fanout threshold
+  or introducing a more complex gossip protocol.
+  Member copy counts are historical confirmations. To make a current durability
+  guarantee, the protocol would need renewable leases or periodic exact probes
+  and a policy for peers that permanently leave; the UI does not claim one.
 - **Post office** — deterministic election (lowest-fingerprint peer advertising
-  `post_office`); `drain_from_post_office` every 3 s; relay only ever sees ciphertext.
+  `post_office`); `drain_from_post_office` every 3 s. Each account may disable
+  relay use in Settings; the default remains enabled. This gates uploads and
+  downloads on that device. New clients wrap signed events for each recipient
+  in a pairwise opaque mailbox before relay sync. The relay sees mailbox IDs,
+  pseudonymous outer headers, size buckets, and traffic timing, but cannot
+  open event headers, channel controls, DM text, or file contents.
 
 Tracked DMs are accepted into an encrypted, bounded transaction journal and
 immutable outbox before transport. Retries reuse the original logical message ID,
@@ -217,6 +307,16 @@ transactions install the file row before appending their immutable receipt.
 Live recovery publishes callbacks once after durable installation; startup replay
 only reconstructs history and pending controls. Enqueue APIs perform local durable
 acceptance only; existing send APIs additionally attempt immediate transport.
+On reconnect, a recipient's recurring DM catch-up only visits contacts whose
+device fingerprint the user explicitly verified against the safety number.
+It first reconciles directly with that sender. If that round cannot complete,
+it tries the elected post office; desktop and CLI hosts also drain verified DM
+conversations from the post office periodically. The desktop trust file restores
+this allowlist at login; the CLI persists explicit `/verify-peer` decisions.
+Discovery or a valid handshake alone never authorizes recipient-initiated DM
+pulls. Unverified peers can still push messages directly.
+The sender's retry worker independently attempts direct delivery before relay
+replication, so either side can initiate recovery when a route returns.
 
 Card delivery is not file download or read confirmation. Independent immutable
 chunk work survives an early card receipt and sender restart. The worker also
@@ -352,9 +452,11 @@ wakes, selects one destination and one receipt per iteration, and rotates logica
 messages and their independent destination cursors. It takes owned bounded
 snapshots after local recovery on the blocking pool, releases store locks before
 network awaits, and bounds each network operation to 400 ms. Dropping the accept
-loop cancels its worker and the worker's outstanding network operations. Historical DM and
-control pulls use a receive-only reconciliation projection; controls can be pulled
-directly or through the relay while the original sender is offline.
+loop cancels its worker and the worker's outstanding network operations.
+Historical DM and control pulls for manually verified contacts use a
+receive-only reconciliation projection; DM bodies prefer the direct sender
+route and fall back to the relay, while controls can be pulled directly or
+through the relay when the original sender is offline.
 
 Immutable file retries retain at most eight authenticated connections across
 complete protocol exchanges, with a ten-second idle limit. A rotating admission
@@ -543,7 +645,12 @@ renames recoverable: startup removes an incomplete pair or retains a completed p
 before auth initializes. Startup also removes orphan staging and decrypted scratch.
 The recovered account fingerprint remains the same; the new device fingerprint
 differs. Restored channels are read-only archives because their old sender keys
-are excluded. Offline DM peers are discovered from durable account history.
+are excluded. A new device must be invited into an active channel as a new member
+to receive fresh sender keys and participate in future messages. Peer replicas
+can restore signed ciphertext events but cannot give the new device the retired
+device's sender chains or decrypt past channel history. Users who need readable
+past history must restore a backup containing its plaintext archive. Offline DM
+peers are discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
 managed media referenced by visible cards, received peer avatars, and recall marks.
@@ -613,8 +720,15 @@ Standard primitives + consistent domain separation; AEAD everywhere; PBKDF2-600k
 Noise XX with identity binding; Double-Ratchet + sender-key forward secrecy with
 zeroize-on-drop; signed content-addressed log with fork detection; deterministic relay
 election; the sync `have` id-set is streamed in chunks so arbitrarily large conversations
-reconcile; the relay bounds its storage (LRU whole-conversation eviction) and its serve
+reconcile; the relay bounds its storage by event count and 512 MiB of ciphertext
+(LRU whole-conversation eviction) and its serve
 loop (round cap + idle timeout). Known limitations (by design): device linking relies on
 the one-time pairing code (no separate SAS UX); backfill history travels as plaintext over
-the Noise channel; a relay inevitably sees event authors + the participant pair (content
-stays encrypted).
+the Noise channel. A new client's relay upload contains a pairwise opaque
+mailbox event: original authors, conversation IDs, kinds, timestamps, channel
+names, members, and file metadata are recipient-encrypted. The relay still
+sees authenticated connection identities, mailbox use, size buckets, and
+traffic timing. The mailbox wrapping has no forward secrecy against later
+device-key compromise. Previously stored V1 events remain readable until
+evicted. Details and operational limits are in
+[`post-office-metadata-privacy.md`](post-office-metadata-privacy.md).

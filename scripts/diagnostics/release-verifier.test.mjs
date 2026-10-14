@@ -23,6 +23,9 @@ test("signature and provenance failures stop the real aggregate verifier before 
         writeFileSync(path, "fixture archive");
         writeFileSync(`${path}.bundle`, "fixture signature");
       }
+      const relay = join(assets, `mesh-talk-post-office_v0.1.5_${platform}.zip`);
+      writeFileSync(relay, "fixture archive");
+      writeFileSync(`${relay}.bundle`, "fixture signature");
     }
     writeFileSync(join(bin, "cosign"), '#!/usr/bin/env bash\nexit "${SIGNATURE_EXIT:-0}"\n', { mode: 0o755 });
     const record = join(root, "provenance-args.txt");
@@ -35,7 +38,7 @@ test("signature and provenance failures stop the real aggregate verifier before 
     for (const value of ["--source-digest", sha, "--source-ref", "refs/tags/v0.1.5", "--signer-workflow", "OctopusGarage/mesh-talk/.github/workflows/release.yml", "--deny-self-hosted-runners"]) assert.ok(forwarded.includes(value), value);
     // All crypto verifier commands succeeding cannot bypass malformed contents.
     assert.notEqual(spawnSync("bash", args, { env }).status, 0);
-    assert.equal(readFileSync(record, "utf8").split(/\r?\n/).filter((value) => value === "--deny-self-hosted-runners").length, 13, "both editions of all six platforms are checked after the single deliberate provenance failure");
+    assert.equal(readFileSync(record, "utf8").split(/\r?\n/).filter((value) => value === "--deny-self-hosted-runners").length, 19, "both app editions and the relay of all six platforms are checked after the single deliberate provenance failure");
     // Empty PATH is set inside the already-running Bash process, so missing
     // verification tooling is a deterministic failure on every platform.
     const missing = spawnSync("bash", ["-c", 'PATH="$1"; source "$2" "${@:3}"', "fixture", bashPath(join(root, "empty-bin")), ...args]);

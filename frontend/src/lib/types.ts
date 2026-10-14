@@ -64,6 +64,7 @@ export interface ChannelMemberInfo {
   name: string;
   account_id?: string | null;
   pending?: boolean;
+  replica_enabled?: boolean;
 }
 
 export interface ChannelActivityInfo {
@@ -180,6 +181,8 @@ export interface AppSettings {
   retention_days: number;
   /** Voice/video calls (experimental, 1:1, LAN-only). Default off; opt-in via Settings. */
   calls_enabled: boolean;
+  /** Use an available LAN post-office relay for offline delivery. */
+  post_office_enabled: boolean;
   /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */
   ringtone: string;
   /** Preset name; custom means individual privacy controls differ from a preset. */

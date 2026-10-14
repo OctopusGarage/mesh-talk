@@ -9,6 +9,7 @@
 pub(crate) mod attachment_consent;
 pub(crate) mod call;
 pub(crate) mod channel;
+pub(crate) mod channel_custody;
 pub(crate) mod channel_senders;
 pub(crate) mod channels;
 pub(crate) mod conversation;
@@ -29,6 +30,7 @@ pub(crate) mod media_store;
 pub(crate) mod message;
 pub(crate) mod name_directory;
 pub(crate) mod node;
+mod opaque_relay;
 pub(crate) mod pairing;
 pub(crate) mod peer_directory;
 pub(crate) mod postbox;

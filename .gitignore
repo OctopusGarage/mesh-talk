@@ -24,6 +24,9 @@ coverage/
 dist/
 **/*/dist/
 frontend/dist/
+release_zips/
+docker/post-office/binaries/
+.docker-relay-build/
 
 # Build artifacts
 build/

@@ -738,12 +738,20 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
         .await
         .unwrap();
     let dm = super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        sync_delivery_test_stage(&a, &b, &bl, dm).await;
-        sync_delivery_test_stage(&a, &b, &bl, file).await;
-    })
+    // Each independent sync needs its own bound: a busy Windows runner can
+    // spend several seconds on one authenticated handshake.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sync_delivery_test_stage(&a, &b, &bl, dm),
+    )
     .await
-    .unwrap();
+    .expect("DM setup sync completes");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sync_delivery_test_stage(&a, &b, &bl, file),
+    )
+    .await
+    .expect("file setup sync completes");
     let ids = a.sync_store(&bp.public()).lock().unwrap().event_ids(&file);
     assert_eq!(
         b.sync_store(&ap.public()).lock().unwrap().event_ids(&file),
@@ -3269,14 +3277,19 @@ async fn automatic_offline_roundtrip(evict: bool) {
         .unwrap();
     let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
         .event
-        .id;
+        .clone();
+    let mailbox =
+        crate::postoffice::opaque::RelayMailbox::new(&a.identity, &bp.public(), &pp.public())
+            .unwrap();
+    let outer_id = mailbox.wrap(&original).unwrap().id;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !relay.lock().unwrap().has(&original) {
+        while !relay.lock().unwrap().has(&outer_id) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
+    assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     at.abort();
     let _ = at.await;
@@ -3288,6 +3301,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         Account::from_secret_bytes(baccount),
         &ap,
     );
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
     b.roster
         .lock()
         .unwrap()
@@ -3348,6 +3362,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         Account::from_secret_bytes(aaccount),
         &bp,
     );
+    a.replace_verified_dm_pull_peers(vec![bp.public().user_id()]);
     a.roster
         .lock()
         .unwrap()
@@ -3436,9 +3451,18 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
         .unwrap();
     let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
         .event
-        .id;
+        .clone();
     a.flush_delivery(id).await;
-    assert!(relay.lock().unwrap().has(&original));
+    let mailbox =
+        crate::postoffice::opaque::RelayMailbox::new(&a.identity, &bob.public(), &proof.public())
+            .unwrap();
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .has(&mailbox.wrap(&original).unwrap().id)
+    );
+    assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     task.abort();
     let _ = task.await;
@@ -3561,6 +3585,307 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
             consent: None,
         }
     );
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
+    b.set_attachment_global_auto(false).unwrap();
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
+
+    let po = DeviceIdentity::generate();
+    let keys = po.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(&po, "Relay", listener.local_addr().unwrap().port());
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", po).unwrap(),
+    ));
+    let relay_task = tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        listener,
+        relay.clone(),
+    ));
+    for peer in [&a, &b] {
+        peer.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &peer.user_id(),
+        );
+    }
+
+    let source = ad.path().join("offline-file.bin");
+    let bytes = vec![7; crate::file::CHUNK_SIZE + 17];
+    std::fs::write(&source, &bytes).unwrap();
+    let (card, file) = a
+        .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    a.flush_delivery(card).await;
+    b.drain_from_post_office().await;
+    let offer = tokio::time::timeout(std::time::Duration::from_secs(5), offers.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offer.file_conv, file);
+    b.decide_attachment(file, true).unwrap();
+
+    let recipient_task = tokio::spawn(b.clone().run_accept_loop(bl));
+    let recipient = a.routing_peer(&b.user_id()).unwrap();
+    let mut channel = a
+        .privacy_dial(recipient.addr, &recipient.public)
+        .await
+        .unwrap();
+    let binding = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .destinations[0]
+        .binding
+        .event_id;
+    let status = super::session::request_file_consent(&mut channel, file, binding)
+        .await
+        .unwrap();
+    assert_eq!(status, crate::eventlog::sync::FileConsentStatus::Accepted);
+    a.outgoing_file_consents
+        .lock()
+        .unwrap()
+        .insert((card, binding), status);
+    drop(channel);
+    recipient_task.abort();
+    let _ = recipient_task.await;
+
+    a.flush_file_delivery(card).await;
+    assert!(
+        b.read_file(file).is_err(),
+        "recipient was offline during upload"
+    );
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &a.identity,
+        &b.identity.public(),
+        &proof.public(),
+    )
+    .unwrap();
+    assert!(
+        relay.lock().unwrap().has(
+            &mailbox
+                .wrap(
+                    a.log
+                        .lock()
+                        .unwrap()
+                        .events(&file)
+                        .into_iter()
+                        .find(|event| event.id == final_chunk)
+                        .unwrap(),
+                )
+                .unwrap()
+                .id
+        )
+    );
+    assert!(!relay.lock().unwrap().has(&final_chunk));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            b.drain_from_post_office().await;
+            if b.read_file(file)
+                .as_ref()
+                .is_ok_and(|actual| actual == &bytes)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    relay_task.abort();
+    let _ = relay_task.await;
+}
+
+/// Real LAN custody tests require the installed relay's signed device ID.
+/// The sender has no accept loop, so its file worker cannot race the
+/// controlled consent and offline handoffs below.
+#[tokio::test]
+#[ignore = "requires installed mac2015 post office on the same LAN"]
+async fn mac2015_post_office_delivers_file_bytes_after_both_peers_go_offline() {
+    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+        "MESH_TALK_E2E_MAC2015_RELAY_ID",
+        "mac2015",
+        "launchctl kickstart -k gui/$(id -u)/com.octopusgarage.mesh-talk.post-office",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires installed windows10 post office on the same LAN"]
+async fn windows10_post_office_delivers_file_bytes_after_both_peers_go_offline() {
+    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+        "MESH_TALK_E2E_WINDOWS10_RELAY_ID",
+        "windows10",
+        "powershell -NoProfile -Command \"Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice\"",
+    )
+    .await;
+}
+
+async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+    relay_id_env: &str,
+    relay_host: &str,
+    restart_command: &str,
+) {
+    use crate::discovery::announce::decode;
+
+    let relay_id = std::env::var(relay_id_env)
+        .unwrap_or_else(|_| panic!("set {relay_id_env} to the installed relay device ID"));
+    let socket = crate::transport::net::discovery_socket(47474).unwrap();
+    let (relay_proof, relay_ip) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (len, source) = socket.recv_from(&mut buf).await.unwrap();
+            if let Some(proof) = decode(&buf[..len])
+                && proof.verify()
+                && proof.post_office
+                && proof.user_id == relay_id
+            {
+                break (proof, source.ip());
+            }
+        }
+    })
+    .await
+    .expect("installed relay's signed LAN announce was not received");
+
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "File Alice", 1);
+    let bp = Announce::new_with_account(&bob, &ba, "File Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
+    b.set_attachment_global_auto(false).unwrap();
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
+    for peer in [&a, &b] {
+        peer.roster
+            .lock()
+            .unwrap()
+            .update(&relay_proof, relay_ip, &peer.user_id());
+        assert_eq!(
+            super::postbox::elected_post_office(&peer.roster.lock().unwrap())
+                .unwrap()
+                .public
+                .user_id(),
+            relay_id
+        );
+    }
+
+    let source = ad.path().join("remote-relay-file.bin");
+    let bytes = (0..(crate::file::CHUNK_SIZE + 37))
+        .map(|n| (n % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(&source, &bytes).unwrap();
+    let (card, file) = a
+        .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    // Bob has no listener yet. The offer must reach the remote relay.
+    a.flush_delivery(card).await;
+    b.drain_from_post_office().await;
+    let offer = tokio::time::timeout(std::time::Duration::from_secs(10), offers.recv())
+        .await
+        .expect("recipient did not receive offline offer from installed relay")
+        .expect("file offer channel closed");
+    assert_eq!(offer.file_conv, file);
+    assert!(!b.file_ready_to_save(file));
+    b.decide_attachment(file, true).unwrap();
+
+    // Authenticate a live recipient's consent, then close their only listener.
+    // No file chunk is sent on the consent channel.
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let recipient = a.routing_peer(&b.user_id()).unwrap();
+    let mut channel = a
+        .privacy_dial(recipient.addr, &recipient.public)
+        .await
+        .unwrap();
+    let binding = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .destinations[0]
+        .binding
+        .event_id;
+    let status = super::session::request_file_consent(&mut channel, file, binding)
+        .await
+        .unwrap();
+    assert_eq!(status, crate::eventlog::sync::FileConsentStatus::Accepted);
+    a.outgoing_file_consents
+        .lock()
+        .unwrap()
+        .insert((card, binding), status);
+    drop(channel);
+    bt.abort();
+    let _ = bt.await;
+    assert!(!b.file_ready_to_save(file));
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+
+    // The sender can now upload the encrypted chunks only to the installed relay.
+    a.flush_file_delivery(card).await;
+    assert!(!b.file_ready_to_save(file));
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    drop(a);
+
+    // The relay is restarted while it alone holds the bytes, then the recipient
+    // pulls and verifies them with the sender absent.
+    let restart = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            relay_host,
+            restart_command,
+        ])
+        .status()
+        .expect("ssh to installed relay failed");
+    assert!(restart.success(), "installed relay restart failed");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            b.drain_from_post_office().await;
+            if b.read_file(file)
+                .as_ref()
+                .is_ok_and(|actual| actual == &bytes)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("installed relay did not redeliver complete file bytes after restart");
     assert_eq!(b.read_file(file).unwrap(), bytes);
 }
 

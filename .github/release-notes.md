@@ -1,19 +1,24 @@
 ## Mesh-Talk __TAG__
 
-Serverless, end-to-end-encrypted LAN messenger (Rust + Tauri 2 + React). No server and no
+End-to-end-encrypted LAN messenger (Rust + Tauri 2 + React). No central server or
 sign-up — peers on the same local network discover each other over signed broadcasts and chat
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.3.1
+### What's new in v0.3.2
 
-- Give channel owners controls to dissolve a channel and complete the invitation and membership
-  lifecycle.
-- Hide invisible peers from online presence while keeping their messaging available.
-- Let you remove the default Google Noto sticker pack and reinstall it when wanted.
-- Improve settings layout and guide users through release updates.
-- Fix macOS 12 WebView compatibility in packaged frontend bundles and retain graphics
-  configuration in release diagnostics.
+- Recover missed channel messages from available group members after reconnecting, even when
+  the original sender has gone offline.
+- Share encrypted channel history and retained attachments among group members by default,
+  with a visible per-member option to disable replica sharing.
+- Bound sender fanout for larger channels and retry delivery until enough member copies are
+  confirmed. Small channels continue direct delivery.
+- Restrict automatic direct-message catch-up to contacts whose safety number you manually
+  verified. Incoming direct messages can still arrive by direct push.
+- Improve offline recovery and delivery status while keeping file transfers separate from
+  message propagation.
+- Add pairwise opaque post-office mailboxes, a per-account relay preference, separate
+  native relay packages, and a Linux container image published with the verified release.
 
 
 ### Downloads
@@ -33,6 +38,19 @@ Each platform has a default edition with the current avatar and personal theme c
 | Windows (ARM64) | `mesh-talk___TAG___windows_arm64.zip` |
 | Linux (x64) | `mesh-talk___TAG___linux_x86_64.zip` |
 | Linux (ARM64) | `mesh-talk___TAG___linux_aarch64.zip` |
+
+### Post-office relay downloads
+
+An always-on relay has its own headless package, separate from the desktop app. Choose
+`mesh-talk-post-office___TAG___<os>_<arch>.zip` using the same platform names above.
+Each relay ZIP contains `mesh-talk-node`, a setup guide and `SHA256SUMS` (plus a
+Windows service installer script on Windows). Its `.zip.bundle` signature and
+build provenance are verified by the release workflow along with the app packages.
+
+For Linux Docker Engine, the same verified Linux binaries are also published as
+`ghcr.io/octopusgarage/mesh-talk-post-office:__TAG__` for `linux/amd64` and
+`linux/arm64`. Run it with host networking, a persistent data directory, and
+an owner-only password file. See the [post-office package and container guide](https://github.com/OctopusGarage/mesh-talk/blob/__TAG__/docs/post-office-release.md).
 
 ### Verifying your download
 
@@ -79,10 +97,13 @@ For offline delivery (so peers still receive messages when you're not both onlin
 headless relay on an always-on machine:
 
 ```sh
-mesh-talk-node --post-office
+mesh-talk-node --keystore ./relay.keystore --password-file ./relay.password \
+  --name post-office --post-office --port 47475
 ```
 
-The post office only ever stores **ciphertext** — it cannot read messages.
+The post office stores encrypted event wrappers. It needs routing metadata to
+deliver them, and connection timing can reveal communication patterns. See the
+[relay metadata privacy guide](https://github.com/OctopusGarage/mesh-talk/blob/__TAG__/docs/post-office-metadata-privacy.md).
 
 Full documentation: [README](https://github.com/OctopusGarage/mesh-talk#readme) ·
 [ARCHITECTURE](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/ARCHITECTURE.md) ·

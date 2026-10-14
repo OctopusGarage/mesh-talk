@@ -184,6 +184,7 @@ pub struct ChannelBook {
     activities: HashMap<ConversationId, Vec<ChannelActivity>>,
     activity_emitted: HashSet<EventId>,
     lineage_owner: HashMap<ConversationId, String>,
+    replica_preferences: HashMap<(ConversationId, String), (u64, EventId, bool)>,
 }
 
 /// A Lamport timestamp cannot establish whether an owner observed a leave: an
@@ -210,6 +211,12 @@ pub(super) fn descends_from(
 }
 
 impl ChannelBook {
+    /// Missing preference means the member participates by default.
+    pub fn replica_enabled(&self, channel: ConversationId, member: &str) -> bool {
+        self.replica_preferences
+            .get(&(channel, member.to_string()))
+            .is_none_or(|(_, _, enabled)| *enabled)
+    }
     /// Replay only signed membership controls. This keeps late-invite pending
     /// reconstruction and admission checks on the same causal leave rules.
     fn membership_view(
@@ -386,6 +393,22 @@ impl ChannelBook {
                 state.is_member(own)
                     && state.owner() != own
                     && self.transferred.contains(&(**id, own.to_string()))
+            })
+            .map(|(id, state)| (*id, state.members().to_vec()))
+            .collect()
+    }
+
+    pub fn pending_replica_preferences(
+        &self,
+        own: &str,
+    ) -> Vec<(ConversationId, Vec<PublicIdentity>)> {
+        self.states
+            .iter()
+            .filter(|(id, state)| {
+                state.is_accepted_member(own)
+                    && self
+                        .replica_preferences
+                        .contains_key(&(**id, own.to_string()))
             })
             .map(|(id, state)| (*id, state.members().to_vec()))
             .collect()
@@ -628,6 +651,25 @@ impl ChannelBook {
                         state.accept_invite(&event.author.user_id(), event.id);
                         if event.author == my_author {
                             after_accept.insert(event.id);
+                        }
+                    }
+                }
+                EventKind::ChannelReplica => {
+                    if let [enabled @ 0..=1] = event.ciphertext.as_slice()
+                        && self
+                            .states
+                            .get(&channel_id)
+                            .is_some_and(|state| state.is_accepted_member(&event.author.user_id()))
+                    {
+                        let key = (channel_id, event.author.user_id());
+                        let version = (event.lamport, event.id);
+                        if self
+                            .replica_preferences
+                            .get(&key)
+                            .is_none_or(|(lamport, id, _)| version > (*lamport, *id))
+                        {
+                            self.replica_preferences
+                                .insert(key, (event.lamport, event.id, *enabled == 1));
                         }
                     }
                 }

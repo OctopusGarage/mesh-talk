@@ -1,9 +1,9 @@
 //! The post office: an elected always-on peer that stores-and-forwards encrypted
-//! events so a message reaches an offline recipient. It is a peer with two extra
-//! hats — a full replica (a [`crate::eventlog::PersistentEventLog`]) and a
-//! store-and-forward relay (it reconciles as a [`crate::eventlog::sync::SyncStore`]).
-//! For DMs it is a *dumb relay*: it holds recipient-sealed envelopes it can never
-//! decrypt, and never holds any conversation key.
+//! events so a message reaches an offline recipient. Its production sync path
+//! stores recipient-encrypted, pairwise opaque outer events in a
+//! [`crate::eventlog::PersistentEventLog`]. It validates those outer signatures
+//! and reconciles them as a [`crate::eventlog::sync::SyncStore`], but cannot
+//! decrypt the signed inner events or hold a conversation key.
 //!
 //! [`election`] decides — deterministically, so every peer agrees — which eligible
 //! (always-on) peer is the post office: the one with the lowest identity
@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub mod election;
+pub mod opaque;
 
 pub use election::{elect, is_post_office};
 
@@ -29,12 +30,22 @@ const MAX_RELAY_EVENTS: usize = 100_000;
 /// Only run a (file-rewriting) compaction once the total exceeds the cap by this much,
 /// so compaction runs at most once per `RETENTION_SLACK` appends rather than every one.
 const RETENTION_SLACK: usize = 5_000;
+/// Bound ciphertext storage even when every event is a large file chunk.
+const MAX_RELAY_BYTES: usize = 512 * 1024 * 1024;
+const RETENTION_BYTE_SLACK: usize = 16 * 1024 * 1024;
 
-/// A post office: a durable replica plus a store-and-forward relay. It accepts
-/// validly-signed events (it cannot forge or alter them) and serves them to
-/// peers via reconciliation, but it never decrypts a DM — it has no key and no
-/// API to do so. Storage is bounded by evicting least-recently-touched WHOLE
-/// conversations once it grows past a cap.
+fn stored_bytes(event: &Event) -> usize {
+    event
+        .ciphertext
+        .len()
+        .saturating_add(event.parents.len().saturating_mul(32))
+        .saturating_add(256)
+}
+
+/// A post office: a durable store-and-forward relay. The production network
+/// path accepts only opaque outer events; local `accept` remains available for
+/// pre-migration callers. Storage is bounded by evicting least-recently-touched
+/// WHOLE mailboxes once it grows past the event or byte cap.
 pub struct PostOffice {
     log: PersistentEventLog,
     identity: DeviceIdentity,
@@ -43,8 +54,12 @@ pub struct PostOffice {
     tick: u64,
     /// Cached total event count (kept in step with the log).
     total: usize,
+    bytes: usize,
     max_events: usize,
     slack: usize,
+    max_bytes: usize,
+    byte_slack: usize,
+    opaque_only: bool,
 }
 
 impl PostOffice {
@@ -60,14 +75,25 @@ impl PostOffice {
             touch.insert(conv, tick);
         }
         let total = log.all_event_ids().len();
+        let bytes = log
+            .conversations()
+            .iter()
+            .flat_map(|conv| log.events(conv))
+            .fold(0usize, |total, event| {
+                total.saturating_add(stored_bytes(event))
+            });
         Ok(Self {
             log,
             identity,
             touch,
             tick,
             total,
+            bytes,
             max_events: MAX_RELAY_EVENTS,
             slack: RETENTION_SLACK,
+            max_bytes: MAX_RELAY_BYTES,
+            byte_slack: RETENTION_BYTE_SLACK,
+            opaque_only: false,
         })
     }
 
@@ -75,9 +101,11 @@ impl PostOffice {
     /// `SyncStore::ingest` relay path so retention applies however an event arrives.
     fn record(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         let conv = event.conversation_id;
+        let event_bytes = stored_bytes(&event);
         let outcome = self.log.append(event)?;
         if matches!(outcome, AppendOutcome::Appended) {
             self.total += 1;
+            self.bytes = self.bytes.saturating_add(event_bytes);
             self.tick += 1;
             self.touch.insert(conv, self.tick);
             self.enforce_retention()?;
@@ -89,7 +117,9 @@ impl PostOffice {
     /// Whole-conversation eviction keeps the kept set causally closed (dropping part of
     /// a conversation would orphan kept children → un-ingestable).
     fn enforce_retention(&mut self) -> Result<(), LogError> {
-        if self.total <= self.max_events + self.slack {
+        if self.total <= self.max_events + self.slack
+            && self.bytes <= self.max_bytes + self.byte_slack
+        {
             return Ok(());
         }
         let mut convs: Vec<(ConversationId, u64)> = self
@@ -104,22 +134,34 @@ impl PostOffice {
         convs.sort_by_key(|&(_, t)| t); // least-recently-touched first
         let mut keep: HashSet<ConversationId> = convs.iter().map(|(c, _)| *c).collect();
         let mut running = self.total;
+        let mut running_bytes = self.bytes;
         for (conv, _) in &convs {
-            if running <= self.max_events {
+            if running <= self.max_events && running_bytes <= self.max_bytes {
                 break;
             }
             running -= self.log.conversation_len(conv);
+            running_bytes = running_bytes.saturating_sub(
+                self.log.events(conv).iter().fold(0usize, |total, event| {
+                    total.saturating_add(stored_bytes(event))
+                }),
+            );
             keep.remove(conv);
             self.touch.remove(conv);
         }
         let dropped = self.log.retain_conversations(&keep)?;
         self.total -= dropped;
+        self.bytes = running_bytes;
         Ok(())
     }
 
     /// This post office's public identity (used by the election).
     pub fn public(&self) -> PublicIdentity {
         self.identity.public()
+    }
+
+    /// Production relay sessions accept only the opaque outer event shape.
+    pub(crate) fn require_opaque_envelopes(&mut self) {
+        self.opaque_only = true;
     }
 
     /// Accept an event for relay: validate (signature, integrity, parents, …),
@@ -136,6 +178,12 @@ impl PostOffice {
         self.slack = slack;
     }
 
+    #[cfg(test)]
+    pub fn set_byte_retention_cap(&mut self, max_bytes: usize, slack: usize) {
+        self.max_bytes = max_bytes;
+        self.byte_slack = slack;
+    }
+
     /// Whether this post office holds the event with the given id.
     pub fn has(&self, id: &EventId) -> bool {
         self.log.has(id)
@@ -146,6 +194,11 @@ impl PostOffice {
         let mut ids: Vec<EventId> = self.log.events(conversation).iter().map(|e| e.id).collect();
         ids.sort();
         ids
+    }
+
+    #[cfg(test)]
+    pub fn held_events(&self, conversation: &ConversationId) -> Vec<Event> {
+        self.log.events(conversation).into_iter().cloned().collect()
     }
 }
 
@@ -167,6 +220,12 @@ impl SyncStore for PostOffice {
         SyncStore::events_excluding(&self.log, conversation, have)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        if self.opaque_only && !opaque::envelope_shape(&event) {
+            return Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "post office requires an opaque envelope",
+            )));
+        }
         // Route through `record` so the relay-receive path is also retention-bounded.
         self.record(event)
     }
@@ -216,6 +275,30 @@ mod tests {
         assert_eq!(po.accept(ev.clone()).unwrap(), AppendOutcome::Appended);
         assert!(po.has(&ev.id));
         assert_eq!(po.held_ids(&conv()), vec![ev.id]);
+    }
+
+    #[test]
+    fn byte_budget_evicts_oldest_whole_mailbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let mut po =
+            PostOffice::open(&dir.path().join("po.log"), "pw", DeviceIdentity::generate()).unwrap();
+        let first = message(&sender, 1, vec![], 1, &[1; 1024]);
+        let second = Event::new(
+            &sender,
+            ConversationId::new([2; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![2; 1024],
+        );
+        po.set_byte_retention_cap(stored_bytes(&first), 0);
+        po.accept(first.clone()).unwrap();
+        po.accept(second.clone()).unwrap();
+        assert!(!po.has(&first.id));
+        assert!(po.has(&second.id));
     }
 
     #[test]
