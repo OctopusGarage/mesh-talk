@@ -381,3 +381,61 @@ impl Node {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::account::Account;
+
+    #[test]
+    fn pending_history_record_rejects_cross_account_and_tampered_headers() {
+        let own = Account::generate().account_id();
+        let peer = Account::generate().account_id();
+        let outsider = Account::generate().account_id();
+        let id = [9; 32];
+        let plaintext =
+            DmEnvelope::new(peer.clone(), own.clone(), id, b"history".to_vec()).encode();
+        let valid = PendingRecord {
+            conversation: *account_conversation_id(&own, &peer).as_bytes(),
+            from: peer.clone(),
+            wall_clock: 1,
+            event_id: id,
+            total_len: plaintext.len(),
+            plaintext,
+        };
+        assert!(valid.clone().finish(&own).is_some());
+        assert!(valid.clone().finish(&outsider).is_none());
+        assert!(
+            PendingRecord {
+                from: outsider,
+                ..valid.clone()
+            }
+            .finish(&own)
+            .is_none()
+        );
+        assert!(
+            PendingRecord {
+                event_id: [8; 32],
+                ..valid.clone()
+            }
+            .finish(&own)
+            .is_none()
+        );
+        assert!(
+            PendingRecord {
+                conversation: [7; 32],
+                ..valid.clone()
+            }
+            .finish(&own)
+            .is_none()
+        );
+        assert!(
+            PendingRecord {
+                total_len: valid.total_len + 1,
+                ..valid
+            }
+            .finish(&own)
+            .is_none()
+        );
+    }
+}

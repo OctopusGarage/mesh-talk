@@ -172,4 +172,27 @@ mod tests {
         assert!(AccountHistoryFrame::decode(&trailing).is_none());
         assert!(AccountHistoryFrame::decode(b"MTDE1").is_none());
     }
+
+    #[test]
+    fn decode_rejects_untrusted_oversized_record_headers_and_chunks() {
+        let oversized_header = super::super::wire::frame(
+            MAGIC,
+            &AccountHistoryFrame::RecordHeader {
+                conversation: [1; 32],
+                from: "cd".repeat(16),
+                wall_clock: 0,
+                event_id: [2; 32],
+                total_len: (MAX_RECORD + 1) as u32,
+            },
+        );
+        assert!(AccountHistoryFrame::decode(&oversized_header).is_none());
+
+        let oversized_chunk = super::super::wire::frame(
+            MAGIC,
+            &AccountHistoryFrame::RecordChunk {
+                bytes: vec![0; MAX_CHUNK + 1],
+            },
+        );
+        assert!(AccountHistoryFrame::decode(&oversized_chunk).is_none());
+    }
 }

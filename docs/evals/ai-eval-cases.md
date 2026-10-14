@@ -20,7 +20,10 @@ Run:
 ```bash
 make eval-smoke
 AI_EVAL_COMMAND='<non-interactive model command>' make ai-eval
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/linked-device-sync-ai-eval-suite.json --report target/ai-eval/linked-device-sync-report.json
 ```
+
+The linked-device suite reviews source against a security rubric. It supplements the Rust unit tests and real-process E2E runs; model scores alone do not verify runtime behavior.
 
 ## Core Smoke Examples
 

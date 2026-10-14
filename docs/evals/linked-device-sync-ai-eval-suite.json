@@ -1,0 +1,63 @@
+{
+  "name": "mesh-talk-linked-device-sync-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-SYNC-AI-001",
+      "name": "direct history sync authenticates and bounds transfers",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
+      "min_score": 0.85,
+      "scenario": "Review the linked-device direct DM history sync for cross-account disclosure, malformed-record import, unbounded transfer, and repeated full-history traffic. Judge only protections visible in this file; flag dependencies on other files as unverified.",
+      "rubric": [
+        "The server checks the requesting peer against a certified linked-device directory and the requested account against its own account.",
+        "The client checks the target peer account and linked-device identity before dialing.",
+        "Each received DM record is validated for logical message ID, sender, account route, and conversation before import.",
+        "Transfer pages and chunks have explicit limits, and an unchanged digest avoids retransmitting the complete history.",
+        "A disabled local history policy prevents serving and importing history."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-002",
+      "name": "history wire decoder rejects oversized and invalid frames",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync_wire.rs",
+      "min_score": 0.85,
+      "scenario": "Review the account-history frame codec as the trust boundary before any record allocation. Check whether malformed, oversized, forged-device, or incompatible frames can pass decode. Judge only behavior visible in this file.",
+      "rubric": [
+        "Decoding requires the account-history magic, an explicit frame size cap, a bounded bincode decoder, and no trailing bytes.",
+        "Requests require the supported version and a canonical account ID.",
+        "Record headers require a canonical sender account and a positive length no greater than MAX_RECORD.",
+        "Record chunks cannot be empty or larger than MAX_CHUNK.",
+        "Device frames verify their account certificate and bind it to the transmitted device signing key."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-003",
+      "name": "linked device directory validates account certificates",
+      "subject_file": "crates/mesh-talk-core/src/node/account_devices.rs",
+      "min_score": 0.85,
+      "scenario": "Review whether the local linked-device directory can admit a forged, cross-account, conflicting, or unbounded device record, including when reopened from disk.",
+      "rubric": [
+        "An enrolled certificate must verify cryptographically and bind the exact device signing key and own account ID.",
+        "Reload validates persisted records rather than trusting encrypted storage alone.",
+        "Duplicate enrollment is idempotent, while conflicting records are rejected.",
+        "The number of linked devices is bounded on insertion and reload.",
+        "The directory is stored through the encrypted record log."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-004",
+      "name": "local erasure suppresses sibling reimport",
+      "subject_file": "crates/mesh-talk-core/src/node/lifecycle.rs",
+      "min_score": 0.85,
+      "scenario": "Review whether deleting, clearing, or retention-pruning local account DM history persists logical-message suppression before removing plaintext, so a sibling cannot resurrect erased messages later. Judge only behavior visible in this file.",
+      "rubric": [
+        "Deleting an account message persists a suppression marker before removing its sidecar entries.",
+        "Clear and retention collect logical account message IDs from both sent and received stores.",
+        "Bulk suppression is persisted before the matching plaintext entries are removed.",
+        "Persistence failures propagate instead of silently proceeding with an erase.",
+        "The erase remains local; it does not claim to delete copies on other devices."
+      ]
+    }
+  ]
+}

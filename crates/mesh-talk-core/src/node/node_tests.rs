@@ -5915,6 +5915,78 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
     assert!(node.account_history(&bob_id, 10).is_empty());
 }
 
+#[test]
+fn linked_history_clear_and_retention_survive_restart_without_resurrection() {
+    use crate::identity::account::Account;
+    use crate::node::conversation::account_conversation_id;
+    use crate::node::dm_envelope::DmEnvelope;
+    use crate::node::message::MessageBody;
+    use crate::node::pairing::BackfillRecord;
+
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate().secret_bytes();
+    let account = Account::generate().secret_bytes();
+    let own = Account::from_secret_bytes(account).account_id();
+    let peer = Account::generate().account_id();
+    let conversation = account_conversation_id(&own, &peer);
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open_with_account(
+            DeviceIdentity::from_secret_bytes(identity.0, identity.1),
+            Account::from_secret_bytes(account),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("node.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let record = |id: u8, wall_clock: u64| BackfillRecord {
+        conv: *conversation.as_bytes(),
+        from: peer.clone(),
+        wall_clock,
+        plaintext: DmEnvelope::new(
+            peer.clone(),
+            own.clone(),
+            [id; 32],
+            MessageBody::new(format!("message {id}").into_bytes(), None).encode(),
+        )
+        .encode(),
+        event_id: [id; 32],
+    };
+
+    let cleared = record(31, 10);
+    let node = open();
+    node.import_account_backfill(std::slice::from_ref(&cleared))
+        .unwrap();
+    assert_eq!(node.clear_account_conversation(&peer).unwrap(), 1);
+    node.set_device_sync_category(crate::node::SyncCategory::History, false)
+        .unwrap();
+    drop(node);
+
+    let node = open();
+    assert!(!node.device_sync_policy().history);
+    node.import_account_backfill(std::slice::from_ref(&cleared))
+        .unwrap();
+    assert!(node.account_history(&peer, 10).is_empty());
+    node.set_device_sync_category(crate::node::SyncCategory::History, true)
+        .unwrap();
+    let pruned = record(32, 50);
+    node.import_account_backfill(std::slice::from_ref(&pruned))
+        .unwrap();
+    assert_eq!(node.prune_older_than(100).unwrap(), 1);
+    drop(node);
+
+    let node = open();
+    node.import_account_backfill(&[cleared, pruned]).unwrap();
+    assert!(node.account_history(&peer, 10).is_empty());
+}
+
 #[tokio::test]
 async fn start_linking_is_idempotent_until_stopped() {
     let dir = tempfile::tempdir().unwrap();
