@@ -843,6 +843,11 @@ export const test = base.extend({
           // The durable chat-media store accessor. The mock has no store, so reject like the
           // real "no stored media" path → the preview hook falls back to read_file.
           read_media: () => {
+            if (dataMode === "screenshot-ipc-fallback") {
+              return (
+                window as unknown as { __lastWrittenFileBytes?: number[] }
+              ).__lastWrittenFileBytes ?? [];
+            }
             throw new Error("no stored media for this file");
           },
           write_temp_file: (a) => {

@@ -91,6 +91,25 @@ test("hidden screenshot capture cancels without sending", async ({ page }) => {
   );
 });
 
+test("sender previews a screenshot when media IPC returns fallback byte arrays", async ({
+  page,
+}) => {
+  await enterChat(page, "tester", "/?data=screenshot-ipc-fallback");
+  await openBobDm(page);
+  await openCapture(page, "screenshot-now");
+  await selectRegion(page);
+  await page.getByTestId("screenshot-send").click();
+
+  const image = page.getByTestId("file-image");
+  await expect(image).toBeVisible();
+  await expect
+    .poll(() =>
+      image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(0);
+  await expect(page.getByTestId("file-image-unsupported")).toHaveCount(0);
+});
+
 test("rectangle arrow text and undo remain usable before send", async ({
   page,
 }) => {

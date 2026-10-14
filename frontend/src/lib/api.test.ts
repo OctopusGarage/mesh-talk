@@ -14,6 +14,28 @@ beforeEach(() => {
   useAuth.setState({ user: null });
 });
 
+describe("media read IPC bytes", () => {
+  it.each(["readMedia", "readFile"] as const)(
+    "%s turns a fallback JSON byte array into binary image data",
+    async (method) => {
+      const pngHeader = [137, 80, 78, 71, 13, 10, 26, 10];
+      invoke.mockResolvedValueOnce(pngHeader);
+
+      const bytes = await chat[method]("file-conv");
+      const blobBytes = new Uint8Array(await new Blob([bytes]).arrayBuffer());
+
+      expect(blobBytes).toEqual(new Uint8Array(pngHeader));
+    },
+  );
+
+  it("preserves the normal ArrayBuffer response", async () => {
+    const original = new Uint8Array([137, 80, 78, 71]).buffer;
+    invoke.mockResolvedValueOnce(original);
+
+    expect(await chat.readMedia("file-conv")).toBe(original);
+  });
+});
+
 describe("contact visibility command mapping", () => {
   it("binds reads and writes to the expected local owner", async () => {
     await contactPolicy.get("owner");
