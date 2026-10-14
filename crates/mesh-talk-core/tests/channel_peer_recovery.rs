@@ -89,7 +89,7 @@ impl CliNode {
             }
             std::thread::sleep(Duration::from_millis(300));
         }
-        panic!("peer {user_id} not discovered");
+        panic!("expected peer not discovered");
     }
 }
 
