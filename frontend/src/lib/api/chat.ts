@@ -1,4 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
+
+export type SyncCategory =
+  "history" | "attachments" | "profile" | "appearance" | "contacts";
+
+export type DeviceSyncPolicy = Record<SyncCategory, boolean>;
+
+export interface AccountPreference {
+  category: "appearance" | "contacts";
+  key: string;
+  value: string | null;
+  revision: number;
+  device_id: string;
+}
+
+export interface DeviceSyncStatus {
+  device_id: string;
+  phase: "offline" | "catching_up" | "up_to_date" | "error" | "disabled";
+  pending_attachments: number;
+  error: string | null;
+}
 import type {
   AccountInfo,
   ChannelInfo,
@@ -30,6 +50,26 @@ function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
 }
 
 export const chat = {
+  getDeviceSyncPolicy: () => invoke<DeviceSyncPolicy>("get_device_sync_policy"),
+  getDeviceSyncStatus: () =>
+    invoke<DeviceSyncStatus[]>("get_device_sync_status"),
+  setDeviceSyncCategory: (category: SyncCategory, enabled: boolean) =>
+    invoke<DeviceSyncPolicy>("set_device_sync_category", {
+      category,
+      enabled,
+    }),
+  getAccountPreferences: (category: "appearance" | "contacts") =>
+    invoke<AccountPreference[]>("get_account_preferences", { category }),
+  setAccountPreference: (
+    category: "appearance" | "contacts",
+    key: string,
+    value: string | null,
+  ) =>
+    invoke<AccountPreference>("set_account_preference", {
+      category,
+      key,
+      value,
+    }),
   ownerIdentity: (owner: string) =>
     invoke<{ owner: string; device_id: string; account_id: string }>(
       "owner_node_identity",

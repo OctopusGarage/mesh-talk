@@ -49,18 +49,23 @@ pub async fn publish_avatar(
         .map_err(CommandError::from)
 }
 
-/// Every avatar peers have propagated to us, as `account_id -> data-URL`. The frontend
-/// merges these into its avatars store on startup so received avatars survive a relaunch.
+/// Durable signed profiles, including `null` for a cleared avatar. The frontend uses
+/// tombstones so an old local copy cannot reappear after a linked device clears it.
 #[tauri::command]
 pub async fn peer_avatars(
     state: tauri::State<'_, NodeState>,
-) -> Result<std::collections::HashMap<String, String>, CommandError> {
+) -> Result<std::collections::HashMap<String, Option<String>>, CommandError> {
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
-        .peer_avatars()
+        .peer_profile_states()
         .into_iter()
-        .map(|(id, bytes)| (id, String::from_utf8_lossy(&bytes).into_owned()))
+        .map(|(id, bytes)| {
+            (
+                id,
+                bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            )
+        })
         .collect())
 }
 

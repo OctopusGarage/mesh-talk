@@ -90,6 +90,15 @@ export const test = base.extend({
           account_id: CAROL.account_id,
         },
       ];
+      if (dataMode === "post-office") {
+        peers.push({
+          user_id: "device_relay_4444",
+          name: "relay node",
+          addr: "192.168.1.50:47100",
+          post_office: true,
+          account_id: "acc_relay_eeee5555",
+        });
+      }
 
       (window as unknown as Record<string, unknown>).__mockRotateBobDevice =
         () => {
@@ -931,6 +940,64 @@ export const test = base.extend({
           },
 
           // device linking
+          get_device_sync_policy: () =>
+            JSON.parse(
+              localStorage.getItem(`mock-device-sync-policy-${SELF.device}`) ??
+                '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
+            ),
+          get_device_sync_status: () => [],
+          set_device_sync_category: (a) => {
+            if (
+              ![
+                "history",
+                "attachments",
+                "profile",
+                "appearance",
+                "contacts",
+              ].includes(String(a.category))
+            )
+              throw new Error("this sync category is not available yet");
+            const policy = responses.get_device_sync_policy({}) as Record<
+              string,
+              boolean
+            >;
+            const next = {
+              ...policy,
+              [String(a.category)]: Boolean(a.enabled),
+            };
+            localStorage.setItem(
+              `mock-device-sync-policy-${SELF.device}`,
+              JSON.stringify(next),
+            );
+            return next;
+          },
+          get_account_preferences: (a) =>
+            JSON.parse(
+              localStorage.getItem(
+                `mock-account-preferences-${SELF.device}-${String(a.category)}`,
+              ) ?? "[]",
+            ),
+          set_account_preference: (a) => {
+            const key = `mock-account-preferences-${SELF.device}-${String(a.category)}`;
+            const rows = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<
+              Record<string, unknown>
+            >;
+            const record = {
+              category: String(a.category),
+              key: String(a.key),
+              value: a.value ?? null,
+              revision: Date.now(),
+              device_id: SELF.device,
+            };
+            localStorage.setItem(
+              key,
+              JSON.stringify([
+                ...rows.filter((row) => row.key !== record.key),
+                record,
+              ]),
+            );
+            return record;
+          },
           start_linking: () => "0123456789abcdef0123456789abcdef", // 32 hex, like a real PairingCode
           stop_linking: ok,
           link_device: () => SELF.account,

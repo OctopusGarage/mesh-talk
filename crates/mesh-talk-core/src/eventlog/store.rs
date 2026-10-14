@@ -182,6 +182,18 @@ impl EventLog {
         self.events.get(id)
     }
 
+    /// Look up an authored event without allocating a conversation snapshot.
+    pub fn authored_event(
+        &self,
+        conversation: ConversationId,
+        author: Author,
+        seq: u64,
+    ) -> Option<&Event> {
+        self.author_seq
+            .get(&(conversation, author, seq))
+            .and_then(|id| self.events.get(id))
+    }
+
     /// All events in a conversation, in deterministic total order `(lamport, id)`.
     ///
     /// This order is topologically consistent (parents before children) for

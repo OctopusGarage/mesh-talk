@@ -1,0 +1,162 @@
+{
+  "name": "mesh-talk-linked-device-sync-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-SYNC-AI-001",
+      "name": "direct history sync authenticates and bounds transfers",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
+      "min_score": 0.85,
+      "scenario": "Review the linked-device direct DM history sync for cross-account disclosure, malformed-record import, unbounded transfer, and repeated full-history traffic. Judge only protections visible in this file; flag dependencies on other files as unverified.",
+      "rubric": [
+        "The server checks the requesting peer against a certified linked-device directory and the requested account against its own account.",
+        "The client checks the target peer account and linked-device identity before dialing.",
+        "Each received DM record is validated for logical message ID, sender, account route, and conversation before import.",
+        "Transfer pages and chunks have explicit limits, and an unchanged digest avoids retransmitting the complete history.",
+        "A disabled local history policy prevents serving and importing history."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-002",
+      "name": "history wire decoder rejects oversized and invalid frames",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync_wire.rs",
+      "min_score": 0.85,
+      "scenario": "Review the account-history frame codec as the trust boundary before any record allocation. Check whether malformed, oversized, forged-device, or incompatible frames can pass decode. Judge only behavior visible in this file.",
+      "rubric": [
+        "Decoding requires the account-history magic, an explicit frame size cap, a bounded bincode decoder, and no trailing bytes.",
+        "Requests require the supported version and a canonical account ID.",
+        "Record headers require a canonical sender account and a positive length no greater than MAX_RECORD.",
+        "Record chunks cannot be empty or larger than MAX_CHUNK.",
+        "Device frames verify their account certificate and bind it to the transmitted device signing key."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-003",
+      "name": "linked device directory validates account certificates",
+      "subject_file": "crates/mesh-talk-core/src/node/account_devices.rs",
+      "min_score": 0.85,
+      "scenario": "Review whether the local linked-device directory can admit a forged, cross-account, conflicting, or unbounded device record, including when reopened from disk.",
+      "rubric": [
+        "An enrolled certificate must verify cryptographically and bind the exact device signing key and own account ID.",
+        "Reload validates persisted records rather than trusting encrypted storage alone.",
+        "Duplicate enrollment is idempotent, while conflicting records are rejected.",
+        "The number of linked devices is bounded on insertion and reload.",
+        "The directory is stored through the encrypted record log."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-004",
+      "name": "local erasure suppresses sibling reimport",
+      "subject_file": "crates/mesh-talk-core/src/node/lifecycle.rs",
+      "min_score": 0.85,
+      "scenario": "Review whether deleting, clearing, or retention-pruning local account DM history persists logical-message suppression before removing plaintext, so a sibling cannot resurrect erased messages later. Judge only behavior visible in this file.",
+      "rubric": [
+        "Deleting an account message persists a suppression marker before removing its sidecar entries.",
+        "Clear and retention collect logical account message IDs from both sent and received stores.",
+        "Bulk suppression is persisted before the matching plaintext entries are removed.",
+        "Persistence failures propagate instead of silently proceeding with an erase.",
+        "The erase remains local; it does not claim to delete copies on other devices."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-005",
+      "name": "signed sibling avatar updates respect the local profile choice",
+      "subject_file": "crates/mesh-talk-core/src/node/profile_io.rs",
+      "min_score": 0.85,
+      "scenario": "Review signed account-avatar propagation between linked devices. Check whether a sibling can impersonate another account, whether a disabled local profile choice defers sibling updates, and whether a newer update becomes the state republished to future peers.",
+      "rubric": [
+        "The profile payload signature verifies and its account ID matches the authenticated sender device's certified account.",
+        "A disabled profile choice defers an own-account sibling update so it can be applied after re-enabling.",
+        "The durable profile store applies only newer updates and retains avatar clears.",
+        "An applied own-account update refreshes the profile republished to newly discovered peers.",
+        "Local avatar publication uses a timestamp newer than the durable own-account profile state."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-006",
+      "name": "linked avatar restart does not resurrect stale local state",
+      "subject_file": "frontend/src/store/avatars.ts",
+      "min_score": 0.85,
+      "scenario": "Review the frontend avatar store for a linked-device update or clear arriving before or after startup loads. Check whether an older local own-avatar override can reappear or be republished, and whether a user's newer local edit remains authoritative.",
+      "rubric": [
+        "A signed own-account update removes the stale local override and persists that removal without republishing it.",
+        "Durable clear tombstones are recognized on startup, rather than treated as absent data.",
+        "Startup republish does not turn a stale local avatar into a newer signed update after a sibling changed it.",
+        "In-flight local edits and owner changes are guarded against stale asynchronous loads.",
+        "A local override for another contact is not removed by that contact's propagated avatar."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-007",
+      "name": "automatic channel enrollment preserves invitation consent",
+      "subject_file": "crates/mesh-talk-core/src/node/channels.rs",
+      "min_score": 0.85,
+      "scenario": "Review automatic channel invitation and acceptance for linked devices. Check whether an unrelated invite or relay can gain automatic acceptance, whether owners alone issue invitations, and whether the work is bounded and repeatable.",
+      "rubric": [
+        "Only the channel owner proposes a certified sibling of an accepted account member.",
+        "Relays, unrelated accounts, dissolved channels, and existing members are excluded.",
+        "A pending invitation is accepted automatically only when another accepted channel member is a verified sibling of the local account.",
+        "An ordinary invitation remains pending for explicit consent.",
+        "The recovery loop processes at most one invitation and one acceptance per pass."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-008",
+      "name": "channel history archive stays bounded and membership gated",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
+      "min_score": 0.85,
+      "scenario": "Review historical channel plaintext reconciliation between certified siblings. Check whether an arbitrary account or pending channel invite can read history, whether records can exhaust memory or conflict with signed events, and whether local erasure remains effective on later sweeps.",
+      "rubric": [
+        "The server authenticates a certified sibling and exports only channels where its own device is accepted and the requester is a member.",
+        "The importer requires accepted local membership before writing channel plaintext.",
+        "Channel record size, chunks, page count, and per-request archive allocation have explicit bounds without materializing the whole plaintext history.",
+        "When a signed event is present locally, its channel, kind, and author must match the imported record.",
+        "The importer checks local account suppression before each channel write; marker creation and restart persistence are evaluated separately in MT-SYNC-AI-004 and its unit test.",
+        "The transfer retains original event IDs, and durable import rejects conflicting reuse of an ID."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-009",
+      "name": "versioned account preferences merge without syncing device choices",
+      "subject_file": "crates/mesh-talk-core/src/node/account_preferences.rs",
+      "min_score": 0.85,
+      "scenario": "Review the durable preference store used for appearance and contact choices. Check validation, bounded records, deterministic concurrent resolution, tombstones, and persistence. Judge only this file.",
+      "rubric": [
+        "Only appearance and contact categories can be stored; device-local sync choices cannot be imported as account preferences.",
+        "Keys, values, authors, and revisions have explicit validation and size bounds.",
+        "A deterministic revision and device-ID order resolves concurrent edits, while a stale edit cannot replace a newer one.",
+        "Clears are retained as versioned tombstones and survive reopen.",
+        "A failed durable append does not update the in-memory current value."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-010",
+      "name": "linked attachment transfer authenticates and verifies bytes",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
+      "min_score": 0.85,
+      "scenario": "Review old file-card and byte catch-up between linked devices. Check cross-account access, accepted channel membership, signed manifest proof, local erase, transfer bounds, checksum and size checks, and independent attachment choice. Judge only behavior visible in this file.",
+      "rubric": [
+        "Only certified account siblings can request history or attachment bytes; the source limits file cards to eligible account conversations or accepted channels containing the requester.",
+        "Imported file cards require an accepted channel invitation or a matching account conversation and a signed manifest proof bound to the original event ID, author, and clock.",
+        "The local attachment choice gates card import and byte requests independently of message history.",
+        "Byte transfer is chunked and writes to disk with cumulative size and manifest checksum verification before encrypted storage.",
+        "Local suppression and file erasure block reimport, and failed or incomplete transfers do not install bytes."
+      ]
+    },
+    {
+      "id": "MT-SYNC-AI-011",
+      "name": "linked appearance does not overwrite a fresh device with defaults",
+      "subject_file": "frontend/src/lib/linkedAppearance.ts",
+      "min_score": 0.85,
+      "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Judge only this file.",
+      "rubric": [
+        "A new device does not automatically publish default appearance values that could overwrite another linked device.",
+        "Before issuing a pairing code, existing saved appearance values can be published when missing.",
+        "Remote values apply only while the local appearance choice is enabled.",
+        "Applying a remote value does not echo the same change back as a newer local edit.",
+        "Polls and subscriptions stop after cleanup, and asynchronous responses do not update state after cleanup."
+      ]
+    }
+  ]
+}

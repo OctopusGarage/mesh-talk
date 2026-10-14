@@ -15,6 +15,8 @@ import { useAuth } from "@/store/auth";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { usePrivacy } from "@/store/privacy";
 import { ease, useMotionOK } from "@/lib/motion";
+import { startLinkedAppearance } from "@/lib/linkedAppearance";
+import { startLinkedContacts } from "@/lib/linkedContacts";
 
 export function ChatApp() {
   const { t } = useTranslation();
@@ -35,6 +37,12 @@ export function ChatApp() {
       usePrivacy.getState().reset();
     };
   }, [owner, generation]);
+  useEffect(() => {
+    if (owner && ready) return startLinkedAppearance();
+  }, [owner, generation, ready]);
+  useEffect(() => {
+    if (owner && ready) return startLinkedContacts(owner);
+  }, [owner, generation, ready]);
   useEffect(() => {
     if (owner && ready) void usePrivacy.getState().load(owner);
   }, [owner, generation, ready]);
