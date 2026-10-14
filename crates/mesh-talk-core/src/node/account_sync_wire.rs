@@ -34,6 +34,13 @@ pub(super) enum AccountHistoryFrame {
         next_cursor: Option<u32>,
         digest: [u8; 32],
     },
+    ChannelHeader {
+        channel: [u8; 32],
+        from: String,
+        wall_clock: u64,
+        event_id: [u8; 32],
+        total_len: u32,
+    },
 }
 
 impl AccountHistoryFrame {
@@ -79,6 +86,9 @@ impl AccountHistoryFrame {
             Self::RecordHeader {
                 from, total_len, ..
             } => account_id(from) && *total_len > 0 && (*total_len as usize) <= MAX_RECORD,
+            Self::ChannelHeader {
+                from, total_len, ..
+            } => account_id(from) && *total_len > 0 && (*total_len as usize) <= MAX_RECORD,
             Self::RecordChunk { bytes } => !bytes.is_empty() && bytes.len() <= MAX_CHUNK,
             Self::Complete { .. } => true,
         }
@@ -120,6 +130,13 @@ mod tests {
                 next_cursor: Some(8),
                 digest: [9; 32],
             },
+            AccountHistoryFrame::ChannelHeader {
+                channel: [1; 32],
+                from: "ef".repeat(16),
+                wall_clock: 42,
+                event_id: [4; 32],
+                total_len: 1024,
+            },
         ] {
             let encoded = frame.encode().expect("valid frame encodes");
             assert!(encoded.starts_with(MAGIC));
@@ -153,6 +170,17 @@ mod tests {
         assert!(
             AccountHistoryFrame::RecordChunk {
                 bytes: vec![0; MAX_CHUNK + 1],
+            }
+            .encode()
+            .is_none()
+        );
+        assert!(
+            AccountHistoryFrame::ChannelHeader {
+                channel: [1; 32],
+                from: "ef".repeat(16),
+                wall_clock: 0,
+                event_id: [3; 32],
+                total_len: (MAX_RECORD + 1) as u32,
             }
             .encode()
             .is_none()

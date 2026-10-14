@@ -83,7 +83,7 @@ test("linked-device history choice is local and survives reopening", async ({
   await page.getByTestId("sidebar-action-link").click();
   const dialog = page.getByTestId("link-device-dialog");
   const history = dialog.getByRole("switch", {
-    name: "Direct message history",
+    name: "Message history",
   });
   const profile = dialog.getByRole("switch", { name: "Account avatar" });
   await expect(history).toHaveAttribute("aria-checked", "true");
@@ -92,7 +92,7 @@ test("linked-device history choice is local and survives reopening", async ({
   await profile.click();
   await expect(history).toHaveAttribute("aria-checked", "false");
   await expect(profile).toHaveAttribute("aria-checked", "false");
-  await expect(dialog).toContainText("Channel messages and attachments");
+  await expect(dialog).toContainText("Attachments, appearance, and contacts");
 
   await dialog.getByRole("button", { name: "Close" }).click();
   const linkAction = page.getByTestId("sidebar-action-link");
@@ -128,7 +128,7 @@ test("failed sync choice leaves the device policy unchanged", async ({
   await page.getByTestId("sidebar-action-link").click();
   const dialog = page.getByTestId("link-device-dialog");
   const history = dialog.getByRole("switch", {
-    name: "Direct message history",
+    name: "Message history",
   });
   await expect(history).toHaveAttribute("aria-checked", "true");
   await history.click();

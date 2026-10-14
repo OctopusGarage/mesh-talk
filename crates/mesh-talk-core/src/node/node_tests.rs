@@ -5936,6 +5936,13 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .set_device_sync_category(crate::node::SyncCategory::History, false)
         .unwrap();
 
+    let channel = a1_node.create_channel("old channel", vec![]).await.unwrap();
+    a1_node
+        .send_channel_message(channel, b"before sibling joined")
+        .await
+        .unwrap();
+    let old_channel_id = a1_node.channel_history(channel, 10)[0].id;
+
     let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
     bob_node
         .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
@@ -5958,7 +5965,22 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     );
 
     let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if a2_node
+                .list_channels()
+                .iter()
+                .any(|item| item.id == channel && !item.pending_invite)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("certified sibling joins the existing channel");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(a2_node.channel_history(channel, 10).is_empty());
     assert!(
         a2_node
             .account_history(&bob_account.account_id(), 10)
@@ -5968,6 +5990,57 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     a2_node
         .set_device_sync_category(crate::node::SyncCategory::History, true)
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if a2_node
+                .channel_history(channel, 10)
+                .iter()
+                .any(|item| item.id == old_channel_id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("old channel plaintext reaches the linked device");
+    let archived = a2_node.channel_history(channel, 10);
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].id, old_channel_id);
+    assert_eq!(archived[0].text, b"before sibling joined");
+    assert!(archived[0].from_me, "another own device is still 'you'");
+    assert_eq!(
+        a2_node
+            .delete_message(channel, old_channel_id, false)
+            .unwrap(),
+        1
+    );
+    a1_node
+        .send_channel_message(channel, b"after sibling joined")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if a2_node
+                .channel_history(channel, 10)
+                .iter()
+                .any(|item| item.text == b"after sibling joined")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("new channel messages still arrive");
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let history = a2_node.channel_history(channel, 10);
+    assert_eq!(
+        history.len(),
+        1,
+        "sibling history must not resurrect a local erase"
+    );
+    assert_eq!(history[0].text, b"after sibling joined");
     for _ in 0..50 {
         if a2_node.account_history(&bob_account.account_id(), 10).len() == 1 {
             break;

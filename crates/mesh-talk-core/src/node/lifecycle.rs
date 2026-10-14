@@ -46,7 +46,12 @@ impl Node {
         target: EventId,
         account: bool,
     ) -> Result<usize, NodeError> {
-        if account {
+        if account
+            || self
+                .list_channels()
+                .iter()
+                .any(|channel| channel.id == conv)
+        {
             self.account_suppression
                 .lock()
                 .expect("account suppression mutex not poisoned")
@@ -187,15 +192,23 @@ impl Node {
         should_remove: impl Fn(ConversationId, u64) -> bool,
     ) -> Result<usize, NodeError> {
         let mut suppressed = Vec::new();
+        let channels: std::collections::HashSet<_> = self
+            .list_channels()
+            .into_iter()
+            .map(|channel| channel.id)
+            .collect();
         {
             let received = self.received.lock().expect("received mutex not poisoned");
             for conv in received.conversations() {
                 for entry in received.entries_ref(&conv) {
-                    if should_remove(conv, entry.wall_clock)
-                        && let Some(envelope) =
+                    if should_remove(conv, entry.wall_clock) {
+                        if channels.contains(&conv) {
+                            suppressed.push((conv, entry.event_id));
+                        } else if let Some(envelope) =
                             super::dm_envelope::DmEnvelope::decode(&entry.plaintext)
-                    {
-                        suppressed.push((conv, EventId::new(envelope.msg_id)));
+                        {
+                            suppressed.push((conv, EventId::new(envelope.msg_id)));
+                        }
                     }
                 }
             }
@@ -210,6 +223,13 @@ impl Node {
                     {
                         suppressed.push((conv, EventId::new(envelope.msg_id)));
                     }
+                }
+            }
+        }
+        for channel in channels {
+            for (id, entry) in self.raw_sent_history(channel) {
+                if should_remove(channel, entry.wall_clock) {
+                    suppressed.push((channel, id));
                 }
             }
         }

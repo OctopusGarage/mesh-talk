@@ -100,6 +100,21 @@
         "An ordinary invitation remains pending for explicit consent.",
         "The recovery loop processes at most one invitation and one acceptance per pass."
       ]
+    },
+    {
+      "id": "MT-SYNC-AI-008",
+      "name": "channel history archive stays bounded and membership gated",
+      "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
+      "min_score": 0.85,
+      "scenario": "Review historical channel plaintext reconciliation between certified siblings. Check whether an arbitrary account or pending channel invite can read history, whether records can exhaust memory or conflict with signed events, and whether local erasure remains effective on later sweeps.",
+      "rubric": [
+        "The server authenticates a certified sibling and exports only channels where its own device is accepted and the requester is a member.",
+        "The importer requires accepted local membership before writing channel plaintext.",
+        "Channel record size, chunks, page count, and total allocation have explicit bounds.",
+        "When a signed event is present locally, its channel, kind, and author must match the imported record.",
+        "A durable local suppression marker prevents an erased channel message from being reimported when the source digest changes.",
+        "The transfer retains original event IDs and is deduplicated on import."
+      ]
     }
   ]
 }

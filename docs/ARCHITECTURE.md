@@ -113,15 +113,17 @@ command names for Tauri registration. Commands clone a node handle from
   devices; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
-  Direct-message history reconciliation and signed account-avatar updates obey
+  Message-history reconciliation and signed account-avatar updates obey
   separate device-local switches. Profile updates use the existing per-peer
   event delivery path; a device with avatar sync disabled defers sibling updates
   until it is re-enabled. The received-profile store retains clear tombstones,
   and each device also stores its own signed profile state so it can republish
   the current avatar or clear after restart. Channel owners invite certified
   siblings of accepted members; a sibling accepts automatically only when an
-  already accepted member has its own certified account. The invite does not transfer old channel
-  plaintext or attachments; those still require an authenticated archive path.
+  already accepted member has its own certified account. Once accepted, bounded
+  account reconciliation transfers available older channel plaintext with stable
+  event IDs. Locally erased channel messages carry durable suppression markers.
+  File cards and attachment bytes still require a separate authenticated path.
 
 ## 3. Event log & sync (`eventlog/`)
 

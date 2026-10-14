@@ -1,4 +1,4 @@
-//! Bounded direct history catch-up between certified devices on one account.
+//! Bounded direct and channel history catch-up between certified account devices.
 
 use super::account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 use super::account_sync_wire::{AccountHistoryFrame, MAX_CHUNK, MAX_RECORD, VERSION};
@@ -9,6 +9,8 @@ use super::pairing::BackfillRecord;
 use super::session::SessionError;
 use super::*;
 use crate::discovery::roster::PeerRecord;
+use crate::eventlog::event::{ConversationId, EventId};
+use crate::identity::device::PublicIdentity;
 use crate::transport::SecureChannel;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -30,6 +32,7 @@ struct PeerCursor {
 
 #[derive(Clone)]
 struct PendingRecord {
+    channel: bool,
     conversation: [u8; 32],
     from: String,
     wall_clock: u64,
@@ -38,10 +41,49 @@ struct PendingRecord {
     plaintext: Vec<u8>,
 }
 
+#[derive(Clone)]
+struct ChannelRecord {
+    conversation: [u8; 32],
+    from: String,
+    wall_clock: u64,
+    event_id: [u8; 32],
+    plaintext: Vec<u8>,
+}
+
+enum HistoryRecord {
+    Direct(BackfillRecord),
+    Channel(ChannelRecord),
+}
+
+impl HistoryRecord {
+    fn id(&self) -> [u8; 32] {
+        match self {
+            Self::Direct(record) => record.event_id,
+            Self::Channel(record) => record.event_id,
+        }
+    }
+
+    fn tag(&self) -> u8 {
+        match self {
+            Self::Direct(_) => 0,
+            Self::Channel(_) => 1,
+        }
+    }
+}
+
 impl PendingRecord {
-    fn finish(self, own_account_id: &str) -> Option<BackfillRecord> {
+    fn finish(self, own_account_id: &str) -> Option<HistoryRecord> {
         if self.plaintext.len() != self.total_len {
             return None;
+        }
+        if self.channel {
+            return Some(HistoryRecord::Channel(ChannelRecord {
+                conversation: self.conversation,
+                from: self.from,
+                wall_clock: self.wall_clock,
+                event_id: self.event_id,
+                plaintext: self.plaintext,
+            }));
         }
         let env = DmEnvelope::decode(&self.plaintext)?;
         if env.msg_id != self.event_id || env.route.sender_account != self.from {
@@ -57,13 +99,13 @@ impl PendingRecord {
         if *account_conversation_id(own_account_id, other).as_bytes() != self.conversation {
             return None;
         }
-        Some(BackfillRecord {
+        Some(HistoryRecord::Direct(BackfillRecord {
             conv: self.conversation,
             from: self.from,
             wall_clock: self.wall_clock,
             plaintext: self.plaintext,
             event_id: self.event_id,
-        })
+        }))
     }
 }
 
@@ -120,7 +162,7 @@ impl Node {
         Ok(())
     }
 
-    fn export_sync_records(&self) -> Vec<BackfillRecord> {
+    fn export_sync_records(&self, requester: &PublicIdentity) -> Vec<HistoryRecord> {
         let own = self.account_id();
         let mut records = self.export_account_backfill();
         records.retain_mut(|record| {
@@ -138,7 +180,70 @@ impl Node {
         });
         records.sort_by_key(|record| record.event_id);
         records.dedup_by_key(|record| record.event_id);
-        records
+        let mut merged: Vec<HistoryRecord> =
+            records.into_iter().map(HistoryRecord::Direct).collect();
+        let requester_id = requester.user_id();
+        let me = self.user_id();
+        let channels = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            book.channel_ids()
+                .into_iter()
+                .filter(|id| {
+                    book.state(id).is_some_and(|state| {
+                        !state.is_dissolved()
+                            && state.is_accepted_member(&me)
+                            && state.is_member(&requester_id)
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        for channel in channels {
+            let mut seen = HashSet::new();
+            for (id, entry) in self.raw_sent_history(channel) {
+                if entry.plaintext.is_empty()
+                    || entry.plaintext.len() > MAX_RECORD
+                    || !seen.insert(id)
+                {
+                    continue;
+                }
+                let from = self
+                    .log
+                    .lock()
+                    .expect("log mutex not poisoned")
+                    .get(&id)
+                    .map(|event| event.author.user_id())
+                    .unwrap_or_else(|| me.clone());
+                merged.push(HistoryRecord::Channel(ChannelRecord {
+                    conversation: *channel.as_bytes(),
+                    from,
+                    wall_clock: entry.wall_clock,
+                    event_id: *id.as_bytes(),
+                    plaintext: entry.plaintext,
+                }));
+            }
+            let received = self
+                .received
+                .lock()
+                .expect("received mutex not poisoned")
+                .entries(&channel);
+            for entry in received {
+                if entry.plaintext.is_empty()
+                    || entry.plaintext.len() > MAX_RECORD
+                    || !seen.insert(entry.event_id)
+                {
+                    continue;
+                }
+                merged.push(HistoryRecord::Channel(ChannelRecord {
+                    conversation: *channel.as_bytes(),
+                    from: entry.from,
+                    wall_clock: entry.wall_clock,
+                    event_id: *entry.event_id.as_bytes(),
+                    plaintext: entry.plaintext,
+                }));
+            }
+        }
+        merged.sort_by_key(|record| (record.tag(), record.id()));
+        merged
     }
 
     pub(in crate::node) async fn serve_account_history(
@@ -151,9 +256,9 @@ impl Node {
         if account_id != self.account_id() || !channel.io_admitted() {
             return;
         }
-        let peer = channel.peer_identity();
+        let peer = channel.peer_identity().clone();
         if !self.linked_devices().iter().any(|device| {
-            device.public == *peer
+            device.public == peer
                 && device.certificate.verify()
                 && device.certificate.account_id() == account_id
                 && device.certificate.device_ed25519_pub == peer.ed25519_pub
@@ -179,10 +284,11 @@ impl Node {
             .await;
             return;
         }
-        let records = self.export_sync_records();
+        let records = self.export_sync_records(&peer);
         let mut hasher = Sha256::new();
         for record in &records {
-            hasher.update(record.event_id);
+            hasher.update([record.tag()]);
+            hasher.update(record.id());
         }
         let digest: [u8; 32] = hasher.finalize().into();
         if cursor == 0 && known_digest == digest {
@@ -199,17 +305,32 @@ impl Node {
         let start = (cursor as usize).min(records.len());
         let end = start.saturating_add(RECORDS_PER_PAGE).min(records.len());
         for record in &records[start..end] {
-            let header = AccountHistoryFrame::RecordHeader {
-                conversation: record.conv,
-                from: record.from.clone(),
-                wall_clock: record.wall_clock,
-                event_id: record.event_id,
-                total_len: record.plaintext.len() as u32,
+            let (header, plaintext) = match record {
+                HistoryRecord::Direct(record) => (
+                    AccountHistoryFrame::RecordHeader {
+                        conversation: record.conv,
+                        from: record.from.clone(),
+                        wall_clock: record.wall_clock,
+                        event_id: record.event_id,
+                        total_len: record.plaintext.len() as u32,
+                    },
+                    &record.plaintext,
+                ),
+                HistoryRecord::Channel(record) => (
+                    AccountHistoryFrame::ChannelHeader {
+                        channel: record.conversation,
+                        from: record.from.clone(),
+                        wall_clock: record.wall_clock,
+                        event_id: record.event_id,
+                        total_len: record.plaintext.len() as u32,
+                    },
+                    &record.plaintext,
+                ),
             };
             if send_frame(channel, &header).await.is_err() {
                 return;
             }
-            for chunk in record.plaintext.chunks(MAX_CHUNK) {
+            for chunk in plaintext.chunks(MAX_CHUNK) {
                 if send_frame(
                     channel,
                     &AccountHistoryFrame::RecordChunk {
@@ -313,6 +434,31 @@ impl Node {
                         ));
                     }
                     pending = Some(PendingRecord {
+                        channel: false,
+                        conversation,
+                        from,
+                        wall_clock,
+                        event_id,
+                        total_len: total_len as usize,
+                        plaintext: Vec::with_capacity(total_len as usize),
+                    });
+                }
+                AccountHistoryFrame::ChannelHeader {
+                    channel: conversation,
+                    from,
+                    wall_clock,
+                    event_id,
+                    total_len,
+                } if pending.is_none() => {
+                    started_records = true;
+                    if page.len() >= RECORDS_PER_PAGE
+                        || total_len == 0
+                        || total_len as usize > MAX_RECORD
+                    {
+                        return Err(NodeError::Channel("invalid channel-history record".into()));
+                    }
+                    pending = Some(PendingRecord {
+                        channel: true,
                         conversation,
                         from,
                         wall_clock,
@@ -345,7 +491,72 @@ impl Node {
                     digest,
                 } if pending.is_none() => {
                     if self.device_sync_policy().history {
-                        self.import_account_backfill(&page)?;
+                        {
+                            let book = self.channels.lock().expect("channels mutex not poisoned");
+                            for record in &page {
+                                if let HistoryRecord::Channel(record) = record {
+                                    let channel = ConversationId::new(record.conversation);
+                                    if !book.state(&channel).is_some_and(|state| {
+                                        !state.pending_invite()
+                                            && state.is_accepted_member(&self.user_id())
+                                    }) {
+                                        return Err(NodeError::Authorization(
+                                            "channel history requires accepted membership".into(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        {
+                            let log = self.log.lock().expect("log mutex not poisoned");
+                            for record in &page {
+                                if let HistoryRecord::Channel(record) = record {
+                                    let channel = ConversationId::new(record.conversation);
+                                    if let Some(event) = log.get(&EventId::new(record.event_id))
+                                        && (event.conversation_id != channel
+                                            || event.kind != crate::eventlog::EventKind::Message
+                                            || event.author.user_id() != record.from)
+                                    {
+                                        return Err(NodeError::Authorization(
+                                            "channel history conflicts with signed event".into(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        let direct: Vec<_> = page
+                            .iter()
+                            .filter_map(|record| match record {
+                                HistoryRecord::Direct(record) => Some(record.clone()),
+                                HistoryRecord::Channel(_) => None,
+                            })
+                            .collect();
+                        self.import_account_backfill(&direct)?;
+                        for record in page {
+                            if let HistoryRecord::Channel(record) = record {
+                                let conversation = ConversationId::new(record.conversation);
+                                let event_id = EventId::new(record.event_id);
+                                if self
+                                    .account_suppression
+                                    .lock()
+                                    .expect("account suppression mutex not poisoned")
+                                    .contains(conversation, event_id)
+                                {
+                                    continue;
+                                }
+                                self.received
+                                    .lock()
+                                    .expect("received mutex not poisoned")
+                                    .record(
+                                        conversation,
+                                        record.from,
+                                        record.wall_clock,
+                                        &record.plaintext,
+                                        event_id,
+                                    )
+                                    .map_err(NodeError::Log)?;
+                            }
+                        }
                     }
                     return Ok((next_cursor, digest));
                 }
@@ -417,6 +628,7 @@ mod tests {
         let plaintext =
             DmEnvelope::new(peer.clone(), own.clone(), id, b"history".to_vec()).encode();
         let valid = PendingRecord {
+            channel: false,
             conversation: *account_conversation_id(&own, &peer).as_bytes(),
             from: peer.clone(),
             wall_clock: 1,
