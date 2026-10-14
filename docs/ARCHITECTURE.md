@@ -256,7 +256,8 @@ command names for Tauri registration. Commands clone a node handle from
   these endpoints remain separate from device identity and from Noise authorization.
   The roster and encrypted route cache retain multiple addresses per device and
   a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
-  for the protocol, limitations, and cross-network release checks.
+  for the protocol, limitations, and cross-network release checks; see
+  [network topologies](network-topologies.md) for the A–F deployment scenarios.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
