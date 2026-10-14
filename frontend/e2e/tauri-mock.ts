@@ -572,6 +572,9 @@ export const test = base.extend({
       };
 
       const ok = () => null;
+      const probedEndpoints: string[] = [];
+      (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
+        probedEndpoints;
       let failNextCommand: string | null = null;
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
@@ -855,8 +858,9 @@ export const test = base.extend({
           read_media: () => {
             if (dataMode === "screenshot-ipc-fallback") {
               return (
-                window as unknown as { __lastWrittenFileBytes?: number[] }
-              ).__lastWrittenFileBytes ?? [];
+                (window as unknown as { __lastWrittenFileBytes?: number[] })
+                  .__lastWrittenFileBytes ?? []
+              );
             }
             throw new Error("no stored media for this file");
           },
@@ -1171,6 +1175,10 @@ export const test = base.extend({
           diag_get_peers: () => diagPeers,
           diag_network_info: () => networkInfo,
           rescan_peers: ok,
+          probe_peer_endpoint: (a) => {
+            probedEndpoints.push(String(a.host));
+            return null;
+          },
           set_badge: ok,
           network_name: () => "TestNet-5G",
           env_info: () => envInfo,

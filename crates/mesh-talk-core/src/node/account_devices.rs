@@ -1,3 +1,5 @@
+//! Persistent, certificate-validated roster of devices linked to this account.
+
 use crate::eventlog::LogError;
 use crate::identity::account::DeviceCertificate;
 use crate::identity::device::PublicIdentity;
@@ -8,16 +10,19 @@ use std::path::Path;
 const MAGIC: &[u8; 6] = b"MTACDV";
 const MAX_LINKED_DEVICES: usize = 64;
 
+/// Return the encrypted roster path for an account in the node data directory.
 pub(crate) fn file_path(dir: &Path, account_id: &str) -> std::path::PathBuf {
     dir.join(format!("account-devices-{account_id}.log"))
 }
 
+/// Public identity and account-issued certificate for one linked device.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccountDevice {
     pub public: PublicIdentity,
     pub certificate: DeviceCertificate,
 }
 
+/// Encrypted, bounded roster of devices certified by the local account.
 pub struct AccountDevices {
     file: EncryptedRecordLog<AccountDevice>,
     by_user: HashMap<String, AccountDevice>,
@@ -25,6 +30,7 @@ pub struct AccountDevices {
 }
 
 impl AccountDevices {
+    /// Open the roster and reject corrupt or conflicting device certificates.
     pub fn open(path: &Path, password: &str, own_account_id: &str) -> Result<Self, LogError> {
         let (file, entries) = EncryptedRecordLog::<AccountDevice>::open(path, password, MAGIC)?;
         let mut by_user = HashMap::new();
@@ -61,6 +67,7 @@ impl AccountDevices {
         Ok(())
     }
 
+    /// Persist a newly certified device; return whether it was added.
     pub fn insert(&mut self, device: AccountDevice) -> Result<bool, LogError> {
         Self::validate(&device, &self.own_account_id)?;
         let id = device.public.user_id();
@@ -80,6 +87,7 @@ impl AccountDevices {
         Ok(true)
     }
 
+    /// Return all linked devices in stable device-ID order.
     pub fn devices(&self) -> Vec<AccountDevice> {
         let mut devices: Vec<_> = self.by_user.values().cloned().collect();
         devices.sort_by_key(|device| device.public.user_id());

@@ -1,7 +1,10 @@
+//! Desktop IPC commands for linked-device synchronization and account preferences.
+
 use super::NodeState;
 use crate::commands::CommandError;
 use mesh_talk_core::node::{AccountPreference, DeviceSyncPolicy, DeviceSyncStatus, SyncCategory};
 
+/// Return the local account's synchronization category policy.
 #[tauri::command]
 pub async fn get_device_sync_policy(
     state: tauri::State<'_, NodeState>,
@@ -9,6 +12,7 @@ pub async fn get_device_sync_policy(
     Ok(state.node_handle().await?.device_sync_policy())
 }
 
+/// Return per-device synchronization status for the local account.
 #[tauri::command]
 pub async fn get_device_sync_status(
     state: tauri::State<'_, NodeState>,
@@ -16,6 +20,7 @@ pub async fn get_device_sync_status(
     Ok(state.node_handle().await?.device_sync_status())
 }
 
+/// Enable or disable one category of linked-device synchronization.
 #[tauri::command]
 pub async fn set_device_sync_category(
     state: tauri::State<'_, NodeState>,
@@ -28,6 +33,7 @@ pub async fn set_device_sync_category(
     Ok(node.device_sync_policy())
 }
 
+/// List synchronized preferences in the requested category.
 #[tauri::command]
 pub async fn get_account_preferences(
     state: tauri::State<'_, NodeState>,
@@ -36,6 +42,7 @@ pub async fn get_account_preferences(
     Ok(state.node_handle().await?.account_preferences(category))
 }
 
+/// Set or delete one synchronized account preference.
 #[tauri::command]
 pub async fn set_account_preference(
     state: tauri::State<'_, NodeState>,
