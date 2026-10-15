@@ -31,17 +31,25 @@ pub fn elected_post_office(roster: &Roster) -> Option<PeerRecord> {
     candidates.into_iter().find(|r| r.public == winner)
 }
 
-/// A configured bridge hub is the sole mailbox for this node. If its verified
-/// route has not been learned yet, wait rather than splitting events across
-/// local post offices.
+/// Order verified post offices for delivery. A configured ID is a preference,
+/// never an exclusive mailbox: a reachable alternative can take custody while
+/// the preferred relay is offline. The deterministic order keeps unconfigured
+/// clients on the same primary relay when their rosters agree.
+pub fn post_office_candidates(roster: &Roster, preferred_id: Option<&str>) -> Vec<PeerRecord> {
+    let mut candidates = roster.post_offices();
+    candidates.sort_by_key(|relay| {
+        (
+            preferred_id != Some(relay.public.user_id().as_str()),
+            relay.public.user_id(),
+        )
+    });
+    candidates
+}
+
+/// The first known post office in preference order. Callers performing network
+/// I/O should try subsequent candidates if this relay is unreachable.
 pub fn selected_post_office(roster: &Roster, hub_id: Option<&str>) -> Option<PeerRecord> {
-    match hub_id {
-        Some(id) => roster
-            .post_offices()
-            .into_iter()
-            .find(|relay| relay.public.user_id() == id),
-        None => elected_post_office(roster),
-    }
+    post_office_candidates(roster, hub_id).into_iter().next()
 }
 
 impl super::Node {
@@ -75,6 +83,14 @@ impl super::Node {
             .lock()
             .expect("bridge hub lock not poisoned");
         selected_post_office(roster, hub.as_deref())
+    }
+
+    pub(in crate::node) fn post_office_candidates(&self, roster: &Roster) -> Vec<PeerRecord> {
+        let preferred = self
+            .bridge_hub_id
+            .lock()
+            .expect("bridge hub lock not poisoned");
+        post_office_candidates(roster, preferred.as_deref())
     }
 }
 
@@ -318,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_hub_overrides_election_without_mailbox_fallback() {
+    fn configured_relay_is_preferred_with_mailbox_fallback() {
         let a = DeviceIdentity::generate();
         let b = DeviceIdentity::generate();
         let (local, hub) = if a.user_id() < b.user_id() {
@@ -333,8 +349,11 @@ mod tests {
                 .public,
             hub.public()
         );
-        assert!(
-            selected_post_office(&po_roster(&[(local, 5001)], &[]), Some(&hub.user_id())).is_none()
+        assert_eq!(
+            selected_post_office(&po_roster(&[(local, 5001)], &[]), Some(&hub.user_id()))
+                .unwrap()
+                .public,
+            local.public()
         );
     }
 

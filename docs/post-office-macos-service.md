@@ -50,12 +50,14 @@ ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
-In the current three-relay deployment, mac2015 is the shared hub, and Windows
-and mac-mini each point directly to it. This is a **single elected mailbox and
-directory**, not replicated custody or arbitrary subnet routing. Participating
-clients must enable bridge discovery and pin the same hub fingerprint. A client
-that has not opted in remains a local-only peer. The hub is a single point of
-failure for cross-LAN delivery.
+In the current three-relay deployment, mac2015 is the preferred cross-site
+bridge relay, and Windows and mac-mini each point directly to it. All three
+nodes can store opaque mail independently; their mailboxes do not replicate.
+Participating clients enable bridge discovery and may select mac2015 as their
+preferred post office in Settings. A client that has not opted in remains a
+local-only peer. If mac2015 is offline, another verified relay on the current
+LAN can accept messages. Cross-LAN service during that outage requires an
+independent route and directory path between the remaining sites.
 
 Check boot-service state and listeners:
 

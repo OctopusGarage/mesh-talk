@@ -44,10 +44,11 @@ keystore; on update, it stops an
 existing task, replaces only the binary, checks ACLs, registers the boot task,
 starts it, and waits for the TCP listener and, when configured, the bridge
 proxy. It preserves the data directory and identity. `-Bridge` alone enables a
-local directory; `-BridgePeer` plus `-BridgePeerId` pins a signed remote hub
-and enables the gateway. The example points to mac2015's dedicated routed
-discovery port. Participating clients must separately enable bridge discovery
-and pin the same hub fingerprint. The CLI reclaims a `node.lock` from a
+local directory; `-BridgePeer` plus `-BridgePeerId` authenticate a signed remote relay
+and enable the gateway. The example points to mac2015's dedicated routed
+discovery port. Participating clients enable bridge discovery and can choose
+mac2015 as their preferred post office in Settings. If it is offline, another
+verified local post office can accept messages. The CLI reclaims a `node.lock` from a
 terminated process on Windows; it refuses a lock held by a live process.
 
 ## Check and operate

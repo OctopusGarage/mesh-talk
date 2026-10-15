@@ -104,12 +104,18 @@ impl Node {
         {
             self.record_gateway(&local, &proofs, gateway);
         }
-        let relay = {
+        let candidates = {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            self.selected_post_office(&roster)
+            self.post_office_candidates(&roster)
         };
-        let Some(relay) = relay else { return 0 };
-        let Some((proofs, gateway)) = self.query_bridge_relay(&relay).await else {
+        let mut response = None;
+        for candidate in candidates {
+            if let Some((proofs, gateway)) = self.query_bridge_relay(&candidate).await {
+                response = Some((candidate, proofs, gateway));
+                break;
+            }
+        }
+        let Some((relay, proofs, gateway)) = response else {
             return 0;
         };
         // Recheck host policy after the network await; an invisible-mode switch
@@ -125,6 +131,10 @@ impl Node {
         {
             return 0;
         }
+        // The selected local relay may advertise a verified route to another
+        // post office. Remember it even without an explicit preference so that
+        // users can choose that relay in settings and use it for delivery.
+        self.record_gateway(&relay, &proofs, gateway);
         let now = Instant::now();
         let mut introduced = HashMap::new();
         {
@@ -134,12 +144,6 @@ impl Node {
                     continue;
                 }
                 if proof.post_office {
-                    if proof.public() != relay.public
-                        && let Some((ref id, port)) = gateway
-                        && id == &proof.user_id
-                    {
-                        roster.update_gateway(&proof, relay.addr.ip(), port, &self.user_id());
-                    }
                     continue;
                 }
                 if roster.update_relayed(&proof, relay.addr, &self.user_id())

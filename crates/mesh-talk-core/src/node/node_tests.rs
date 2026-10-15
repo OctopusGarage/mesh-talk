@@ -1435,6 +1435,131 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
 }
 
 #[tokio::test]
+async fn preferred_post_office_fails_over_and_fallback_mailbox_is_drained_after_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let preferred = DeviceIdentity::generate();
+    let fallback = DeviceIdentity::generate();
+    let alice_uid = alice.user_id();
+    let bob_uid = bob.user_id();
+
+    let offline_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let preferred_addr = offline_listener.local_addr().unwrap();
+    drop(offline_listener);
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = bob_listener.local_addr().unwrap();
+    drop(bob_listener);
+    let fallback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fallback_addr = fallback_listener.local_addr().unwrap();
+    let (fallback_ed, fallback_x) = fallback.secret_bytes();
+    let fallback_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("fallback.log"), "pw", fallback).unwrap(),
+    ));
+    let fallback_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(fallback_ed, fallback_x),
+        fallback_listener,
+        Arc::clone(&fallback_store),
+    ));
+
+    let make_roster = |self_uid: &str, other: &DeviceIdentity, other_addr: SocketAddr| {
+        let mut roster = Roster::default();
+        for (proof, addr) in [
+            (Announce::new(other, "peer", other_addr.port()), other_addr),
+            (
+                Announce::new_post_office(&preferred, "preferred", preferred_addr.port()),
+                preferred_addr,
+            ),
+            (
+                Announce::new_post_office(
+                    &DeviceIdentity::from_secret_bytes(fallback_ed, fallback_x),
+                    "fallback",
+                    fallback_addr.port(),
+                ),
+                fallback_addr,
+            ),
+        ] {
+            roster.update(&proof, addr.ip(), self_uid);
+        }
+        Arc::new(Mutex::new(roster))
+    };
+    let alice_roster = make_roster(&alice_uid, &bob, bob_addr);
+    let bob_roster = make_roster(&bob_uid, &alice, bob_addr);
+    let open = |name: &str, identity, roster| {
+        let (dm, receiver) = mpsc::unbounded_channel();
+        let (channels, _) = mpsc::unbounded_channel();
+        let (files, _) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm,
+            channels,
+            files,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, receiver)
+    };
+    let (alice_node, _) = open("alice", alice, alice_roster);
+    let (bob_node, mut bob_rx) = open("bob", bob, bob_roster);
+    alice_node
+        .set_bridge_hub_id(Some(&preferred.user_id()))
+        .unwrap();
+    bob_node
+        .set_bridge_hub_id(Some(&preferred.user_id()))
+        .unwrap();
+    alice_node
+        .send_dm(&bob_uid, b"fallback-delivery")
+        .await
+        .unwrap();
+
+    let fallback_mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &alice_node.identity,
+        &bob_node.identity.public(),
+        &DeviceIdentity::from_secret_bytes(fallback_ed, fallback_x).public(),
+    )
+    .unwrap();
+    assert!(
+        !fallback_store
+            .lock()
+            .unwrap()
+            .held_events(&fallback_mailbox.id())
+            .is_empty(),
+        "the fallback relay must take custody while preferred is offline"
+    );
+
+    // Bring the preferred relay back before Bob drains. Reading only the
+    // preferred mailbox would strand the message already held by fallback.
+    let preferred_listener = TcpListener::bind(preferred_addr).await.unwrap();
+    let (preferred_ed, preferred_x) = preferred.secret_bytes();
+    let preferred_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("preferred.log"), "pw", preferred).unwrap(),
+    ));
+    let preferred_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(preferred_ed, preferred_x),
+        preferred_listener,
+        preferred_store,
+    ));
+    bob_node.replace_verified_dm_pull_peers(vec![alice_uid]);
+    let mut received = None;
+    for _ in 0..10 {
+        bob_node.drain_from_post_office().await;
+        if let Ok(dm) = bob_rx.try_recv() {
+            received = Some(dm);
+            break;
+        }
+    }
+    assert_eq!(
+        received.expect("fallback mailbox drained").text,
+        b"fallback-delivery"
+    );
+    preferred_task.abort();
+    fallback_task.abort();
+}
+
+#[tokio::test]
 async fn history_merges_sent_and_received_in_time_order() {
     let dir = tempfile::tempdir().unwrap();
     let me = DeviceIdentity::generate();

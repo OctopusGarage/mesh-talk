@@ -1,6 +1,13 @@
 import { defineConfig, devices } from "@playwright/test";
+import { createHash } from "node:crypto";
 
-const port = Number(process.env.MESH_TALK_E2E_PORT ?? 5173);
+const worktreePort =
+  5200 +
+  (parseInt(createHash("sha256").update(process.cwd()).digest("hex").slice(0, 4), 16) %
+    1000);
+const port = Number(
+  process.env.MESH_TALK_E2E_PORT ?? (process.env.CI ? 5173 : worktreePort),
+);
 const url = `http://localhost:${port}`;
 
 // Browser E2E for the Mesh-Talk UI. Runs the Vite dev server + drives the real React app in
@@ -39,7 +46,9 @@ export default defineConfig({
     command: `npm run dev -- --port ${port}`,
     env: { MESH_TALK_E2E: "1" },
     url,
-    reuseExistingServer: !process.env.CI,
+    // Another worktree may already have Vite on this port. Reusing it can
+    // silently test an older checkout and report a false pass or failure.
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 });

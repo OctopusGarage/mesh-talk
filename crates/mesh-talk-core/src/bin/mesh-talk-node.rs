@@ -65,7 +65,7 @@ struct Args {
     /// Share this public node with an opted-in post-office bridge directory.
     #[arg(long)]
     bridge_discovery: bool,
-    /// Full fingerprint of the shared bridge hub; pins all mailbox traffic to it.
+    /// Preferred bridge relay fingerprint; other verified relays remain fallbacks.
     #[arg(long, requires = "bridge_discovery", value_parser = parse_fingerprint)]
     bridge_hub_id: Option<String>,
     /// Serve an opt-in bridge directory alongside the post-office mailbox.

@@ -1204,59 +1204,64 @@ impl Node {
         &self,
         destination: &DeliveryDestination,
     ) -> bool {
-        let po = {
+        let candidates = {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            self.selected_post_office(&roster)
+            self.post_office_candidates(&roster)
         };
-        let Some(po) = po else {
-            return false;
-        };
-        if po.public == self.identity.public() || !self.relay_allowed(&po.public) {
-            return false;
-        }
-        let Ok(mut channel) = self.privacy_dial(po.addr, &po.public).await else {
-            return false;
-        };
-        if !self.delivery_destination_allowed(destination)
-            || !self.relay_allowed(&po.public)
-            || channel
-                .peer_announcement()
-                .is_some_and(|p| po.account_id.is_some() && p.account_id() != po.account_id)
-            || !self
-                .delivery
-                .lock()
-                .expect("delivery lock not poisoned")
-                .contains_work_event(destination.event.id)
-        {
-            return false;
-        }
-        let Ok(uploaded) = self
-            .opaque_relay_round(
-                &mut channel,
+        for po in candidates {
+            if po.public == self.identity.public() || !self.relay_allowed(&po.public) {
+                continue;
+            }
+            let Ok(mut channel) = self.privacy_dial(po.addr, &po.public).await else {
+                continue;
+            };
+            if !self.delivery_destination_allowed(destination)
+                || !self.relay_allowed(&po.public)
+                || channel
+                    .peer_announcement()
+                    .is_some_and(|p| po.account_id.is_some() && p.account_id() != po.account_id)
+                || !self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .contains_work_event(destination.event.id)
+            {
+                continue;
+            }
+            let Ok(uploaded) = self
+                .opaque_relay_round(
+                    &mut channel,
+                    &destination.device,
+                    Some(destination.event.conversation_id),
+                )
+                .await
+            else {
+                continue;
+            };
+            let Some((_, outer_id)) = uploaded
+                .iter()
+                .find(|(inner_id, _)| *inner_id == destination.event.id)
+            else {
+                continue;
+            };
+            let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
+                &self.identity,
                 &destination.device,
-                Some(destination.event.conversation_id),
-            )
-            .await
-        else {
-            return false;
-        };
-        let Some((_, outer_id)) = uploaded
-            .iter()
-            .find(|(inner_id, _)| *inner_id == destination.event.id)
-        else {
-            return false;
-        };
-        let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
-            &self.identity,
-            &destination.device,
-            &po.public,
-        ) else {
-            return false;
-        };
-        let held = super::session::request_durable_have(&mut channel, mailbox.id(), *outer_id)
-            .await
-            .unwrap_or(false);
-        held && self.delivery_destination_allowed(destination) && self.relay_allowed(&po.public)
+                &po.public,
+            ) else {
+                continue;
+            };
+            let held = super::session::request_durable_have(&mut channel, mailbox.id(), *outer_id)
+                .await
+                .unwrap_or(false);
+            if held
+                && self.delivery_destination_allowed(destination)
+                && self.relay_allowed(&po.public)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Shared by desktop, CLI and SDK accept-loop hosts. The future owns all
@@ -1435,42 +1440,45 @@ impl Node {
         if !current() {
             return false;
         }
-        let peer = if relay {
+        let peers = if relay {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            self.selected_post_office(&roster)
+            self.post_office_candidates(&roster)
         } else {
             self.routing_peer(&proof.public().user_id())
+                .into_iter()
+                .collect()
         };
-        let Some(peer) = peer else {
-            return false;
-        };
-        if relay && !self.relay_allowed(&peer.public) {
-            return false;
+        let mut completed = false;
+        for peer in peers {
+            if relay && !self.relay_allowed(&peer.public) {
+                continue;
+            }
+            if !relay && (peer.public != proof.public() || peer.account_id != proof.account_id()) {
+                continue;
+            }
+            let Ok(mut channel) = self.privacy_dial(peer.addr, &peer.public).await else {
+                continue;
+            };
+            if !current()
+                || (relay && !self.relay_allowed(&peer.public))
+                || channel
+                    .peer_announcement()
+                    .is_some_and(|p| p.account_id() != peer.account_id)
+            {
+                continue;
+            }
+            completed |= if relay {
+                self.opaque_relay_round(&mut channel, &proof.public(), None)
+                    .await
+                    .is_ok()
+            } else {
+                let store = self.pull_sync_store(channel.peer_identity());
+                super::session::request_round(&mut channel, &store, conv)
+                    .await
+                    .is_ok()
+            };
         }
-        if !relay && (peer.public != proof.public() || peer.account_id != proof.account_id()) {
-            return false;
-        }
-        let Ok(mut channel) = self.privacy_dial(peer.addr, &peer.public).await else {
-            return false;
-        };
-        if !current()
-            || (relay && !self.relay_allowed(&peer.public))
-            || channel
-                .peer_announcement()
-                .is_some_and(|p| p.account_id() != peer.account_id)
-        {
-            return false;
-        }
-        if relay {
-            self.opaque_relay_round(&mut channel, &proof.public(), None)
-                .await
-                .is_ok()
-        } else {
-            let store = self.pull_sync_store(channel.peer_identity());
-            super::session::request_round(&mut channel, &store, conv)
-                .await
-                .is_ok()
-        }
+        completed
     }
 
     async fn retry_one_destination(&self, destination: &DeliveryDestination) -> bool {

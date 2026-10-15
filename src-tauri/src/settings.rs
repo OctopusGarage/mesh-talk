@@ -68,7 +68,7 @@ pub struct AppSettings {
     /// Share public presence with an opted-in post-office bridge. Defaults off.
     #[serde(default)]
     pub bridge_discovery_enabled: bool,
-    /// Full device fingerprint of the shared bridge hub. Empty means normal election.
+    /// Preferred relay fingerprint. Other verified relays remain available for failover.
     #[serde(default)]
     pub bridge_hub_id: String,
     /// The incoming-call ringtone id (see frontend `lib/ringtones.ts`). A cosmetic UI

@@ -838,6 +838,7 @@ export function PeerRow({ p }: { p: DiagPeerInfo }) {
           </div>
           <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
             <CopyValue value={p.user_id} label={shortId(p.user_id, 12)} />
+            {p.via_gateway && <span>{t("diagnostics.viaGateway")}</span>}
             <CopyValue value={`${p.ip}:${p.tcp_port}`} />
           </div>
         </div>

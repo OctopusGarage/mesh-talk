@@ -40,6 +40,7 @@ import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { balancedPrivacy, useSettings } from "@/store/settings";
 import { useAuth } from "@/store/auth";
+import { useChat } from "@/store/chat";
 import type { AppSettings } from "@/lib/types";
 import { useTheme } from "@/lib/theme";
 import {
@@ -157,6 +158,7 @@ export function SettingsDialog({
   const wallpaperEnabled = useTheme((s) => s.wallpaperEnabled);
   const setWallpaperEnabled = useTheme((s) => s.setWallpaperEnabled);
   const owner = useAuth((s) => s.user?.id ?? null);
+  const peers = useChat((s) => s.peers);
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
@@ -301,8 +303,7 @@ export function SettingsDialog({
       () => setBridgeDiscoveryEnabled(enabled),
     );
   };
-  const saveBridgeHub = () => {
-    const id = bridgeHubId.trim().toLowerCase();
+  const saveBridgeHub = (id: string) => {
     void saveSetting(
       () => settingsApi.update({ bridge_hub_id: id }),
       () => setBridgeHubId(id),
@@ -547,23 +548,34 @@ export function SettingsDialog({
                 title={t("settings.bridgeHub")}
                 desc={t("settings.bridgeHubDesc")}
                 control={
-                  <input
+                  <select
                     id="setting-bridge-hub"
-                    type="text"
                     value={bridgeHubId}
-                    onChange={(event) => setBridgeHubId(event.target.value)}
-                    onBlur={saveBridgeHub}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") event.currentTarget.blur();
-                    }}
-                    placeholder={t("settings.bridgeHubPlaceholder")}
+                    onChange={(event) => saveBridgeHub(event.target.value)}
                     aria-label={t("settings.bridgeHub")}
-                    maxLength={32}
-                    autoComplete="off"
-                    spellCheck={false}
                     disabled={!settingsLoaded || saving || !postOfficeEnabled}
-                    className="w-44 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
-                  />
+                    className={`${SELECT_CLASS} w-44 max-w-full`}
+                  >
+                    <option value="">{t("settings.bridgeHubAutomatic")}</option>
+                    {bridgeHubId &&
+                      !peers.some(
+                        (peer) =>
+                          peer.post_office && peer.user_id === bridgeHubId,
+                      ) && (
+                        <option value={bridgeHubId}>
+                          {t("settings.bridgeHubUnavailable", {
+                            id: bridgeHubId.slice(0, 8),
+                          })}
+                        </option>
+                      )}
+                    {peers
+                      .filter((peer) => peer.post_office)
+                      .map((peer) => (
+                        <option key={peer.user_id} value={peer.user_id}>
+                          {peer.name} · {peer.user_id.slice(0, 8)}
+                        </option>
+                      ))}
+                  </select>
                 }
               />
               <Row

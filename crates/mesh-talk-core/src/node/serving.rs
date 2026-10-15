@@ -74,31 +74,40 @@ impl Node {
         if targets.is_empty() {
             return Ok(false);
         }
-        let po = {
+        let candidates = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            self.selected_post_office(&roster)
+            self.post_office_candidates(&roster)
         };
-        let Some(po) = po else {
-            return Ok(false);
-        };
-        if !self.relay_allowed(&po.public) {
-            return Ok(false);
-        }
-        let mut channel = self
-            .privacy_dial(po.addr, &po.public)
-            .await
-            .map_err(SessionError::Transport)?;
-        let mut uploaded = false;
-        for recipient in targets {
+        for po in candidates {
             if !self.relay_allowed(&po.public) {
-                return Ok(false);
+                continue;
             }
-            uploaded |= !self
-                .opaque_relay_round(&mut channel, &recipient, Some(conv))
-                .await?
-                .is_empty();
+            let Ok(mut channel) = self.privacy_dial(po.addr, &po.public).await else {
+                continue;
+            };
+            let mut uploaded = false;
+            let mut complete = true;
+            for recipient in &targets {
+                if !self.relay_allowed(&po.public) {
+                    complete = false;
+                    break;
+                }
+                match self
+                    .opaque_relay_round(&mut channel, recipient, Some(conv))
+                    .await
+                {
+                    Ok(events) => uploaded |= !events.is_empty(),
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                return Ok(uploaded);
+            }
         }
-        Ok(uploaded)
+        Ok(false)
     }
 
     /// Accept inbound connections and maintain deferred profile compactions.
@@ -572,41 +581,38 @@ impl Node {
         }
     }
 
-    /// Pull any DMs held for this node from the elected post office: dial it once,
-    /// then run a sync round for each known peer's DM conversation, surfacing
-    /// anything new. A no-op if no post office is known. Best-effort and
-    /// fail-soft — a dial/round error just ends this drain; the next one retries.
+    /// Pull from every known post office. Mailboxes are relay-specific, so a
+    /// message accepted during failover may remain on the fallback relay after
+    /// the preferred one returns.
     pub async fn drain_from_post_office(&self) {
         if self.cached_peer_snapshot_async().await.is_err() {
             log::warn!("verified discovery cache update failed");
         }
-        let post_office = {
+        let post_offices = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            self.selected_post_office(&roster)
+            self.post_office_candidates(&roster)
         };
-        let Some(po) = post_office else {
-            return;
-        };
-        if !self.relay_allowed(&po.public) {
-            return;
-        }
-        let mut channel = match self.privacy_dial(po.addr, &po.public).await {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        // A pairwise mailbox can contain DMs, channel invitations, controls,
-        // and file chunks, including conversations not known before this pull.
-        for peer in self.historical_dm_peers() {
-            if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+        for po in post_offices {
+            if !self.relay_allowed(&po.public) {
                 continue;
             }
-            if !self.relay_allowed(&po.public)
-                || self
-                    .opaque_relay_round(&mut channel, &peer.public(), None)
-                    .await
-                    .is_err()
-            {
-                return;
+            let Ok(mut channel) = self.privacy_dial(po.addr, &po.public).await else {
+                continue;
+            };
+            // A pairwise mailbox can contain DMs, channel invitations,
+            // controls, and file chunks unknown before this pull.
+            for peer in self.historical_dm_peers() {
+                if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+                    continue;
+                }
+                if !self.relay_allowed(&po.public)
+                    || self
+                        .opaque_relay_round(&mut channel, &peer.public(), None)
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
             }
         }
     }

@@ -56,16 +56,19 @@ test("bridge discovery is off by default and requires post-office relays", async
   await expect(bridge).toBeDisabled();
 });
 
-test("changing language preserves an unsaved bridge hub draft", async ({
+test("selecting a preferred post office persists across settings reopen", async ({
   page,
 }) => {
-  await enterChat(page);
+  await enterChat(page, "tester", "/?data=post-office");
   await openSidebarMenuAction(page, "sidebar-nav-settings");
-  const hub = page.locator("#setting-bridge-hub");
-  await expect(hub).toBeEnabled();
-  await hub.fill("abcd");
-  await page.getByTestId("settings-language-select").selectOption("ja");
-  await expect(hub).toHaveValue("abcd");
+  const preferred = page.locator("#setting-bridge-hub");
+  await expect(preferred).toBeEnabled();
+  await expect(preferred.locator("option")).toHaveCount(2);
+  await preferred.selectOption("44444444444444444444444444444444");
+  await expect(preferred).toHaveValue("44444444444444444444444444444444");
+  await page.getByRole("button", { name: "Close" }).click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(preferred).toHaveValue("44444444444444444444444444444444");
 });
 
 test("a failed settings save keeps the stored value and offers recovery", async ({

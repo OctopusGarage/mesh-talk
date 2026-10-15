@@ -92,7 +92,7 @@ export const test = base.extend({
       ];
       if (dataMode === "post-office") {
         peers.push({
-          user_id: "device_relay_4444",
+          user_id: "44444444444444444444444444444444",
           name: "relay node",
           addr: "192.168.1.50:47100",
           post_office: true,

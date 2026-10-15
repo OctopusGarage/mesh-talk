@@ -137,6 +137,7 @@ export interface DiagPeerInfo {
   name: string;
   ip: string;
   tcp_port: number;
+  via_gateway?: boolean;
   post_office: boolean;
   account_id: string | null;
   last_seen_secs: number;
