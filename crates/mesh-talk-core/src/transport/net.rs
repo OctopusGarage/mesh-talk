@@ -122,8 +122,52 @@ pub async fn bind_dual_stack_listener(port: u16) -> std::io::Result<TcpListener>
     match bind_v6_dual_stack(port) {
         Ok(listener) => Ok(listener),
         // IPv6 unavailable/disabled on this host — fall back to IPv4 so the node still serves.
-        Err(_) => TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await,
+        Err(_) => bind_v4_listener(port),
     }
+}
+
+fn bind_v4_listener(port: u16) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    set_tcp_bind_options(&socket)?;
+    let bind_addr: SocketAddr = (Ipv4Addr::UNSPECIFIED, port).into();
+    socket.bind(&bind_addr.into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    TcpListener::from_std(socket.into())
+}
+
+#[cfg(windows)]
+fn set_tcp_bind_options(socket: &socket2::Socket) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        SO_EXCLUSIVEADDRUSE, SOL_SOCKET, WSAGetLastError, setsockopt,
+    };
+
+    // SO_REUSEADDR can take over an occupied TCP port on Windows. Keep each
+    // node listener exclusive so another process cannot intercept its traffic.
+    let enabled: i32 = 1;
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&enabled as *const i32).cast::<u8>(),
+            std::mem::size_of_val(&enabled) as i32,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(unsafe {
+            WSAGetLastError()
+        }))
+    }
+}
+
+#[cfg(not(windows))]
+fn set_tcp_bind_options(socket: &socket2::Socket) -> std::io::Result<()> {
+    socket.set_reuse_address(true)
 }
 
 /// Bind an IPv6 listener on `[::]:port` with `IPV6_V6ONLY` disabled, so the one
@@ -133,7 +177,7 @@ fn bind_v6_dual_stack(port: u16) -> std::io::Result<TcpListener> {
     let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
     // Accept IPv4-mapped connections on this v6 socket (dual-stack).
     socket.set_only_v6(false)?;
-    socket.set_reuse_address(true)?;
+    set_tcp_bind_options(&socket)?;
     let bind_addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, port).into();
     socket.bind(&bind_addr.into())?;
     socket.listen(1024)?;

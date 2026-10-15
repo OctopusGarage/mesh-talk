@@ -282,6 +282,7 @@ mod tests {
         let expected_id = identity.user_id();
         let occupied = bind_dual_stack_listener(0).await.unwrap();
         let remote_tcp_port = occupied.local_addr().unwrap().port();
+        assert!(bind_dual_stack_listener(remote_tcp_port).await.is_err());
         let proof =
             Announce::new_post_office_with_account(&identity, &account, "remote", remote_tcp_port);
         let current = Arc::new(Mutex::new(Some(proof)));
