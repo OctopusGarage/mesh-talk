@@ -251,6 +251,7 @@ function FileBubble({
       {!readOnly && approvalNeeded && !savedPath && (
         <div className="mt-2 flex gap-2">
           <button
+            data-testid="receive-file"
             type="button"
             onClick={() => void decide(true)}
             className="rounded-md bg-primary px-2.5 py-1 text-xs text-primary-foreground"

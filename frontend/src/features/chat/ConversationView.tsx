@@ -634,6 +634,7 @@ export function ConversationView() {
         <AnimatePresence>
           {viewport.showJump && (
             <motion.button
+              data-testid="jump-to-latest"
               type="button"
               initial={{
                 opacity: 0,
