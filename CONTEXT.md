@@ -2,9 +2,11 @@
 
 ## Core job
 
-Let users on the same local network chat directly, end-to-end encrypted, with no central
-server. The desktop app is a Tauri (Rust) backend + React frontend; a headless CLI
-(`mesh-talk-node`, with a `--post-office` relay mode) drives the same core.
+Let users on the same local network chat directly, end-to-end encrypted, without
+a vendor-operated server. On existing routed networks, peers can opt into routed
+discovery or a post-office bridge for cross-site introductions and encrypted
+delivery. The desktop app is a Tauri (Rust) backend + React frontend; a headless
+CLI (`mesh-talk-node`, with a `--post-office` relay mode) drives the same core.
 
 ## Layers (frontend → IPC → node → crypto/sync/transport → storage)
 
@@ -14,7 +16,7 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 | Layer | Path | Responsibility |
 |-------|------|----------------|
 | **Frontend** | `frontend/src/` (React + TS) | UI; talks to the backend only via Tauri commands + events. |
-| **IPC** | `src-tauri/src/{commands,chat_commands}.rs` | Auth (login/register/logout) + all messaging commands. |
+| **IPC** | `src-tauri/src/commands.rs`, `src-tauri/src/chat_commands/` | Auth (login/register/logout) + messaging commands. |
 | **Node** | `crates/mesh-talk-core/src/node/` | Orchestrates identity + discovery + transport + event log + DM/channel/file crypto. |
 | **Crypto** | `crates/mesh-talk-core/src/{identity,transport,ratchet,channel}/`, `dm.rs` | Keys, Noise channel, Double Ratchet, sender-key group ratchet. |
 | **Data/sync** | `crates/mesh-talk-core/src/{eventlog,discovery,postoffice,file}/` | Event DAG + sync, signed discovery, store-and-forward relay, file chunks. |
@@ -30,12 +32,13 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 | **Event** | Content-addressed, signed log entry (Message / React / FileManifest / MembershipChange / KeyRotation / …) in a per-conversation hash-linked DAG. |
 | **Conversation** | A 1:1 DM (device-pair or account-pair) or a channel; history is the event log. |
 | **Outgoing intent** | A user's attempt to send text, a sticker, or a file to a Conversation. It can be pending or failed before acceptance assigns a stable Event ID. |
-| **Post office** | A deterministically-elected always-on peer that stores-and-forwards (still-encrypted) events for offline recipients. |
+| **Post office** | A peer that stores and forwards recipient-encrypted events for offline delivery; optional bridge mode maintains a short-lived directory of opted-in peers. |
 | **Recovery archive** | A user-created encrypted snapshot (`.mtbackup`) unlocked with a separate recovery key; restore keeps the account identity but creates a new device identity. |
 
 ## Key invariants
 
-- All payloads are end-to-end encrypted; the post office only ever sees ciphertext.
+- Message payloads are end-to-end encrypted; the post office sees ciphertext and
+  routing metadata, as described in [`docs/post-office-metadata-privacy.md`](docs/post-office-metadata-privacy.md).
 - Events are content-addressed + signed; ingest re-verifies hash + signature, and the log
   detects author equivocation (forks).
 - DM crypto is forward-secret (Double Ratchet); channels use a per-sender sender-key ratchet
@@ -45,7 +48,9 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 
 ## What Mesh-Talk does NOT own
 
-- **No central server / directory** — discovery is signed UDP multicast, scoped to the LAN.
+- **No vendor-operated central server / directory** — LAN discovery is signed
+  UDP multicast; optional routed discovery and peer-operated bridge directories
+  require existing network reachability and explicit opt-in.
 - **No plaintext relay** — the post office forwards ciphertext only.
 
 > Full technical detail: **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.

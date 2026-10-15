@@ -1,11 +1,15 @@
 # Mesh-Talk Architecture
 
-A decentralized, end-to-end-encrypted LAN messenger. **Tauri** desktop shell, **Rust**
-backend, **React + TypeScript** frontend. No server: peers discover each other over signed UDP
-**multicast** (group `224.0.0.167`, port 47474), connect directly over a Noise-encrypted TCP
+A decentralized, end-to-end-encrypted messenger. **Tauri** desktop shell, **Rust**
+backend, **React + TypeScript** frontend. No vendor-operated server: LAN peers
+discover each other over signed UDP **multicast** (group `224.0.0.167`, port
+47474), connect directly over a Noise-encrypted TCP
 channel, and store messages as an append-only, hash-linked **event log** that syncs CRDT-style.
 When a peer is offline, an elected **post office** node stores-and-forwards the (still-encrypted)
-events.
+events. Existing routed networks can supply optional peer discovery; opted-in
+post-office bridges introduce registered peers across sites without merging
+their IP subnets. See [routed discovery](routed-network-discovery.md) and
+[network topologies](network-topologies.md).
 
 > The earlier RSA-contact / plaintext-UDP / TCP-relay *legacy* stack has been retired;
 > this serverless stack is the entire product and lives at `/`. The only retained

@@ -10,8 +10,9 @@ process and convention docs linked below.
 Mesh-Talk is a **serverless, end-to-end-encrypted desktop chat app** (Rust + Tauri 2 +
 React). Peers on the same LAN discover each other over Ed25519-signed UDP multicast announces,
 connect directly over a Noise-encrypted channel, and store messages as an append-only,
-hash-linked event log that syncs CRDT-style. An elected "post office" peer stores-and-
-forwards (still-encrypted) events for offline recipients.
+hash-linked event log that syncs CRDT-style. Optional routed discovery finds reachable peers
+beyond the LAN, and an opt-in post-office bridge introduces registered peers across sites.
+An elected "post office" peer stores and forwards encrypted events for offline recipients.
 
 ### Technology Stack
 - **Language**: Rust 2024 · **Desktop**: Tauri 2.x · **Frontend**: React 19 + TypeScript + Tailwind + Radix primitives (Vite)
@@ -25,7 +26,8 @@ forwards (still-encrypted) events for offline recipients.
 @mentions, search, multi-device (one account across devices via device linking +
 account-addressed fan-out), system-tray integration, encrypted local storage,
 manual encrypted backup and signed-out recovery, privacy presets and invisible
-mode, and installable customization packs.
+mode, routed discovery, optional post-office bridge discovery, and installable
+customization packs.
 
 ## AI Tool Compatibility
 
@@ -47,12 +49,13 @@ CLI, Copilot, etc.). Conventions for agents live in [`AGENTS.md`](AGENTS.md).
 
 1. **Forward secrecy** — DMs use a Double Ratchet; channels use a sender-key ratchet that
    rotates on membership change. Don't weaken these when extending messaging.
-2. **The post office only sees ciphertext** — never route plaintext through a relay.
+2. **The post office cannot read message content** — it stores ciphertext but sees
+   routing metadata. See [`docs/post-office-metadata-privacy.md`](docs/post-office-metadata-privacy.md).
 3. **Offline delivery** depends on the post office or the recipient coming back online and
    syncing; there is no central store.
 4. **Crypto RNG compatibility** — the core uses `rand_core` 0.6 directly for its identity APIs;
    check dalek and `rand_core` compatibility before changing crypto dependencies.
-5. **Dependencies** — `cargo-deny` + `cargo-audit` run in the gate; keep advisories clean.
+5. **Dependencies** — `cargo-deny` blocks Rust advisories in the gate; keep advisories clean.
 6. **Device linking** — a one-time code authorizes the link and binds both device keys;
    backfill runs inside the authenticated Noise channel. The code is the intended
    out-of-band authorization step, as documented in [`specifications/TODO.md`](specifications/TODO.md).

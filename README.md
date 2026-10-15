@@ -3,27 +3,16 @@
 # Mesh-Talk
 
 [![CI](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml)
-[![UI E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml)
 [![Backend E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml)
-[![Sanitizers](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml)
-[![Fuzz](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml)
-[![Mutation sample](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml)
-[![Gitleaks](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml)
-[![Scorecard](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/OctopusGarage/mesh-talk/badge)](https://scorecard.dev/viewer/?uri=github.com/OctopusGarage/mesh-talk)
-[![codecov](https://codecov.io/gh/OctopusGarage/mesh-talk/branch/main/graph/badge.svg)](https://codecov.io/gh/OctopusGarage/mesh-talk)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
-[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![platform: macOS | Windows | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000?logo=linux&logoColor=white)](#build-from-source)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-docs-8A2BE2)](https://deepwiki.com/OctopusGarage/mesh-talk)
+[![UI E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml)
 [![Release](https://img.shields.io/github/v/release/OctopusGarage/mesh-talk?sort=semver)](https://github.com/OctopusGarage/mesh-talk/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A serverless, end-to-end-encrypted messenger for your local network.** Mesh-Talk peers find
 each other on the LAN and talk directly. Accounts are created and kept locally; no cloud
-registration or central service is required. An optional peer-operated post office can hold
-encrypted events for offline peers.
+registration or central service is required. Existing routed networks can connect peers
+across LANs when users opt in. A peer-operated post office can hold encrypted events for
+offline recipients.
 
 <p align="center">
   <a href="docs/README.md"><strong>Documentation</strong></a>
@@ -50,8 +39,10 @@ Mesh-Talk is a desktop chat app ([Tauri](https://tauri.app/) v2 + React) for mac
 Linux, built on a UI-free Rust protocol core (`mesh-talk-core`) that also runs headless as the
 `mesh-talk-node` CLI. Peers discover one another over signed UDP multicast, connect over a
 Noise-encrypted TCP channel, and converge by replicating a per-conversation append-only event
-log. Every message is end-to-end encrypted with forward secrecy; an optional store-and-forward
-relay (the "post office") delivers messages to peers that are temporarily offline.
+log. Message content is end-to-end encrypted with forward secrecy; an optional store-and-forward
+relay (the "post office") delivers encrypted events to peers that are temporarily offline.
+Routed discovery and post-office bridge discovery are optional ways to reach devices beyond
+one LAN; neither configures a VPN or merges IP subnets.
 
 ## Features
 
@@ -69,13 +60,14 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 - End-to-end encryption with **forward secrecy** — Double Ratchet for DMs, a sender-key ratchet for channels
 - Ed25519 device identities (your ID is your key fingerprint), X25519 key agreement, Noise-encrypted transport
 - Safety-number contact verification with trust-on-first-use and key-change warnings
-- Encrypted-at-rest keystores and message logs; no servers, no telemetry, no central account
+- Encrypted-at-rest keystores and message logs; no vendor-operated server, telemetry, or central account
 - Balanced, Private, and Strict privacy presets for notification previews, app locking, and sensitive copying; invisible mode stops public presence announcements and lets approved accounts reach you
 
 **Network**
 
 - Zero-config LAN discovery: signed UDP multicast announces + announce/response + a unicast subnet-scan fallback
 - Optional routed discovery on an existing user-managed Tailscale network, plus manual IP/hostname entry; Mesh-Talk verifies device identity independently of the network
+- Optional post-office bridge discovery introduces opted-in devices across LANs through a pinned relay or shared hub; relays carry encrypted DMs, not arbitrary LAN traffic
 - Dual-stack IPv4/IPv6 direct TCP; self-healing discovery that re-announces and re-joins on network changes
 
 **Desktop experience**
@@ -144,7 +136,13 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 4. **Encrypt** — message payloads are sealed with per-conversation ratchets (Double Ratchet / sender
    key), so a compromised key can't decrypt past traffic.
 5. **Relay when offline** — if a recipient is away, an elected post-office node holds the encrypted
-   events and forwards them on reconnect. It never sees plaintext.
+   events and forwards them on reconnect. It cannot read message content, but sees routing
+   metadata; see [relay metadata privacy](docs/post-office-metadata-privacy.md).
+
+On an existing routed network, peers can also use [routed discovery](docs/routed-network-discovery.md).
+For several LANs, opted-in clients can use a [post-office bridge](docs/network-topologies.md)
+to discover registered peers and exchange encrypted DMs through a shared mailbox. This is
+not an IP bridge, mailbox replication, or a guarantee of cross-network calls or file delivery.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
@@ -179,9 +177,12 @@ After the one-time approval it behaves like any installed app. To remove the pro
 need paid signing (Apple Developer ID for macOS, a code-signing cert or the Microsoft Store for
 Windows); Linux is always prompt-free.
 
-> Two peers must be on the **same LAN** with the firewall allowing UDP `47474` (multicast
-> `224.0.0.167`) and the app's TCP port. If they can't see each other, the in-app **Diagnostics**
-> panel (under **Connection**) and the [troubleshooting guide](specifications/troubleshooting_guide.md) walk through it.
+> For automatic LAN discovery, peers share a **LAN** and the firewall allows UDP `47474`
+> (multicast `224.0.0.167`) and the app's TCP port. Across networks, use an existing routed
+> path plus [routed discovery](docs/routed-network-discovery.md) or the opted-in
+> [post-office bridge](docs/network-topologies.md). The in-app **Diagnostics** panel
+> (under **Connection**) and [troubleshooting guide](specifications/troubleshooting_guide.md)
+> help when a peer is missing.
 
 ## Build from source
 
@@ -208,17 +209,22 @@ make tauri-build  # or: produce a release bundle (.app / .dmg / .exe / .deb / ..
 The same core runs without a UI as `mesh-talk-node` — also the offline-delivery relay:
 
 ```bash
-cargo run --bin mesh-talk-node -- --keystore alice.ks --password <pw> --name alice
+cargo run --bin mesh-talk-node -- --keystore alice.ks --password 'your-password' --name alice
 ```
 
 | Flag | Meaning |
 |------|---------|
 | `--keystore <path>` | encrypted identity keystore, created if absent (**required**) |
-| `--password <pw>` | password that encrypts the keystore (**required**) |
+| `--password <pw>` or `--password-file <path>` | keystore password (choose one; use a private file for a long-running service) |
 | `--name <name>` | display name advertised to peers (**required**) |
 | `--port <n>` | TCP port to listen on (`0` = OS-assigned) |
 | `--discovery-port <n>` | UDP discovery port, default `47474` (**must match across peers**) |
 | `--post-office` | run as a store-and-forward relay for offline delivery (no chat REPL) |
+| `--bridge` | also serve the opt-in peer directory on a post-office node |
+
+Bridge peers, pinned hub IDs, and client discovery flags are documented in the
+[network topology guide](docs/network-topologies.md); they require an existing routed
+connection and explicit client opt-in.
 
 Each instance needs its **own** keystore path — two nodes sharing one clobber each other's data.
 In the chat REPL: `/msg <peer-id-prefix> <text>` to DM, `/history <peer-id-prefix>` to view a thread.
@@ -263,8 +269,10 @@ Everything is indexed in the **[documentation map](docs/README.md)** — start t
 
 ```bash
 make tauri-dev    # run the desktop app (hot reload)
-make test         # Rust workspace unit tests
-make e2e          # multi-process backend E2E (real nodes)
+# Run only the affected Rust tests while developing:
+make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync
+make test         # full Rust workspace suite before PR submission or in CI
+make e2e          # multi-process backend E2E when requested or at release gates
 make lint fix     # clippy -D warnings · auto-fix + format
 make check        # the full local health gate
 ```
@@ -285,7 +293,7 @@ community guidelines.
 
 ## Security
 
-Mesh-Talk is end-to-end encrypted with forward secrecy and has no servers or telemetry. Please
+Mesh-Talk is end-to-end encrypted with forward secrecy and has no vendor-operated server or telemetry. Please
 report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not open a public issue for
 security reports.
 

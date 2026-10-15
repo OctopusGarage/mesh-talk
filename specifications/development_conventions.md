@@ -35,19 +35,17 @@ This document outlines the development conventions, coding standards, and best p
 
 ## Testing Standards
 
-1. **Unit Tests**: Write unit tests for all public functions
-2. **Integration Tests**: Write integration tests for major components
-3. **Test Organization**: Three layers — inline `#[cfg(test)]` unit tests next to the code
-   (`cargo test -p mesh-talk-core --lib`), multi-process backend E2E rigs in
-   `crates/mesh-talk-core/tests/` (`make e2e`), and Playwright UI E2E in `frontend/`
-   (`npm run e2e`). See [`testing_guidelines.md`](testing_guidelines.md).
-4. **Test Structure**: Structure tests with Arrange, Act, Assert (AAA pattern)
-5. **Descriptive Names**: Use descriptive test names that explain what is being tested
-6. **One Assert Per Test**: Aim for one assertion per test when possible
-7. **Test Coverage**: Test cases need to cover normal and exceptional situations
-8. **Test Passing Standard**: All test cases must pass 100%
-9. **Property-based Testing**: Use property-based testing for complex algorithms
-10. **Error Condition Testing**: Test error conditions and edge cases
+- Put focused Rust unit tests next to the behavior they cover and frontend
+  state/component tests next to their modules. Give tests names that describe
+  an observable result, including important failure and account-switch paths.
+- Use integration tests when the boundary itself matters: storage persistence,
+  authenticated network delivery, Tauri IPC, or browser rendering. Keep
+  multi-process backend rigs in `crates/mesh-talk-core/tests/` and UI scenarios
+  in `frontend/e2e/`.
+- Run affected tests during development. Reserve full workspace, multi-process,
+  and browser suites for explicit requests, PR/review gates, and CI. See
+  [`testing_guidelines.md`](testing_guidelines.md) and the
+  [local feedback loop](../docs/testing-feedback-loop.md).
 
 ## Rust Language Standards
 
@@ -62,8 +60,8 @@ This document outlines the development conventions, coding standards, and best p
    - Use features to enable optional functionality
    - Consider workspace organization for multi-crate projects
 2. **Git Hooks**:
-   - Run linting and tests before committing
-   - Run full test suite before pushing
+   - The pre-commit hook checks staged whitespace and source formatting
+   - Run affected tests during development; run the full suite before PR submission
 
 ## Git Workflow
 

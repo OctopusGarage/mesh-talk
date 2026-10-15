@@ -40,13 +40,14 @@
 - Reference `specifications/development_conventions.md` for naming nuances.
 
 ## Architecture & Components
-- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No server.
+- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
 - The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
   (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
   low-level socket in `transport/net.rs`) + the content-addressed event log + DM/channel/
   file crypto. Messages are events synced as a bounded append-only log, account-addressed
-  across a user's devices; offline delivery via an elected post office. Wire formats are
-  versioned bincode.
+  across a user's devices; offline delivery via an elected post office. Optional
+  routed discovery and opt-in post-office bridges connect reachable sites without
+  joining their IP subnets. Wire formats are versioned bincode.
 - See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport.
 
 ## Testing Guidelines

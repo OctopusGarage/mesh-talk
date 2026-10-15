@@ -1,8 +1,9 @@
 # Mesh-Talk Documentation Map
 
 A map of current guides, references, and dated evaluations, grouped by purpose. Mesh-Talk is a
-serverless, end-to-end-encrypted, local-first P2P LAN messenger (Tauri + React desktop app
-plus a headless `mesh-talk-node` CLI over a shared Rust core).
+serverless, end-to-end-encrypted, local-first messenger (Tauri + React desktop app
+plus a headless `mesh-talk-node` CLI over a shared Rust core). LAN discovery is
+automatic; routed and post-office bridge discovery are optional.
 
 > New here? Start with the root [`README.md`](../README.md), then
 > [`ARCHITECTURE.md`](ARCHITECTURE.md).
