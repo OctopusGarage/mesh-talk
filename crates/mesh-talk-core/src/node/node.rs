@@ -352,6 +352,7 @@ pub struct Node {
     /// Ephemeral identities introduced by an explicitly enabled bridge relay.
     pub(in crate::node) bridge_dm_pull_peers: Mutex<HashMap<UserId, std::time::Instant>>,
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
+    pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_control_ids:
         Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
@@ -748,6 +749,7 @@ impl Node {
             verified_dm_pull_peers: Mutex::new(HashSet::new()),
             bridge_dm_pull_peers: Mutex::new(HashMap::new()),
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
+            bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
             delivery_control_ids: Mutex::new(delivery_control_ids),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),

@@ -34,6 +34,8 @@ This makes C visible to opted-in A/B and A/B visible to opted-in C, with bidirec
 
 When only E in LAN X and F in LAN Y have an existing routed connection, both can run `--post-office --bridge` with a pinned `--bridge-peer`. Each relay queries the other's discovery endpoint with a fresh nonce, verifies the signed Mesh Talk announcement against the configured **full device fingerprint**, and opens a local TCP gateway on the other relay's signed port. The local bridge directory gives the remote relay's signed proof and gateway endpoint only to clients that enable bridge discovery. It never introduces clients that have not registered their own visible presence. The gateway copies encrypted TCP bytes; the client's Noise session terminates at the named remote relay, which still authenticates the client.
 
+For three or more sites, use one explicit hub post office instead of reciprocal gateways. Each site's relay pins that same hub with `--bridge-peer` and can bind an independent local proxy port with `--bridge-proxy-port 0`. Clients enable bridge discovery and pin `--bridge-hub-id <hub-full-fingerprint>` (or the desktop setting), so all sites use one directory and mailbox even when another post office is available locally. See [three or more sites with one explicit hub](network-topologies.md#4-three-or-more-sites-with-one-explicit-hub) for the full configuration and limits.
+
 ```text
 LAN X: A, B → E ⇄ F ← C, D :LAN Y
                existing routed IP path

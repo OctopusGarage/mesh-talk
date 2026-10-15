@@ -1206,7 +1206,7 @@ impl Node {
     ) -> bool {
         let po = {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            super::postbox::elected_post_office(&roster)
+            self.selected_post_office(&roster)
         };
         let Some(po) = po else {
             return false;
@@ -1437,7 +1437,7 @@ impl Node {
         }
         let peer = if relay {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            super::postbox::elected_post_office(&roster)
+            self.selected_post_office(&roster)
         } else {
             self.routing_peer(&proof.public().user_id())
         };
@@ -1924,7 +1924,7 @@ impl Node {
             }
             let peer = if relay {
                 let roster = self.roster.lock().expect("roster lock not poisoned");
-                super::postbox::elected_post_office(&roster)
+                self.selected_post_office(&roster)
             } else {
                 self.routing_peer(&binding.device.user_id())
             };

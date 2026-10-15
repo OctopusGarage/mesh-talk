@@ -867,6 +867,12 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         .get_for_owner(&account_id)
                     {
                         node.set_post_office_enabled(settings.post_office_enabled);
+                        if let Err(error) = node.set_bridge_hub_id(
+                            (!settings.bridge_hub_id.is_empty())
+                                .then_some(settings.bridge_hub_id.as_str()),
+                        ) {
+                            log::warn!("Ignored invalid bridge hub setting: {error}");
+                        }
                         node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
                     }
                 }

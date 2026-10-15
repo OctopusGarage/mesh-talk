@@ -160,6 +160,7 @@ export function SettingsDialog({
   const [callsEnabled, setCallsEnabled] = useState(false);
   const [postOfficeEnabled, setPostOfficeEnabled] = useState(true);
   const [bridgeDiscoveryEnabled, setBridgeDiscoveryEnabled] = useState(false);
+  const [bridgeHubId, setBridgeHubId] = useState("");
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
   const [privacy, setPrivacy] = useState(balancedPrivacy);
   const settingsScroll = useRef<HTMLDivElement>(null);
@@ -191,6 +192,7 @@ export function SettingsDialog({
         setCallsEnabled(s.calls_enabled);
         setPostOfficeEnabled(s.post_office_enabled);
         setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
+        setBridgeHubId(s.bridge_hub_id ?? "");
         setRingtone(asRingtoneId(s.ringtone));
         const policy = privacyFromSettings(s);
         setPrivacy(policy);
@@ -267,6 +269,13 @@ export function SettingsDialog({
     void saveSetting(
       () => settingsApi.update({ bridge_discovery_enabled: enabled }),
       () => setBridgeDiscoveryEnabled(enabled),
+    );
+  };
+  const saveBridgeHub = () => {
+    const id = bridgeHubId.trim().toLowerCase();
+    void saveSetting(
+      () => settingsApi.update({ bridge_hub_id: id }),
+      () => setBridgeHubId(id),
     );
   };
   const savePrivacy = (patch: Partial<AppSettings>) => {
@@ -495,6 +504,31 @@ export function SettingsDialog({
                     checked={bridgeDiscoveryEnabled}
                     onCheckedChange={onBridgeDiscovery}
                     disabled={!settingsLoaded || saving || !postOfficeEnabled}
+                  />
+                }
+              />
+              <Row
+                id="setting-bridge-hub"
+                icon={<ShieldCheck className="h-4 w-4" />}
+                title={t("settings.bridgeHub")}
+                desc={t("settings.bridgeHubDesc")}
+                control={
+                  <input
+                    id="setting-bridge-hub"
+                    type="text"
+                    value={bridgeHubId}
+                    onChange={(event) => setBridgeHubId(event.target.value)}
+                    onBlur={saveBridgeHub}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                    placeholder={t("settings.bridgeHubPlaceholder")}
+                    aria-label={t("settings.bridgeHub")}
+                    maxLength={32}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={!settingsLoaded || saving || !postOfficeEnabled}
+                    className="w-44 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
                   />
                 }
               />

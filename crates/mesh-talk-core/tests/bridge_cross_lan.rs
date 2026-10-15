@@ -26,6 +26,18 @@ impl Node {
         relay: bool,
         gateway: Option<(std::net::SocketAddr, &str)>,
     ) -> Self {
+        Self::start_with_config(dir, name, port, relay, gateway, None, false)
+    }
+
+    fn start_with_config(
+        dir: &std::path::Path,
+        name: &str,
+        port: u16,
+        relay: bool,
+        gateway: Option<(std::net::SocketAddr, &str)>,
+        hub: Option<&str>,
+        dynamic_proxy_port: bool,
+    ) -> Self {
         std::fs::create_dir_all(dir).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_mesh-talk-node"));
         command
@@ -43,9 +55,15 @@ impl Node {
                     .arg(remote.to_string())
                     .arg("--bridge-peer-id")
                     .arg(id);
+                if dynamic_proxy_port {
+                    command.args(["--bridge-proxy-port", "0"]);
+                }
             }
         } else {
             command.arg("--bridge-discovery");
+            if let Some(hub) = hub {
+                command.args(["--bridge-hub-id", hub]);
+            }
         }
         let mut child = command
             .stdin(Stdio::piped())
@@ -237,4 +255,91 @@ fn bridge_introduces_both_lans_and_delivers_both_directions() {
     c.until("hello-from-b", Duration::from_secs(30));
     // Keep the relay alive until after both deliveries.
     e.send("/peers");
+}
+
+#[test]
+#[ignore = "seven processes model three isolated LAN discovery scopes"]
+fn three_sites_share_one_pinned_hub_despite_another_local_post_office() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = 41000 + (std::process::id() % 1000) as u16 * 8;
+    let mut hub = Node::start(&dir.path().join("hub"), "Hub D", base, true);
+    let hub_id = hub.identity("post-office ");
+    let mut local = Node::start(&dir.path().join("local"), "Local C", base + 1, true);
+    let local_id = local.identity("post-office ");
+    let hub_endpoint = std::net::SocketAddr::from(([127, 0, 0, 1], base));
+    let mut gateway_y = Node::start_with_config(
+        &dir.path().join("gateway-y"),
+        "Gateway G",
+        base + 2,
+        true,
+        Some((hub_endpoint, &hub_id)),
+        None,
+        true,
+    );
+    let gateway_y_id = gateway_y.identity("post-office ");
+    let mut gateway_z = Node::start_with_config(
+        &dir.path().join("gateway-z"),
+        "Gateway H",
+        base + 3,
+        true,
+        Some((hub_endpoint, &hub_id)),
+        None,
+        true,
+    );
+    let gateway_z_id = gateway_z.identity("post-office ");
+
+    let mut x = Node::start_with_config(
+        &dir.path().join("x"),
+        "X",
+        base + 4,
+        false,
+        None,
+        Some(&hub_id),
+        false,
+    );
+    let x_id = x.identity("node ");
+    let mut y = Node::start_with_config(
+        &dir.path().join("y"),
+        "Y",
+        base + 5,
+        false,
+        None,
+        Some(&hub_id),
+        false,
+    );
+    let y_id = y.identity("node ");
+    let mut z = Node::start_with_config(
+        &dir.path().join("z"),
+        "Z",
+        base + 6,
+        false,
+        None,
+        Some(&hub_id),
+        false,
+    );
+    let z_id = z.identity("node ");
+
+    x.await_relay(&local_id, base + 1);
+    x.await_relay(&hub_id, base);
+    y.await_relay(&gateway_y_id, base + 2);
+    z.await_relay(&gateway_z_id, base + 3);
+    for (node, peers) in [
+        (&mut x, [&y_id, &z_id]),
+        (&mut y, [&x_id, &z_id]),
+        (&mut z, [&x_id, &y_id]),
+    ] {
+        for peer in peers {
+            node.await_peer(peer);
+        }
+    }
+    x.send(&format!("/msg {} x-to-y", &y_id[..8]));
+    y.until("x-to-y", Duration::from_secs(45));
+    y.send(&format!("/msg {} y-to-z", &z_id[..8]));
+    z.until("y-to-z", Duration::from_secs(45));
+    z.send(&format!("/msg {} z-to-x", &x_id[..8]));
+    x.until("z-to-x", Duration::from_secs(45));
+    hub.send("/peers");
+    local.send("/peers");
+    gateway_y.send("/peers");
+    gateway_z.send("/peers");
 }

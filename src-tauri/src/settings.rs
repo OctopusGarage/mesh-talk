@@ -68,6 +68,9 @@ pub struct AppSettings {
     /// Share public presence with an opted-in post-office bridge. Defaults off.
     #[serde(default)]
     pub bridge_discovery_enabled: bool,
+    /// Full device fingerprint of the shared bridge hub. Empty means normal election.
+    #[serde(default)]
+    pub bridge_hub_id: String,
     /// The incoming-call ringtone id (see frontend `lib/ringtones.ts`). A cosmetic UI
     /// preference; the backend only stores it. Defaults to the classic phone ring.
     #[serde(default = "default_ringtone")]
@@ -108,6 +111,7 @@ impl Default for AppSettings {
             calls_enabled: false,
             post_office_enabled: true,
             bridge_discovery_enabled: false,
+            bridge_hub_id: String::new(),
             ringtone: default_ringtone(),
             privacy_level: PrivacyLevel::Balanced,
             notification_preview: true,
@@ -158,6 +162,7 @@ struct AccountSettings {
     calls_enabled: bool,
     post_office_enabled: bool,
     bridge_discovery_enabled: bool,
+    bridge_hub_id: String,
     ringtone: String,
     privacy_level: PrivacyLevel,
     notification_preview: bool,
@@ -182,6 +187,7 @@ impl From<&AppSettings> for AccountSettings {
             calls_enabled: value.calls_enabled,
             post_office_enabled: value.post_office_enabled,
             bridge_discovery_enabled: value.bridge_discovery_enabled,
+            bridge_hub_id: value.bridge_hub_id.clone(),
             ringtone: value.ringtone.clone(),
             privacy_level: value.privacy_level,
             notification_preview: value.notification_preview,
@@ -205,6 +211,7 @@ impl AccountSettings {
             calls_enabled: self.calls_enabled,
             post_office_enabled: self.post_office_enabled,
             bridge_discovery_enabled: self.bridge_discovery_enabled,
+            bridge_hub_id: self.bridge_hub_id.clone(),
             ringtone: self.ringtone.clone(),
             privacy_level: self.privacy_level,
             notification_preview: self.notification_preview,
@@ -460,10 +467,18 @@ pub async fn set_app_settings(
     settings: AppSettings,
 ) -> Result<(), CommandError> {
     let level = settings.privacy_level;
-    let settings = settings.with_privacy_level(level);
+    let mut settings = settings.with_privacy_level(level);
+    let hub = settings.bridge_hub_id.trim();
+    if !hub.is_empty() && (hub.len() != 32 || !hub.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(CommandError::InvalidInput(
+            "bridge hub ID must be a full 32-character hexadecimal fingerprint".into(),
+        ));
+    }
+    settings.bridge_hub_id = hub.to_ascii_lowercase();
     let retention_days = settings.retention_days;
     let post_office_enabled = settings.post_office_enabled;
     let bridge_discovery_enabled = settings.bridge_discovery_enabled;
+    let bridge_hub_id = settings.bridge_hub_id.clone();
     match owner.as_deref() {
         Some(owner) => config_store::with_account(&app_state, owner, SETTINGS_FILE, |path| {
             let previous = state.get_for_owner(owner)?;
@@ -503,6 +518,8 @@ pub async fn set_app_settings(
         };
         if let Some(node) = node {
             node.set_post_office_enabled(post_office_enabled);
+            node.set_bridge_hub_id((!bridge_hub_id.is_empty()).then_some(bridge_hub_id.as_str()))
+                .expect("settings fingerprint validated before persistence");
             node.set_bridge_discovery_enabled(bridge_discovery_enabled);
         }
     }
@@ -662,6 +679,7 @@ mod tests {
             "existing accounts keep relay delivery enabled"
         );
         assert!(!s.bridge_discovery_enabled, "bridge discovery defaults off");
+        assert!(s.bridge_hub_id.is_empty(), "no hub is pinned by default");
     }
 
     #[test]
@@ -672,6 +690,7 @@ mod tests {
         let alice = AccountSettings {
             post_office_enabled: false,
             bridge_discovery_enabled: true,
+            bridge_hub_id: "0123456789abcdef0123456789abcdef".into(),
             ..AccountSettings::default()
         };
         config_store::write_account(&alice_path, &alice).unwrap();
@@ -679,8 +698,10 @@ mod tests {
         let other: AccountSettings = config_store::read_account(&bob_path);
         assert!(!saved.post_office_enabled);
         assert!(saved.bridge_discovery_enabled);
+        assert_eq!(saved.bridge_hub_id, "0123456789abcdef0123456789abcdef");
         assert!(other.post_office_enabled);
         assert!(!other.bridge_discovery_enabled);
+        assert!(other.bridge_hub_id.is_empty());
         assert!(
             !saved
                 .with_global(&GlobalSettings::default())

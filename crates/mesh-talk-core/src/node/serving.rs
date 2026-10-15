@@ -76,7 +76,7 @@ impl Node {
         }
         let po = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            elected_post_office(&roster)
+            self.selected_post_office(&roster)
         };
         let Some(po) = po else {
             return Ok(false);
@@ -582,7 +582,7 @@ impl Node {
         }
         let post_office = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            elected_post_office(&roster)
+            self.selected_post_office(&roster)
         };
         let Some(po) = post_office else {
             return;

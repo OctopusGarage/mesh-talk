@@ -4,25 +4,30 @@
 
 use crate::discovery::Announce;
 use crate::identity::device::PublicIdentity;
+use crate::postoffice::gateway::GatewayProof;
 use crate::transport::MAX_PLAINTEXT;
 use bincode::Options;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const REQUEST: &[u8] = b"MTBD1Q";
+const REQUEST_V1: &[u8] = b"MTBD1Q";
+const REQUEST_V2: &[u8] = b"MTBD2Q";
 const RESPONSE: &[u8] = b"MTBD1R";
 const TTL: Duration = Duration::from_secs(45);
 const MAX_MEMBERS: usize = 128;
 
+pub type GatewayRoute = (String, u16);
+pub type DirectoryPage = (Vec<Announce>, Option<GatewayRoute>, bool);
+
 #[derive(Default)]
 pub struct BridgeDirectory {
     members: HashMap<String, (Announce, Instant)>,
-    gateway: Option<Arc<Mutex<Option<Announce>>>>,
+    gateway: Option<Arc<Mutex<Option<GatewayProof>>>>,
 }
 
 impl BridgeDirectory {
-    pub fn with_gateway(gateway: Arc<Mutex<Option<Announce>>>) -> Self {
+    pub fn with_gateway(gateway: Arc<Mutex<Option<GatewayProof>>>) -> Self {
         Self {
             members: HashMap::new(),
             gateway: Some(gateway),
@@ -70,18 +75,31 @@ impl BridgeDirectory {
             && remote.tcp_port != 0
             && remote.name.len() <= 1024
         {
-            proofs.push(remote);
+            proofs.push(remote.announce);
         }
         Some(proofs)
+    }
+
+    pub fn gateway_route(&self) -> Option<(String, u16)> {
+        let proof = self.gateway.as_ref()?.lock().ok()?.clone()?;
+        (proof.announce.verify()
+            && proof.announce.post_office
+            && proof.announce.account_id().is_some()
+            && proof.proxy_port != 0)
+            .then_some((proof.announce.user_id, proof.proxy_port))
     }
 }
 
 pub fn is_request(bytes: &[u8]) -> bool {
-    bytes == REQUEST
+    bytes == REQUEST_V1 || bytes == REQUEST_V2
 }
 
 pub fn request() -> &'static [u8] {
-    REQUEST
+    REQUEST_V2
+}
+
+pub fn legacy_request() -> &'static [u8] {
+    REQUEST_V1
 }
 
 pub fn encode_response(proofs: &[Announce]) -> Option<Vec<Vec<u8>>> {
@@ -107,6 +125,101 @@ pub fn encode_response(proofs: &[Announce]) -> Option<Vec<Vec<u8>>> {
     }
     pages.push(frame(&selected, true)?);
     Some(pages)
+}
+
+const RESPONSE_V2: &[u8] = b"MTBD2R";
+
+pub fn encode_response_with_gateway(
+    proofs: &[Announce],
+    gateway: Option<(String, u16)>,
+) -> Option<Vec<Vec<u8>>> {
+    if gateway.as_ref().is_some_and(|(id, port)| {
+        *port == 0
+            || !proofs
+                .iter()
+                .any(|proof| proof.post_office && &proof.user_id == id)
+    }) {
+        return None;
+    }
+    let mut ordered: Vec<_> = proofs
+        .iter()
+        .filter(|proof| proof.verify())
+        .cloned()
+        .collect();
+    ordered.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+    let mut pages = Vec::new();
+    let mut selected = Vec::new();
+    for proof in ordered {
+        selected.push(proof);
+        if frame_v2(
+            &selected,
+            gateway_on_page(&selected, gateway.as_ref()),
+            false,
+        )
+        .is_none()
+        {
+            let overflow = selected.pop()?;
+            if selected.is_empty() {
+                return None;
+            }
+            pages.push(frame_v2(
+                &selected,
+                gateway_on_page(&selected, gateway.as_ref()),
+                false,
+            )?);
+            selected = vec![overflow];
+        }
+    }
+    pages.push(frame_v2(
+        &selected,
+        gateway_on_page(&selected, gateway.as_ref()),
+        true,
+    )?);
+    Some(pages)
+}
+
+fn gateway_on_page<'a>(
+    proofs: &[Announce],
+    gateway: Option<&'a (String, u16)>,
+) -> Option<&'a (String, u16)> {
+    gateway.filter(|(id, _)| proofs.iter().any(|proof| &proof.user_id == id))
+}
+
+fn frame_v2(proofs: &[Announce], gateway: Option<&(String, u16)>, last: bool) -> Option<Vec<u8>> {
+    let mut bytes = Vec::from(RESPONSE_V2);
+    bytes.push(u8::from(last));
+    bytes.extend_from_slice(&bincode::serialize(&(proofs, gateway)).ok()?);
+    (bytes.len() <= MAX_PLAINTEXT).then_some(bytes)
+}
+
+pub fn decode_response_with_gateway(bytes: &[u8]) -> Option<DirectoryPage> {
+    let body = bytes.strip_prefix(RESPONSE_V2)?;
+    if bytes.len() > MAX_PLAINTEXT || body.is_empty() || body[0] > 1 {
+        return None;
+    }
+    let (proofs, gateway): (Vec<Announce>, Option<(String, u16)>) = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_PLAINTEXT as u64)
+        .reject_trailing_bytes()
+        .deserialize(&body[1..])
+        .ok()?;
+    if proofs.len() > MAX_MEMBERS
+        || proofs.iter().any(|proof| {
+            !proof.verify()
+                || proof.account_id().is_none()
+                || proof.tcp_port == 0
+                || proof.name.len() > 1024
+        })
+        || gateway.as_ref().is_some_and(|(id, port)| {
+            *port == 0
+                || !proofs
+                    .iter()
+                    .any(|proof| proof.post_office && &proof.user_id == id)
+        })
+    {
+        return None;
+    }
+    Some((proofs, gateway, body[0] == 1))
 }
 
 fn frame(proofs: &[Announce], last: bool) -> Option<Vec<u8>> {
@@ -143,6 +256,14 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn directory_requests_distinguish_legacy_and_gateway_aware_clients() {
+        assert!(is_request(b"MTBD1Q"));
+        assert!(is_request(b"MTBD2Q"));
+        assert_eq!(legacy_request(), b"MTBD1Q");
+        assert_eq!(request(), b"MTBD2Q");
+    }
 
     #[test]
     fn only_authenticated_visible_self_presence_can_join() {
@@ -198,13 +319,63 @@ mod tests {
     }
 
     #[test]
+    fn version_two_response_binds_gateway_port_to_a_signed_post_office_proof() {
+        let identity = DeviceIdentity::generate();
+        let proof =
+            Announce::new_post_office_with_account(&identity, &Account::generate(), "hub", 47475);
+        let route = (identity.user_id(), 50000);
+        let pages = encode_response_with_gateway(std::slice::from_ref(&proof), Some(route.clone()))
+            .unwrap();
+        assert_eq!(
+            decode_response_with_gateway(&pages[0]),
+            Some((vec![proof.clone()], Some(route), true))
+        );
+        assert!(encode_response_with_gateway(&[proof], Some(("a".repeat(32), 50000))).is_none());
+    }
+
+    #[test]
+    fn paged_response_places_gateway_port_with_its_signed_proof() {
+        let account = Account::generate();
+        let mut proofs: Vec<_> = (0..80)
+            .map(|_| {
+                Announce::new_with_account(
+                    &DeviceIdentity::generate(),
+                    &account,
+                    "long name".repeat(100),
+                    47475,
+                )
+            })
+            .collect();
+        let hub = DeviceIdentity::generate();
+        let route = (hub.user_id(), 50000);
+        proofs.push(Announce::new_post_office_with_account(
+            &hub, &account, "hub", 47476,
+        ));
+        let pages = encode_response_with_gateway(&proofs, Some(route.clone())).unwrap();
+        assert!(pages.len() > 1);
+        let mut found = Vec::new();
+        for page in pages {
+            let (entries, gateway, _) = decode_response_with_gateway(&page).unwrap();
+            if let Some(gateway) = gateway {
+                assert_eq!(gateway, route);
+                assert!(entries.iter().any(|entry| entry.user_id == hub.user_id()));
+                found.push(gateway);
+            }
+        }
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
     fn gateway_proof_is_shared_only_after_visible_self_registration() {
         let a = DeviceIdentity::generate();
         let e = DeviceIdentity::generate();
         let account = Account::generate();
         let a_proof = Announce::new_with_account(&a, &account, "A", 47475);
         let remote = Announce::new_post_office_with_account(&e, &account, "E", 47476);
-        let gateway = Arc::new(Mutex::new(Some(remote.clone())));
+        let gateway = Arc::new(Mutex::new(Some(GatewayProof {
+            announce: remote.clone(),
+            proxy_port: 50000,
+        })));
         let mut directory = BridgeDirectory::with_gateway(Arc::clone(&gateway));
         let now = Instant::now();
 

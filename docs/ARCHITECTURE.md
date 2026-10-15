@@ -358,6 +358,10 @@ directory, its fresh, self-signed introductions can be polled from that post
 office's opaque mailboxes. This does not mark safety numbers verified, persists
 no bridge permission, and expires with the directory membership. Invisible mode
 does not participate. See [routed network discovery](routed-network-discovery.md).
+For multi-site bridges, clients can pin one hub fingerprint. Site relays each
+publish that hub's signed proof and their own local TCP proxy port; clients
+authenticate the hub end to end and use its single opaque mailbox. A missing
+configured hub pauses relay delivery instead of electing another mailbox.
 The sender's retry worker independently attempts direct delivery before relay
 replication, so either side can initiate recovery when a route returns.
 
