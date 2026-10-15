@@ -2,6 +2,26 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { expect, test } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
+test("reopening settings selects the visible privacy section", async ({ page }) => {
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const dialog = page.getByTestId("settings-dialog");
+  const privacy = dialog.getByRole("button", {
+    name: "Network privacy",
+    exact: true,
+  });
+  const appearance = dialog.getByRole("button", {
+    name: "Appearance",
+    exact: true,
+  });
+  await appearance.click();
+  await expect(appearance).toHaveAttribute("aria-current", "location");
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(privacy).toHaveAttribute("aria-current", "location");
+  await expect(appearance).not.toHaveAttribute("aria-current", "location");
+});
+
 test("post-office preference is on by default and persists across settings reopen", async ({
   page,
 }) => {

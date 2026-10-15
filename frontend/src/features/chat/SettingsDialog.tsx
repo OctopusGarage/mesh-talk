@@ -179,6 +179,12 @@ export function SettingsDialog({
   const settingsScroll = useRef<HTMLDivElement>(null);
   const [moreBelow, setMoreBelow] = useState(true);
   const [activeSection, setActiveSection] = useState("privacy");
+  useLayoutEffect(() => {
+    if (open) {
+      setMoreBelow(true);
+      setActiveSection("privacy");
+    }
+  }, [open]);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [loadedOwner, setLoadedOwner] = useState<string | null>(null);
   const [autostartLoaded, setAutostartLoaded] = useState(false);
@@ -395,7 +401,6 @@ export function SettingsDialog({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (next) setMoreBelow(true);
       }}
     >
       {controlledOpen === undefined && (
