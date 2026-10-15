@@ -2874,12 +2874,12 @@ fn node_with_files(
 
 #[tokio::test]
 async fn automatic_receipt_roundtrip_with_both_original_peers_stopped_in_turn() {
-    automatic_offline_roundtrip(false).await;
+    automatic_offline_roundtrip(false, false).await;
 }
 
 #[tokio::test]
 async fn automatic_receipt_reuses_exact_ack_after_relay_eviction() {
-    automatic_offline_roundtrip(true).await;
+    automatic_offline_roundtrip(true, true).await;
 }
 
 #[tokio::test]
@@ -3250,7 +3250,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
     }
 }
 
-async fn automatic_offline_roundtrip(evict: bool) {
+async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -3284,6 +3284,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         relay.clone(),
     )));
     let (a, _) = node(ad.path(), alice, aa, &bp);
+    a.set_bridge_discovery_enabled(bridge_enabled);
     a.roster
         .lock()
         .unwrap()
@@ -3300,13 +3301,26 @@ async fn automatic_offline_roundtrip(evict: bool) {
         crate::postoffice::opaque::RelayMailbox::new(&a.identity, &bp.public(), &pp.public())
             .unwrap();
     let outer_id = mailbox.wrap(&original).unwrap().id;
+    let federated_outer_id =
+        crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public())
+            .unwrap()
+            .wrap(&original)
+            .unwrap()
+            .id;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !relay.lock().unwrap().has(&outer_id) {
+        while !relay.lock().unwrap().has(&outer_id)
+            || (bridge_enabled && !relay.lock().unwrap().has(&federated_outer_id))
+        {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        relay.lock().unwrap().has(&federated_outer_id),
+        bridge_enabled
+    );
     assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     at.abort();

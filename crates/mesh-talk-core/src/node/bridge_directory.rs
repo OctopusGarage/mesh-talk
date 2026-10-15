@@ -7,15 +7,31 @@ use crate::identity::device::PublicIdentity;
 use crate::postoffice::gateway::GatewayProof;
 use crate::transport::MAX_PLAINTEXT;
 use bincode::Options;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const REQUEST_V1: &[u8] = b"MTBD1Q";
 const REQUEST_V2: &[u8] = b"MTBD2Q";
 const RESPONSE: &[u8] = b"MTBD1R";
 const TTL: Duration = Duration::from_secs(45);
 const MAX_MEMBERS: usize = 128;
+
+fn unix_seconds_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// An opted-in, self-signed client announcement with the origin relay's fixed
+/// expiry. Forwarding cannot refresh that expiry after the client disappears.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FederatedPresence {
+    pub announce: Announce,
+    pub expires_at_secs: u64,
+}
 
 pub type GatewayRoute = (String, u16);
 pub type DirectoryPage = (Vec<Announce>, Option<GatewayRoute>, bool);
@@ -34,6 +50,7 @@ fn valid_gateway_route(proofs: &[Announce], gateway: &(String, u16)) -> bool {
 #[derive(Default)]
 pub struct BridgeDirectory {
     members: HashMap<String, (Announce, Instant)>,
+    remote_members: HashMap<String, FederatedPresence>,
     gateway: Option<Arc<Mutex<Option<GatewayProof>>>>,
 }
 
@@ -41,6 +58,7 @@ impl BridgeDirectory {
     pub fn with_gateway(gateway: Arc<Mutex<Option<GatewayProof>>>) -> Self {
         Self {
             members: HashMap::new(),
+            remote_members: HashMap::new(),
             gateway: Some(gateway),
         }
     }
@@ -56,8 +74,13 @@ impl BridgeDirectory {
     ) -> Option<Vec<Announce>> {
         self.members
             .retain(|_, (_, seen)| now.saturating_duration_since(*seen) < TTL);
+        self.remote_members
+            .retain(|_, proof| proof.expires_at_secs > unix_seconds_now());
         let proof = presence.filter(|proof| {
-            publicly_visible && valid_directory_proof(proof) && proof.public() == *public
+            publicly_visible
+                && !proof.post_office
+                && valid_directory_proof(proof)
+                && proof.public() == *public
         })?;
         if self.members.len() >= MAX_MEMBERS && !self.members.contains_key(&proof.user_id) {
             return None;
@@ -70,6 +93,19 @@ impl BridgeDirectory {
             .filter(|(id, _)| *id != &proof.user_id)
             .map(|(_, (proof, _))| proof.clone())
             .collect();
+        proofs.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        let mut remote = self
+            .remote_members
+            .values()
+            .filter(|remote| {
+                remote.announce.user_id != proof.user_id
+                    && !self.members.contains_key(&remote.announce.user_id)
+            })
+            .map(|remote| remote.announce.clone())
+            .collect::<Vec<_>>();
+        remote.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        proofs.extend(remote);
+        proofs.truncate(MAX_MEMBERS.saturating_sub(1));
         if let Some(gateway) = &self.gateway
             && let Some(remote) = gateway
                 .lock()
@@ -89,6 +125,55 @@ impl BridgeDirectory {
             && valid_directory_proof(&proof.announce)
             && proof.proxy_port != 0)
             .then_some((proof.announce.user_id, proof.proxy_port))
+    }
+
+    pub fn export_federated(&self, now: Instant, unix_now: u64) -> Vec<FederatedPresence> {
+        let mut proofs = Vec::new();
+        for (announce, seen) in self.members.values() {
+            let age = now.saturating_duration_since(*seen).as_secs();
+            if age < TTL.as_secs() && !announce.post_office {
+                proofs.push(FederatedPresence {
+                    announce: announce.clone(),
+                    expires_at_secs: unix_now.saturating_add(TTL.as_secs() - age),
+                });
+            }
+        }
+        proofs.sort_by(|a, b| a.announce.user_id.cmp(&b.announce.user_id));
+        let mut remote = self
+            .remote_members
+            .values()
+            .filter(|entry| {
+                entry.expires_at_secs > unix_now
+                    && !self.members.contains_key(&entry.announce.user_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        remote.sort_by(|a, b| a.announce.user_id.cmp(&b.announce.user_id));
+        proofs.extend(remote);
+        proofs.truncate(MAX_MEMBERS);
+        proofs
+    }
+
+    pub fn import_federated(&mut self, proofs: &[FederatedPresence], unix_now: u64) {
+        self.remote_members
+            .retain(|_, proof| proof.expires_at_secs > unix_now);
+        for proof in proofs.iter().take(MAX_MEMBERS) {
+            if proof.announce.post_office
+                || !valid_directory_proof(&proof.announce)
+                || proof.expires_at_secs <= unix_now
+                || proof.expires_at_secs > unix_now.saturating_add(TTL.as_secs())
+                || self.members.contains_key(&proof.announce.user_id)
+            {
+                continue;
+            }
+            if self.remote_members.len() >= MAX_MEMBERS
+                && !self.remote_members.contains_key(&proof.announce.user_id)
+            {
+                break;
+            }
+            self.remote_members
+                .insert(proof.announce.user_id.clone(), proof.clone());
+        }
     }
 }
 
@@ -345,6 +430,88 @@ mod tests {
                 .is_none()
         );
         assert!(directory.members.is_empty());
+    }
+
+    #[test]
+    fn federated_presence_expires_and_excludes_relay_identities() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let relay = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&alice, &account, "Alice", 47475);
+        let relay_proof = Announce::new_post_office_with_account(&relay, &account, "Relay", 47476);
+        let now = Instant::now();
+        let unix_now = unix_seconds_now();
+        let mut origin = BridgeDirectory::default();
+        origin
+            .register(&alice.public(), Some(&proof), true, now)
+            .unwrap();
+        let mut remote = BridgeDirectory::default();
+        let snapshot = origin.export_federated(now, unix_now);
+        assert_eq!(snapshot.len(), 1);
+        remote.import_federated(&snapshot, unix_now);
+        remote.import_federated(
+            &[FederatedPresence {
+                announce: relay_proof,
+                expires_at_secs: unix_now + 45,
+            }],
+            unix_now,
+        );
+        let bob_proof = Announce::new_with_account(&bob, &account, "Bob", 47477);
+        let visible = remote
+            .register(&bob.public(), Some(&bob_proof), true, now)
+            .unwrap();
+        assert_eq!(visible, vec![proof.clone()]);
+        assert!(
+            remote
+                .export_federated(now, unix_now + 46)
+                .iter()
+                .all(|entry| entry.announce.user_id != proof.user_id)
+        );
+    }
+
+    #[test]
+    fn post_office_cannot_register_as_a_directory_member() {
+        let account = Account::generate();
+        let relay = DeviceIdentity::generate();
+        let proof = Announce::new_post_office_with_account(&relay, &account, "Relay", 47475);
+        assert!(
+            BridgeDirectory::default()
+                .register(&relay.public(), Some(&proof), true, Instant::now())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn federation_export_keeps_local_members_when_remote_capacity_is_full() {
+        let now = Instant::now();
+        let unix_now = unix_seconds_now();
+        let account = Account::generate();
+        let mut directory = BridgeDirectory::default();
+        for index in 0..MAX_MEMBERS {
+            let identity = DeviceIdentity::generate();
+            let announce =
+                Announce::new_with_account(&identity, &account, format!("Remote {index}"), 47475);
+            directory.remote_members.insert(
+                announce.user_id.clone(),
+                FederatedPresence {
+                    announce,
+                    expires_at_secs: unix_now + 45,
+                },
+            );
+        }
+        let local = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&local, &account, "Local", 47476);
+        directory
+            .register(&local.public(), Some(&proof), true, now)
+            .unwrap();
+        let exported = directory.export_federated(now, unix_now);
+        assert_eq!(exported.len(), MAX_MEMBERS);
+        assert!(
+            exported
+                .iter()
+                .any(|entry| entry.announce.user_id == proof.user_id)
+        );
     }
 
     #[test]

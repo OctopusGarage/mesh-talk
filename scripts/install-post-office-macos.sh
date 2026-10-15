@@ -4,7 +4,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 prepare --binary PATH --name NAME --port PORT [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] | activate" >&2
+    echo "usage: $0 prepare --binary PATH --name NAME --port PORT [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] [--federation-peer ID@IP:PORT ...] | activate" >&2
     exit 2
 }
 
@@ -45,9 +45,10 @@ bridge=false
 bridge_peer=
 bridge_peer_id=
 bridge_proxy_port=
+federation_peers=()
 while (($#)); do
     case $1 in
-        --binary|--name|--port|--discovery-port|--lan-announce-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port)
+        --binary|--name|--port|--discovery-port|--lan-announce-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port|--federation-peer)
             (($# >= 2)) || usage
             case $1 in
                 --binary) source_binary=$2 ;;
@@ -58,6 +59,7 @@ while (($#)); do
                 --bridge-peer) bridge_peer=$2 ;;
                 --bridge-peer-id) bridge_peer_id=$2 ;;
                 --bridge-proxy-port) bridge_proxy_port=$2 ;;
+                --federation-peer) federation_peers+=("$2") ;;
             esac
             shift 2 ;;
         --bridge) bridge=true; shift ;;
@@ -75,6 +77,10 @@ if [[ -n $bridge_peer || -n $bridge_peer_id || -n $bridge_proxy_port ]]; then
     ((bridge_proxy_port >= 1 && bridge_proxy_port <= 65535 && bridge_proxy_port != port)) || usage
     bridge=true
 fi
+for seed in "${federation_peers[@]}"; do
+    [[ $seed =~ ^[0-9a-fA-F]{32}@.+:[0-9]+$ ]] || usage
+    bridge=true
+done
 
 umask 077
 install -d -m 700 "$data_dir" "$state_dir" "$bin_dir"
@@ -89,11 +95,11 @@ install -m 755 "$source_binary" "$binary.next"
 "$binary.next" --help >/dev/null
 mv -f "$binary.next" "$binary"
 
-python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$lan_announce_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" <<'PY'
+python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$lan_announce_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" "${federation_peers[@]}" <<'PY'
 import plistlib
 import sys
 
-plist, home, user, name, port, discovery_port, lan_announce_port, bridge, peer, peer_id, proxy_port = sys.argv[1:]
+plist, home, user, name, port, discovery_port, lan_announce_port, bridge, peer, peer_id, proxy_port, *federation_peers = sys.argv[1:]
 args = [
     f"{home}/.local/bin/mesh-talk-node",
     "--keystore", f"{home}/.local/share/mesh-talk-post-office/identity.keystore",
@@ -109,6 +115,8 @@ if bridge == "true":
 if peer:
     args.extend(["--bridge-peer", peer, "--bridge-peer-id", peer_id.lower(),
                  "--bridge-proxy-port", proxy_port])
+for seed in federation_peers:
+    args.extend(["--federation-peer", seed])
 job = {
     "Label": "com.octopusgarage.mesh-talk.post-office",
     "UserName": user,

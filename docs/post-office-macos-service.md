@@ -35,7 +35,15 @@ Example for the Intel relay on LAN X (paths and addresses are deployment-specifi
 
 ```bash
 scp target/x86_64-apple-darwin/release/mesh-talk-node scripts/install-post-office-macos.sh mac2015:~/.local/state/mesh-talk-post-office/
-ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node --name mac2015-post-office --port 47475 --discovery-port 47479 --lan-announce-port 47474 --bridge --bridge-peer 100.109.255.49:47474 --bridge-peer-id e2bc2167aab97af10cb893de4ae2fb0c --bridge-proxy-port 47477'
+ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare \
+  --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node \
+  --name mac2015-post-office --port 47475 --discovery-port 47479 \
+  --lan-announce-port 47474 --bridge \
+  --bridge-peer 100.109.255.49:47480 \
+  --bridge-peer-id e2bc2167aab97af10cb893de4ae2fb0c --bridge-proxy-port 47477 \
+  --federation-peer d2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478 \
+  --federation-peer edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479 \
+  --federation-peer e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
 ssh -tt mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
@@ -47,21 +55,25 @@ ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/mesh-talk-node-arm mac-min
 ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh mac-mini:~/.local/state/mesh-talk-post-office/'
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare \
   --binary /Users/stella/.local/state/mesh-talk-post-office/mesh-talk-node-arm \
-  --name mac-mini-post-office --port 47476 \
+  --name mac-mini-post-office --port 47476 --discovery-port 47480 \
+  --lan-announce-port 47474 --bridge \
   --bridge-peer 100.82.240.19:47479 \
   --bridge-peer-id edbbf0daac94d930e687ba86c20d3f06 \
-  --bridge-proxy-port 47475'
+  --bridge-proxy-port 47475 \
+  --federation-peer d2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478 \
+  --federation-peer edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479 \
+  --federation-peer e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
-In the current deployment, mac2015 and mac-mini pin each other and expose
-reciprocal local gateways. Windows also points to mac2015. All three nodes
-store opaque mail independently; their mailboxes do not replicate. Participating
-clients enable bridge discovery, register with reachable verified relays, and
-use a local post office first unless they set an optional preference. A client
-that has not opted in remains a local-only peer. If a relay or the inter-site
-path fails, local delivery can continue; cross-LAN service during that outage
-requires another independent route and directory path.
+The commands above keep the legacy gateway while enabling equal relay
+federation. Use the same `--federation-peer` entries on every relay; each
+keeps its own keystore,
+password file, name, and listener ports. Federation exchanges opted-in signed
+presence and version-3 encrypted mailboxes, while legacy gateways can remain
+during migration. A client that has not opted in remains a local-only peer.
+If the only physical route between two sites fails, the local relay retains
+encrypted outgoing mail until a route returns.
 
 Check boot-service state and listeners:
 

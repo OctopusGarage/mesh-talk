@@ -17,11 +17,13 @@ use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod election;
+pub mod federation;
 pub mod gateway;
 pub mod opaque;
 
@@ -37,13 +39,20 @@ const RETENTION_SLACK: usize = 5_000;
 /// Bound ciphertext storage even when every event is a large file chunk.
 const MAX_RELAY_BYTES: usize = 512 * 1024 * 1024;
 const RETENTION_BYTE_SLACK: usize = 16 * 1024 * 1024;
-const MAX_RELAY_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub(crate) const MAX_RELAY_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const RETENTION_MAGIC: &[u8; 6] = b"MTPOR1";
 
 #[derive(Serialize, Deserialize)]
 struct MailboxArrival {
     conversation: ConversationId,
     first_seen_secs: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FederatedMailbox {
+    pub id: ConversationId,
+    pub digest: [u8; 32],
+    pub first_seen_secs: u64,
 }
 
 fn unix_seconds(now: SystemTime) -> u64 {
@@ -347,6 +356,68 @@ impl PostOffice {
         ids
     }
 
+    /// Only version-3 pairwise mailboxes may be copied between relay identities.
+    /// Legacy mailboxes bind their keys to one relay and stay local.
+    pub fn federated_mailboxes(&self) -> Vec<ConversationId> {
+        self.log
+            .conversations()
+            .into_iter()
+            .filter(opaque::RelayMailbox::is_federated_id)
+            .collect()
+    }
+
+    pub fn federated_inventory(&self) -> Vec<FederatedMailbox> {
+        self.federated_mailboxes()
+            .into_iter()
+            .map(|id| {
+                let mut ids = self.held_ids(&id);
+                ids.sort();
+                let mut hash = Sha256::new();
+                for event_id in ids {
+                    hash.update(event_id.as_bytes());
+                }
+                FederatedMailbox {
+                    id,
+                    digest: hash.finalize().into(),
+                    first_seen_secs: self
+                        .first_seen
+                        .get(&id)
+                        .copied()
+                        .unwrap_or_else(|| unix_seconds(SystemTime::now())),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn adopt_federated_arrivals(
+        &mut self,
+        inventory: &[FederatedMailbox],
+        now: SystemTime,
+    ) -> Result<(), LogError> {
+        let current = unix_seconds(now);
+        let cutoff = current.saturating_sub(MAX_RELAY_AGE.as_secs());
+        let mut changed = false;
+        for entry in inventory {
+            if !opaque::RelayMailbox::is_federated_id(&entry.id)
+                || entry.first_seen_secs <= cutoff
+                || entry.first_seen_secs > current.saturating_add(300)
+            {
+                continue;
+            }
+            let prior = self.first_seen.get(&entry.id).copied().unwrap_or(u64::MAX);
+            if entry.first_seen_secs < prior {
+                self.first_seen.insert(entry.id, entry.first_seen_secs);
+                changed = true;
+            }
+        }
+        if changed {
+            self.next_expiry_secs = next_expiry(&self.first_seen);
+            self.rewrite_arrivals()?;
+            self.prune_expired_at(now)?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn held_events(&self, conversation: &ConversationId) -> Vec<Event> {
         self.log.events(conversation).into_iter().cloned().collect()
@@ -465,6 +536,41 @@ mod tests {
 
         let po = PostOffice::open_at(&path, "pw", reopened_identity, start + lifetime).unwrap();
         assert!(!po.has(&event.id));
+    }
+
+    #[test]
+    fn federated_copy_keeps_the_origin_thirty_day_expiry() {
+        let root = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let mailbox = opaque::RelayMailbox::federated(&alice, &bob.public()).unwrap();
+        let event = mailbox
+            .wrap(&message(&alice, 1, vec![], 1, b"queued"))
+            .unwrap();
+        let start = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let later = start + Duration::from_secs(10 * 24 * 60 * 60);
+        let mut first = PostOffice::open_at(
+            &root.path().join("first"),
+            "pw",
+            DeviceIdentity::generate(),
+            start,
+        )
+        .unwrap();
+        first.record_at(event.clone(), start).unwrap();
+        let inventory = first.federated_inventory();
+        let mut second = PostOffice::open_at(
+            &root.path().join("second"),
+            "pw",
+            DeviceIdentity::generate(),
+            later,
+        )
+        .unwrap();
+        second.adopt_federated_arrivals(&inventory, later).unwrap();
+        second.record_at(event.clone(), later).unwrap();
+        second
+            .prune_expired_at(start + Duration::from_secs(30 * 24 * 60 * 60))
+            .unwrap();
+        assert!(!second.has(&event.id));
     }
 
     #[test]

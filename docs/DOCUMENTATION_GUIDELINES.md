@@ -32,8 +32,9 @@ table, release procedure, or full feature inventory into either overview.
    events temporarily, subject to capacity and a 30-day maximum age.
 
 Use this order when explaining the product to newcomers. Describe a capability
-and its relevant boundary together. For example, bridge discovery is opt-in and
-does not imply cross-network file transfer, calls, or mailbox replication.
+and its relevant boundary together. For example, bridge discovery is opt-in;
+federated relays can replicate opaque mailboxes, while calls and direct device
+synchronization still require their own reachable paths.
 
 ## Writing and maintenance rules
 

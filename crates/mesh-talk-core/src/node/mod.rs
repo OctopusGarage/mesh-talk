@@ -93,7 +93,7 @@ pub use node::{
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
 pub use postbox::{
     elected_post_office, run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
-    run_relay_accept_loop,
+    run_federated_relay_accept_loop_with_directory, run_relay_accept_loop,
 };
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};

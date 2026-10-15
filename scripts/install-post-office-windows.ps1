@@ -9,7 +9,12 @@ param(
     [ValidatePattern('^[0-9A-Fa-f]{32}$')]
     [string]$BridgePeerId,
     [ValidateRange(1, 65535)]
-    [int]$BridgeProxyPort = 47476
+    [int]$BridgeProxyPort = 47476,
+    [ValidateRange(1, 65535)]
+    [int]$DiscoveryPort = 47478,
+    [ValidateRange(1, 65535)]
+    [int]$LanAnnouncePort = 47474,
+    [string[]]$FederationPeer = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +28,11 @@ if ([bool]$BridgePeer -ne [bool]$BridgePeerId) {
 }
 if ($BridgePeer -and $BridgeProxyPort -eq 47475) {
     throw 'The bridge proxy port must differ from the local relay port 47475'
+}
+foreach ($seed in $FederationPeer) {
+    if ($seed -notmatch '^[0-9A-Fa-f]{32}@.+:[0-9]+$') {
+        throw "Invalid federation peer: $seed"
+    }
 }
 
 if (-not (Test-Path -LiteralPath $StagedBinary -PathType Leaf)) {
@@ -87,11 +97,14 @@ if ($existing) {
 }
 Copy-Item -LiteralPath $StagedBinary -Destination $binary -Force
 
-$arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47475 --discovery-port 47474' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name
+$arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47475 --discovery-port {3} --lan-announce-port {4}' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name, $DiscoveryPort, $LanAnnouncePort
 if ($BridgePeer) {
     $arguments += ' --bridge --bridge-peer "{0}" --bridge-peer-id "{1}" --bridge-proxy-port {2}' -f $BridgePeer, $BridgePeerId.ToLowerInvariant(), $BridgeProxyPort
-} elseif ($Bridge) {
+} elseif ($Bridge -or $FederationPeer.Count -gt 0) {
     $arguments += ' --bridge'
+}
+foreach ($seed in $FederationPeer) {
+    $arguments += ' --federation-peer "{0}"' -f $seed
 }
 $action = New-ScheduledTaskAction -Execute $binary -Argument $arguments -WorkingDirectory $Root
 $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -101,7 +114,7 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
 
 $firewallRules = @(
     @{ Name = 'MeshTalk PostOffice TCP 47475'; Protocol = 'TCP'; Port = 47475 },
-    @{ Name = 'MeshTalk PostOffice UDP 47474'; Protocol = 'UDP'; Port = 47474 }
+    @{ Name = "MeshTalk PostOffice UDP $DiscoveryPort"; Protocol = 'UDP'; Port = $DiscoveryPort }
 )
 if ($BridgePeer) {
     $firewallRules += @{ Name = "MeshTalk PostOffice Bridge TCP $BridgeProxyPort"; Protocol = 'TCP'; Port = $BridgeProxyPort }

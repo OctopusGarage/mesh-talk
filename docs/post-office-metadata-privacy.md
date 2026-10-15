@@ -3,8 +3,10 @@
 ## Current relay boundary
 
 New clients wrap each signed event in a recipient-encrypted **opaque outer
-event** before syncing to a post office. The outer event has a pairwise,
-relay-specific mailbox ID, a pairwise pseudonymous signing key, an opaque
+event** before syncing to a post office. All relay users write a legacy
+relay-specific copy. A visible client that enables bridge discovery also
+writes a version-3 federation copy. Both have a pairwise mailbox ID, a
+pairwise pseudonymous signing key, an opaque
 sequence number, no parents, zero logical and wall-clock timestamps, and a
 constant `Message` kind. The original signed event, including its author,
 conversation ID, kind, parents, timestamps, channel controls, file metadata,
@@ -13,9 +15,10 @@ only the outer event. Direct peer sync still exchanges the original signed
 events over authenticated Noise.
 
 The mailbox ID, AEAD key, nonce-derivation key, and pseudonymous signing seed
-come from a domain-separated HKDF over the pair's X25519 static DH secret,
-both complete public device identities in canonical order, and the relay's
-Ed25519 key.
+come from a domain-separated HKDF over the pair's X25519 static DH secret
+and both complete public device identities in canonical order. The legacy
+format also binds the relay's Ed25519 key; version 3 uses a different domain
+and has the same mailbox ID on every trusted relay.
 Both devices derive the same mailbox without registering a token. A third
 device and the relay cannot derive it. Each inner event's signed 256-bit ID
 derives a deterministic AES-GCM nonce under the mailbox nonce key. Since the
@@ -37,12 +40,21 @@ opaque wrapper to an older relay because the outer event uses the existing
 signed sync wire. Old clients cannot upload their clear events to a new
 production relay. No automatic clear-metadata fallback exists.
 
+Trusted relays exchange a bounded inventory and reconcile only version-3
+opaque mailboxes over identity-pinned Noise connections. The inventory
+contains pseudonymous mailbox IDs, event-set digests, and original arrival
+times. Unchanged mailboxes require no event sync. A relay outside the shared
+identity pin list cannot read the federation inventory. Federation extends
+metadata visibility to every trusted relay in the group: they can correlate
+the same pseudonymous mailbox and event IDs across sites, but cannot decrypt
+the inner event. The legacy format remains relay-specific.
+
 ## What remains visible
 
 | Relay observation | Why it remains visible |
 | --- | --- |
 | Authenticated connecting device and IP address | Noise identity authentication and TCP routing |
-| Pairwise opaque mailbox ID | Selecting the stored queue for sync |
+| Pairwise opaque mailbox ID | Selecting the stored queue for sync; version 3 uses the same pseudonym across trusted relays |
 | Pseudonymous outer author and opaque event ID | Relay event-log integrity and deduplication |
 | Size bucket, count, upload/pull time | Storage, traffic, and retrieval behavior |
 
@@ -83,14 +95,16 @@ The post office also expires each whole mailbox 30 days after its first event
 arrives. It checks expiry on startup, before serving relay sync, and every
 minute while running. This is an additional maximum-age limit; the existing
 event-count and byte budgets can evict a mailbox sooner. Arrival times are
-stored in a password-encrypted `relay.retention` sidecar. Existing mailboxes
+stored in a password-encrypted `relay.retention` sidecar. Federation carries
+the earliest arrival time to new relay copies, so a transfer does not restart
+the 30-day clock. Existing mailboxes
 without an arrival record start their 30-day clock on the first upgrade startup
 so the upgrade does not discard queued messages immediately. A sender that
 still holds an event may upload it again after expiry, starting a new mailbox.
-If election changes, the new relay has a different mailbox ID and does not
-inherit the old relay's stored blobs. An online sender retries to the newly
-elected relay; otherwise delivery waits for that sender or the former relay
-to return. Several LAN relays provide a standby, not replicated custody.
+Legacy relay-specific mailboxes do not replicate. Version-3 copies reconcile
+among reachable trusted relays; if no route remains to another site, the
+local copy stays queued until a relay path returns. A sender can also retry
+through another reachable local relay.
 
 ## Acceptance and operational limits
 

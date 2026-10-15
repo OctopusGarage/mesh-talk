@@ -8,6 +8,7 @@ use crate::identity::device::PublicIdentity;
 use crate::postoffice::opaque::RelayMailbox;
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// `seen` avoids pulling the same retained blobs every three seconds. The
@@ -51,8 +52,34 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        let mailbox = RelayMailbox::new(&self.identity, recipient, channel.peer_identity())
+        let legacy = RelayMailbox::new(&self.identity, recipient, channel.peer_identity())
             .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
+        let mut uploaded = self
+            .opaque_mailbox_round(channel, recipient, conversation, legacy)
+            .await?;
+        if self.bridge_discovery_enabled.load(Ordering::Acquire)
+            && !self.privacy_snapshot().invisible
+        {
+            let federated = RelayMailbox::federated(&self.identity, recipient)
+                .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
+            uploaded.extend(
+                self.opaque_mailbox_round(channel, recipient, conversation, federated)
+                    .await?,
+            );
+        }
+        Ok(uploaded)
+    }
+
+    async fn opaque_mailbox_round<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        mailbox: RelayMailbox,
+    ) -> Result<Vec<(EventId, EventId)>, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         let seen = self
             .opaque_seen
             .lock()

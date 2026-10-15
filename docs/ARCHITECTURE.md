@@ -5,7 +5,7 @@ backend, **React + TypeScript** frontend. No vendor-operated server: LAN peers
 discover each other over signed UDP **multicast** (group `224.0.0.167`, port
 47474), connect directly over a Noise-encrypted TCP
 channel, and store messages as an append-only, hash-linked **event log** that syncs CRDT-style.
-When a peer is offline, an elected **post office** node stores-and-forwards the (still-encrypted)
+When a peer is offline, a peer-operated **post office** node stores-and-forwards the (still-encrypted)
 events. Existing routed networks can supply optional peer discovery; opted-in
 post-office bridges introduce registered peers across sites without merging
 their IP subnets. See [routed discovery](routed-network-discovery.md) and
@@ -364,12 +364,15 @@ directory, its fresh, self-signed introductions can be polled from that post
 office's opaque mailboxes. This does not mark safety numbers verified, persists
 no bridge permission, and expires with the directory membership. Invisible mode
 does not participate. See [routed network discovery](routed-network-discovery.md).
-For multi-site bridges, clients can prefer one relay fingerprint. Site relays
-publish that relay's signed proof and their own local TCP proxy port. Clients
-authenticate the relay end to end and use its opaque mailbox while reachable.
-When it is unavailable, clients can use another verified relay and drain all
-known relay-specific mailboxes on recovery. Cross-site continuity still needs
-an independent network route and bridge directory path between the sites.
+For multi-site federation, post offices have equal roles and a shared set of
+trusted identity-pinned seeds. They discover trusted LAN relays, probe routed
+seeds, exchange short-lived signed opt-in presence, and reconcile version-3
+pairwise opaque mailboxes over Noise. The original mailbox arrival time follows
+each federated copy, preserving the 30-day maximum. Clients can prefer a local
+relay and fall back to another reachable relay. New clients also read and write
+legacy relay-specific mailboxes during migration. A legacy `--bridge-peer`
+gateway remains available for old clients. Cross-site continuity requires a
+physical routed path through at least one reachable relay chain.
 The sender's retry worker independently attempts direct delivery before relay
 replication, so either side can initiate recovery when a route returns.
 

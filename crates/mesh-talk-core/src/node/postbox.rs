@@ -8,9 +8,11 @@ use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::bridge_directory::{self, BridgeDirectory};
 use crate::node::session::{Served, serve_one, serve_wire_bytes};
 use crate::node::transport::secure_accept;
+use crate::postoffice::federation;
 use crate::postoffice::gateway::GatewayProof;
 use crate::postoffice::{PostOffice, elect};
 use crate::transport::SecureChannel;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -144,10 +146,22 @@ where
     serve_relay_or_bridge_connection(channel, store, None).await;
 }
 
+#[cfg(test)]
 async fn serve_relay_or_bridge_connection<IO>(
+    channel: SecureChannel<IO>,
+    store: Arc<Mutex<PostOffice>>,
+    directory: Option<Arc<Mutex<BridgeDirectory>>>,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_relay_or_bridge_connection_with_trust(channel, store, directory, None).await;
+}
+
+async fn serve_relay_or_bridge_connection_with_trust<IO>(
     mut channel: SecureChannel<IO>,
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,
+    federation_trust: Option<Arc<HashSet<String>>>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -187,6 +201,24 @@ async fn serve_relay_or_bridge_connection<IO>(
                         break;
                     }
                 }
+            }
+        }
+        return;
+    }
+    if federation::is_inventory_request(&first) {
+        if !federation_trust
+            .as_ref()
+            .is_some_and(|trusted| trusted.contains(&channel.peer_identity().user_id()))
+            || federation::send_inventory(&mut channel, &store, directory.as_ref())
+                .await
+                .is_err()
+        {
+            return;
+        }
+        for _ in 0..MAX_RELAY_ROUNDS {
+            match tokio::time::timeout(RELAY_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
+                Ok(Ok(Served::Handled(_))) => continue,
+                _ => break,
             }
         }
         return;
@@ -275,11 +307,57 @@ pub async fn run_bridge_relay_accept_loop_with_gateway(
     .await;
 }
 
+/// Serve normal clients and an equal-relay federation on the same listener.
+/// Inventory and bulk opaque replication are restricted to pinned identities.
+#[cfg(test)]
+pub async fn run_federated_relay_accept_loop(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    trusted_relays: Arc<HashSet<String>>,
+) {
+    run_federated_relay_accept_loop_with_directory(
+        identity,
+        listener,
+        store,
+        trusted_relays,
+        federation::FederationDirectory::new(),
+    )
+    .await;
+}
+
+pub async fn run_federated_relay_accept_loop_with_directory(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    trusted_relays: Arc<HashSet<String>>,
+    directory: federation::FederationDirectory,
+) {
+    run_relay_accept_loop_inner_with_trust(
+        identity,
+        listener,
+        store,
+        Some(directory.shared()),
+        Some(trusted_relays),
+    )
+    .await;
+}
+
 async fn run_relay_accept_loop_inner(
     identity: DeviceIdentity,
     listener: TcpListener,
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,
+) {
+    run_relay_accept_loop_inner_with_trust(identity, listener, store, directory, None).await;
+}
+
+async fn run_relay_accept_loop_inner_with_trust(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    directory: Option<Arc<Mutex<BridgeDirectory>>>,
+    federation_trust: Option<Arc<HashSet<String>>>,
 ) {
     store
         .lock()
@@ -308,10 +386,17 @@ async fn run_relay_accept_loop_inner(
         let store = Arc::clone(&store);
         let identity = Arc::clone(&identity);
         let directory = directory.clone();
+        let federation_trust = federation_trust.clone();
         tokio::spawn(async move {
             let _permit = permit; // held for the connection's lifetime, freed on drop
             if let Ok(channel) = secure_accept(stream, &identity).await {
-                serve_relay_or_bridge_connection(channel, store, directory).await;
+                serve_relay_or_bridge_connection_with_trust(
+                    channel,
+                    store,
+                    directory,
+                    federation_trust,
+                )
+                .await;
             }
         });
     }
@@ -519,6 +604,369 @@ mod tests {
             relay_store.lock().unwrap().has(&event_id),
             "relay persisted the pushed event"
         );
+    }
+
+    #[tokio::test]
+    async fn trusted_relays_reconcile_federated_mailboxes_after_disconnect() {
+        let root = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let first = DeviceIdentity::generate();
+        let second = DeviceIdentity::generate();
+        let first_keys = first.secret_bytes();
+        let second_keys = second.secret_bytes();
+        let first_public = first.public();
+        let second_public = second.public();
+        let first_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("first"), "pw", first).unwrap(),
+        ));
+        let second_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("second"), "pw", second).unwrap(),
+        ));
+        let mailbox =
+            crate::postoffice::opaque::RelayMailbox::federated(&alice, &bob.public()).unwrap();
+        let legacy =
+            crate::postoffice::opaque::RelayMailbox::new(&alice, &bob.public(), &first_public)
+                .unwrap();
+        let event = Event::new(
+            &alice,
+            ConversationId::new([61; 32]),
+            1,
+            vec![],
+            1,
+            10,
+            EventKind::Message,
+            b"opaque".to_vec(),
+        );
+        let outer = mailbox.wrap(&event).unwrap();
+        let legacy_outer = legacy.wrap(&event).unwrap();
+        first_store.lock().unwrap().accept(outer.clone()).unwrap();
+        first_store
+            .lock()
+            .unwrap()
+            .accept(legacy_outer.clone())
+            .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let trusted = Arc::new(std::collections::HashSet::from([first_public.user_id()]));
+        let second_server = tokio::spawn(run_federated_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(second_keys.0, second_keys.1),
+            listener,
+            Arc::clone(&second_store),
+            trusted,
+        ));
+        crate::postoffice::federation::sync_with_relay(
+            addr,
+            &DeviceIdentity::from_secret_bytes(first_keys.0, first_keys.1),
+            &second_public,
+            &first_store,
+        )
+        .await
+        .unwrap();
+        assert!(second_store.lock().unwrap().has(&outer.id));
+        assert!(!second_store.lock().unwrap().has(&legacy_outer.id));
+        assert_eq!(
+            crate::postoffice::federation::sync_with_relay(
+                addr,
+                &DeviceIdentity::from_secret_bytes(first_keys.0, first_keys.1),
+                &second_public,
+                &first_store,
+            )
+            .await
+            .unwrap(),
+            0,
+            "matching mailbox digests should avoid a redundant sync round",
+        );
+
+        second_server.abort();
+        let _ = second_server.await;
+        let reply = Event::new(
+            &bob,
+            ConversationId::new([62; 32]),
+            1,
+            vec![],
+            1,
+            11,
+            EventKind::Message,
+            b"reply".to_vec(),
+        );
+        let reply_outer = crate::postoffice::opaque::RelayMailbox::federated(&bob, &alice.public())
+            .unwrap()
+            .wrap(&reply)
+            .unwrap();
+        second_store
+            .lock()
+            .unwrap()
+            .accept(reply_outer.clone())
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let recovered_addr = listener.local_addr().unwrap();
+        let trusted = Arc::new(std::collections::HashSet::from([first_public.user_id()]));
+        let second_server = tokio::spawn(run_federated_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(second_keys.0, second_keys.1),
+            listener,
+            Arc::clone(&second_store),
+            trusted,
+        ));
+        crate::postoffice::federation::sync_with_relay(
+            recovered_addr,
+            &DeviceIdentity::from_secret_bytes(first_keys.0, first_keys.1),
+            &second_public,
+            &first_store,
+        )
+        .await
+        .unwrap();
+        assert!(first_store.lock().unwrap().has(&reply_outer.id));
+        second_server.abort();
+    }
+
+    #[tokio::test]
+    async fn trusted_relays_exchange_only_opted_in_signed_presence() {
+        let root = tempfile::tempdir().unwrap();
+        let first = DeviceIdentity::generate();
+        let second = DeviceIdentity::generate();
+        let first_keys = first.secret_bytes();
+        let second_keys = second.secret_bytes();
+        let first_public = first.public();
+        let second_public = second.public();
+        let first_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("first"), "pw", first).unwrap(),
+        ));
+        let second_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("second"), "pw", second).unwrap(),
+        ));
+        let first_directory = federation::FederationDirectory::new();
+        let second_directory = federation::FederationDirectory::new();
+        let account = Account::generate();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let hidden = DeviceIdentity::generate();
+        let alice_proof = Announce::new_with_account(&alice, &account, "Alice", 47475);
+        let bob_proof = Announce::new_with_account(&bob, &account, "Bob", 47476);
+        let hidden_proof = Announce::new_with_account(&hidden, &account, "Hidden", 47477);
+        let now = std::time::Instant::now();
+        first_directory
+            .shared()
+            .lock()
+            .unwrap()
+            .register(&alice.public(), Some(&alice_proof), true, now)
+            .unwrap();
+        first_directory.shared().lock().unwrap().register(
+            &hidden.public(),
+            Some(&hidden_proof),
+            false,
+            now,
+        );
+        second_directory
+            .shared()
+            .lock()
+            .unwrap()
+            .register(&bob.public(), Some(&bob_proof), true, now)
+            .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_federated_relay_accept_loop_with_directory(
+            DeviceIdentity::from_secret_bytes(second_keys.0, second_keys.1),
+            listener,
+            second_store,
+            Arc::new(HashSet::from([first_public.user_id()])),
+            second_directory.clone(),
+        ));
+        first_directory
+            .sync_with_relay(
+                addr,
+                &DeviceIdentity::from_secret_bytes(first_keys.0, first_keys.1),
+                &second_public,
+                &first_store,
+            )
+            .await
+            .unwrap();
+        let observer = DeviceIdentity::generate();
+        let observer_proof = Announce::new_with_account(&observer, &account, "Observer", 47478);
+        let proofs = second_directory
+            .shared()
+            .lock()
+            .unwrap()
+            .register(&observer.public(), Some(&observer_proof), true, now)
+            .unwrap();
+        assert!(proofs.iter().any(|proof| proof.user_id == alice.user_id()));
+        assert!(!proofs.iter().any(|proof| proof.user_id == hidden.user_id()));
+        assert!(
+            !proofs
+                .iter()
+                .any(|proof| proof.user_id == first_public.user_id())
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn untrusted_relay_cannot_read_federation_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let server_identity = DeviceIdentity::generate();
+        let server_keys = server_identity.secret_bytes();
+        let server_public = server_identity.public();
+        let client_identity = DeviceIdentity::generate();
+        let client_store = Arc::new(Mutex::new(
+            PostOffice::open(
+                &root.path().join("client"),
+                "pw",
+                DeviceIdentity::generate(),
+            )
+            .unwrap(),
+        ));
+        let server_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("server"), "pw", server_identity).unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_federated_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(server_keys.0, server_keys.1),
+            listener,
+            server_store,
+            Arc::new(HashSet::new()),
+        ));
+        assert!(
+            federation::sync_with_relay(addr, &client_identity, &server_public, &client_store)
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn three_equal_relays_forward_after_middle_route_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let mailbox =
+            crate::postoffice::opaque::RelayMailbox::federated(&sender, &recipient.public())
+                .unwrap();
+        let west = DeviceIdentity::generate();
+        let middle = DeviceIdentity::generate();
+        let east = DeviceIdentity::generate();
+        let west_keys = west.secret_bytes();
+        let middle_keys = middle.secret_bytes();
+        let east_keys = east.secret_bytes();
+        let west_public = west.public();
+        let middle_public = middle.public();
+        let east_public = east.public();
+        let west_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("west"), "pw", west).unwrap(),
+        ));
+        let middle_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("middle"), "pw", middle).unwrap(),
+        ));
+        let east_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("east"), "pw", east).unwrap(),
+        ));
+        let middle_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let middle_addr = middle_listener.local_addr().unwrap();
+        let east_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let east_addr = east_listener.local_addr().unwrap();
+        let middle_server = tokio::spawn(run_federated_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(middle_keys.0, middle_keys.1),
+            middle_listener,
+            Arc::clone(&middle_store),
+            Arc::new(HashSet::from([
+                west_public.user_id(),
+                east_public.user_id(),
+            ])),
+        ));
+        let east_server = tokio::spawn(run_federated_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(east_keys.0, east_keys.1),
+            east_listener,
+            Arc::clone(&east_store),
+            Arc::new(HashSet::from([middle_public.user_id()])),
+        ));
+        let first = mailbox
+            .wrap(&Event::new(
+                &sender,
+                ConversationId::new([71; 32]),
+                1,
+                vec![],
+                1,
+                10,
+                EventKind::Message,
+                b"first".to_vec(),
+            ))
+            .unwrap();
+        west_store.lock().unwrap().accept(first.clone()).unwrap();
+        federation::sync_with_relay(
+            middle_addr,
+            &DeviceIdentity::from_secret_bytes(west_keys.0, west_keys.1),
+            &middle_public,
+            &west_store,
+        )
+        .await
+        .unwrap();
+        federation::sync_with_relay(
+            east_addr,
+            &DeviceIdentity::from_secret_bytes(middle_keys.0, middle_keys.1),
+            &east_public,
+            &middle_store,
+        )
+        .await
+        .unwrap();
+        assert!(east_store.lock().unwrap().has(&first.id));
+
+        middle_server.abort();
+        let _ = middle_server.await;
+        let second = mailbox
+            .wrap(&Event::new(
+                &sender,
+                ConversationId::new([72; 32]),
+                1,
+                vec![],
+                1,
+                11,
+                EventKind::Message,
+                b"queued".to_vec(),
+            ))
+            .unwrap();
+        west_store.lock().unwrap().accept(second.clone()).unwrap();
+        assert!(
+            federation::sync_with_relay(
+                middle_addr,
+                &DeviceIdentity::from_secret_bytes(west_keys.0, west_keys.1),
+                &middle_public,
+                &west_store
+            )
+            .await
+            .is_err()
+        );
+        assert!(!east_store.lock().unwrap().has(&second.id));
+        let middle_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let recovered_addr = middle_listener.local_addr().unwrap();
+        let recovered = tokio::spawn(run_federated_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(middle_keys.0, middle_keys.1),
+            middle_listener,
+            Arc::clone(&middle_store),
+            Arc::new(HashSet::from([
+                west_public.user_id(),
+                east_public.user_id(),
+            ])),
+        ));
+        federation::sync_with_relay(
+            recovered_addr,
+            &DeviceIdentity::from_secret_bytes(west_keys.0, west_keys.1),
+            &middle_public,
+            &west_store,
+        )
+        .await
+        .unwrap();
+        federation::sync_with_relay(
+            east_addr,
+            &DeviceIdentity::from_secret_bytes(middle_keys.0, middle_keys.1),
+            &east_public,
+            &middle_store,
+        )
+        .await
+        .unwrap();
+        assert!(east_store.lock().unwrap().has(&second.id));
+        recovered.abort();
+        east_server.abort();
     }
 
     #[tokio::test]

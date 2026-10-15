@@ -14,10 +14,12 @@ use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
 use mesh_talk_core::node::{DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket};
 use mesh_talk_core::node::{
-    run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway, run_relay_accept_loop,
+    run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
+    run_federated_relay_accept_loop_with_directory, run_relay_accept_loop,
 };
 use mesh_talk_core::postoffice::PostOffice;
-use std::collections::BTreeSet;
+use mesh_talk_core::postoffice::federation::FederationDirectory;
+use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -84,6 +86,34 @@ struct Args {
     /// Local TCP port for the pinned hub gateway (0 = OS-assigned).
     #[arg(long, requires = "bridge_peer")]
     bridge_proxy_port: Option<u16>,
+    /// Equal federation relay seed: <full-fingerprint>@<routed-ip>:<discovery-udp-port>.
+    /// Repeat the same peer list on every relay; LAN addresses are discovered automatically.
+    #[arg(long = "federation-peer", requires_all = ["post_office", "bridge"])]
+    federation_peers: Vec<FederationSeed>,
+}
+
+#[derive(Clone, Debug)]
+struct FederationSeed {
+    id: String,
+    discovery: SocketAddr,
+}
+
+impl std::str::FromStr for FederationSeed {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (id, endpoint) = value
+            .split_once('@')
+            .ok_or_else(|| "expected <full-fingerprint>@<ip>:<discovery-port>".to_string())?;
+        let id = parse_fingerprint(id)?;
+        let discovery = endpoint
+            .parse::<SocketAddr>()
+            .map_err(|_| "expected a numeric routed IP and UDP port".to_string())?;
+        if discovery.port() == 0 {
+            return Err("federation discovery port must be nonzero".into());
+        }
+        Ok(Self { id, discovery })
+    }
 }
 
 fn parse_fingerprint(value: &str) -> Result<String, String> {
@@ -719,6 +749,35 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.discovery_port
     ));
 
+    if !args.federation_peers.is_empty() {
+        let directory = gateway
+            .map(FederationDirectory::with_gateway)
+            .unwrap_or_default();
+        let trusted = Arc::new(
+            args.federation_peers
+                .iter()
+                .map(|seed| seed.id.clone())
+                .collect::<HashSet<_>>(),
+        );
+        let federation_identity = DeviceIdentity::from_secret_bytes(ed, x);
+        tokio::spawn(run_federation_loop(
+            Arc::clone(&roster),
+            args.federation_peers.clone(),
+            federation_identity,
+            Arc::clone(&store),
+            directory.clone(),
+        ));
+        run_federated_relay_accept_loop_with_directory(
+            transport_identity,
+            listener,
+            store,
+            trusted,
+            directory,
+        )
+        .await;
+        return Ok(());
+    }
+
     // Serve relay connections until killed. This loop never returns; the trailing
     // Ok(()) is unreachable in practice (the process is stopped by a signal).
     if let Some(gateway) = gateway {
@@ -730,6 +789,64 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         run_relay_accept_loop(transport_identity, listener, store).await;
     }
     Ok(())
+}
+
+async fn run_federation_loop(
+    roster: Arc<Mutex<Roster>>,
+    seeds: Vec<FederationSeed>,
+    identity: DeviceIdentity,
+    store: Arc<Mutex<PostOffice>>,
+    directory: FederationDirectory,
+) {
+    let self_id = identity.user_id();
+    let trusted = seeds
+        .iter()
+        .map(|seed| seed.id.as_str())
+        .collect::<HashSet<_>>();
+    loop {
+        let mut routes = roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .post_offices()
+            .into_iter()
+            .filter(|peer| {
+                peer.public.user_id() != self_id && trusted.contains(peer.public.user_id().as_str())
+            })
+            .map(|peer| (peer.addr, peer.public))
+            .collect::<Vec<_>>();
+        let probed =
+            futures_util::future::join_all(seeds.iter().filter(|seed| seed.id != self_id).map(
+                |seed| async move {
+                    mesh_talk_core::postoffice::gateway::query_pinned_relay(
+                        seed.discovery,
+                        &seed.id,
+                    )
+                    .await
+                    .map(|proof| {
+                        (
+                            SocketAddr::new(seed.discovery.ip(), proof.tcp_port),
+                            proof.public(),
+                        )
+                    })
+                },
+            ))
+            .await;
+        routes.extend(probed.into_iter().flatten());
+        routes.sort_by_key(|(addr, peer)| (peer.user_id(), *addr));
+        routes.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        let results = futures_util::future::join_all(
+            routes
+                .iter()
+                .map(|(addr, peer)| directory.sync_with_relay(*addr, &identity, peer, &store)),
+        )
+        .await;
+        for ((addr, peer), result) in routes.iter().zip(results) {
+            if let Err(error) = result {
+                log::debug!("federation {} at {addr}: {error}", peer.user_id());
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 /// Parse and dispatch a `/msg <prefix> <text>` command: resolve the recipient
@@ -975,6 +1092,24 @@ fn handle_sendfile(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn federation_seed_requires_full_identity_and_routed_endpoint() {
+        let parsed: super::FederationSeed = "edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479"
+            .parse()
+            .unwrap();
+        assert_eq!(parsed.id, "edbbf0daac94d930e687ba86c20d3f06");
+        assert_eq!(parsed.discovery.to_string(), "100.82.240.19:47479");
+        assert!(
+            "edbb@100.82.240.19:47479"
+                .parse::<super::FederationSeed>()
+                .is_err()
+        );
+        assert!(
+            "edbbf0daac94d930e687ba86c20d3f06@invalid"
+                .parse::<super::FederationSeed>()
+                .is_err()
+        );
+    }
     use super::*;
     use mesh_talk_core::identity::device::DeviceIdentity;
     use std::net::SocketAddr;

@@ -5,10 +5,11 @@ Home (build 26200). Its `MeshTalk-PostOffice` Scheduled Task runs the headless
 relay as `SYSTEM` at boot. The binary is
 `D:\ProgramData\MeshTalk\PostOffice\mesh-talk-node.exe`; its keystore, password
 file, `relay.log`, and `node.lock` are in the `data` subdirectory. TCP 47475
-serves peers; signed UDP multicast discovery uses 47474. In the current
-three-relay deployment, the node also runs a local TCP 47476 gateway to the
-mac2015 hub. Firewall rules allow these listener ports from `LocalSubnet` on
-all network profiles.
+serves peers; its dedicated signed-query UDP port is 47478 and it announces
+to clients on the shared LAN port 47474. The optional legacy gateway listens
+on TCP 47476. The equal-relay federation uses the same trusted seed list as
+mac2015 and mac-mini. Firewall rules allow the relay listener ports from
+`LocalSubnet` on all network profiles.
 
 The task passes `--password-file`, never a password argument. The installer
 creates a random password on the Windows host only on first installation and
@@ -33,7 +34,22 @@ scp target/x86_64-pc-windows-gnu/release/mesh-talk-node.exe \
   windows10:'D:/mesh-talk-node.next.exe'
 scp scripts/install-post-office-windows.ps1 \
   windows10:'D:/install-post-office-windows.ps1'
-ssh windows10 'powershell -NoProfile -ExecutionPolicy Bypass -File D:\install-post-office-windows.ps1 -StagedBinary D:\mesh-talk-node.next.exe -Name windows10-post-office -BridgePeer 192.168.3.72:47479 -BridgePeerId edbbf0daac94d930e687ba86c20d3f06 -BridgeProxyPort 47476'
+```
+
+Then run this in a PowerShell session on Windows (working directory D:):
+
+```powershell
+& 'D:\install-post-office-windows.ps1' `
+  -StagedBinary 'D:\mesh-talk-node.next.exe' `
+  -Name 'windows10-post-office' `
+  -BridgePeer '192.168.3.72:47479' `
+  -BridgePeerId 'edbbf0daac94d930e687ba86c20d3f06' `
+  -BridgeProxyPort 47476 -DiscoveryPort 47478 -LanAnnouncePort 47474 `
+  -FederationPeer @(
+    'd2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478',
+    'edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479',
+    'e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
+  )
 ```
 
 Run those commands for a first install and for each update. The installer
