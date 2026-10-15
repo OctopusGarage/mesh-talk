@@ -16,18 +16,7 @@ interface AppLockState {
 
 function hideSensitiveState() {
   useAuth.setState((state) => ({ generation: state.generation + 1 }));
-  useChat.setState((state) => ({
-    runEpoch: state.runEpoch + 1,
-    active: null,
-    messages: {},
-    reactions: {},
-    incomingFiles: [],
-    peers: [],
-    accounts: [],
-    channels: [],
-    members: [],
-    searchTarget: null,
-  }));
+  useChat.getState().resetForLock();
   useCalls.getState().teardown();
 }
 

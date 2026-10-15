@@ -239,6 +239,7 @@ export interface ChatState {
   error: string | null; // transient action error (file/reaction send), surfaced to the user
   bootFailed: boolean; // the node never came up within the boot window
 
+  resetForLock: () => void;
   start: () => () => void;
   retryBoot: () => void;
   loadFavorites: () => Promise<void>;
@@ -278,45 +279,62 @@ export interface ChatState {
   renameChannel: (channelId: string, name: string) => Promise<void>;
 }
 
+/** One empty session snapshot for initial state, login, and app lock. */
+function emptySessionData() {
+  return {
+    identityEpoch: 0,
+    bootBusy: false,
+    bootRequest: 0,
+    intents: {},
+    deleted: {},
+    statusBusy: false,
+    historyRequests: {},
+    activeRequest: 0,
+    rosterRequest: 0,
+    favoritesRequest: 0,
+    loadingRequest: 0,
+    ready: false,
+    myId: "",
+    myAccountId: "",
+    peers: [],
+    accounts: [],
+    channels: [],
+    channelMembersById: {},
+    active: null,
+    searchTarget: null,
+    messages: {},
+    reactions: {},
+    unread: {},
+    unreadOwner: "",
+    pendingUnknownUnread: {},
+    cacheOrder: [],
+    members: [],
+    channelOwner: "",
+    incomingFiles: [],
+    favorites: NO_FAVORITES,
+    loading: false,
+    historyError: null,
+    error: null,
+    bootFailed: false,
+  };
+}
+
 export const useChat = create<ChatState>((rawSet, get) => ({
-  identityEpoch: 0,
-  bootBusy: false,
-  bootRequest: 0,
-  intents: {},
-  deleted: {},
-  statusBusy: false,
+  ...emptySessionData(),
   runEpoch: 0,
-  historyRequests: {},
-  activeRequest: 0,
-  rosterRequest: 0,
-  favoritesRequest: 0,
-  loadingRequest: 0,
-  ready: false,
-  myId: "",
-  myAccountId: "",
-  peers: [],
-  accounts: [],
-  channels: [],
-  channelMembersById: {},
-  active: null,
-  searchTarget: null,
-  messages: {},
-  reactions: {},
-  unread: {},
-  unreadOwner: "",
-  pendingUnknownUnread: {},
-  cacheOrder: [],
-  members: [],
-  channelOwner: "",
-  incomingFiles: [],
-  favorites: NO_FAVORITES,
-  loading: false,
-  historyError: null,
-  error: null,
-  bootFailed: false,
 
   clearError: () => rawSet({ error: null }),
   setError: (msg) => rawSet({ error: msg }),
+
+  resetForLock: () => {
+    lastUnknownSenderRefresh = 0;
+    rawSet((state) => ({
+      ...emptySessionData(),
+      runEpoch: state.runEpoch + 1,
+    }));
+    useTransfers.getState().reset();
+    resetFileAvailability();
+  },
 
   loadFavorites: async () => {
     const lease = captureChat(get);
@@ -473,40 +491,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     resetFileAvailability();
     useCalls.getState().teardown();
     set({
-      ready: false,
-      error: null,
-      bootFailed: false,
-      myId: "",
-      myAccountId: "",
-      peers: [],
-      accounts: [],
-      channels: [],
-      channelMembersById: {},
-      active: null,
-      searchTarget: null,
-      messages: {},
-      reactions: {},
-      unread: {},
-      unreadOwner: "",
-      pendingUnknownUnread: {},
-      cacheOrder: [],
-      members: [],
-      channelOwner: "",
-      incomingFiles: [],
-      favorites: NO_FAVORITES,
-      historyRequests: {},
-      activeRequest: 0,
-      rosterRequest: 0,
-      favoritesRequest: 0,
-      loadingRequest: 0,
-      loading: false,
-      historyError: null,
-      identityEpoch: 0,
+      ...emptySessionData(),
       bootBusy: true,
       bootRequest: 1,
-      intents: {},
-      deleted: {},
-      statusBusy: false,
     });
     // Load favorites only after the captured owner's identity boot succeeds.
     // Poll my_id until the node finishes opening (post-login KDF unlock takes a moment).
