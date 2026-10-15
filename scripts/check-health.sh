@@ -5,8 +5,8 @@
 
 set -e  # Exit on any error
 
-# FAST mode (FAST=1, or `check-health.sh --fast`): runs only the quick local gate used by the
-# pre-commit hook — formatting, clippy, frontend lint/tests, and the now-cheap in-memory Rust
+# FAST mode (FAST=1, or `check-health.sh --fast`): an optional partial local gate with
+# formatting, clippy, frontend lint/tests, and the in-memory Rust
 # unit slice. It SKIPS the slow, redundant steps (full `cargo test --workspace`, the verbose
 # workspace build, the frontend build, and the supply-chain/secret/typos scans), because CI
 # (.github/workflows/ci.yml) runs the full `cargo test --workspace` on all three platforms plus

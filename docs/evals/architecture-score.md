@@ -16,13 +16,13 @@ unchanged. A focused assembler regression covers incomplete records, overflow,
 and a complete page; existing linked-device backfill and process tests exercise
 the path end to end.
 
-| Dimension | Starting | Round 1 | Round 2 | Round 3 | Evidence |
-|---|---:|---:|---:|---:|---|
-| Module depth | 22/25 | 23/25 | 23/25 | 23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly belongs to the directory module. |
-| Seam integrity | 23/25 | 23/25 | 23/25 | 23/25 | Core, host, and client interfaces are unchanged; wire, storage, and settings persistence seams remain distinct. |
-| Test surface | 24/25 | 24/25 | 24/25 | 24/25 | Focused page, bridge, and settings races plus linked-device, bridge process, and UI E2E coverage; full-round bridge refresh still lacks one isolated test interface. |
-| Locality | 21/25 | 22/25 | 23/25 | 24/25 | Account record completion, cross-page gateway consistency, and Settings dialog save/load lifetime now each have one owner. |
-| **Total** | **90/100** | **92/100** | **93/100** | **94/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
+| Dimension | Starting | Round 1 | Round 2 | Round 3 | Round 4 | Evidence |
+|---|---:|---:|---:|---:|---:|---|
+| Module depth | 22/25 | 23/25 | 23/25 | 23/25 | 23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly belongs to the directory module. |
+| Seam integrity | 23/25 | 23/25 | 23/25 | 23/25 | 24/25 | Host settings and periodic retention use one owner-scoped `NodeState` interface rather than duplicating runtime/session checks. |
+| Test surface | 24/25 | 24/25 | 24/25 | 24/25 | 24/25 | Focused page, bridge, settings, and host ownership regressions; full-round bridge refresh still lacks one isolated test interface. |
+| Locality | 21/25 | 22/25 | 23/25 | 24/25 | 24/25 | Account completion, gateway consistency, Settings dialog lifetime, and host account ownership each have one owner. |
+| **Total** | **90/100** | **92/100** | **93/100** | **94/100** | **95/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
 
 Verification: `cargo test -p mesh-talk-core --lib node::account_sync`,
 `cargo test -p mesh-talk-core --lib account_history_backfills_to_a_linked_device`,
@@ -51,6 +51,19 @@ tests passed; after moving owner invalidation to a layout effect, the five
 settings recovery tests passed again. The remaining point to the target is
 primarily the host's repeated settings application lease and the dialog's
 field-level presentation state.
+
+Round 4 moves host runtime and live-session ownership checks into
+`NodeState::node_for_owner`. Settings application and periodic retention use
+that interface; immediate retention pruning checks ownership again after
+relay application can yield. The focused host regression covers the matching
+owner, a different requested owner, and a replaced session. The normal local
+workflow now selects one Rust module/integration target or frontend test file;
+pre-commit performs source checks, while comprehensive suites remain the PR/CI
+gate. This review rates seam integrity one point higher. The 95/100 is a
+qualitative architecture score, not a measured performance or test coverage
+percentage. Round 4 was validated with focused host tests, strict Clippy,
+formatting, and workflow checks; the comprehensive health gate was stopped
+when the user changed the local testing policy.
 
 ## Earlier review — 2026-10-09
 

@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run check
+.PHONY: dev build test test-focused e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run check
 
 dev: install-deps frontend-install
 	@echo "Development environment configured!"
@@ -13,6 +13,16 @@ build:
 
 test:
 	cargo test --workspace
+
+# Normal development: select the affected crate and test filter, or one integration
+# target. Keep `make test` as the explicit comprehensive pre-PR/CI command.
+test-focused:
+	@test -n "$(TEST_PACKAGE)" && { test -n "$(TEST_FILTER)" || test -n "$(TEST_TARGET)"; } || { echo "Usage: make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync [TEST_TARGET=bridge_cross_lan]" >&2; exit 2; }
+	@if [ -n "$(TEST_TARGET)" ]; then \
+		cargo test -p "$(TEST_PACKAGE)" --test "$(TEST_TARGET)" "$(TEST_FILTER)"; \
+	else \
+		cargo test -p "$(TEST_PACKAGE)" --lib "$(TEST_FILTER)"; \
+	fi
 
 # End-to-end integration tests: real `mesh-talk-node` processes over UDP discovery +
 # TCP (two-node DM, history-across-restart, post-office offline delivery,
@@ -97,6 +107,7 @@ help:
 	@echo "  make dev              Set up the development environment"
 	@echo "  make build            Build the application for release"
 	@echo "  make test             Run the workspace unit/integration tests"
+	@echo "  make test-focused TEST_PACKAGE=... TEST_FILTER=...  Run affected Rust tests"
 	@echo "  make e2e              Run the end-to-end multi-process tests (slow)"
 	@echo "  make eval-smoke       Run delivery and AI regression smoke checks"
 	@echo "  make ai-eval          Run real model-backed AI evals (requires AI_EVAL_COMMAND)"

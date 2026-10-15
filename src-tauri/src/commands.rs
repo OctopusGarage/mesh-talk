@@ -1052,6 +1052,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn owner_scoped_node_handle_requires_matching_session_and_runtime() {
+        let fixture = AuthFixture::new("settings-node-owner");
+        let alice_owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), &alice_owner)
+            )
+            .is_some()
+        );
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), "another-owner")
+            )
+            .is_none()
+        );
+
+        let bob_owner = "replacement-owner";
+        fixture.app_state.session().publish(
+            "replacement".into(),
+            fixture_user(bob_owner),
+            "pw".into(),
+        );
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), &alice_owner)
+            )
+            .is_none()
+        );
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), bob_owner)
+            )
+            .is_none()
+        );
+    }
+
     fn invoke_auth(
         webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
         cmd: &str,

@@ -467,6 +467,26 @@ pub(crate) fn apply_relay_settings(
     hub_result
 }
 
+/// Apply one durable settings document to the current account's runtime.
+/// Retention gets a fresh owner check after relay application because the
+/// session or runtime may change before blocking prune work is scheduled.
+async fn apply_running_settings(
+    node_state: &crate::chat_commands::NodeState,
+    session: &crate::state::SessionState,
+    owner: &str,
+    settings: &AppSettings,
+) {
+    if let Some(node) = node_state.node_for_owner(session, owner).await {
+        apply_relay_settings(&node, settings)
+            .expect("settings fingerprint validated before persistence");
+    }
+    if let Some(cutoff) = retention_cutoff_ms(settings.retention_days)
+        && let Some(node) = node_state.node_for_owner(session, owner).await
+    {
+        let _ = tokio::task::spawn_blocking(move || node.prune_older_than(cutoff)).await;
+    }
+}
+
 /// Update the toggles and persist them. If "stay signed in" was just turned OFF,
 /// immediately forget the saved keychain secret + `last_user` so the next launch
 /// shows the login screen (the toggle is the user's control over the stored secret).
@@ -488,8 +508,7 @@ pub async fn set_app_settings(
         ));
     }
     settings.bridge_hub_id = hub.to_ascii_lowercase();
-    let retention_days = settings.retention_days;
-    let relay_settings = settings.clone();
+    let running_settings = settings.clone();
     match owner.as_deref() {
         Some(owner) => config_store::with_account(&app_state, owner, SETTINGS_FILE, |path| {
             let previous = state.get_for_owner(owner)?;
@@ -517,36 +536,9 @@ pub async fn set_app_settings(
         }
     }
 
-    // Apply relay use to the running node after the account preference is durable.
+    // Apply the durable account preference to its running node, if still current.
     if let Some(owner) = owner.as_deref() {
-        let node = {
-            let guard = node_state.0.lock().await;
-            guard.as_ref().and_then(|rt| {
-                (rt.host_account_id() == Some(owner)
-                    && matches!(app_state.session().capture(), Ok(ref lease) if lease.owner() == owner))
-                    .then(|| rt.handle())
-            })
-        };
-        if let Some(node) = node {
-            apply_relay_settings(&node, &relay_settings)
-                .expect("settings fingerprint validated before persistence");
-        }
-    }
-
-    // Apply a tightened retention window immediately (the periodic prune would otherwise
-    // only catch it on its next tick). Best-effort; a no-op if the node isn't running yet.
-    if let (Some(owner), Some(cutoff)) = (owner.as_deref(), retention_cutoff_ms(retention_days)) {
-        let node = {
-            let guard = node_state.0.lock().await;
-            guard.as_ref().and_then(|rt| {
-                (rt.host_account_id() == Some(owner)
-                    && matches!(app_state.session().capture(), Ok(ref lease) if lease.owner() == owner))
-                    .then(|| rt.handle())
-            })
-        };
-        if let Some(node) = node {
-            let _ = tokio::task::spawn_blocking(move || node.prune_older_than(cutoff)).await;
-        }
+        apply_running_settings(&node_state, app_state.session(), owner, &running_settings).await;
     }
     Ok(())
 }

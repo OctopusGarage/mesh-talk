@@ -37,6 +37,7 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | How to set up, build, test, and submit changes. |
 | [`specifications/development_conventions.md`](../specifications/development_conventions.md) | Coding standards, naming, error handling, performance, cross-platform conventions. |
 | [`specifications/testing_guidelines.md`](../specifications/testing_guidelines.md) | The three test layers — inline unit, multi-process backend E2E, Playwright UI E2E. |
+| [`docs/testing-feedback-loop.md`](testing-feedback-loop.md) | Focused local test commands, module boundaries, and full-gate triggers. |
 | [`specifications/git_standards.md`](../specifications/git_standards.md) | Conventional-commit format, scopes, and GPG signing / hook enforcement. |
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements. |
 | [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md) | Delivery validation, full real smoke, real AI eval coverage, commands, triggers, gaps, and hardening plan. |

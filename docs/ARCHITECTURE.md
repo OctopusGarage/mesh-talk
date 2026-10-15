@@ -739,9 +739,10 @@ the UI sends users who suspect compromise to new identity creation.
   fmt,
   `clippy --workspace --all-targets -D warnings`, ESLint, frontend tests (Vitest), full
   `cargo test --workspace`, typos, cargo-deny, cargo-machete, gitleaks, shellcheck, audits,
-  both builds — **mirrors CI** so failures surface locally, not on CI. The `hooks/pre-commit`
-  hook runs a fast slice (`check-health.sh --fast`: fmt/clippy/lint/unit only); GPG-signed
-  commits are enforced by `hooks/pre-push`.
+  both builds — **mirrors CI** for PR/review validation. The `hooks/pre-commit`
+  hook checks staged whitespace and source formatting; focused tests run during
+  development. The optional `check-health.sh --fast` runs a partial gate;
+  GPG-signed commits are enforced by `hooks/pre-push`.
 - **CI** (`.github/workflows/`): `ci.yml` (Linux, macOS, and Windows matrix → the `verify` aggregate
   check, required by branch protection; coverage → Codecov on Linux), `check-health.yml`,
   `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (Dependabot PRs to `dev`, gated by required checks),

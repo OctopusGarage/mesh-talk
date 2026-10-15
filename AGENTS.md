@@ -18,8 +18,12 @@
 ## Build, Test, and Development Commands
 - `make dev` primes Rust + Node deps and installs git hooks.
 - `make build` / `make frontend-build` — release build / Vite production build.
-- Three test layers: `make test` runs the workspace unit/integration suite
-  (`cargo test --workspace`; filter with `cargo test -p mesh-talk-core --lib node::node`);
+- During feature development, run affected tests only: `make test-focused
+  TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
+  tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.
+  `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`
+  selects a frontend unit file. `make test` runs the full workspace suite
+  (`cargo test --workspace`) for pre-PR and CI gates;
   `make e2e` runs the `#[ignore]`d multi-process backend rigs; `cd frontend && npm run e2e`
   runs the Playwright UI suite. Test builds use cheap KDF params (the `fast-test-kdf`
   feature), and `.cargo/config.toml` caps test/compile parallelism.
@@ -50,6 +54,10 @@
   unit tests near the code. Networking/crypto changes ship a loopback integration assertion.
 - Backend multi-process E2E via `make e2e` (CI: `e2e-backend.yml`); Playwright UI E2E via
   `cd frontend && npm run e2e` (CI: `e2e-ui.yml`).
+- Do not run full suites or E2E automatically during ordinary feature work. Run
+  the affected unit or integration tests as changes are made; run E2E and the
+  comprehensive health gate on explicit request, before PR/review, or in CI.
+- See `docs/testing-feedback-loop.md` for selection examples and escalation triggers.
 - Document executed validation commands in every PR (minimum `make test`).
 
 ## Commit & Pull Request Guidelines

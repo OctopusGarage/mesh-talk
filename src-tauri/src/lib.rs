@@ -219,17 +219,8 @@ pub fn run_tauri_configured(
                             let node = {
                                 let node_state =
                                     app_handle.state::<crate::chat_commands::NodeState>();
-                                let guard = node_state.0.lock().await;
-                                guard.as_ref().and_then(|rt| {
-                                    (rt.host_account_id() == Some(owner.as_str())
-                                        && matches!(
-                                            app_handle.state::<crate::state::AppState>()
-                                                .session()
-                                                .capture(),
-                                            Ok(ref lease) if lease.owner() == owner
-                                        ))
-                                    .then(|| rt.handle())
-                                })
+                                let app_state = app_handle.state::<crate::state::AppState>();
+                                node_state.node_for_owner(app_state.session(), &owner).await
                             };
                             if let Some(node) = node {
                                 let _ = tokio::task::spawn_blocking(move || {
