@@ -377,7 +377,7 @@
     "bridgeDiscoveryDesc": "Share this device's public presence with a bridge-enabled post office and discover its other participants across networks. Messages use encrypted relay mailboxes when peers cannot connect directly. This is off by default and unavailable in invisible mode.",
     "bridgeHub": "Shared bridge hub fingerprint",
     "bridgeHubDesc": "For multi-site bridges, enter the hub post office's full 32-character device fingerprint. All cross-site mailboxes use this hub. Leave blank for normal relay election.",
-    "bridgeHubPlaceholder": "32-character fingerprint",
+    "bridgeHubPlaceholder": "32 hex characters",
     "privacyLevel": "Privacy level",
     "privacyLevelDesc": "Choose a starting point, then adjust the controls below.",
     "level_balanced": "Balanced",
