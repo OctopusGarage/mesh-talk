@@ -8,6 +8,8 @@ The protocol/host/UI layering is mostly legible. The initial audit found a runti
 
 **Follow-up:** `5b1bd7f` removed the settings/auth runtime import cycle by injecting the owner resolver into the low-level settings adapter and keeping the existing public facade. ESLint now blocks store imports from IPC adapters and facade imports from the auth store. The current score under this audit's rubric is **85/100** (three warnings); the graph and R5 finding below preserve the original audit snapshot. The remaining structural work is the peer projection, UI boundaries, and host command ownership.
 
+**Roster follow-up:** `a0ff56f` and `416d156` introduced a cached current-roster projection. Search, member views, avatars, profile cards, call controls, sidebar counts, and diagnostics now reuse its device/account/name/role lookups. Channel member account bindings retain precedence after discovery expires, while relay devices stay available for diagnostics and cannot be selected as contacts or call targets. The focused contract and affected UI tests passed. This closes the frontend identity-projection warning and moves the score to **90/100** (two warnings). The protocol core still owns durable signed proofs and live role precedence; this frontend projection does not replace it.
+
 ## Module Dependency Graph
 
 ```mermaid

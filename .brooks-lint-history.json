@@ -42,5 +42,16 @@
       "suggestion": 0
     },
     "scope": "Same structural audit after settings/auth runtime cycle removal in 5b1bd7f"
+  },
+  {
+    "date": "2026-10-15",
+    "mode": "Architecture Audit",
+    "score": 90,
+    "findings": {
+      "critical": 0,
+      "warning": 2,
+      "suggestion": 0
+    },
+    "scope": "Same structural audit after shared frontend current-roster projection in a0ff56f and 416d156"
   }
 ]
