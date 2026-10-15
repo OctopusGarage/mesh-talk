@@ -29,8 +29,9 @@ impl Node {
         // Keep the current roster authoritative for each device. Signed proof
         // history lets legacy device-pair DMs remain searchable after expiry,
         // but must not revive an old human role for a live relay device.
-        let mut seen_devices: std::collections::HashSet<String> =
+        let live_devices: std::collections::HashSet<String> =
             peers.iter().map(|peer| peer.public.user_id()).collect();
+        let mut seen_devices = live_devices.clone();
         let mut dm_peers: Vec<_> = peers
             .iter()
             .filter(|peer| !peer.post_office)
@@ -80,6 +81,11 @@ impl Node {
             }
         }
         for proof in self.historical_peer_proofs() {
+            // A saved human proof must not override a newer live relay role for
+            // the same device. Other offline human devices remain searchable.
+            if live_devices.contains(&proof.user_id) {
+                continue;
+            }
             if let Some(acct) = proof.account_id() {
                 let label = account_labels.entry(acct).or_default();
                 if !proof.post_office && label.is_none() {

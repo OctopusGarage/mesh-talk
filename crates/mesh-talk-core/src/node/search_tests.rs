@@ -166,6 +166,31 @@ fn search_does_not_present_a_relay_only_account_as_a_contact() {
 
     assert!(node.known_account_ids().contains(&relay_id));
     assert!(node.search("diagnostic").is_empty());
+
+    // A durable proof may still describe the same device as an ordinary peer
+    // while its current signed announcement advertises the relay role.
+    node.configure_privacy(
+        dir.path(),
+        "pw",
+        &node.signed_announce("Me", 1),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    node.privacy
+        .state
+        .write()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .proofs
+        .record(&Announce::new_with_account(
+            &relay,
+            &relay_account,
+            "Former contact",
+            1,
+        ))
+        .unwrap();
+    assert!(node.search("diagnostic").is_empty());
 }
 
 #[tokio::test]
