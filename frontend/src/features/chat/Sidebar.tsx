@@ -49,6 +49,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { ContactContextMenu } from "./HiddenContactsDialog";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { isContactPeer } from "@/lib/contactVisibility";
+import { peerAccountKey } from "@/lib/rosterProjection";
 import { ProfileDialog } from "./ProfileDialog";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import { AboutDialog } from "./AboutDialog";
@@ -544,7 +545,7 @@ export function Sidebar() {
     const online = new Set<string>();
     for (const p of peers) {
       if (!isContactPeer(p)) continue;
-      const account = p.account_id ?? p.user_id;
+      const account = peerAccountKey(p);
       if (account === myAccountId) continue;
       if (presenceMap[account]?.online) online.add(account);
     }
@@ -554,7 +555,7 @@ export function Sidebar() {
     if (!policyLoaded) return 0;
     const online = new Set<string>();
     for (const p of peers) {
-      const account = p.account_id ?? p.user_id;
+      const account = peerAccountKey(p);
       if (
         isContactPeer(p) &&
         account !== myAccountId &&

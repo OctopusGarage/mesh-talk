@@ -20,7 +20,7 @@ import { useSettings } from "@/store/settings";
 import { shortId } from "@/lib/format";
 import { playCallTone } from "@/lib/ringtones";
 import { cn } from "@/lib/utils";
-import { isContactPeer } from "@/lib/contactVisibility";
+import { rosterProjection } from "@/lib/rosterProjection";
 import { ease, useMotionOK } from "@/lib/motion";
 
 /** Header actions: start a voice or video call with a DM contact. Separate entry points
@@ -42,8 +42,9 @@ export function CallButtons({
   // Subscribe to a BOOLEAN (does the account have any discovered device?), not the whole
   // roster array — the array's identity changes every ~4s on the roster poll and would
   // re-render the header for nothing.
-  const hasDevice = useChat((s) =>
-    s.peers.some((p) => isContactPeer(p) && p.account_id === accountId),
+  const hasDevice = useChat(
+    (s) =>
+      rosterProjection(s.peers).contactDevicesForAccount(accountId).length > 0,
   );
   // Opt-in: the feature is hidden entirely until enabled in Settings.
   if (!callsEnabled) return null;
@@ -51,9 +52,8 @@ export function CallButtons({
   const start = (video: boolean) => {
     // Read the device list fresh at click time. Ring EVERY discovered device of the account
     // (first-to-answer wins; see store/calls.ts).
-    const deviceIds = useChat
-      .getState()
-      .peers.filter((p) => isContactPeer(p) && p.account_id === accountId)
+    const deviceIds = rosterProjection(useChat.getState().peers)
+      .contactDevicesForAccount(accountId)
       .map((p) => p.user_id);
     if (deviceIds.length > 0)
       void useCalls.getState().startCall({ name, accountId, deviceIds }, video);
@@ -145,8 +145,8 @@ export function CallDialog() {
   // Prefer the name from our own roster (keyed by the AUTHENTICATED device id) over the
   // caller's self-asserted offer name. Select the derived NAME (a stable string), not the
   // roster array, so the always-mounted overlay doesn't re-render on every ~4s roster poll.
-  const rosterName = useChat(
-    (s) => s.peers.find((p) => p.user_id === peerId)?.name,
+  const rosterName = useChat((s) =>
+    peerId ? rosterProjection(s.peers).nameForDevice(peerId) : null,
   );
   const localStream = useCalls((s) => s.localStream);
   const remoteStream = useCalls((s) => s.remoteStream);

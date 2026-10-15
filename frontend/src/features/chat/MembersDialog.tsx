@@ -24,7 +24,7 @@ import { chat as chatApi } from "@/lib/api";
 import type { ChannelActivityInfo, ChannelMemberInfo } from "@/lib/types";
 import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
 import { useContactPolicy } from "@/store/contactPolicy";
-import { rosterProjection } from "@/lib/rosterProjection";
+import { peerAccountKey, rosterProjection } from "@/lib/rosterProjection";
 import { visiblePeers } from "@/lib/contactVisibility";
 import { VirtualRosterList, VIRTUALIZE_AT } from "./VirtualRosterList";
 import { MemberProfileDialog } from "./MemberProfileDialog";
@@ -555,7 +555,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 >
                   <div className="min-w-0 flex-1">
                     <IdentityCrest
-                      id={p.account_id ?? p.user_id}
+                      id={peerAccountKey(p)}
                       name={p.name || t("common.unnamed")}
                       status={statusFor(p.account_id)}
                       variant="compact"

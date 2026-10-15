@@ -34,6 +34,7 @@ import { diag, obs } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { formatAgo, formatTime, shortId } from "@/lib/format";
 import { isContactPeer } from "@/lib/contactVisibility";
+import { peerAccountKey } from "@/lib/rosterProjection";
 import { useChat } from "@/store/chat";
 import { CONNECTION_LABEL, connectionState } from "./connectionState";
 import { useCopyFeedback } from "./useCopyFeedback";
@@ -314,7 +315,7 @@ export function DiagnosticsDialog({
           p.last_seen_secs <= ONLINE_SECS &&
           p.account_id !== info?.account_id,
       )
-      .map((p) => p.account_id ?? p.user_id),
+      .map(peerAccountKey),
   ).size;
   const connection = connectionState({
     bootFailed,
@@ -817,11 +818,7 @@ export function PeerRow({ p }: { p: DiagPeerInfo }) {
     <div className="flex items-center justify-between gap-2 py-1.5">
       <div className="flex min-w-0 items-center gap-2.5">
         <div className="relative shrink-0">
-          <IdentityGlyph
-            seed={p.account_id ?? p.user_id}
-            size={28}
-            title={p.name}
-          />
+          <IdentityGlyph seed={peerAccountKey(p)} size={28} title={p.name} />
           <PresenceDot
             status={status}
             size="sm"

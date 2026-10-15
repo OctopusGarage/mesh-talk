@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { PeerInfo } from "./types";
-import { rosterProjection } from "./rosterProjection";
+import { peerAccountKey, rosterProjection } from "./rosterProjection";
 
 it("keeps relay devices available for diagnostics while selecting a human contact", () => {
   const peers: PeerInfo[] = [
@@ -39,9 +39,15 @@ it("keeps relay devices available for diagnostics while selecting a human contac
   expect(
     roster.devicesForAccount("shared").map((peer) => peer.user_id),
   ).toEqual(["relay", "human"]);
+  expect(
+    roster.contactDevicesForAccount("shared").map((peer) => peer.user_id),
+  ).toEqual(["human"]);
+  expect(roster.contactDevicesForAccount("infrastructure")).toEqual([]);
   expect(roster.contactForAccount("shared")?.user_id).toBe("human");
   expect(roster.contactForAccount("infrastructure")).toBeUndefined();
   expect(roster.contactForAccount("legacy")).toBeUndefined();
+  expect(peerAccountKey(peers[0])).toBe("shared");
+  expect(peerAccountKey(peers[3])).toBe("legacy");
   expect(rosterProjection(peers)).toBe(roster);
 });
 

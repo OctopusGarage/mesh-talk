@@ -1,14 +1,16 @@
 import type { PeerInfo, SearchHitInfo } from "./types";
-import { isContactPeer, rosterProjection } from "./rosterProjection";
+import {
+  isContactPeer,
+  peerAccountKey,
+  rosterProjection,
+} from "./rosterProjection";
 export { isContactPeer } from "./rosterProjection";
 
 export function visiblePeers(
   peers: PeerInfo[],
   hidden: Record<string, unknown>,
 ) {
-  return peers.filter(
-    (p) => isContactPeer(p) && !hidden[p.account_id ?? p.user_id],
-  );
+  return peers.filter((p) => isContactPeer(p) && !hidden[peerAccountKey(p)]);
 }
 
 export function visibleSearchHits(
