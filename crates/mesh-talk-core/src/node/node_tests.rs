@@ -5072,6 +5072,100 @@ async fn search_finds_a_sent_dm_by_keyword() {
     assert!(node.search("absent-keyword").is_empty());
 }
 
+#[test]
+fn search_finds_account_message_after_contact_goes_offline() {
+    use crate::node::DmEnvelope;
+    use crate::node::conversation::account_conversation_id;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _dm_rx) = mpsc::unbounded_channel();
+    let (ch, _ch_rx) = mpsc::unbounded_channel();
+    let (file, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        ch,
+        file,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let own = node.account_id();
+    let contact = "a".repeat(32);
+    let conversation = account_conversation_id(&own, &contact);
+    let message = DmEnvelope::new(
+        own,
+        contact.clone(),
+        [7; 32],
+        MessageBody::new(b"offline project notes".to_vec(), None).encode(),
+    );
+    node.sentlog
+        .lock()
+        .unwrap()
+        .record(conversation, 1, 1, &message.encode())
+        .unwrap();
+
+    assert_eq!(node.known_account_ids(), vec![contact.clone()]);
+    let hits = node.search("PROJECT");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].target, contact);
+    assert_eq!(hits[0].text, b"offline project notes");
+}
+
+#[test]
+fn search_does_not_present_a_relay_only_account_as_a_contact() {
+    use crate::node::DmEnvelope;
+    use crate::node::conversation::account_conversation_id;
+
+    let dir = tempfile::tempdir().unwrap();
+    let me = DeviceIdentity::generate();
+    let relay = DeviceIdentity::generate();
+    let relay_account = crate::identity::account::Account::generate();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    roster.lock().unwrap().update(
+        &Announce::new_post_office_with_account(&relay, &relay_account, "Relay", 1),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &me.public().user_id(),
+    );
+    let (dm, _dm_rx) = mpsc::unbounded_channel();
+    let (ch, _ch_rx) = mpsc::unbounded_channel();
+    let (file, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        me,
+        roster,
+        dm,
+        ch,
+        file,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let own = node.account_id();
+    let relay_id = relay_account.account_id();
+    let message = DmEnvelope::new(
+        own.clone(),
+        relay_id.clone(),
+        [8; 32],
+        MessageBody::new(b"relay diagnostic token".to_vec(), None).encode(),
+    );
+    node.sentlog
+        .lock()
+        .unwrap()
+        .record(
+            account_conversation_id(&own, &relay_id),
+            1,
+            1,
+            &message.encode(),
+        )
+        .unwrap();
+
+    assert!(node.known_account_ids().contains(&relay_id));
+    assert!(node.search("diagnostic").is_empty());
+}
+
 #[tokio::test]
 async fn a_reply_round_trips_with_its_reply_to() {
     let alice = DeviceIdentity::generate();

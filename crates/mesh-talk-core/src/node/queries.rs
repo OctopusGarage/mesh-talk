@@ -301,24 +301,53 @@ impl Node {
                 });
             }
         }
-        // Account-addressed DMs (the multi-device path the app uses) live under account
-        // conversations, not device-pair ones — scan them too, deduped by account id.
+        // Account-addressed DMs (the multi-device path the app uses) remain
+        // searchable after every device leaves discovery. The durable message
+        // index supplies account IDs; verified proofs provide names and prevent
+        // relay-only accounts from becoming people-facing search results.
         let my_account = self.account.account_id();
-        let mut seen_accounts = std::collections::HashSet::new();
-        for peer in peers.iter().filter(|p| !p.post_office) {
-            let Some(acct) = peer.account_id.clone() else {
-                continue;
-            };
-            if !seen_accounts.insert(acct.clone()) {
+        // None marks an account for which we only know relay devices. A human
+        // device upgrades it to Some(name), even when the two share an account.
+        let mut account_labels: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for peer in &peers {
+            if let Some(acct) = &peer.account_id {
+                let label = account_labels.entry(acct.clone()).or_default();
+                if !peer.post_office && label.is_none() {
+                    *label = Some(peer.name.clone());
+                }
+            }
+        }
+        for proof in self.historical_peer_proofs() {
+            if let Some(acct) = proof.account_id() {
+                let label = account_labels.entry(acct).or_default();
+                if !proof.post_office && label.is_none() {
+                    *label = Some(proof.name);
+                }
+            }
+        }
+        let mut accounts: std::collections::BTreeSet<String> =
+            self.known_account_ids().into_iter().collect();
+        accounts.extend(
+            account_labels
+                .iter()
+                .filter_map(|(acct, label)| label.as_ref().map(|_| acct.clone())),
+        );
+        for acct in accounts {
+            if matches!(account_labels.get(&acct), Some(None)) {
                 continue;
             }
+            let label = account_labels
+                .get(&acct)
+                .and_then(Clone::clone)
+                .unwrap_or_else(|| acct.clone());
             let conv = account_conversation_id(&my_account, &acct);
             for m in self.scan_conversation(conv, &q, PER_CONV, true) {
                 hits.push(SearchHit {
                     is_channel: false,
                     target: acct.clone(),
                     account_id: Some(acct.clone()),
-                    label: peer.name.clone(),
+                    label: label.clone(),
                     from_me: m.from_me,
                     who: m.who,
                     text: m.text,
