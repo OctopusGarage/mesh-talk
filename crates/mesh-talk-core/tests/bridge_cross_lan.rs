@@ -258,6 +258,54 @@ fn bridge_introduces_both_lans_and_delivers_both_directions() {
 }
 
 #[test]
+#[ignore = "four real processes and two isolated discovery scopes"]
+fn reciprocal_relays_introduce_clients_without_a_selected_hub() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = 43000 + (std::process::id() % 1000) as u16 * 4;
+    let e_endpoint = std::net::SocketAddr::from(([127, 0, 0, 1], base));
+    let f_endpoint = std::net::SocketAddr::from(([127, 0, 0, 1], base + 1));
+
+    let e = Node::start(&dir.path().join("e"), "Relay E", base, true);
+    let e_id = e.identity("post-office ");
+    let mut f = Node::start_with_config(
+        &dir.path().join("f"),
+        "Relay F",
+        base + 1,
+        true,
+        Some((e_endpoint, &e_id)),
+        None,
+        true,
+    );
+    let f_id = f.identity("post-office ");
+    drop(e);
+    let mut e = Node::start_with_config(
+        &dir.path().join("e"),
+        "Relay E",
+        base,
+        true,
+        Some((f_endpoint, &f_id)),
+        None,
+        true,
+    );
+    assert_eq!(e.identity("post-office "), e_id);
+
+    let mut a = Node::start(&dir.path().join("a"), "Client A", base + 2, false);
+    let a_id = a.identity("node ");
+    let mut b = Node::start(&dir.path().join("b"), "Client B", base + 3, false);
+    let b_id = b.identity("node ");
+    a.await_relay(&e_id, base);
+    b.await_relay(&f_id, base + 1);
+    a.await_peer(&b_id);
+    b.await_peer(&a_id);
+    a.send(&format!("/msg {} hello-from-a", &b_id[..8]));
+    b.until("hello-from-a", Duration::from_secs(45));
+    b.send(&format!("/msg {} hello-from-b", &a_id[..8]));
+    a.until("hello-from-b", Duration::from_secs(45));
+    e.send("/peers");
+    f.send("/peers");
+}
+
+#[test]
 #[ignore = "seven processes model three isolated LAN discovery scopes"]
 fn three_sites_share_one_pinned_hub_despite_another_local_post_office() {
     let dir = tempfile::tempdir().unwrap();

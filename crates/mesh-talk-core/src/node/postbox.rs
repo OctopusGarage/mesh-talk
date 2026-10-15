@@ -3,8 +3,8 @@
 //! Client upload and drain live in `opaque_relay` and `serving`;
 //! this module provides election lookup and the serving loop.
 
-use crate::discovery::roster::{PeerRecord, Roster};
-use crate::identity::device::DeviceIdentity;
+use crate::discovery::roster::{PeerRecord, Roster, RouteSource};
+use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::bridge_directory::{self, BridgeDirectory};
 use crate::node::session::{Served, serve_one, serve_wire_bytes};
 use crate::node::transport::secure_accept;
@@ -32,14 +32,17 @@ pub fn elected_post_office(roster: &Roster) -> Option<PeerRecord> {
 }
 
 /// Order verified post offices for delivery. A configured ID is a preference,
-/// never an exclusive mailbox: a reachable alternative can take custody while
-/// the preferred relay is offline. The deterministic order keeps unconfigured
-/// clients on the same primary relay when their rosters agree.
+/// never an exclusive mailbox. Without one, use a directly discovered LAN
+/// relay before a remote gateway; break ties by fingerprint for stability.
 pub fn post_office_candidates(roster: &Roster, preferred_id: Option<&str>) -> Vec<PeerRecord> {
     let mut candidates = roster.post_offices();
     candidates.sort_by_key(|relay| {
         (
             preferred_id != Some(relay.public.user_id().as_str()),
+            !relay
+                .routes
+                .iter()
+                .any(|route| route.source == RouteSource::Lan),
             relay.public.user_id(),
         )
     });
@@ -50,6 +53,32 @@ pub fn post_office_candidates(roster: &Roster, preferred_id: Option<&str>) -> Ve
 /// I/O should try subsequent candidates if this relay is unreachable.
 pub fn selected_post_office(roster: &Roster, hub_id: Option<&str>) -> Option<PeerRecord> {
     post_office_candidates(roster, hub_id).into_iter().next()
+}
+
+/// For an introduced recipient, favor the relays that actually reported that
+/// recipient. A merely local relay may have no route to the other site's
+/// client, so successful custody there would not imply deliverability.
+pub fn post_office_candidates_for(
+    roster: &Roster,
+    preferred_id: Option<&str>,
+    recipient: &PublicIdentity,
+) -> Vec<PeerRecord> {
+    let mut candidates = post_office_candidates(roster, preferred_id);
+    if let Some(peer) = roster
+        .get(&recipient.user_id())
+        .filter(|peer| peer.public == *recipient)
+    {
+        let introduced_by: Vec<_> = peer
+            .routes
+            .iter()
+            .filter(|route| route.source == RouteSource::PostOffice)
+            .map(|route| route.addr)
+            .collect();
+        if !introduced_by.is_empty() {
+            candidates.sort_by_key(|relay| !introduced_by.contains(&relay.addr));
+        }
+    }
+    candidates
 }
 
 impl super::Node {
@@ -91,6 +120,18 @@ impl super::Node {
             .lock()
             .expect("bridge hub lock not poisoned");
         post_office_candidates(roster, preferred.as_deref())
+    }
+
+    pub(in crate::node) fn post_office_candidates_for(
+        &self,
+        roster: &Roster,
+        recipient: &PublicIdentity,
+    ) -> Vec<PeerRecord> {
+        let preferred = self
+            .bridge_hub_id
+            .lock()
+            .expect("bridge hub lock not poisoned");
+        post_office_candidates_for(roster, preferred.as_deref(), recipient)
     }
 }
 
@@ -354,6 +395,77 @@ mod tests {
                 .unwrap()
                 .public,
             local.public()
+        );
+    }
+
+    #[test]
+    fn unconfigured_client_prefers_its_local_relay_over_a_gateway() {
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let (remote, local) = if a.user_id() < b.user_id() {
+            (&a, &b)
+        } else {
+            (&b, &a)
+        };
+        let account = crate::identity::account::Account::generate();
+        let mut roster = Roster::default();
+        roster.update_gateway(
+            &crate::discovery::Announce::new_post_office_with_account(
+                remote, &account, "remote", 47475,
+            ),
+            "192.168.0.99".parse().unwrap(),
+            47477,
+            "self",
+        );
+        roster.update(
+            &crate::discovery::Announce::new_post_office_with_account(
+                local, &account, "local", 47476,
+            ),
+            "192.168.0.99".parse().unwrap(),
+            "self",
+        );
+        assert_eq!(
+            selected_post_office(&roster, None).unwrap().public,
+            local.public()
+        );
+        assert_eq!(
+            selected_post_office(&roster, Some(&remote.user_id()))
+                .unwrap()
+                .public,
+            remote.public()
+        );
+    }
+
+    #[test]
+    fn recipient_introduction_routes_mail_to_a_shared_relay() {
+        let local = DeviceIdentity::generate();
+        let shared = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let mut roster = Roster::default();
+        roster.update(
+            &crate::discovery::Announce::new_post_office_with_account(
+                &local, &account, "local", 47475,
+            ),
+            "192.168.3.16".parse().unwrap(),
+            "self",
+        );
+        roster.update(
+            &crate::discovery::Announce::new_post_office_with_account(
+                &shared, &account, "shared", 47476,
+            ),
+            "192.168.3.72".parse().unwrap(),
+            "self",
+        );
+        roster.update_relayed(
+            &crate::discovery::Announce::new_with_account(&recipient, &account, "remote", 55000),
+            "192.168.3.72:47476".parse().unwrap(),
+            "self",
+        );
+        assert_eq!(
+            post_office_candidates_for(&roster, Some(&local.user_id()), &recipient.public())[0]
+                .public,
+            shared.public()
         );
     }
 

@@ -144,8 +144,8 @@
         "States that both post offices require an explicit pinned bridge-peer configuration and must use distinct TCP ports.",
         "Says clients opt in to bridge discovery and learn the remote relay through the authenticated local bridge directory.",
         "Requires a fresh signed remote relay proof and end-to-end Noise authentication through the TCP gateway.",
-        "Explains that all participating clients converge on one elected post-office directory and opaque mailbox for delivery.",
-        "States that relay mailbox contents are not replicated and failure of the elected relay pauses cross-LAN delivery.",
+        "Explains that participating clients register with every reachable verified relay and use a local relay first unless they set an optional preference.",
+        "States that relay mailbox contents are not replicated and inter-site delivery needs a surviving route between the sites.",
         "Provides real cross-machine evidence covering all four client identities and bidirectional encrypted DMs."
       ]
     }

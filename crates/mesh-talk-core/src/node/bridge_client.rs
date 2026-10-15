@@ -3,39 +3,15 @@
 
 use super::*;
 use crate::discovery::Announce;
-use crate::discovery::roster::{PeerRecord, RouteSource, UpdateOutcome};
+use crate::discovery::roster::{PeerRecord, UpdateOutcome};
 use crate::node::bridge_directory;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn local_bridge_relay(
-    roster: &crate::discovery::roster::Roster,
-    excluded: Option<&str>,
-) -> Option<PeerRecord> {
-    roster
-        .post_offices()
-        .into_iter()
-        .filter(|relay| {
-            excluded.is_none_or(|id| relay.public.user_id() != id)
-                && relay.routes.iter().any(|route| {
-                    matches!(
-                        route.source,
-                        RouteSource::Lan | RouteSource::RoutedQuery | RouteSource::Authenticated
-                    )
-                })
-        })
-        .min_by_key(|relay| relay.public.user_id())
-}
-
-fn uses_gateway(relay: &PeerRecord) -> bool {
-    relay
-        .routes
-        .iter()
-        .any(|route| route.addr == relay.addr && route.source == RouteSource::Gateway)
-}
+const MAX_DIRECTORY_RELAYS_PER_REFRESH: usize = 8;
+const DIRECTORY_MEMBERSHIP_TTL: Duration = Duration::from_secs(45);
 
 impl Node {
     /// Explicitly share this device's public presence with a discovered relay
@@ -65,79 +41,54 @@ impl Node {
         }
     }
 
-    /// One bounded registration and directory refresh. It is safe to call on a
-    /// timer; no VPN inventory or Tailscale dependency exists here.
+    /// Register with each reachable, verified post office. Local and gateway
+    /// relays are peers: clients use their local relay first, while registrations
+    /// on both sides make cross-site introductions and mailbox drains possible.
     pub async fn refresh_bridge_directory(&self) -> usize {
         if !self.bridge_discovery_enabled.load(Ordering::Acquire)
             || self.privacy_snapshot().invisible
         {
             return 0;
         }
-        let hub = self
+        let preference = self
             .bridge_hub_id
             .lock()
             .expect("bridge hub lock not poisoned")
             .clone();
-        // A local site relay first introduces a configured hub. When the
-        // chosen relay itself uses a gateway, refresh that local route too.
-        let bootstrap = {
-            let roster = self.roster.lock().expect("roster lock not poisoned");
-            let chosen = self.selected_post_office(&roster);
-            if chosen.as_ref().is_some_and(uses_gateway) || (hub.is_some() && chosen.is_none()) {
-                let excluded = chosen
-                    .as_ref()
-                    .map(|relay| relay.public.user_id())
-                    .or_else(|| hub.clone());
-                local_bridge_relay(&roster, excluded.as_deref())
-            } else {
-                None
-            }
-        };
-        if let Some(local) = bootstrap
-            && let Some((proofs, gateway)) = self.query_bridge_relay(&local).await
-            && self
-                .bridge_hub_id
-                .lock()
-                .expect("bridge hub lock not poisoned")
-                .as_deref()
-                == hub.as_deref()
-        {
-            self.record_gateway(&local, &proofs, gateway);
-        }
         let candidates = {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             self.post_office_candidates(&roster)
         };
-        let mut response = None;
-        for candidate in candidates {
-            if let Some((proofs, gateway)) = self.query_bridge_relay(&candidate).await {
-                response = Some((candidate, proofs, gateway));
-                break;
-            }
-        }
-        let Some((relay, proofs, gateway)) = response else {
-            return 0;
-        };
-        // Recheck host policy after the network await; an invisible-mode switch
-        // or relay preference change must not publish directory results.
-        if !self.bridge_discovery_enabled.load(Ordering::Acquire)
-            || self.privacy_snapshot().invisible
-            || !self.relay_allowed(&relay.public)
-            || *self
-                .bridge_hub_id
-                .lock()
-                .expect("bridge hub lock not poisoned")
-                != hub
-        {
-            return 0;
-        }
-        // The selected local relay may advertise a verified route to another
-        // post office. Remember it even without an explicit preference so that
-        // users can choose that relay in settings and use it for delivery.
-        self.record_gateway(&relay, &proofs, gateway);
-        let now = Instant::now();
         let mut introduced = HashMap::new();
-        {
+        let mut successful = 0;
+        let responses = futures_util::future::join_all(
+            candidates
+                .into_iter()
+                .take(MAX_DIRECTORY_RELAYS_PER_REFRESH)
+                .map(|relay| async {
+                    let response = self.query_bridge_relay(&relay).await;
+                    (relay, response)
+                }),
+        )
+        .await;
+        for (relay, response) in responses {
+            let Some((proofs, gateway)) = response else {
+                continue;
+            };
+            // A policy change during an awaited query must not publish its results.
+            if !self.bridge_discovery_enabled.load(Ordering::Acquire)
+                || self.privacy_snapshot().invisible
+                || !self.relay_allowed(&relay.public)
+                || *self
+                    .bridge_hub_id
+                    .lock()
+                    .expect("bridge hub lock not poisoned")
+                    != preference
+            {
+                return 0;
+            }
+            successful += 1;
+            self.record_gateway(&relay, &proofs, gateway);
             let mut roster = self.roster.lock().expect("roster lock not poisoned");
             for proof in proofs {
                 if proof.public() == self.identity.public() {
@@ -149,9 +100,12 @@ impl Node {
                 if roster.update_relayed(&proof, relay.addr, &self.user_id())
                     != UpdateOutcome::Rejected
                 {
-                    introduced.insert(proof.user_id, now);
+                    introduced.insert(proof.user_id, Instant::now());
                 }
             }
+        }
+        if successful == 0 {
+            return 0;
         }
         if self.cached_peer_snapshot_async().await.is_err() {
             let mut roster = self.roster.lock().expect("roster lock not poisoned");
@@ -160,8 +114,8 @@ impl Node {
             }
             return 0;
         }
-        // A completed refresh replaces the set. Peers missing from a response
-        // cease to be authorized for automatic relay pulls immediately.
+        // A directory can be temporarily unreachable while another succeeds.
+        // Keep its last verified introductions only until the membership TTL.
         let count = introduced.len();
         let mut bridge_peers = self
             .bridge_dm_pull_peers
@@ -173,7 +127,7 @@ impl Node {
                 .bridge_hub_id
                 .lock()
                 .expect("bridge hub lock not poisoned")
-                != hub
+                != preference
         {
             drop(bridge_peers);
             let mut roster = self.roster.lock().expect("roster lock not poisoned");
@@ -182,7 +136,14 @@ impl Node {
             }
             return 0;
         }
-        let old = std::mem::replace(&mut *bridge_peers, introduced);
+        let old = std::mem::take(&mut *bridge_peers);
+        let now = Instant::now();
+        for (id, seen) in old.iter() {
+            if now.saturating_duration_since(*seen) < DIRECTORY_MEMBERSHIP_TTL {
+                introduced.entry(id.clone()).or_insert(*seen);
+            }
+        }
+        *bridge_peers = introduced;
         let current = bridge_peers.clone();
         drop(bridge_peers);
         let mut roster = self.roster.lock().expect("roster lock not poisoned");
@@ -263,12 +224,13 @@ impl Node {
 mod tests {
     use super::*;
     use crate::discovery::Roster;
+    use crate::discovery::roster::RouteSource;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
-    fn gateway_election_keeps_a_local_site_relay_for_refresh() {
+    fn gateway_directory_route_keeps_a_local_site_relay_available() {
         let a = DeviceIdentity::generate();
         let b = DeviceIdentity::generate();
         let (hub, local) = if a.user_id() < b.user_id() {
@@ -292,12 +254,9 @@ mod tests {
         );
         let elected = super::super::postbox::elected_post_office(&roster).unwrap();
         assert_eq!(elected.public, hub.public());
-        assert_eq!(
-            local_bridge_relay(&roster, Some(&hub.user_id()))
-                .unwrap()
-                .public,
-            local.public()
-        );
+        let candidates = super::super::postbox::post_office_candidates(&roster, None);
+        assert_eq!(candidates[0].public, local.public());
+        assert_eq!(candidates[1].public, hub.public());
         assert!(
             elected
                 .routes

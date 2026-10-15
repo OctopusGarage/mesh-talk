@@ -74,40 +74,38 @@ impl Node {
         if targets.is_empty() {
             return Ok(false);
         }
-        let candidates = {
-            let roster = self.roster.lock().expect("roster mutex not poisoned");
-            self.post_office_candidates(&roster)
-        };
-        for po in candidates {
-            if !self.relay_allowed(&po.public) {
-                continue;
-            }
-            let Ok(mut channel) = self.privacy_dial(po.addr, &po.public).await else {
-                continue;
+        let mut uploaded = false;
+        for recipient in &targets {
+            let candidates = {
+                let roster = self.roster.lock().expect("roster mutex not poisoned");
+                self.post_office_candidates_for(&roster, recipient)
             };
-            let mut uploaded = false;
-            let mut complete = true;
-            for recipient in &targets {
+            let mut complete = false;
+            for po in candidates {
                 if !self.relay_allowed(&po.public) {
-                    complete = false;
-                    break;
+                    continue;
                 }
-                match self
+                let Ok(mut channel) = self.privacy_dial(po.addr, &po.public).await else {
+                    continue;
+                };
+                if !self.relay_allowed(&po.public) {
+                    continue;
+                }
+                let Ok(events) = self
                     .opaque_relay_round(&mut channel, recipient, Some(conv))
                     .await
-                {
-                    Ok(events) => uploaded |= !events.is_empty(),
-                    Err(_) => {
-                        complete = false;
-                        break;
-                    }
-                }
+                else {
+                    continue;
+                };
+                uploaded |= !events.is_empty();
+                complete = true;
+                break;
             }
-            if complete {
-                return Ok(uploaded);
+            if !complete {
+                return Ok(false);
             }
         }
-        Ok(false)
+        Ok(uploaded)
     }
 
     /// Accept inbound connections and maintain deferred profile compactions.

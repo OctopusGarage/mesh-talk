@@ -1206,7 +1206,7 @@ impl Node {
     ) -> bool {
         let candidates = {
             let roster = self.roster.lock().expect("roster lock not poisoned");
-            self.post_office_candidates(&roster)
+            self.post_office_candidates_for(&roster, &destination.device)
         };
         for po in candidates {
             if po.public == self.identity.public() || !self.relay_allowed(&po.public) {

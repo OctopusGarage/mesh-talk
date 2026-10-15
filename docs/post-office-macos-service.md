@@ -20,26 +20,26 @@ phases:
    authorization, installs a root-owned plist in `/Library/LaunchDaemons`,
    stops the old per-login agent if present, and starts the boot service.
 
-For a hub, use `--bridge` and a dedicated discovery port if another Mesh Talk
+For a relay, use `--bridge` and a dedicated discovery port if another Mesh Talk
 process on the same host already owns UDP 47474. In that case, also set
 `--lan-announce-port 47474`: the relay keeps receiving on its dedicated port
 while advertising its signed identity to ordinary LAN clients directly. This
 lets clients use the relay even when another post office on the LAN is offline.
-For a spoke, use
-`--bridge-peer <hub-IP>:<hub-discovery-port>` and the hub's exact signed
+For a relay on another LAN, use
+`--bridge-peer <peer-IP>:<peer-discovery-port>` and the peer's exact signed
 32-character device fingerprint. Its proxy port must differ from its own TCP
-relay port. Routed UDP queries and the hub's TCP port must be reachable from
-the spoke over the existing network, such as Tailscale.
+relay port. Routed UDP queries and the peer's TCP port must be reachable over
+the existing network, such as Tailscale.
 
-Example for an Intel hub (paths and address are deployment-specific):
+Example for the Intel relay on LAN X (paths and addresses are deployment-specific):
 
 ```bash
 scp target/x86_64-apple-darwin/release/mesh-talk-node scripts/install-post-office-macos.sh mac2015:~/.local/state/mesh-talk-post-office/
-ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node --name mac2015-post-office --port 47475 --discovery-port 47479 --lan-announce-port 47474 --bridge'
+ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node --name mac2015-post-office --port 47475 --discovery-port 47479 --lan-announce-port 47474 --bridge --bridge-peer 100.109.255.49:47474 --bridge-peer-id e2bc2167aab97af10cb893de4ae2fb0c --bridge-proxy-port 47477'
 ssh -tt mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
-Example for a spoke on another LAN:
+Example for the reciprocal relay on another LAN:
 
 ```bash
 scp target/aarch64-apple-darwin/release/mesh-talk-node mac2015:~/.local/state/mesh-talk-post-office/mesh-talk-node-arm
@@ -54,14 +54,14 @@ ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
-In the current three-relay deployment, mac2015 is the preferred cross-site
-bridge relay, and Windows and mac-mini each point directly to it. All three
-nodes can store opaque mail independently; their mailboxes do not replicate.
-Participating clients enable bridge discovery and may select mac2015 as their
-preferred post office in Settings. A client that has not opted in remains a
-local-only peer. If mac2015 is offline, another verified relay on the current
-LAN can accept messages. Cross-LAN service during that outage requires an
-independent route and directory path between the remaining sites.
+In the current deployment, mac2015 and mac-mini pin each other and expose
+reciprocal local gateways. Windows also points to mac2015. All three nodes
+store opaque mail independently; their mailboxes do not replicate. Participating
+clients enable bridge discovery, register with reachable verified relays, and
+use a local post office first unless they set an optional preference. A client
+that has not opted in remains a local-only peer. If a relay or the inter-site
+path fails, local delivery can continue; cross-LAN service during that outage
+requires another independent route and directory path.
 
 Check boot-service state and listeners:
 

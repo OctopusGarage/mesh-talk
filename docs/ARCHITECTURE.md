@@ -319,8 +319,10 @@ command names for Tauri registration. Commands clone a node handle from
   Member copy counts are historical confirmations. To make a current durability
   guarantee, the protocol would need renewable leases or periodic exact probes
   and a policy for peers that permanently leave; the UI does not claim one.
-- **Post office** — deterministic election (lowest-fingerprint peer advertising
-  `post_office`); `drain_from_post_office` every 3 s. Each account may disable
+- **Post office** — verified relays are ordered by an optional user preference,
+  then direct LAN reachability, then fingerprint. Introduced recipients favor
+  the relays that reported them; `drain_from_post_office` visits every known
+  mailbox every 3 s. Each account may disable
   relay use in Settings; the default remains enabled. This gates uploads and
   downloads on that device. New clients wrap signed events for each recipient
   in a pairwise opaque mailbox before relay sync. The relay sees mailbox IDs,

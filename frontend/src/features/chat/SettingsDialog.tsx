@@ -554,7 +554,7 @@ export function SettingsDialog({
                     onChange={(event) => saveBridgeHub(event.target.value)}
                     aria-label={t("settings.bridgeHub")}
                     disabled={!settingsLoaded || saving || !postOfficeEnabled}
-                    className={`${SELECT_CLASS} w-44 max-w-full`}
+                    className={`${SELECT_CLASS} w-56 max-w-full`}
                   >
                     <option value="">{t("settings.bridgeHubAutomatic")}</option>
                     {bridgeHubId &&
