@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$StagedBinary,
-    [string]$Root = 'C:\ProgramData\MeshTalk\PostOffice',
+    [string]$Root = 'D:\ProgramData\MeshTalk\PostOffice',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
     [string]$Name = 'post-office'
 )
