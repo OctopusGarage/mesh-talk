@@ -3,10 +3,15 @@ import { chat, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import { loadPendingUnread, loadUnread } from "@/lib/unreadStorage";
-import { useAvatars } from "@/store/avatars";
-import { useCalls } from "@/store/calls";
-import { useTransfers } from "@/store/transfers";
-import { resetFileAvailability } from "@/store/fileAvailability";
+import {
+  applyChatCallSignal,
+  applyChatFileProgress,
+  applyChatProfile,
+  resetChatFileAvailability,
+  resetChatFiles,
+  stopChatCalls,
+  syncChatAvatarIdentity,
+} from "./chatRuntimeEffects";
 import {
   captureOwner,
   captureChatOwner,
@@ -163,13 +168,7 @@ async function pollUntilReady(
           ready: true,
         };
       });
-      // Tell the avatars store who "we" are (so setting our own avatar publishes it) and
-      // pull avatars peers already propagated to us (durable across restart).
-      useAvatars.getState().setOwnId(acct);
-      void useAvatars.getState().loadPeers(() => !isCancelled());
-      // Re-publish our own avatar so the node re-holds it and propagates to peers after a
-      // restart (otherwise contacts can't pull it until we manually re-set the photo).
-      void useAvatars.getState().reassertOwn(() => !isCancelled());
+      syncChatAvatarIdentity(acct, () => !isCancelled());
       await get().refreshRoster();
       return true;
     } catch {
@@ -332,8 +331,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       ...emptySessionData(),
       runEpoch: state.runEpoch + 1,
     }));
-    useTransfers.getState().reset();
-    resetFileAvailability();
+    resetChatFiles();
   },
 
   loadFavorites: async () => {
@@ -487,9 +485,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const set = guardedSet(rawSet, lease.current);
     // Fresh slate per login (the store survives logout/login of a different account).
     lastUnknownSenderRefresh = 0;
-    useTransfers.getState().reset();
-    resetFileAvailability();
-    useCalls.getState().teardown();
+    resetChatFiles();
+    stopChatCalls();
     set({
       ...emptySessionData(),
       bootBusy: true,
@@ -535,14 +532,13 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         if (lease.current()) get_handleFile(set, get, e);
       },
       onFileProgress: (e) => {
-        if (lease.current()) useTransfers.getState().applyProgress(e);
+        if (lease.current()) applyChatFileProgress(e);
       },
       onProfile: (e) => {
-        if (lease.current())
-          useAvatars.getState().mergeReceived(e.account_id, e.avatar);
+        if (lease.current()) applyChatProfile(e);
       },
       onCallSignal: (e) => {
-        if (lease.current()) useCalls.getState().onSignal(e);
+        if (lease.current()) applyChatCallSignal(e);
       },
     });
 
@@ -551,7 +547,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       clearInterval(roster);
       unlisten();
       if (get().runEpoch === lease.run) {
-        useCalls.getState().teardown();
+        stopChatCalls();
         rawSet((s) => ({ runEpoch: s.runEpoch + 1, ready: false }));
       }
     };
@@ -579,7 +575,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       ) {
         // Runtime/account replacement can happen without a host logout. Invalidate
         // old in-flight conversation work; the run's owned ticker performs fresh boot.
-        resetFileAvailability();
+        resetChatFileAvailability();
         rawSet((state) => ({
           ...invalidateConversationIdentity(),
           identityEpoch: state.identityEpoch + 1,
