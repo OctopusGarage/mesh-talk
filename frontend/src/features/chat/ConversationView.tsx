@@ -34,6 +34,7 @@ import {
 } from "@/lib/mediaTypes";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
+import { PendingChannelInvite } from "./PendingChannelInvite";
 import { VerifyContactDialog } from "./VerifyContactDialog";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import type { MemberProfileTarget } from "./memberProfileDetails";
@@ -460,11 +461,7 @@ export function ConversationView() {
     id: string;
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [inviteBusy, setInviteBusy] = useState(false);
-  const [declineOpen, setDeclineOpen] = useState(false);
   useEffect(() => setMemberProfile(null), [active?.id]);
-  const acceptChannelInvite = useChat((s) => s.acceptChannelInvite);
-  const leaveChannel = useChat((s) => s.leaveChannel);
   const [screenshotBytes, setScreenshotBytes] = useState<Uint8Array | null>(
     null,
   );
@@ -1053,62 +1050,7 @@ export function ConversationView() {
       </Dialog>
 
       {pendingInvite ? (
-        <div className="border-t bg-card px-5 py-4" role="status">
-          <p className="text-sm text-muted-foreground">
-            {t("conversation.pendingInviteHint")}
-          </p>
-          <div className="mt-3 flex gap-2">
-            <Button
-              disabled={inviteBusy}
-              onClick={() => {
-                setInviteBusy(true);
-                void acceptChannelInvite().finally(() => setInviteBusy(false));
-              }}
-            >
-              {t("conversation.acceptInvite")}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={inviteBusy}
-              onClick={() => setDeclineOpen(true)}
-            >
-              {t("conversation.declineInvite")}
-            </Button>
-          </div>
-          <Dialog open={declineOpen} onOpenChange={setDeclineOpen}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>{t("conversation.declineInvite")}</DialogTitle>
-                <DialogDescription>
-                  {t("conversation.declineInviteConfirm")}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="flex justify-end gap-2">
-                <Button
-                  variant="ghost"
-                  disabled={inviteBusy}
-                  onClick={() => setDeclineOpen(false)}
-                >
-                  {t("common.cancel")}
-                </Button>
-                <Button
-                  variant="destructive"
-                  disabled={inviteBusy}
-                  onClick={() => {
-                    setInviteBusy(true);
-                    void leaveChannel()
-                      .then((ok) => {
-                        if (ok) setDeclineOpen(false);
-                      })
-                      .finally(() => setInviteBusy(false));
-                  }}
-                >
-                  {t("conversation.declineInvite")}
-                </Button>
-              </div>
-            </DialogContent>
-          </Dialog>
-        </div>
+        <PendingChannelInvite key={key} channelId={active.id} />
       ) : readOnly ? (
         <div
           className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
