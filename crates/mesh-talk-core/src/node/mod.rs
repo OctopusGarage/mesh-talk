@@ -61,6 +61,7 @@ pub(crate) mod recovered_sent_ids;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 mod runtime_work;
+mod search;
 pub(crate) mod sentlog;
 pub(crate) mod serving;
 pub(crate) mod session;
