@@ -696,42 +696,14 @@ fn require_session(state: &AppState) -> CommandResult<crate::state::SessionInfo>
         .ok_or_else(|| CommandError::Authentication("User session not found. Please login.".into()))
 }
 
-/// Adopt an account secret just persisted by a successful device link: drop the running
-/// node runtime and re-spawn it so it reloads the account keystore (now holding the
-/// linked account) and re-advertises under it. Reuses the held session credentials — no
-/// re-login required.
+/// Resume the node after device linking with its newly persisted account secret.
 #[tauri::command]
 pub async fn adopt_linked_account<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
 ) -> Result<(), CommandError> {
-    let lease = app_state
-        .session()
-        .capture()
-        .map_err(CommandError::Authentication)?;
-    let pw = {
-        let guard = node_state.0.lock().await;
-        app_state
-            .session()
-            .matching(&lease, |_| {
-                node_state.check_installation(&lease)?;
-                guard
-                    .as_ref()
-                    .filter(|rt| rt.host_account_id() == Some(lease.owner()))
-                    .map(|rt| rt.restart_password().to_string())
-                    .ok_or_else(CommandError::not_started)
-            })
-            .map_err(CommandError::Authentication)??
-    };
-    spawn_node_runtime(
-        app_handle,
-        lease,
-        pw,
-        node_state.inner().clone(),
-        app_state.session().clone(),
-    );
-    Ok(())
+    crate::linked_account::adopt_linked_account(app_handle, &app_state, &node_state).await
 }
 
 #[cfg(test)]
@@ -1215,6 +1187,42 @@ mod tests {
                 .restart_password(),
             " password-a "
         );
+    }
+
+    #[test]
+    fn registered_adoption_restarts_runtime_for_current_session() {
+        let fixture = AuthFixture::new("adopt-current");
+        let lease = fixture.app_state.session().capture().unwrap();
+        let original_device = fixture
+            .node
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .user_id()
+            .to_owned();
+
+        invoke_auth(
+            &fixture.webview,
+            "adopt_linked_account",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if fixture.node.test_installed_for(&lease) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        let runtime = fixture.node.0.blocking_lock();
+        assert_eq!(runtime.as_ref().unwrap().user_id(), original_device);
+        assert_eq!(runtime.as_ref().unwrap().restart_password(), " password-a ");
     }
 
     #[test]

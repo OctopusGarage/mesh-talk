@@ -23,6 +23,7 @@ pub mod contact_policy;
 pub mod diagnostics;
 pub mod events;
 pub mod favorites;
+mod linked_account;
 pub mod logger;
 pub mod owner_commands;
 pub mod perf;
