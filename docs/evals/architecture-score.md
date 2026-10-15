@@ -1,4 +1,36 @@
-# Architecture score — 2026-10-09
+# Architecture health assessments
+
+## Optimization series — 2026-10-15
+
+The repository-wide starting assessment was **90/100**: module depth 22/25,
+seam integrity 23/25, test surface 24/25, and locality 21/25. This is a
+qualitative review of the current core, host, and frontend, including the
+recent bridge and linked-device sync work. It is not a measured decline from
+the narrower 9 October review below.
+
+Round 1 concentrates Account history page records, bounded scanning, and
+inbound frame assembly in `node/account_sync/page.rs`. The receive loop now
+coordinates the wire stream and applies a completed page through one method.
+The Node interface, versioned frames, limits, and persistence formats are
+unchanged. A focused assembler regression covers incomplete records, overflow,
+and a complete page; existing linked-device backfill and process tests exercise
+the path end to end.
+
+| Dimension | Starting | After round 1 | Evidence |
+|---|---:|---:|---|
+| Module depth | 22/25 | 23/25 | The page module owns bounded record assembly and scanning instead of exposing those steps inside the Node receive loop. |
+| Seam integrity | 23/25 | 23/25 | Core, host, and client interfaces are unchanged; the Account sync wire and storage seams remain distinct. |
+| Test surface | 24/25 | 24/25 | New page assembly test plus existing linked-device and process coverage; application still lacks a single isolated full-round test interface. |
+| Locality | 21/25 | 22/25 | Frame bounds and record completion now sit with the page types; Account sync storage application remains in `account_sync.rs`. |
+| **Total** | **90/100** | **92/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
+
+Verification: `cargo test -p mesh-talk-core --lib node::account_sync`,
+`cargo test -p mesh-talk-core --lib account_history_backfills_to_a_linked_device`,
+`make test`, `cargo clippy --all-targets -- -D warnings`, and `make e2e` passed.
+The score remains below the 95/100 goal because Account sync application,
+bridge introduction, and settings ownership still span multiple places.
+
+## Earlier review — 2026-10-09
 
 **95/100**, up from **86/100** in the broad-scope review of commit `6640d30`.
 This is a qualitative score for the codebase's active core, host, and frontend

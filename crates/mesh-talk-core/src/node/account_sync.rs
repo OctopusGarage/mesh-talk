@@ -25,6 +25,11 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
+mod page;
+#[cfg(test)]
+use page::PendingRecord;
+use page::{ChannelRecord, FileCardRecord, HistoryPageAssembler, HistoryRecord, PageBuilder};
+
 const RECORDS_PER_PAGE: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
@@ -55,37 +60,6 @@ struct PeerCursor {
     next_file: usize,
 }
 
-#[derive(Clone)]
-struct PendingRecord {
-    kind: u8,
-    conversation: [u8; 32],
-    peer_account: Option<String>,
-    from: String,
-    wall_clock: u64,
-    event_id: [u8; 32],
-    total_len: usize,
-    plaintext: Vec<u8>,
-}
-
-#[derive(Clone)]
-struct ChannelRecord {
-    conversation: [u8; 32],
-    from: String,
-    wall_clock: u64,
-    event_id: [u8; 32],
-    plaintext: Vec<u8>,
-}
-
-#[derive(Clone)]
-struct FileCardRecord {
-    host: [u8; 32],
-    peer_account: Option<String>,
-    from: String,
-    wall_clock: u64,
-    event_id: [u8; 32],
-    payload: Vec<u8>,
-}
-
 #[derive(Serialize, Deserialize)]
 struct FileCardPayload {
     manifest: Vec<u8>,
@@ -96,144 +70,6 @@ struct FileCardPayload {
 struct FileCardPayloadRef<'a> {
     manifest: &'a [u8],
     proof: &'a Event,
-}
-
-enum HistoryRecord {
-    Direct(BackfillRecord),
-    Channel(ChannelRecord),
-    FileCard(FileCardRecord),
-}
-
-impl HistoryRecord {
-    fn id(&self) -> [u8; 32] {
-        match self {
-            Self::Direct(record) => record.event_id,
-            Self::Channel(record) => record.event_id,
-            Self::FileCard(record) => record.event_id,
-        }
-    }
-
-    fn tag(&self) -> u8 {
-        match self {
-            Self::Direct(_) => 0,
-            Self::Channel(_) => 1,
-            Self::FileCard(_) => 2,
-        }
-    }
-
-    fn cursor(&self) -> HistoryCursor {
-        HistoryCursor {
-            tag: self.tag(),
-            id: self.id(),
-        }
-    }
-}
-
-/// A full-history sweep keeps only one page and a look-ahead record in memory.
-/// The order-independent digest lets stores be scanned without sorting all rows.
-struct PageBuilder {
-    after: Option<HistoryCursor>,
-    records: Vec<HistoryRecord>,
-    digest_xor: [u8; 32],
-    count: u64,
-}
-
-impl PageBuilder {
-    fn new(after: Option<HistoryCursor>) -> Self {
-        Self {
-            after,
-            records: Vec::with_capacity(RECORDS_PER_PAGE + 1),
-            digest_xor: [0; 32],
-            count: 0,
-        }
-    }
-
-    fn offer(&mut self, key: HistoryCursor, build: impl FnOnce() -> HistoryRecord) {
-        let mut hasher = Sha256::new();
-        hasher.update(b"mesh-talk-history-record-v2");
-        hasher.update([key.tag]);
-        hasher.update(key.id);
-        let hash: [u8; 32] = hasher.finalize().into();
-        for (byte, part) in self.digest_xor.iter_mut().zip(hash) {
-            *byte ^= part;
-        }
-        self.count = self.count.saturating_add(1);
-        if self.after.is_some_and(|after| key <= after)
-            || self.records.iter().any(|record| record.cursor() == key)
-            || (self.records.len() > RECORDS_PER_PAGE
-                && self.records.last().is_some_and(|last| key >= last.cursor()))
-        {
-            return;
-        }
-        let insert_at = self.records.partition_point(|record| record.cursor() < key);
-        self.records.insert(insert_at, build());
-        self.records.truncate(RECORDS_PER_PAGE + 1);
-    }
-
-    fn finish(mut self) -> (Vec<HistoryRecord>, Option<HistoryCursor>, [u8; 32]) {
-        let next = if self.records.len() > RECORDS_PER_PAGE {
-            self.records.pop();
-            self.records.last().map(HistoryRecord::cursor)
-        } else {
-            None
-        };
-        let mut hasher = Sha256::new();
-        hasher.update(b"mesh-talk-history-digest-v2");
-        hasher.update(self.digest_xor);
-        hasher.update(self.count.to_be_bytes());
-        (self.records, next, hasher.finalize().into())
-    }
-}
-
-impl PendingRecord {
-    fn finish(self, own_account_id: &str) -> Option<HistoryRecord> {
-        if self.plaintext.len() != self.total_len {
-            return None;
-        }
-        if self.kind == 2 {
-            return Some(HistoryRecord::FileCard(FileCardRecord {
-                host: self.conversation,
-                peer_account: self.peer_account,
-                from: self.from,
-                wall_clock: self.wall_clock,
-                event_id: self.event_id,
-                payload: self.plaintext,
-            }));
-        }
-        if self.kind == 1 {
-            return Some(HistoryRecord::Channel(ChannelRecord {
-                conversation: self.conversation,
-                from: self.from,
-                wall_clock: self.wall_clock,
-                event_id: self.event_id,
-                plaintext: self.plaintext,
-            }));
-        }
-        if self.kind != 0 {
-            return None;
-        }
-        let env = DmEnvelope::decode(&self.plaintext)?;
-        if env.msg_id != self.event_id || env.route.sender_account != self.from {
-            return None;
-        }
-        let other = if env.route.sender_account == own_account_id {
-            &env.route.recipient_account
-        } else if env.route.recipient_account == own_account_id {
-            &env.route.sender_account
-        } else {
-            return None;
-        };
-        if *account_conversation_id(own_account_id, other).as_bytes() != self.conversation {
-            return None;
-        }
-        Some(HistoryRecord::Direct(BackfillRecord {
-            conv: self.conversation,
-            from: self.from,
-            wall_clock: self.wall_clock,
-            plaintext: self.plaintext,
-            event_id: self.event_id,
-        }))
-    }
 }
 
 fn transport(error: crate::transport::TransportError) -> NodeError {
@@ -1153,6 +989,98 @@ impl Node {
         Ok(true)
     }
 
+    fn apply_account_history_page(&self, page: &[HistoryRecord]) -> Result<(), NodeError> {
+        let policy = self.device_sync_policy();
+        if policy.history {
+            {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                for record in page {
+                    if let HistoryRecord::Channel(record) = record {
+                        let channel = ConversationId::new(record.conversation);
+                        if !book.state(&channel).is_some_and(|state| {
+                            !state.pending_invite() && state.is_accepted_member(&self.user_id())
+                        }) {
+                            return Err(NodeError::Authorization(
+                                "channel history requires accepted membership".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            {
+                let log = self.log.lock().expect("log mutex not poisoned");
+                for record in page {
+                    if let HistoryRecord::Channel(record) = record {
+                        let channel = ConversationId::new(record.conversation);
+                        if let Some(event) = log.get(&EventId::new(record.event_id))
+                            && (event.conversation_id != channel
+                                || event.kind != crate::eventlog::EventKind::Message
+                                || event.author.user_id() != record.from)
+                        {
+                            return Err(NodeError::Authorization(
+                                "channel history conflicts with signed event".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            let direct: Vec<_> = page
+                .iter()
+                .filter_map(|record| match record {
+                    HistoryRecord::Direct(record) => Some(record.clone()),
+                    HistoryRecord::Channel(_) | HistoryRecord::FileCard(_) => None,
+                })
+                .collect();
+            self.import_account_backfill(&direct)?;
+            for record in page {
+                if let HistoryRecord::Channel(record) = record {
+                    let conversation = ConversationId::new(record.conversation);
+                    let event_id = EventId::new(record.event_id);
+                    if self
+                        .account_suppression
+                        .lock()
+                        .expect("account suppression mutex not poisoned")
+                        .contains(conversation, event_id)
+                    {
+                        continue;
+                    }
+                    let mut received = self.received.lock().expect("received mutex not poisoned");
+                    if let Some(existing) = received.entry(event_id) {
+                        // The live receive and sender sidecar can timestamp the
+                        // same signed event differently. Preserve the local row
+                        // when its identity and plaintext already match.
+                        if existing.conversation == conversation
+                            && existing.from == record.from
+                            && existing.plaintext == record.plaintext
+                        {
+                            continue;
+                        }
+                        return Err(NodeError::Authorization(
+                            "channel history conflicts with local plaintext".into(),
+                        ));
+                    }
+                    received
+                        .record_durable(&super::received_log::ReceivedEntry {
+                            conversation,
+                            event_id,
+                            from: record.from.clone(),
+                            wall_clock: record.wall_clock,
+                            plaintext: record.plaintext.clone(),
+                        })
+                        .map_err(NodeError::Log)?;
+                }
+            }
+        }
+        if policy.attachments {
+            for record in page {
+                if let HistoryRecord::FileCard(record) = record {
+                    self.import_account_file_card(record)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn pull_account_history_page(
         &self,
         peer: &PeerRecord,
@@ -1195,8 +1123,7 @@ impl Node {
             },
         )
         .await?;
-        let mut pending: Option<PendingRecord> = None;
-        let mut page = Vec::new();
+        let mut page = HistoryPageAssembler::new();
         let mut seen_devices = HashSet::new();
         let mut seen_preferences = HashSet::new();
         let mut started_records = false;
@@ -1209,7 +1136,7 @@ impl Node {
                 .ok_or_else(|| NodeError::Channel("invalid account-history response".into()))?;
             match frame {
                 AccountHistoryFrame::Device { device }
-                    if !started_records && pending.is_none() && seen_devices.len() < 64 =>
+                    if !started_records && page.is_idle() && seen_devices.len() < 64 =>
                 {
                     if !seen_devices.insert(device.public.user_id()) {
                         return Err(NodeError::Channel("duplicate linked device".into()));
@@ -1221,7 +1148,7 @@ impl Node {
                         .map_err(NodeError::Log)?;
                 }
                 AccountHistoryFrame::Preference { record }
-                    if pending.is_none()
+                    if page.is_idle()
                         && page.is_empty()
                         && seen_preferences.len() < super::account_preferences::MAX_KEYS =>
                 {
@@ -1248,200 +1175,20 @@ impl Node {
                             .map_err(NodeError::Log)?;
                     }
                 }
-                AccountHistoryFrame::RecordHeader {
-                    conversation,
-                    from,
-                    wall_clock,
-                    event_id,
-                    total_len,
-                } if pending.is_none() => {
-                    started_records = true;
-                    if page.len() >= RECORDS_PER_PAGE
-                        || total_len == 0
-                        || total_len as usize > MAX_RECORD
-                    {
-                        return Err(NodeError::Channel(
-                            "too many account-history records".into(),
-                        ));
+                other => {
+                    if matches!(
+                        other,
+                        AccountHistoryFrame::RecordHeader { .. }
+                            | AccountHistoryFrame::ChannelHeader { .. }
+                            | AccountHistoryFrame::FileCardHeader { .. }
+                    ) {
+                        started_records = true;
                     }
-                    pending = Some(PendingRecord {
-                        kind: 0,
-                        conversation,
-                        peer_account: None,
-                        from,
-                        wall_clock,
-                        event_id,
-                        total_len: total_len as usize,
-                        plaintext: Vec::with_capacity(total_len as usize),
-                    });
-                }
-                AccountHistoryFrame::ChannelHeader {
-                    channel: conversation,
-                    from,
-                    wall_clock,
-                    event_id,
-                    total_len,
-                } if pending.is_none() => {
-                    started_records = true;
-                    if page.len() >= RECORDS_PER_PAGE
-                        || total_len == 0
-                        || total_len as usize > MAX_RECORD
-                    {
-                        return Err(NodeError::Channel("invalid channel-history record".into()));
-                    }
-                    pending = Some(PendingRecord {
-                        kind: 1,
-                        conversation,
-                        peer_account: None,
-                        from,
-                        wall_clock,
-                        event_id,
-                        total_len: total_len as usize,
-                        plaintext: Vec::with_capacity(total_len as usize),
-                    });
-                }
-                AccountHistoryFrame::FileCardHeader {
-                    host: conversation,
-                    peer_account,
-                    from,
-                    wall_clock,
-                    event_id,
-                    total_len,
-                } if pending.is_none() => {
-                    started_records = true;
-                    if page.len() >= RECORDS_PER_PAGE
-                        || total_len == 0
-                        || total_len as usize > MAX_RECORD
-                    {
-                        return Err(NodeError::Channel("invalid file-card record length".into()));
-                    }
-                    pending = Some(PendingRecord {
-                        kind: 2,
-                        conversation,
-                        peer_account,
-                        from,
-                        wall_clock,
-                        event_id,
-                        total_len: total_len as usize,
-                        plaintext: Vec::with_capacity(total_len as usize),
-                    });
-                }
-                AccountHistoryFrame::RecordChunk { bytes } => {
-                    if bytes.is_empty() || bytes.len() > MAX_CHUNK {
-                        return Err(NodeError::Channel("invalid account-history chunk".into()));
-                    }
-                    let Some(record) = pending.as_mut() else {
-                        return Err(NodeError::Channel("unexpected history chunk".into()));
-                    };
-                    if record.plaintext.len().saturating_add(bytes.len()) > record.total_len {
-                        return Err(NodeError::Channel("history record overflow".into()));
-                    }
-                    record.plaintext.extend_from_slice(&bytes);
-                    if record.plaintext.len() == record.total_len {
-                        let complete = pending.take().unwrap();
-                        let record = complete.finish(&own).ok_or_else(|| {
-                            NodeError::Channel("invalid account-history record".into())
-                        })?;
-                        page.push(record);
+                    if let Some(complete) = page.accept(other, &own)? {
+                        self.apply_account_history_page(&complete.records)?;
+                        return Ok((complete.next_cursor, complete.digest));
                     }
                 }
-                AccountHistoryFrame::Complete {
-                    next_cursor,
-                    digest,
-                } if pending.is_none() => {
-                    let policy = self.device_sync_policy();
-                    if policy.history {
-                        {
-                            let book = self.channels.lock().expect("channels mutex not poisoned");
-                            for record in &page {
-                                if let HistoryRecord::Channel(record) = record {
-                                    let channel = ConversationId::new(record.conversation);
-                                    if !book.state(&channel).is_some_and(|state| {
-                                        !state.pending_invite()
-                                            && state.is_accepted_member(&self.user_id())
-                                    }) {
-                                        return Err(NodeError::Authorization(
-                                            "channel history requires accepted membership".into(),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        {
-                            let log = self.log.lock().expect("log mutex not poisoned");
-                            for record in &page {
-                                if let HistoryRecord::Channel(record) = record {
-                                    let channel = ConversationId::new(record.conversation);
-                                    if let Some(event) = log.get(&EventId::new(record.event_id))
-                                        && (event.conversation_id != channel
-                                            || event.kind != crate::eventlog::EventKind::Message
-                                            || event.author.user_id() != record.from)
-                                    {
-                                        return Err(NodeError::Authorization(
-                                            "channel history conflicts with signed event".into(),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        let direct: Vec<_> = page
-                            .iter()
-                            .filter_map(|record| match record {
-                                HistoryRecord::Direct(record) => Some(record.clone()),
-                                HistoryRecord::Channel(_) | HistoryRecord::FileCard(_) => None,
-                            })
-                            .collect();
-                        self.import_account_backfill(&direct)?;
-                        for record in &page {
-                            if let HistoryRecord::Channel(record) = record {
-                                let conversation = ConversationId::new(record.conversation);
-                                let event_id = EventId::new(record.event_id);
-                                if self
-                                    .account_suppression
-                                    .lock()
-                                    .expect("account suppression mutex not poisoned")
-                                    .contains(conversation, event_id)
-                                {
-                                    continue;
-                                }
-                                let mut received =
-                                    self.received.lock().expect("received mutex not poisoned");
-                                if let Some(existing) = received.entry(event_id) {
-                                    // The live receive and sender sidecar can timestamp the
-                                    // same signed event differently. Preserve the local row
-                                    // when its identity and plaintext already match.
-                                    if existing.conversation == conversation
-                                        && existing.from == record.from
-                                        && existing.plaintext == record.plaintext
-                                    {
-                                        continue;
-                                    }
-                                    return Err(NodeError::Authorization(
-                                        "channel history conflicts with local plaintext".into(),
-                                    ));
-                                }
-                                received
-                                    .record_durable(&super::received_log::ReceivedEntry {
-                                        conversation,
-                                        event_id,
-                                        from: record.from.clone(),
-                                        wall_clock: record.wall_clock,
-                                        plaintext: record.plaintext.clone(),
-                                    })
-                                    .map_err(NodeError::Log)?;
-                            }
-                        }
-                    }
-                    if policy.attachments {
-                        for record in &page {
-                            if let HistoryRecord::FileCard(record) = record {
-                                self.import_account_file_card(record)?;
-                            }
-                        }
-                    }
-                    return Ok((next_cursor, digest));
-                }
-                _ => return Err(NodeError::Channel("unexpected history frame".into())),
             }
         }
     }
@@ -1585,6 +1332,54 @@ impl Node {
 mod tests {
     use super::*;
     use crate::identity::account::Account;
+
+    #[test]
+    fn history_page_assembler_accepts_only_complete_bounded_records() {
+        let own = Account::generate().account_id();
+        let mut page = HistoryPageAssembler::new();
+        let header = AccountHistoryFrame::ChannelHeader {
+            channel: [1; 32],
+            from: "ab".repeat(16),
+            wall_clock: 1,
+            event_id: [2; 32],
+            total_len: 3,
+        };
+        assert!(page.accept(header, &own).unwrap().is_none());
+        assert!(
+            page.accept(
+                AccountHistoryFrame::Complete {
+                    next_cursor: None,
+                    digest: [3; 32],
+                },
+                &own,
+            )
+            .is_err()
+        );
+        assert!(
+            page.accept(AccountHistoryFrame::RecordChunk { bytes: vec![4; 4] }, &own,)
+                .is_err()
+        );
+        assert!(
+            page.accept(AccountHistoryFrame::RecordChunk { bytes: vec![4; 3] }, &own,)
+                .unwrap()
+                .is_none()
+        );
+        let complete = page
+            .accept(
+                AccountHistoryFrame::Complete {
+                    next_cursor: None,
+                    digest: [3; 32],
+                },
+                &own,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(complete.records.len(), 1);
+        assert_eq!(complete.digest, [3; 32]);
+        assert!(
+            matches!(&complete.records[0], HistoryRecord::Channel(record) if record.plaintext == vec![4; 3])
+        );
+    }
 
     #[test]
     fn archive_page_uses_exclusive_cursor_and_bounded_payloads() {
