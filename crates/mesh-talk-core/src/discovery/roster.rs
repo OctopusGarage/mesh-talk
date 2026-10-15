@@ -173,8 +173,9 @@ impl Roster {
         )
     }
 
-    /// A signed identity introduced by a relay. The relay's address is useful
-    /// for opaque mailbox delivery but is never a direct peer endpoint.
+    /// A signed ordinary peer introduced by a relay. The relay's address is
+    /// useful for opaque mailbox delivery but is never a direct peer endpoint.
+    /// Post offices need their own verified gateway route instead.
     pub fn update_relayed(
         &mut self,
         announce: &Announce,
@@ -183,6 +184,7 @@ impl Roster {
     ) -> UpdateOutcome {
         if announce.user_id == self_user_id
             || !announce.verify()
+            || announce.post_office
             || announce.account_id().is_none()
             || announce.tcp_port == 0
             || announce.name.len() > 1024
@@ -526,6 +528,21 @@ mod routed_tests {
         );
         roster.forget_relayed(&proof.user_id);
         assert_eq!(roster.get(&proof.user_id).unwrap().addr.ip(), direct);
+    }
+
+    #[test]
+    fn relay_introduction_rejects_post_office_identity() {
+        let device = DeviceIdentity::generate();
+        let proof =
+            Announce::new_post_office_with_account(&device, &Account::generate(), "Relay", 47475);
+        let relay: SocketAddr = "100.101.102.30:47800".parse().unwrap();
+        let mut roster = Roster::default();
+        assert_eq!(
+            roster.update_relayed(&proof, relay, "self"),
+            UpdateOutcome::Rejected
+        );
+        assert!(roster.get(&proof.user_id).is_none());
+        assert!(roster.historical_announcement(&device.public()).is_none());
     }
 
     #[test]
