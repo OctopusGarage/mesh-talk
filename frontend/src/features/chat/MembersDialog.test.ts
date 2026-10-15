@@ -3,6 +3,7 @@ import { act, createElement, type HTMLAttributes, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
+import type { ChannelActivityInfo } from "@/lib/types";
 import "@/lib/i18n";
 
 const { chatState, avatars, dialog, channelApi } = vi.hoisted(() => ({
@@ -51,7 +52,9 @@ const { chatState, avatars, dialog, channelApi } = vi.hoisted(() => ({
         },
       ],
     })),
-    channelActivity: vi.fn(async () => []),
+    channelActivity: vi.fn(
+      async (_channelId: string): Promise<ChannelActivityInfo[]> => [],
+    ),
     setChannelReplicaEnabled: vi.fn(async () => {}),
   },
 }));
@@ -487,6 +490,37 @@ it("does not carry a dissolution confirmation into another channel", async () =>
     await act(async () => root.unmount());
     chatState.active = previousActive;
     chatState.dissolveChannel.mockClear();
+  }
+});
+
+it("does not show the previous channel's activity while the new channel loads", async () => {
+  const previousActive = chatState.active;
+  channelApi.channelActivity.mockImplementation((channelId: string) =>
+    channelId === "channel"
+      ? Promise.resolve([
+          {
+            kind: "created" as const,
+            actor: "owner-device",
+            target: null,
+            wall_clock: 1,
+          },
+        ])
+      : new Promise(() => {}),
+  );
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(container.textContent).toContain("Me created this channel");
+
+    chatState.active = { kind: "channel", id: "other", name: "Other" };
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(container.textContent).not.toContain("Me created this channel");
+  } finally {
+    await act(async () => root.unmount());
+    chatState.active = previousActive;
+    channelApi.channelActivity.mockImplementation(async () => []);
   }
 });
 

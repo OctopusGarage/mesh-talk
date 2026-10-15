@@ -33,6 +33,7 @@ import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { diag, obs } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { formatAgo, formatTime, shortId } from "@/lib/format";
+import { isContactPeer } from "@/lib/contactVisibility";
 import { useChat } from "@/store/chat";
 import { CONNECTION_LABEL, connectionState } from "./connectionState";
 import { useCopyFeedback } from "./useCopyFeedback";
@@ -309,7 +310,7 @@ export function DiagnosticsDialog({
     peers
       .filter(
         (p) =>
-          !p.post_office &&
+          isContactPeer(p) &&
           p.last_seen_secs <= ONLINE_SECS &&
           p.account_id !== info?.account_id,
       )

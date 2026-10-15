@@ -1,7 +1,7 @@
 import type { PeerInfo, SearchHitInfo } from "./types";
 
 /** Infrastructure remains in the raw roster for routing and diagnostics. */
-export function isContactPeer(peer: PeerInfo): boolean {
+export function isContactPeer(peer: Pick<PeerInfo, "post_office">): boolean {
   return !peer.post_office;
 }
 

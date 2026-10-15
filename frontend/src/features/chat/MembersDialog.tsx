@@ -97,7 +97,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const [transferring, setTransferring] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState<string | null>(null);
   const [leaving, setLeaving] = useState(false);
-  const [activity, setActivity] = useState<ChannelActivityInfo[]>([]);
+  const [activitySnapshot, setActivitySnapshot] = useState<{
+    channelId: string;
+    entries: ChannelActivityInfo[];
+  } | null>(null);
+  const activity =
+    activitySnapshot?.channelId === channelId ? activitySnapshot.entries : [];
   const [replicaOverride, setReplicaOverride] = useState<boolean | null>(null);
   const [replicaBusy, setReplicaBusy] = useState(false);
   const [replicaError, setReplicaError] = useState(false);
@@ -110,6 +115,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     setPendingTransfer(null);
     setConfirming(null);
     setConfirmLeave(null);
+    setActivitySnapshot(null);
   }, [active?.id]);
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
@@ -134,12 +140,15 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
     let live = true;
-    void chatApi.channelActivity(active.id).then(
+    const requestedChannel = active.id;
+    void chatApi.channelActivity(requestedChannel).then(
       (items) => {
-        if (live) setActivity(items);
+        if (live)
+          setActivitySnapshot({ channelId: requestedChannel, entries: items });
       },
       () => {
-        if (live) setActivity([]);
+        if (live)
+          setActivitySnapshot({ channelId: requestedChannel, entries: [] });
       },
     );
     return () => {
