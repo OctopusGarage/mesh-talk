@@ -277,7 +277,7 @@ test("hide confirmation defaults to safe keyboard cancellation and explains its 
   await page.getByTestId(`hide-contact-menu-${bob}`).click();
   const dialog = page.getByTestId("hide-contact-dialog");
   await expect(dialog).toContainText("Messages and calls can still arrive");
-  await expect(dialog).toContainText("signed-in user on this device");
+  await expect(dialog).toContainText("Linked devices can share this choice");
   await expect(page.getByTestId("hide-contact-cancel")).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(dialog).toHaveCount(0);

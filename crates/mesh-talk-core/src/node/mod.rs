@@ -6,7 +6,16 @@
 //! `pub(crate)` (rather than `pub`) means an external consumer's semver contract is the
 //! re-exports, not every internal type.
 
+pub(crate) mod account_devices;
+pub(crate) mod account_file_proofs;
+pub(crate) mod account_preferences;
+pub(crate) mod account_suppression;
+pub(crate) mod account_sync;
+pub(crate) mod account_sync_policy;
+pub(crate) mod account_sync_wire;
 pub(crate) mod attachment_consent;
+mod bridge_client;
+pub(crate) mod bridge_directory;
 pub(crate) mod call;
 pub(crate) mod channel;
 pub(crate) mod channel_custody;
@@ -63,6 +72,10 @@ pub use crate::transport::net::{
     DEFAULT_DISCOVERY_PORT, DISCOVERY_MULTICAST_GROUP, bind_dual_stack_listener, discovery_socket,
     ipv4_interface_addrs,
 };
+pub use account_devices::AccountDevice;
+pub use account_preferences::AccountPreference;
+pub use account_sync::{DeviceSyncStatus, SyncPhase};
+pub use account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
 pub use channel::{ChannelActivity, ReceivedChannelMessage};
@@ -77,7 +90,10 @@ pub use node::{
     SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
-pub use postbox::{elected_post_office, run_relay_accept_loop};
+pub use postbox::{
+    elected_post_office, run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
+    run_relay_accept_loop,
+};
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;

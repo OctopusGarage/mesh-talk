@@ -43,12 +43,33 @@ impl Node {
         {
             return Ok(());
         }
-        let payload = ProfilePayload::new(&self.account, avatar, now_millis());
+        let payload = {
+            let mut profiles = self.profiles.lock().expect("profiles mutex not poisoned");
+            let updated_at = now_millis().max(
+                profiles
+                    .updated_at(&self.account_id())
+                    .unwrap_or(0)
+                    .saturating_add(1),
+            );
+            let payload = ProfilePayload::new(&self.account, avatar.clone(), updated_at);
+            profiles
+                .record(&self.account_id(), updated_at, avatar)
+                .map_err(NodeError::Log)?;
+            payload
+        };
         // Hold it so on-discovery re-publish sends the current version.
-        *self
-            .my_profile
-            .lock()
-            .expect("my_profile mutex not poisoned") = Some(payload.clone());
+        {
+            let mut current = self
+                .my_profile
+                .lock()
+                .expect("my_profile mutex not poisoned");
+            if current
+                .as_ref()
+                .is_none_or(|held| held.updated_at <= payload.updated_at)
+            {
+                *current = Some(payload.clone());
+            }
+        }
         self.publish_profile_to_peers(&payload).await;
         Ok(())
     }
@@ -169,6 +190,13 @@ impl Node {
             if !payload.verify() || peer_account.as_deref() != Some(payload.account_id().as_str()) {
                 continue;
             }
+            if payload.account_id() == self.account_id() && !self.device_sync_policy().profile {
+                self.profiles_emitted
+                    .lock()
+                    .expect("profiles_emitted mutex not poisoned")
+                    .remove(&event.id);
+                continue;
+            }
             // Newest-wins, durable. A stale update returns false (don't surface it).
             let applied = self
                 .profiles
@@ -181,6 +209,12 @@ impl Node {
                 )
                 .unwrap_or(false);
             if applied {
+                if payload.account_id() == self.account_id() {
+                    *self
+                        .my_profile
+                        .lock()
+                        .expect("my_profile mutex not poisoned") = Some(payload.clone());
+                }
                 let _ = self.profile_incoming.send(ReceivedProfile {
                     account_id: payload.account_id(),
                     avatar: payload.avatar,

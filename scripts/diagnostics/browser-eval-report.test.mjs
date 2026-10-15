@@ -4,14 +4,14 @@ import { test } from "node:test";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 47], ["extended", 48]]) {
+  for (const [tier, count] of [["core", 48], ["extended", 49]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
     assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 2);
     assert.equal(paths.filter(path => path[0] === "media-recovery.spec.ts").length, 1);
     assert.equal(paths.filter(path => path[0] === "media-lifecycle.spec.ts").length, 3);
-    assert.equal(paths.filter(path => path[0] === "screenshot-portable.spec.ts").length, 4);
+    assert.equal(paths.filter(path => path[0] === "screenshot-portable.spec.ts").length, 5);
     assert.equal(paths.filter(path => path[0] === "file-send-progress.spec.ts").length, 4);
     assert.equal(paths.filter(path => path[0] === "directory-transfer.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "attachment-approval.spec.ts").length, 3);

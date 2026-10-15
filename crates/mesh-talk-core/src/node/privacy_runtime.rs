@@ -11,6 +11,7 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 use tokio::net::TcpStream;
 
@@ -219,8 +220,11 @@ impl Node {
             return Err(error);
         }
         self.privacy.generation.fetch_add(1, Ordering::SeqCst);
-        if !invisible {
+        if invisible {
+            self.clear_bridge_introductions();
+        } else {
             visibility.set_public(true).await;
+            self.bridge_notify.notify_one();
         }
         Ok(())
     }
@@ -715,6 +719,7 @@ impl Node {
         let mut roster = self.roster.lock().expect("roster lock not poisoned");
         if publicly_visible {
             roster.update(announce, ip, &self.user_id());
+            roster.mark_authenticated(public, std::net::SocketAddr::new(ip, announce.tcp_port));
         } else {
             roster.forget(public);
         }
@@ -790,7 +795,19 @@ impl Node {
                 continue;
             }
             if let Some(peer) = peers.iter().find(|p| p.public == proof.public())
-                && state.routes.record(&peer.public, peer.addr.ip()).is_err()
+                && (if peer.routes.is_empty() {
+                    vec![peer.addr.ip()]
+                } else {
+                    peer.routes
+                        .iter()
+                        .filter(|route| {
+                            route.source != crate::discovery::roster::RouteSource::PostOffice
+                        })
+                        .map(|route| route.addr.ip())
+                        .collect()
+                })
+                .into_iter()
+                .any(|ip| state.routes.record(&peer.public, ip).is_err())
             {
                 log::warn!("discovered peer route was not cached");
                 continue;
@@ -842,27 +859,111 @@ impl Node {
         {
             return Err(TransportError::AdmissionDenied);
         }
-        let mut channel = tokio::time::timeout(super::transport::HANDSHAKE_TIMEOUT, async {
-            #[cfg(test)]
-            timing.phase("dial-tcp-connect");
-            let stream = TcpStream::connect(addr).await?;
-            #[cfg(test)]
-            {
-                timing.socket(&stream);
-                timing.phase("dial-noise-presence");
+        let mut candidates = Vec::with_capacity(10);
+        if let Some(preferred) = self
+            .preferred_routes
+            .lock()
+            .expect("routes lock not poisoned")
+            .get(&expected.user_id())
+            .copied()
+        {
+            candidates.push(preferred);
+        }
+        let mut current_ports = std::collections::HashMap::new();
+        let mut supplied_relay_address = false;
+        if let Some(peer) = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .get(&expected.user_id())
+            .filter(|peer| peer.public == *expected)
+            .cloned()
+        {
+            let mut routes = peer.routes;
+            supplied_relay_address = routes.iter().any(|route| {
+                route.source == crate::discovery::roster::RouteSource::PostOffice
+                    && route.addr == addr
+            }) && !routes.iter().any(|route| {
+                route.source != crate::discovery::roster::RouteSource::PostOffice
+                    && route.addr == addr
+            });
+            routes
+                .retain(|route| route.source != crate::discovery::roster::RouteSource::PostOffice);
+            current_ports.extend(
+                routes
+                    .iter()
+                    .map(|route| (route.addr.ip(), route.addr.port())),
+            );
+            routes.sort_by_key(|route| route.last_authenticated);
+            candidates.extend(routes.into_iter().rev().map(|route| route.addr));
+        }
+        if let Ok(state) = self.privacy.state.read()
+            && let Some(state) = state.as_ref()
+        {
+            let port = announce
+                .as_ref()
+                .map_or(addr.port(), |proof| proof.tcp_port);
+            candidates.extend(
+                state
+                    .routes
+                    .routes()
+                    .into_iter()
+                    .filter(|(public, _)| public == expected)
+                    .map(|(_, ip)| std::net::SocketAddr::new(ip, port)),
+            );
+        }
+        for candidate in &mut candidates {
+            candidate.set_ip(crate::transport::net::canonical_peer_ip(candidate.ip()));
+        }
+        // A fresh signed announce replaces an old listening port on the same IP.
+        // A successful dial cached for that IP must not silently resurrect the
+        // superseded port; other IP paths remain available for fallback.
+        candidates.retain(|candidate| {
+            current_ports
+                .get(&candidate.ip())
+                .is_none_or(|port| *port == candidate.port())
+        });
+        // The caller may supply a fresh one-off endpoint (for example, a
+        // pairing listener) before its signed port reaches the roster.
+        if !supplied_relay_address {
+            candidates.insert(0, addr);
+        }
+        let mut unique = std::collections::HashSet::new();
+        candidates.retain(|candidate| unique.insert(*candidate));
+        candidates.truncate(10);
+        let mut last_error = TransportError::Noise("no peer route available".into());
+        let mut successful = None;
+        for candidate in candidates {
+            let attempt = tokio::time::timeout(Duration::from_secs(3), async {
+                #[cfg(test)]
+                timing.phase("dial-tcp-connect");
+                let stream = TcpStream::connect(candidate).await?;
+                #[cfg(test)]
+                {
+                    timing.socket(&stream);
+                    timing.phase("dial-noise-presence");
+                }
+                stream.set_nodelay(true)?;
+                SecureChannel::connect_with_visibility(
+                    stream,
+                    &self.identity,
+                    Some(expected),
+                    own.as_ref(),
+                    publicly_visible,
+                )
+                .await
+            })
+            .await;
+            match attempt {
+                Ok(Ok(channel)) => {
+                    successful = Some((candidate, channel));
+                    break;
+                }
+                Ok(Err(error)) => last_error = error,
+                Err(_) => last_error = TransportError::Noise("dial timed out".into()),
             }
-            stream.set_nodelay(true)?;
-            SecureChannel::connect_with_visibility(
-                stream,
-                &self.identity,
-                Some(expected),
-                own.as_ref(),
-                publicly_visible,
-            )
-            .await
-        })
-        .await
-        .map_err(|_| TransportError::Noise("dial timed out".into()))??;
+        }
+        let (addr, mut channel) = successful.ok_or(last_error)?;
         #[cfg(test)]
         timing.phase("dial-proof-validation");
         if let Some(new) = channel.peer_announcement() {
@@ -886,6 +987,10 @@ impl Node {
             addr.ip(),
             channel.peer_publicly_visible(),
         )?;
+        self.preferred_routes
+            .lock()
+            .expect("routes lock not poisoned")
+            .insert(expected.user_id(), addr);
         self.guard_channel(&mut channel, generation);
         #[cfg(test)]
         timing.finish();

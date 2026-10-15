@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 export const BACKEND_SUITES = {
-  two_node_cli: ["two_cli_nodes_exchange_a_dm"],
+  two_node_cli: ["two_cli_nodes_discover_by_routed_query_and_exchange_a_dm", "two_cli_nodes_exchange_a_dm"],
   persistent_history: ["message_history_survives_restart"],
   post_office_offline: ["offline_dm_delivered_via_post_office"],
   channel_and_file_cli: ["two_cli_nodes_exchange_a_channel_message", "two_cli_nodes_transfer_a_file"],

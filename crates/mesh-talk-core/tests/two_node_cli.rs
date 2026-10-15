@@ -179,3 +179,43 @@ fn two_cli_nodes_exchange_a_dm() {
         "expected sender name Alpha, got: {got}"
     );
 }
+
+#[test]
+#[ignore = "spawns two real processes on separate discovery ports"]
+fn two_cli_nodes_discover_by_routed_query_and_exchange_a_dm() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve first port");
+    let second = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve second port");
+    let alpha_port = first.local_addr().unwrap().port();
+    let bravo_port = second.local_addr().unwrap().port();
+    assert_ne!(alpha_port, bravo_port);
+    drop((first, second));
+
+    let mut alpha = CliNode::spawn(
+        &dir.path().join("routed-alpha").join("identity.keystore"),
+        "Routed Alpha",
+        alpha_port,
+    );
+    let alpha_uid = read_user_id(&alpha);
+    let mut bravo = CliNode::spawn(
+        &dir.path().join("routed-bravo").join("identity.keystore"),
+        "Routed Bravo",
+        bravo_port,
+    );
+    let bravo_uid = read_user_id(&bravo);
+
+    // Distinct ports prevent multicast and the LAN scanner from finding the
+    // other node. Discovery must follow the explicit unicast query path.
+    alpha.send(&format!("/probe 127.0.0.1:{bravo_port}"));
+    bravo.send(&format!("/probe 127.0.0.1:{alpha_port}"));
+    await_discovery(&mut alpha, &bravo_uid, "Routed Alpha");
+    await_discovery(&mut bravo, &alpha_uid, "Routed Bravo");
+
+    alpha.send(&format!("/msg {} routed-hello", &bravo_uid[..8]));
+    bravo
+        .wait_for(
+            |line| line.starts_with(&format!("from {alpha_uid}")) && line.contains("routed-hello"),
+            Duration::from_secs(10),
+        )
+        .expect("Bravo received the Noise-encrypted DM over the routed path");
+}

@@ -14,13 +14,18 @@ the real model-backed AI eval. The canonical executable suite is
 | MT-AI-006 | `docs/post-office-metadata-privacy.md` | Relay privacy claims match visible routing metadata, custody limits, key compromise, and V1 migration behavior. |
 | MT-AI-007 | `docs/post-office-macos-service.md` | Intel Mac service setup, credential handling, health checks, lifecycle limits, and separate cross-machine offer and file-byte relay verification. |
 | MT-AI-008 | `docs/post-office-windows-service.md` | Windows Scheduled Task setup, credential and lock handling, health checks, and separate cross-machine delivery layers. |
+| MT-AI-009 | `docs/routed-network-discovery.md` | Tailscale candidate identity boundary, opt-in A/B/C/E bridge flow, opaque message delivery, and explicit network limits. |
+| MT-AI-010 | `docs/routed-network-discovery.md` | Two pinned post-office gateways share one elected directory and mailbox, with cross-LAN E2E evidence and no replication claim. |
 
 Run:
 
 ```bash
 make eval-smoke
 AI_EVAL_COMMAND='<non-interactive model command>' make ai-eval
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/linked-device-sync-ai-eval-suite.json --report target/ai-eval/linked-device-sync-report.json
 ```
+
+The linked-device suite reviews source against a security rubric. It supplements the Rust unit tests and real-process E2E runs; model scores alone do not verify runtime behavior.
 
 ## Core Smoke Examples
 

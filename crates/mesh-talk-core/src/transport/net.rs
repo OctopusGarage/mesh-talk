@@ -38,6 +38,22 @@ pub fn discovery_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
     Ok(sock)
 }
 
+/// Optional IPv6 unicast socket for routed discovery. Kept separate from the
+/// IPv4 multicast socket so LAN behavior and platform multicast binding stay
+/// unchanged. A host without IPv6 can omit it.
+pub fn routed_ipv6_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_only_v6(true)?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    let bind_addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, discovery_port).into();
+    socket.bind(&bind_addr.into())?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket.into())
+}
+
 /// Join [`DISCOVERY_MULTICAST_GROUP`] on every current non-loopback IPv4 interface
 /// (plus an unspecified-interface fallback). A single interface (the default route)
 /// is not enough on a multi-NIC / multi-WiFi host. Individual joins may fail (the
@@ -106,8 +122,52 @@ pub async fn bind_dual_stack_listener(port: u16) -> std::io::Result<TcpListener>
     match bind_v6_dual_stack(port) {
         Ok(listener) => Ok(listener),
         // IPv6 unavailable/disabled on this host — fall back to IPv4 so the node still serves.
-        Err(_) => TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await,
+        Err(_) => bind_v4_listener(port),
     }
+}
+
+fn bind_v4_listener(port: u16) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    set_tcp_bind_options(&socket)?;
+    let bind_addr: SocketAddr = (Ipv4Addr::UNSPECIFIED, port).into();
+    socket.bind(&bind_addr.into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    TcpListener::from_std(socket.into())
+}
+
+#[cfg(windows)]
+fn set_tcp_bind_options(socket: &socket2::Socket) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        SO_EXCLUSIVEADDRUSE, SOL_SOCKET, WSAGetLastError, setsockopt,
+    };
+
+    // SO_REUSEADDR can take over an occupied TCP port on Windows. Keep each
+    // node listener exclusive so another process cannot intercept its traffic.
+    let enabled: i32 = 1;
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&enabled as *const i32).cast::<u8>(),
+            std::mem::size_of_val(&enabled) as i32,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(unsafe {
+            WSAGetLastError()
+        }))
+    }
+}
+
+#[cfg(not(windows))]
+fn set_tcp_bind_options(socket: &socket2::Socket) -> std::io::Result<()> {
+    socket.set_reuse_address(true)
 }
 
 /// Bind an IPv6 listener on `[::]:port` with `IPV6_V6ONLY` disabled, so the one
@@ -117,7 +177,7 @@ fn bind_v6_dual_stack(port: u16) -> std::io::Result<TcpListener> {
     let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
     // Accept IPv4-mapped connections on this v6 socket (dual-stack).
     socket.set_only_v6(false)?;
-    socket.set_reuse_address(true)?;
+    set_tcp_bind_options(&socket)?;
     let bind_addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, port).into();
     socket.bind(&bind_addr.into())?;
     socket.listen(1024)?;
@@ -149,6 +209,24 @@ mod tests {
         // Port 0 → OS-assigned; just proves the bind + option-setting path works.
         let a = discovery_socket(0).unwrap();
         assert!(a.local_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn routed_ipv6_socket_receives_loopback_datagrams() {
+        let socket = routed_ipv6_socket(0).unwrap();
+        let target = socket.local_addr().unwrap();
+        let client = UdpSocket::bind("[::1]:0").await.unwrap();
+        client
+            .send_to(b"query", (Ipv6Addr::LOCALHOST, target.port()))
+            .await
+            .unwrap();
+        let mut buf = [0; 16];
+        let (n, source) = tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"query");
+        assert!(source.is_ipv6());
     }
 
     #[tokio::test]

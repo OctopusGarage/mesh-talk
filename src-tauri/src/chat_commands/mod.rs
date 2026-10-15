@@ -13,6 +13,7 @@ mod messaging;
 mod models;
 mod platform;
 mod state;
+mod sync;
 
 #[cfg(test)]
 use diagnostics::{PRESENCE_TTL_SECS, presence_from_seen};
@@ -30,6 +31,7 @@ pub use models::*;
 pub use platform::*;
 pub use state::NodeState;
 pub(crate) use state::RuntimeAuthority;
+pub use sync::*;
 
 fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {
     let bytes =

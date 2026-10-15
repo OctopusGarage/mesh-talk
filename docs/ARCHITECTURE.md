@@ -89,9 +89,12 @@ command names for Tauri registration. Commands clone a node handle from
   membership controls before granting a group route.
   Departure, acceptance, and ownership-transfer delivery are retried to channel
   members after an offline first push (bounded batches).
-  Membership is keyed to the device identity, so another device of the same account
-  must be invited separately. Restored groups remain read-only archives until that
-  new device is invited. In Invisible mode, a manually trusted carrier may send
+  Membership is keyed to the device identity. When a channel owner discovers a
+  certified sibling of an accepted member, it signs and distributes one invitation
+  per recovery pass; the sibling must still accept it. If the owner is offline, the
+  invitation waits until its node runs and learns the sibling's verified route.
+  Restored groups remain read-only archives until the new device is invited.
+  In Invisible mode, a manually trusted carrier may send
   a new channel's earlier signed ancestry, but the receiving sync connection
   stages it only in bounded memory (8 MiB). It is never advertised as durable
   custody and disappears on disconnect. A signed, causally valid invitation
@@ -110,6 +113,31 @@ command names for Tauri registration. Commands clone a node handle from
   devices; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
+  Message history, attachment catch-up, signed account-avatar updates, appearance,
+  and contact presentation preferences obey separate device-local switches.
+  Appearance and contact records use a versioned, encrypted local store with a
+  deterministic revision/device tie-break and clear tombstones. Only certified
+  sibling devices exchange these records over the Noise account-sync channel.
+  Profile updates use the existing per-peer
+  event delivery path; a device with avatar sync disabled defers sibling updates
+  until it is re-enabled. The received-profile store retains clear tombstones,
+  and each device also stores its own signed profile state so it can republish
+  the current avatar or clear after restart. Channel owners invite certified
+  siblings of accepted members; a sibling accepts automatically only when an
+  already accepted member has its own certified account. Once accepted, bounded
+  account reconciliation transfers available older channel plaintext with stable
+  event IDs. Locally erased channel messages carry durable suppression markers.
+  Historical file cards carry their signed manifest event as a detached proof when
+  the original device-pair event DAG is unavailable. A sibling can request an
+  available attachment through a separate authenticated stream; the receiver checks
+  the manifest size and SHA-256 before encrypting its local copy. Complete local
+  chunk transfers are likewise verified and copied into encrypted managed storage
+  while attachment sync is enabled, so a later generic-file save cannot remove
+  the linked device's only retained bytes. File cards and
+  bytes remain local to eligible account conversations and accepted channels.
+  The file-card sidecar permits identical signed manifest content under both a
+  device conversation and its account conversation; the message sidecar still
+  rejects reused event IDs across conversations.
 
 ## 3. Event log & sync (`eventlog/`)
 
@@ -248,7 +276,16 @@ command names for Tauri registration. Commands clone a node handle from
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
   + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
   Startup burst and scan times are measured from launch; a manual trigger works during
-  startup. The fallback scan visits each /24 once and omits every local interface address.
+  startup. The fallback scan visits each LAN /24 once, omits every local interface address,
+  and excludes Tailscale's 100.64.0.0/10 overlay range.
+  Desktop builds can additionally obtain candidate IPs from an already-running local
+  Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
+  query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
+  these endpoints remain separate from device identity and from Noise authorization.
+  The roster and encrypted route cache retain multiple addresses per device and
+  a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
+  for the protocol, limitations, and cross-network release checks; see
+  [network topologies](network-topologies.md) for the A–F deployment scenarios.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
@@ -315,6 +352,12 @@ conversations from the post office periodically. The desktop trust file restores
 this allowlist at login; the CLI persists explicit `/verify-peer` decisions.
 Discovery or a valid handshake alone never authorizes recipient-initiated DM
 pulls. Unverified peers can still push messages directly.
+An explicit, default-off bridge-discovery preference is a separate authorization:
+while a public node participates in a bridge-enabled post office's authenticated
+directory, its fresh, self-signed introductions can be polled from that post
+office's opaque mailboxes. This does not mark safety numbers verified, persists
+no bridge permission, and expires with the directory membership. Invisible mode
+does not participate. See [routed network discovery](routed-network-discovery.md).
 The sender's retry worker independently attempts direct delivery before relay
 replication, so either side can initiate recovery when a route returns.
 
@@ -591,7 +634,9 @@ macOS menu-bar title and the OS app-icon badge through one session-guarded comma
 **Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
 the signed-in local user's hidden account IDs and last-known names are stored separately
 in `accounts/<local-user-id>/hidden-contacts.json`. Mutations validate the session owner
-and replace the file atomically; this metadata is local to the device, not synced.
+and replace the file atomically. A linked device may optionally synchronize these
+presentation choices through the account preference log; each device keeps its
+own contact-sync switch.
 Settings provides a searchable management dialog and offline restoration; contact rows
 also offer a hide action in their context menu, with an explicit confirmation.
 Visibility filters are projections over the raw roster: contact lists, new-group invite
@@ -648,9 +693,10 @@ differs. Restored channels are read-only archives because their old sender keys
 are excluded. A new device must be invited into an active channel as a new member
 to receive fresh sender keys and participate in future messages. Peer replicas
 can restore signed ciphertext events but cannot give the new device the retired
-device's sender chains or decrypt past channel history. Users who need readable
-past history must restore a backup containing its plaintext archive. Offline DM
-peers are discovered from durable account history.
+device's sender chains or decrypt past channel history. A certified linked device
+with retained plaintext can share its available archive after channel enrollment;
+otherwise a backup containing that plaintext is required. Offline DM peers are
+discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
 managed media referenced by visible cards, received peer avatars, and recall marks.

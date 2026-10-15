@@ -115,6 +115,7 @@ impl Node {
             _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
+            _ = Arc::clone(&self).run_account_history_loop() => {}
             _ = self.accept_connections(listener) => {}
         }
     }
@@ -207,6 +208,32 @@ impl Node {
                 return;
             }
             self.serve_pairing(&mut channel, req).await;
+            return;
+        }
+        if let Some(super::account_sync_wire::AccountHistoryFrame::Request {
+            account_id,
+            cursor,
+            known_digest,
+            wanted,
+            ..
+        }) = super::account_sync_wire::AccountHistoryFrame::decode(&first)
+        {
+            self.serve_account_history(&mut channel, &account_id, cursor, known_digest, wanted)
+                .await;
+            return;
+        }
+        if let Some(super::account_sync_wire::AccountHistoryFrame::AttachmentRequest {
+            account_id,
+            file_conv,
+            ..
+        }) = super::account_sync_wire::AccountHistoryFrame::decode(&first)
+        {
+            self.serve_account_attachment(
+                &mut channel,
+                &account_id,
+                crate::eventlog::event::ConversationId::new(file_conv),
+            )
+            .await;
             return;
         }
         // A call signal (SDP/bye): surface it live (bound to the authenticated peer) and

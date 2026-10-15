@@ -233,6 +233,10 @@ impl Node {
         {
             let records = self.received_files.lock().expect("files lock not poisoned");
             let log = self.log.lock().expect("log lock not poisoned");
+            let proofs = self
+                .account_file_proofs
+                .lock()
+                .expect("file proofs lock not poisoned");
             for conversation in records.conversations() {
                 for entry in records.entries(&conversation) {
                     if delivery.file_erased(entry.conversation, entry.event_id)
@@ -240,7 +244,9 @@ impl Node {
                     {
                         continue;
                     }
-                    let original = log.get(&entry.event_id);
+                    let original = log
+                        .get(&entry.event_id)
+                        .or_else(|| proofs.get(&entry.event_id));
                     let decoded = validated_manifest(&entry.plaintext);
                     let existing = decoded.as_ref().and_then(|m| book.manifest(&m.file_conv()));
                     if let Some(manifest) = eligible_manifest_row(&entry, original, existing) {

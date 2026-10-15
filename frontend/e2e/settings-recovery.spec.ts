@@ -16,6 +16,26 @@ test("post-office preference is on by default and persists across settings reope
   await expect(relay).toHaveAttribute("aria-checked", "false");
 });
 
+test("bridge discovery is off by default and requires post-office relays", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const bridge = page.getByRole("switch", {
+    name: "Discover peers through a post office",
+  });
+  const relay = page.getByRole("switch", { name: "Use post-office relays" });
+  await expect(bridge).toHaveAttribute("aria-checked", "false");
+  await bridge.click();
+  await expect(bridge).toHaveAttribute("aria-checked", "true");
+  await relay.click();
+  await expect(bridge).toBeDisabled();
+  await page.getByRole("button", { name: "Close" }).click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(bridge).toHaveAttribute("aria-checked", "true");
+  await expect(bridge).toBeDisabled();
+});
+
 test("a failed settings save keeps the stored value and offers recovery", async ({
   page,
 }) => {

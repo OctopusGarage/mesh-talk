@@ -15,11 +15,12 @@ test:
 	cargo test --workspace
 
 # End-to-end integration tests: real `mesh-talk-node` processes over UDP discovery +
-# TCP (two-node DM, history-across-restart, post-office offline delivery). `#[ignore]`d
+# TCP (two-node DM, history-across-restart, post-office offline delivery,
+# and opt-in cross-LAN bridge discovery). `#[ignore]`d
 # by default (real UDP-multicast discovery + node cold starts), so run them explicitly here. Serial
 # (--test-threads=1) to avoid discovery-port / CPU contention between the heavy processes.
 e2e:
-	nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli -- --ignored --test-threads=1
+	nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli --test bridge_cross_lan -- --ignored --test-threads=1
 	nice -n 10 cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
 
 eval-smoke:

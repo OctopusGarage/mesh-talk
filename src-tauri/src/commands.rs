@@ -767,6 +767,12 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 password: &password,
                 discovery_port,
                 post_office_enabled,
+                #[cfg(not(test))]
+                candidate_source: Some(std::sync::Arc::new(
+                    crate::tailscale_discovery::TailscaleCandidates { discovery_port },
+                )),
+                #[cfg(test)]
+                candidate_source: None,
             },
             mesh_talk_core::node::RuntimeEvents {
                 on_dm: Box::new(move |dm| {
@@ -861,6 +867,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         .get_for_owner(&account_id)
                     {
                         node.set_post_office_enabled(settings.post_office_enabled);
+                        node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
                     }
                 }
                 // Keep lifecycle diagnostics without persisting an account identifier.

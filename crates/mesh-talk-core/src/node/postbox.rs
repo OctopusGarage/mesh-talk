@@ -3,9 +3,11 @@
 //! Client upload and drain live in `opaque_relay` and `serving`;
 //! this module provides election lookup and the serving loop.
 
+use crate::discovery::Announce;
 use crate::discovery::roster::{PeerRecord, Roster};
 use crate::identity::device::DeviceIdentity;
-use crate::node::session::{Served, serve_one};
+use crate::node::bridge_directory::{self, BridgeDirectory};
+use crate::node::session::{Served, serve_one, serve_wire_bytes};
 use crate::node::transport::secure_accept;
 use crate::postoffice::{PostOffice, elect};
 use crate::transport::SecureChannel;
@@ -33,16 +35,66 @@ pub fn elected_post_office(roster: &Roster) -> Option<PeerRecord> {
 /// the shared durable store until the peer disconnects. The PostOffice ingests
 /// (validates + persists) pushed events and serves held events to pullers; it
 /// never decrypts. Generic over the IO so it is testable over an in-memory duplex.
-pub async fn serve_relay_connection<IO>(
+#[cfg(test)]
+pub async fn serve_relay_connection<IO>(channel: SecureChannel<IO>, store: Arc<Mutex<PostOffice>>)
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_relay_or_bridge_connection(channel, store, None).await;
+}
+
+async fn serve_relay_or_bridge_connection<IO>(
     mut channel: SecureChannel<IO>,
     store: Arc<Mutex<PostOffice>>,
+    directory: Option<Arc<Mutex<BridgeDirectory>>>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    let first = match tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.recv()).await {
+        Ok(Ok(bytes)) => bytes,
+        _ => return,
+    };
+    if bridge_directory::is_request(&first) {
+        if let Some(directory) = directory {
+            let response = {
+                let peers = directory
+                    .lock()
+                    .expect("bridge directory lock not poisoned")
+                    .register(
+                        channel.peer_identity(),
+                        channel.peer_announcement(),
+                        channel.peer_publicly_visible(),
+                        std::time::Instant::now(),
+                    );
+                peers.and_then(|peers| bridge_directory::encode_response(&peers))
+            };
+            if let Some(response) = response {
+                for page in response {
+                    if !matches!(
+                        tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.send(&page)).await,
+                        Ok(Ok(()))
+                    ) {
+                        break;
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if !matches!(
+        tokio::time::timeout(
+            RELAY_IDLE_TIMEOUT,
+            serve_wire_bytes(&mut channel, &store, &first)
+        )
+        .await,
+        Ok(Ok(Served::Handled(_)))
+    ) {
+        return;
+    }
     // Bound the connection so a buggy/malicious peer can't pin the always-on relay: cap
     // the number of sync rounds (a real reconciliation converges well under this) and
     // drop the connection if the peer goes idle mid-stream.
-    for _ in 0..MAX_RELAY_ROUNDS {
+    for _ in 1..MAX_RELAY_ROUNDS {
         match tokio::time::timeout(RELAY_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
             Ok(Ok(Served::Handled(_))) => continue,
             // peer closed, transport/protocol error, or idle past the timeout
@@ -68,6 +120,48 @@ pub async fn run_relay_accept_loop(
     identity: DeviceIdentity,
     listener: TcpListener,
     store: Arc<Mutex<PostOffice>>,
+) {
+    run_relay_accept_loop_inner(identity, listener, store, None).await;
+}
+
+/// Run an opt-in bridge directory on the existing authenticated relay port.
+/// Sync mailboxes remain available on the same listener.
+pub async fn run_bridge_relay_accept_loop(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+) {
+    run_relay_accept_loop_inner(
+        identity,
+        listener,
+        store,
+        Some(Arc::new(Mutex::new(BridgeDirectory::default()))),
+    )
+    .await;
+}
+
+/// Bridge relay with one pinned remote post-office gateway. Only clients that
+/// explicitly register with this directory receive the remote relay proof.
+pub async fn run_bridge_relay_accept_loop_with_gateway(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    gateway: Arc<Mutex<Option<Announce>>>,
+) {
+    run_relay_accept_loop_inner(
+        identity,
+        listener,
+        store,
+        Some(Arc::new(Mutex::new(BridgeDirectory::with_gateway(gateway)))),
+    )
+    .await;
+}
+
+async fn run_relay_accept_loop_inner(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    directory: Option<Arc<Mutex<BridgeDirectory>>>,
 ) {
     store
         .lock()
@@ -95,10 +189,11 @@ pub async fn run_relay_accept_loop(
         };
         let store = Arc::clone(&store);
         let identity = Arc::clone(&identity);
+        let directory = directory.clone();
         tokio::spawn(async move {
             let _permit = permit; // held for the connection's lifetime, freed on drop
             if let Ok(channel) = secure_accept(stream, &identity).await {
-                serve_relay_connection(channel, store).await;
+                serve_relay_or_bridge_connection(channel, store, directory).await;
             }
         });
     }
@@ -110,6 +205,7 @@ mod tests {
     use crate::discovery::announce::Announce;
     use crate::eventlog::event::{ConversationId, Event, EventKind};
     use crate::eventlog::store::EventLog;
+    use crate::identity::account::Account;
     use crate::node::session::request_round;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -210,6 +306,97 @@ mod tests {
             relay_store.lock().unwrap().has(&event_id),
             "relay persisted the pushed event"
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_directory_introduces_only_authenticated_opted_in_devices() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = DeviceIdentity::generate();
+        let relay_keys = relay.secret_bytes();
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("relay.log"), "pw", relay).unwrap(),
+        ));
+        let directory = Arc::new(Mutex::new(BridgeDirectory::default()));
+        let account = Account::generate();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let alice_proof = Announce::new_with_account(&alice, &account, "Alice", 4001);
+        let bob_proof = Announce::new_with_account(&bob, &account, "Bob", 4002);
+
+        for (client, proof, expected) in [
+            (&alice, &alice_proof, None),
+            (&bob, &bob_proof, Some(alice_proof.user_id.as_str())),
+        ] {
+            let (client_io, relay_io) = tokio::io::duplex(64 * 1024);
+            let identity = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
+            let relay_store = Arc::clone(&store);
+            let relay_directory = Arc::clone(&directory);
+            let server = tokio::spawn(async move {
+                let channel = SecureChannel::accept(relay_io, &identity).await.unwrap();
+                serve_relay_or_bridge_connection(channel, relay_store, Some(relay_directory)).await;
+            });
+            let mut channel =
+                SecureChannel::connect_with_presence(client_io, client, None, Some(proof))
+                    .await
+                    .unwrap();
+            channel.send(bridge_directory::request()).await.unwrap();
+            let response = channel.recv().await.unwrap();
+            let (peers, last) = bridge_directory::decode_response(&response).unwrap();
+            assert!(last);
+            match expected {
+                None => assert!(peers.is_empty()),
+                Some(id) => assert_eq!(
+                    peers.iter().map(|p| p.user_id.as_str()).collect::<Vec<_>>(),
+                    vec![id]
+                ),
+            }
+            drop(channel);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_listener_returns_a_pinned_gateway_proof_over_noise() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = DeviceIdentity::generate();
+        let relay_keys = relay.secret_bytes();
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+            )
+            .unwrap(),
+        ));
+        let remote = DeviceIdentity::generate();
+        let remote_account = Account::generate();
+        let remote_proof =
+            Announce::new_post_office_with_account(&remote, &remote_account, "remote", 47475);
+        let gateway = Arc::new(Mutex::new(Some(remote_proof.clone())));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_bridge_relay_accept_loop_with_gateway(
+            relay, listener, store, gateway,
+        ));
+
+        let client = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&client, &account, "client", 47500);
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut channel = SecureChannel::connect_with_presence(stream, &client, None, Some(&proof))
+            .await
+            .unwrap();
+        channel.send(bridge_directory::request()).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), channel.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (peers, last) = bridge_directory::decode_response(&response).unwrap();
+        assert!(last);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].user_id, remote_proof.user_id);
+        drop(channel);
+        server.abort();
     }
 
     #[tokio::test]

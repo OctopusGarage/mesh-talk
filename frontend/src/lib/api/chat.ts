@@ -1,4 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
+
+export type SyncCategory =
+  "history" | "attachments" | "profile" | "appearance" | "contacts";
+
+export type DeviceSyncPolicy = Record<SyncCategory, boolean>;
+
+export interface AccountPreference {
+  category: "appearance" | "contacts";
+  key: string;
+  value: string | null;
+  revision: number;
+  device_id: string;
+}
+
+export interface DeviceSyncStatus {
+  device_id: string;
+  phase: "offline" | "catching_up" | "up_to_date" | "error" | "disabled";
+  pending_attachments: number;
+  error: string | null;
+}
 import type {
   AccountInfo,
   ChannelInfo,
@@ -21,7 +41,35 @@ function nextBadgeRevision(): number {
   return lastBadgeRevision;
 }
 
+// Tauri's normal IPC transport returns raw Response bytes as an ArrayBuffer. If it falls
+// back to postMessage (for example when the custom IPC protocol is blocked), it serializes
+// the same bytes as a JSON number array. Blob([numberArray]) would encode comma-separated
+// text instead of the image, so normalize at the API boundary.
+function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
+  return Array.isArray(bytes) ? new Uint8Array(bytes).buffer : bytes;
+}
+
 export const chat = {
+  getDeviceSyncPolicy: () => invoke<DeviceSyncPolicy>("get_device_sync_policy"),
+  getDeviceSyncStatus: () =>
+    invoke<DeviceSyncStatus[]>("get_device_sync_status"),
+  setDeviceSyncCategory: (category: SyncCategory, enabled: boolean) =>
+    invoke<DeviceSyncPolicy>("set_device_sync_category", {
+      category,
+      enabled,
+    }),
+  getAccountPreferences: (category: "appearance" | "contacts") =>
+    invoke<AccountPreference[]>("get_account_preferences", { category }),
+  setAccountPreference: (
+    category: "appearance" | "contacts",
+    key: string,
+    value: string | null,
+  ) =>
+    invoke<AccountPreference>("set_account_preference", {
+      category,
+      key,
+      value,
+    }),
   ownerIdentity: (owner: string) =>
     invoke<{ owner: string; device_id: string; account_id: string }>(
       "owner_node_identity",
@@ -235,11 +283,11 @@ export const chat = {
   openDownloadDir: (owner: string) =>
     invoke<void>("open_download_dir", { owner }),
   readFile: (fileConv: string) =>
-    invoke<ArrayBuffer>("read_file", { fileConv }),
+    invoke<ArrayBuffer | number[]>("read_file", { fileConv }).then(mediaBytes),
   /** Read DURABLE media bytes (image/screenshot/video) from the chat-media store. Survives
    * chunk prune + restart, unlike readFile (transient chunks). Rejects if none is stored. */
   readMedia: (fileConv: string) =>
-    invoke<ArrayBuffer>("read_media", { fileConv }),
+    invoke<ArrayBuffer | number[]>("read_media", { fileConv }).then(mediaBytes),
   /** Write picked/pasted bytes to a temp file and return its path, to feed the file-send
    *  pipeline. `name` (the picker has one) is kept verbatim so the real filename + extension
    *  survive; without it a `pasted-<ts>.<ext>` name is synthesized for clipboard bytes. */
