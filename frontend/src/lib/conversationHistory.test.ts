@@ -34,6 +34,8 @@ describe("categorize", () => {
   it("classifies an image file as media", () => {
     expect(categorize(msg({ file: file("cat.PNG") }))).toBe("media");
     expect(categorize(msg({ file: file("clip.mp4") }))).toBe("media");
+    expect(categorize(msg({ file: file("portrait.heic") }))).toBe("media");
+    expect(categorize(msg({ file: file("portrait.heif") }))).toBe("media");
   });
   it("classifies a non-media file as files", () => {
     expect(categorize(msg({ file: file("report.pdf") }))).toBe("files");

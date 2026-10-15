@@ -31,7 +31,7 @@ import {
   VIDEO_EXTENSIONS,
   isImage,
   isVideo,
-} from "./mediaFile";
+} from "@/lib/mediaTypes";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
 import { VerifyContactDialog } from "./VerifyContactDialog";
