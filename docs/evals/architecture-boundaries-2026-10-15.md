@@ -10,6 +10,8 @@ The protocol/host/UI layering is mostly legible. The initial audit found a runti
 
 **Roster follow-up:** `a0ff56f` and `416d156` introduced a cached current-roster projection. Search, member views, avatars, profile cards, call controls, sidebar counts, and diagnostics now reuse its device/account/name/role lookups. Channel member account bindings retain precedence after discovery expires, while relay devices stay available for diagnostics and cannot be selected as contacts or call targets. The focused contract and affected UI tests passed. This closes the frontend identity-projection warning and moves the score to **90/100** (two warnings). The protocol core still owns durable signed proofs and live role precedence; this frontend projection does not replace it.
 
+**Host follow-up:** `79414ff` moved node startup, event publication, and startup-error redaction from the auth IPC module into `runtime_bootstrap.rs`. Login, linked-account adoption, and recovery now call the same startup entry point directly. The existing startup-error and login/runtime tests, plus host Clippy, passed. Linked-account adoption is still implemented in `commands.rs`, so the R2 warning remains open; no score change is claimed from this partial split.
+
 ## Module Dependency Graph
 
 ```mermaid
@@ -79,10 +81,10 @@ The frontend import graph has four syntactic cycles; three are type-only edges a
 
 ### Warning — R2 Change Propagation: desktop auth and runtime boot share one module
 
-- **Symptom:** Production code in `src-tauri/src/commands.rs` includes login, auto-login, logout, registration, account rename, session helpers, runtime spawning, and linked-account adoption. `NodeState` already owns the installed runtime and owner checks, while `chat_commands/` is split by business area.
+- **Symptom:** Production code in `src-tauri/src/commands.rs` includes login, auto-login, logout, registration, account rename, session helpers, and linked-account adoption. Runtime spawning now lives in `runtime_bootstrap.rs`; `NodeState` owns the installed runtime and owner checks, while `chat_commands/` is split by business area.
 - **Source:** Fowler, _Refactoring_ — Divergent Change; Ousterhout, _A Philosophy of Software Design_ — information hiding.
 - **Consequence:** Changes to credentials, session ownership, and node startup all edit the same host module and raise the chance of inconsistent lifecycle checks.
-- **Remedy:** Separate auth command handlers from runtime bootstrap and linked-account adoption. Keep `NodeState` as the owner of runtime installation/retirement and preserve Tauri command names and errors through re-exports. Test a replaced session during each asynchronous transition.
+- **Remedy:** Move linked-account adoption's session and runtime transition behind a cohesive host operation, leaving a thin Tauri command adapter. Keep `NodeState` as the owner of runtime installation/retirement and preserve Tauri command names and errors. Test a replaced session during each asynchronous transition.
 
 ## Feature responsibility map
 
@@ -102,7 +104,7 @@ The frontend import graph has four syntactic cycles; three are type-only edges a
 1. Break the settings/API/auth runtime cycle while retaining the facade; enforce the frontend import direction in a static check.
 2. Introduce the typed roster projection and migrate one surface at a time, starting with channel members, search, profile cards, and avatar seeds. Use role-transition and offline-history contract tests before migration.
 3. Split `Sidebar`, then the remaining `ConversationView` behaviors along state and event boundaries. Run affected component tests, typecheck, lint, and format after each move.
-4. Move host runtime boot and linked-account adoption out of `commands.rs` while preserving command registration and `NodeState` ownership checks.
+4. Complete the host boundary by moving linked-account adoption behind a host operation; runtime boot is already isolated in `runtime_bootstrap.rs`. Preserve command registration and `NodeState` ownership checks.
 5. Only then assess `delivery_store.rs` and `node/channel.rs` for internal submodules. Their public interfaces already hide substantial protocol complexity; file length alone is not evidence that a new abstraction would help.
 
 Use focused unit/integration tests during each step. Reserve full Rust, Playwright, and multi-machine suites for CI, pre-PR, or explicit release validation. The review did not execute those suites and does not claim every code path or platform was verified.
