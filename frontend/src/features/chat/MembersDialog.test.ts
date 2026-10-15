@@ -114,6 +114,27 @@ it("shows an unjoined peer's account avatar in Add a peer", () => {
   expect(html).toContain('src="data:image/png;base64,AAAA"');
 });
 
+it("keeps post office nodes out of the Add a peer picker", () => {
+  const previous = chatState.peers;
+  chatState.peers = [
+    ...previous,
+    {
+      user_id: "relay-device",
+      account_id: "relay-account",
+      name: "mac2015-post-office",
+      addr: "100.64.0.1",
+      post_office: true,
+    },
+  ];
+  try {
+    const html = renderToStaticMarkup(createElement(MembersDialog));
+    expect(html).toContain("Alice");
+    expect(html).not.toContain("mac2015-post-office");
+  } finally {
+    chatState.peers = previous;
+  }
+});
+
 it("offers dissolution to the owner of an active channel", () => {
   const html = renderToStaticMarkup(createElement(MembersDialog));
   expect(html).toContain('data-testid="dissolve-channel-trigger"');

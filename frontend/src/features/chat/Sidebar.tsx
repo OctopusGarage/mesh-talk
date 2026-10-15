@@ -48,6 +48,7 @@ import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ContactContextMenu } from "./HiddenContactsDialog";
 import { useContactPolicy } from "@/store/contactPolicy";
+import { isContactPeer } from "@/lib/contactVisibility";
 import { ProfileDialog } from "./ProfileDialog";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import { AboutDialog } from "./AboutDialog";
@@ -542,7 +543,7 @@ export function Sidebar() {
   const networkPeople = useMemo(() => {
     const online = new Set<string>();
     for (const p of peers) {
-      if (p.post_office) continue;
+      if (!isContactPeer(p)) continue;
       const account = p.account_id ?? p.user_id;
       if (account === myAccountId) continue;
       if (presenceMap[account]?.online) online.add(account);
@@ -555,7 +556,7 @@ export function Sidebar() {
     for (const p of peers) {
       const account = p.account_id ?? p.user_id;
       if (
-        !p.post_office &&
+        isContactPeer(p) &&
         account !== myAccountId &&
         !hiddenContacts[account] &&
         presenceMap[account]?.online

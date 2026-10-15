@@ -22,6 +22,7 @@ import type {
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
+import { isContactPeer } from "@/lib/contactVisibility";
 import { publishAppearanceBeforeLink } from "@/lib/linkedAppearance";
 import { useCopyFeedback } from "./useCopyFeedback";
 import { useSerialPoll } from "./useSerialPoll";
@@ -351,13 +352,11 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
             className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background [@media(hover:none)]:min-h-11"
           >
             <option value="">{t("linkDevice.pickDevice")}</option>
-            {peers
-              .filter((p) => !p.post_office)
-              .map((p) => (
-                <option key={p.user_id} value={p.user_id}>
-                  {p.name || t("common.unnamed")} ({shortId(p.user_id)})
-                </option>
-              ))}
+            {peers.filter(isContactPeer).map((p) => (
+              <option key={p.user_id} value={p.user_id}>
+                {p.name || t("common.unnamed")} ({shortId(p.user_id)})
+              </option>
+            ))}
           </select>
           <label
             htmlFor="link-device-code"

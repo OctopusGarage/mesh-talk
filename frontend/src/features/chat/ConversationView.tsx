@@ -19,6 +19,7 @@ import {
 } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
+import { isContactPeer } from "@/lib/contactVisibility";
 import { Composer } from "./Composer";
 import { ScreenshotEditor } from "./ScreenshotEditor";
 import {
@@ -304,7 +305,8 @@ function DmHeader({ id, name }: { id: string; name: string }) {
 
   // Verified state for the crest: a single trust read for the active account (not per-row,
   // so no fan-out), refreshed when the conversation or its presenting device changes.
-  const fingerprint = peers.find((p) => p.account_id === id)?.user_id ?? "";
+  const fingerprint =
+    peers.find((p) => isContactPeer(p) && p.account_id === id)?.user_id ?? "";
   const [trustResult, setTrustResult] = useState<{
     owner: string;
     id: string;

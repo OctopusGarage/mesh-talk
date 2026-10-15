@@ -1,10 +1,17 @@
 import type { PeerInfo, SearchHitInfo } from "./types";
 
+/** Infrastructure remains in the raw roster for routing and diagnostics. */
+export function isContactPeer(peer: PeerInfo): boolean {
+  return !peer.post_office;
+}
+
 export function visiblePeers(
   peers: PeerInfo[],
   hidden: Record<string, unknown>,
 ) {
-  return peers.filter((p) => !hidden[p.account_id ?? p.user_id]);
+  return peers.filter(
+    (p) => isContactPeer(p) && !hidden[p.account_id ?? p.user_id],
+  );
 }
 
 export function visibleSearchHits(
