@@ -3,7 +3,6 @@ import { Virtuoso } from "react-virtuoso";
 import { AnimatePresence, motion } from "framer-motion";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   ChevronDown,
   CircleAlert,
@@ -12,15 +11,14 @@ import {
   Upload,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import {
-  IdentityCrest,
-  PresenceDot,
-  AvatarEditMenu,
-} from "@/components/identity";
-import { GroupAvatar } from "@/components/GroupAvatar";
 import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
-import { isContactPeer } from "@/lib/contactVisibility";
 import { Composer } from "./Composer";
+import {
+  EmptyState,
+  StartupFailureState,
+  UnlockingState,
+} from "./ConversationStates";
+import { ChannelHeader, DmHeader } from "./ConversationHeaders";
 import { ScreenshotEditor } from "./ScreenshotEditor";
 import {
   messageRowKey,
@@ -42,9 +40,6 @@ import { CallButtons } from "./CallDialog";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
 import { TransferBar } from "./TransferBar";
-import { DiagnosticsDialog } from "./DiagnosticsDialog";
-import { OfflineConnectDialog } from "./OfflineConnectDialog";
-import { HiddenContactsDialog } from "./HiddenContactsDialog";
 import {
   Dialog,
   DialogContent,
@@ -53,14 +48,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { chat as chatApi, obs } from "@/lib/api";
+import { chat as chatApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { mentionsName } from "@/lib/mentions";
 import { formatDay } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
-import { useContactPolicy } from "@/store/contactPolicy";
 import {
   convKey,
   displayName,
@@ -68,11 +62,6 @@ import {
   captureChatOwnership,
   type ChatMessage,
 } from "@/store/chat";
-import {
-  presenceLabel,
-  presenceStatus,
-  usePresenceFor,
-} from "@/store/presence";
 import type { ReactionInfo } from "@/lib/types";
 
 function captureComposer() {
@@ -86,203 +75,6 @@ function captureComposer() {
     convKey(useChat.getState().active!) === key;
 }
 
-function EmptyState() {
-  const { t } = useTranslation();
-  const accounts = useChat((s) => s.accounts);
-  const channels = useChat((s) => s.channels);
-  const favorites = useChat((s) => s.favorites);
-  const hidden = useContactPolicy((s) => s.contacts);
-  const policyLoaded = useContactPolicy((s) => s.loaded);
-  const policyError = useContactPolicy((s) => s.error);
-  const owner = useAuth((s) => s.user?.id);
-  const visibleCount =
-    channels.filter((channel) => !favorites[channel.channel_id]?.hidden)
-      .length +
-    (policyLoaded
-      ? accounts.filter((account) => !hidden[account.account_id]).length
-      : 0);
-  const hasConversations = visibleCount > 0;
-  const hiddenOnly = policyLoaded && !hasConversations && accounts.length > 0;
-  const policyUnavailable = !policyLoaded && !hasConversations;
-  const [guideOpen, setGuideOpen] = useState(false);
-  const [connectOpen, setConnectOpen] = useState(false);
-  return (
-    <div className="conversation-welcome flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-muted text-signal">
-        <MessagesSquare className="h-5 w-5" />
-      </div>
-      <div>
-        <p className="font-display text-base font-semibold tracking-tight">
-          {t(
-            hasConversations
-              ? "conversation.noneSelectedTitle"
-              : policyUnavailable
-                ? policyError
-                  ? "contactVisibility.loadError"
-                  : "redesign.loadingContacts"
-                : hiddenOnly
-                  ? "contactVisibility.allHidden"
-                  : "redesign.noPeersTitle",
-          )}
-        </p>
-        {hasConversations && (
-          <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
-            {t("conversation.noneSelectedDesc")}
-          </p>
-        )}
-        {!hasConversations && !hiddenOnly && !policyUnavailable && (
-          <p className="mt-1 max-w-sm text-[13px] leading-5 text-muted-foreground">
-            {t("redesign.noPeersBody")}
-          </p>
-        )}
-      </div>
-      {policyUnavailable && policyError && owner && (
-        <button
-          type="button"
-          onClick={() => void useContactPolicy.getState().load(owner)}
-          className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {t("contactVisibility.retry")}
-        </button>
-      )}
-      {hiddenOnly && <HiddenContactsDialog />}
-      {!hasConversations && !hiddenOnly && !policyUnavailable && (
-        <>
-          <Button
-            type="button"
-            data-testid="empty-connect"
-            onClick={() => setConnectOpen(true)}
-          >
-            {t("redesign.connectToSomeone")}
-          </Button>
-          <button
-            type="button"
-            onClick={() => setGuideOpen(true)}
-            className="rounded-md px-2 py-1 text-sm font-medium text-signal underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {t("redesign.connectionHelp")}
-          </button>
-          <DiagnosticsDialog
-            open={guideOpen}
-            onOpenChange={setGuideOpen}
-            initialTab="help"
-          />
-          <OfflineConnectDialog
-            open={connectOpen}
-            onOpenChange={setConnectOpen}
-            includeSharedNetwork
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
-// Shown on first boot while the node's encrypted stores are still being unlocked in the
-// background (the heavy argon2 KDF + store opens). The login invoke already returned, so
-// this is a non-blocking "two-phase startup" state — not a frozen window.
-function UnlockingState() {
-  const { t } = useTranslation();
-  const [slow, setSlow] = useState(false);
-  const [guideOpen, setGuideOpen] = useState(false);
-  useEffect(() => {
-    const id = window.setTimeout(() => setSlow(true), 15_000);
-    return () => window.clearTimeout(id);
-  }, []);
-  return (
-    <div
-      role="status"
-      className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
-    >
-      <div className="relative flex h-16 w-16 items-center justify-center">
-        <Loader2 className="h-7 w-7 animate-spin text-signal" />
-      </div>
-      <div>
-        <p className="font-display text-lg font-semibold tracking-tight">
-          {t("conversation.unlockingTitle")}
-        </p>
-        <p className="text-sm text-muted-foreground">
-          {t("conversation.unlockingDesc")}
-        </p>
-        {slow && (
-          <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            {t("redesign.slowStartup")}
-          </p>
-        )}
-      </div>
-      {slow && (
-        <>
-          <button
-            type="button"
-            onClick={() => setGuideOpen(true)}
-            className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {t("redesign.openConnection")}
-          </button>
-          <DiagnosticsDialog
-            open={guideOpen}
-            onOpenChange={setGuideOpen}
-            initialTab="help"
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
-function StartupFailureState() {
-  const { t } = useTranslation();
-  const setError = useChat((s) => s.setError);
-  const [guideOpen, setGuideOpen] = useState(false);
-  const revealLogs = async () => {
-    try {
-      await revealItemInDir(await obs.logFile());
-    } catch (e) {
-      setError(t("diagnostics.actionFailed", { error: errorMessage(e) }));
-    }
-  };
-
-  return (
-    <div
-      role="alert"
-      className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
-    >
-      <div className="flex h-12 w-12 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 text-destructive">
-        <CircleAlert className="h-6 w-6" aria-hidden="true" />
-      </div>
-      <div className="max-w-md">
-        <p className="font-display text-lg font-semibold tracking-tight">
-          {t("conversation.startFailedTitle")}
-        </p>
-        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-          {t("conversation.startFailedDesc")}
-        </p>
-      </div>
-      <div className="flex flex-wrap items-center justify-center gap-2">
-        <button
-          type="button"
-          onClick={() => setGuideOpen(true)}
-          className="rounded-md bg-signal px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {t("redesign.openConnection")}
-        </button>
-        <button
-          type="button"
-          onClick={() => void revealLogs()}
-          className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {t("diagnostics.revealLogs")}
-        </button>
-      </div>
-      <DiagnosticsDialog
-        open={guideOpen}
-        onOpenChange={setGuideOpen}
-        initialTab="help"
-      />
-    </div>
-  );
-}
-
 /** A quiet centered date separator between days in the message log. */
 function DaySeparator({ label }: { label: string }) {
   return (
@@ -290,147 +82,6 @@ function DaySeparator({ label }: { label: string }) {
       <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
-    </div>
-  );
-}
-
-/** DM header — the large IdentityCrest (glyph + name + presence + verified), with the
- *  safety number reachable via the verify dialog rendered alongside in the header. */
-function DmHeader({ id, name }: { id: string; name: string }) {
-  const { t } = useTranslation();
-  const [profileOpen, setProfileOpen] = useState(false);
-  const owner = useAuth((s) => s.user?.id);
-  const peers = useChat((s) => s.peers);
-  const presence = usePresenceFor(id);
-  const status = presenceStatus(presence);
-
-  // Verified state for the crest: a single trust read for the active account (not per-row,
-  // so no fan-out), refreshed when the conversation or its presenting device changes.
-  const fingerprint =
-    peers.find((p) => isContactPeer(p) && p.account_id === id)?.user_id ?? "";
-  const [trustResult, setTrustResult] = useState<{
-    owner: string;
-    id: string;
-    fingerprint: string;
-    verified: boolean;
-  } | null>(null);
-  const verified =
-    trustResult !== null &&
-    trustResult.owner === owner &&
-    trustResult.id === id &&
-    trustResult.fingerprint === fingerprint &&
-    trustResult.verified;
-  useEffect(() => {
-    if (!fingerprint || !owner) return;
-    let live = true;
-    void chatApi
-      .getTrust(owner, id, fingerprint)
-      .then(
-        (tr) =>
-          live &&
-          setTrustResult({
-            owner,
-            id,
-            fingerprint,
-            verified: tr.verified && !tr.fingerprint_changed,
-          }),
-      )
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [owner, id, fingerprint]);
-  useEffect(() => setProfileOpen(false), [id]);
-
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <button
-        type="button"
-        onClick={() => setProfileOpen(true)}
-        data-testid="conversation-member-profile"
-        aria-label={t("memberProfile.viewNamed", { name })}
-        className="min-w-0 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <IdentityCrest
-          id={id}
-          name={name}
-          verified={verified}
-          hideId
-          status={status}
-          variant="compact"
-        />
-        <span className="block pl-12 text-[11px] text-muted-foreground">
-          {presenceLabel(presence, t)}
-        </span>
-      </button>
-      <MemberProfileDialog
-        target={profileOpen ? { name, accountId: id } : null}
-        onOpenChange={setProfileOpen}
-      />
-    </div>
-  );
-}
-
-/** Channel header — a mesh/group glyph + name + member count. */
-function ChannelHeader({
-  id,
-  name,
-  memberCount,
-  archived,
-  dissolved,
-  left,
-  pendingInvite,
-}: {
-  id: string;
-  name: string;
-  memberCount: number;
-  archived: boolean;
-  dissolved: boolean;
-  left: boolean;
-  pendingInvite: boolean;
-}) {
-  const { t } = useTranslation();
-  const presence = usePresenceFor(id);
-  const status = presenceStatus(presence);
-  return (
-    <div className="flex min-w-0 items-center gap-3">
-      <div className="relative">
-        <AvatarEditMenu
-          id={id}
-          ariaLabel={t("avatar.editGroup")}
-          category="group"
-        >
-          <GroupAvatar channelId={id} size={36} title={name} />
-        </AvatarEditMenu>
-        {!archived && !dissolved && !left && !pendingInvite && (
-          <PresenceDot
-            status={status}
-            size="md"
-            className="absolute -bottom-0.5 -right-0.5"
-          />
-        )}
-      </div>
-      <div className="min-w-0">
-        <div
-          className="truncate font-display font-semibold tracking-tight"
-          title={name}
-        >
-          {name}
-        </div>
-        <div className="truncate text-xs text-muted-foreground">
-          {dissolved
-            ? t("conversation.dissolvedChannel")
-            : archived
-              ? t("conversation.archivedChannel")
-              : left
-                ? t("conversation.leftChannel")
-                : pendingInvite
-                  ? t("conversation.pendingInvite")
-                  : memberCount
-                    ? t("conversation.members", { count: memberCount })
-                    : t("conversation.channel")}
-        </div>
-      </div>
     </div>
   );
 }
