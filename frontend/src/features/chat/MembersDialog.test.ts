@@ -2,7 +2,7 @@
 import { act, createElement, type HTMLAttributes, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import type { ChannelActivityInfo } from "@/lib/types";
 import "@/lib/i18n";
 
@@ -111,6 +111,30 @@ vi.mock("@/components/ui/dialog", () => {
 
 import { MembersDialog } from "./MembersDialog";
 
+const defaultMembers = chatState.members.map((member) => ({ ...member }));
+const defaultPeers = chatState.peers.map((peer) => ({ ...peer }));
+const defaultActive = { ...chatState.active };
+
+beforeEach(() => {
+  chatState.members = defaultMembers.map((member) => ({ ...member }));
+  chatState.channelOwner = "owner-device";
+  chatState.active = { ...defaultActive };
+  chatState.peers = defaultPeers.map((peer) => ({ ...peer }));
+  chatState.favorites = {};
+  chatState.myId = "owner-device";
+  chatState.myAccountId = "owner-account";
+  chatState.removeMember.mockReset().mockResolvedValue(true);
+  chatState.dissolveChannel.mockReset().mockResolvedValue(true);
+  chatState.open.mockReset();
+  dialog.onOpenChange = null;
+  channelApi.channelMembers.mockReset().mockImplementation(async () => ({
+    owner: "owner-device",
+    members: defaultMembers.map((member) => ({ ...member })),
+  }));
+  channelApi.channelActivity.mockReset().mockResolvedValue([]);
+  channelApi.setChannelReplicaEnabled.mockReset().mockResolvedValue(undefined);
+});
+
 it("shows an unjoined peer's account avatar in Add a peer", () => {
   const html = renderToStaticMarkup(createElement(MembersDialog));
 
@@ -119,9 +143,8 @@ it("shows an unjoined peer's account avatar in Add a peer", () => {
 });
 
 it("keeps post office nodes out of the Add a peer picker", () => {
-  const previous = chatState.peers;
   chatState.peers = [
-    ...previous,
+    ...chatState.peers,
     {
       user_id: "relay-device",
       account_id: "relay-account",
@@ -130,13 +153,9 @@ it("keeps post office nodes out of the Add a peer picker", () => {
       post_office: true,
     },
   ];
-  try {
-    const html = renderToStaticMarkup(createElement(MembersDialog));
-    expect(html).toContain("Alice");
-    expect(html).not.toContain("mac2015-post-office");
-  } finally {
-    chatState.peers = previous;
-  }
+  const html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain("Alice");
+  expect(html).not.toContain("mac2015-post-office");
 });
 
 it("offers dissolution to the owner of an active channel", () => {
@@ -145,9 +164,8 @@ it("offers dissolution to the owner of an active channel", () => {
 });
 
 it("shows a member's signed replica opt-out", () => {
-  const previous = chatState.members;
   chatState.members = [
-    ...previous,
+    ...chatState.members,
     {
       user_id: "peer-device",
       account_id: "peer-account",
@@ -155,12 +173,8 @@ it("shows a member's signed replica opt-out", () => {
       replica_enabled: false,
     },
   ];
-  try {
-    const html = renderToStaticMarkup(createElement(MembersDialog));
-    expect(html).toContain('data-testid="member-replica-disabled-peer-device"');
-  } finally {
-    chatState.members = previous;
-  }
+  const html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain('data-testid="member-replica-disabled-peer-device"');
 });
 
 it("shows a newer store membership after the dialog's initial fetch", async () => {
@@ -189,7 +203,6 @@ it("shows a newer store membership after the dialog's initial fetch", async () =
     ).not.toBeNull();
   } finally {
     await act(async () => root.unmount());
-    chatState.members = previous;
   }
 });
 
@@ -223,7 +236,6 @@ it("ignores a fetch started before a membership update", async () => {
     ).not.toBeNull();
   } finally {
     await act(async () => root.unmount());
-    chatState.members = previous;
   }
 });
 
@@ -298,8 +310,6 @@ it("opens a member's profile without removing the direct-message action", async 
     });
   } finally {
     await act(async () => root.unmount());
-    chatState.members = previous;
-    chatState.open.mockClear();
   }
 });
 
@@ -343,10 +353,6 @@ it("loads live replica state, toggles the local replica, and preserves it on a f
     expect(container.textContent).toContain("Could not update");
   } finally {
     await act(async () => root.unmount());
-    channelApi.channelMembers.mockClear();
-    channelApi.channelActivity.mockClear();
-    channelApi.setChannelReplicaEnabled.mockReset();
-    channelApi.setChannelReplicaEnabled.mockResolvedValue(undefined);
   }
 });
 
@@ -385,7 +391,6 @@ it("requires confirmation and closes the dialog after successful dissolution", a
     ).toBeNull();
   } finally {
     await act(async () => root.unmount());
-    chatState.dissolveChannel.mockClear();
   }
 });
 
@@ -422,13 +427,11 @@ it("keeps confirmation available after a failed dissolution", async () => {
     ).not.toBeNull();
   } finally {
     await act(async () => root.unmount());
-    chatState.dissolveChannel.mockClear();
   }
 });
 
 it("does not carry a removal confirmation into another channel", async () => {
   const previousMembers = chatState.members;
-  const previousActive = chatState.active;
   chatState.members = [
     ...previousMembers,
     {
@@ -457,14 +460,10 @@ it("does not carry a removal confirmation into another channel", async () => {
     expect(chatState.removeMember).not.toHaveBeenCalled();
   } finally {
     await act(async () => root.unmount());
-    chatState.members = previousMembers;
-    chatState.active = previousActive;
-    chatState.removeMember.mockClear();
   }
 });
 
 it("does not carry a dissolution confirmation into another channel", async () => {
-  const previousActive = chatState.active;
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
@@ -488,13 +487,10 @@ it("does not carry a dissolution confirmation into another channel", async () =>
     expect(chatState.dissolveChannel).not.toHaveBeenCalled();
   } finally {
     await act(async () => root.unmount());
-    chatState.active = previousActive;
-    chatState.dissolveChannel.mockClear();
   }
 });
 
 it("does not show the previous channel's activity while the new channel loads", async () => {
-  const previousActive = chatState.active;
   channelApi.channelActivity.mockImplementation((channelId: string) =>
     channelId === "channel"
       ? Promise.resolve([
@@ -519,8 +515,6 @@ it("does not show the previous channel's activity while the new channel loads", 
     expect(container.textContent).not.toContain("Me created this channel");
   } finally {
     await act(async () => root.unmount());
-    chatState.active = previousActive;
-    channelApi.channelActivity.mockImplementation(async () => []);
   }
 });
 
@@ -561,6 +555,5 @@ it("blocks closing confirmation while dissolution is pending", async () => {
     ).not.toBeNull();
   } finally {
     await act(async () => root.unmount());
-    chatState.dissolveChannel.mockClear();
   }
 });
