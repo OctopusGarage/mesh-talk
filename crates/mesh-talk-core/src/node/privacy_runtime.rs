@@ -60,11 +60,9 @@ impl Node {
         own: &Announce,
         visibility: Arc<DiscoveryVisibility>,
     ) -> io::Result<()> {
-        if !own.verify()
+        if !own.valid_presence()
             || own.public() != self.identity.public()
             || own.account_id() != Some(self.account_id())
-            || own.tcp_port == 0
-            || own.name.len() > 1024
         {
             return Err(denied());
         }
@@ -580,11 +578,9 @@ impl Node {
         Ok(())
     }
     pub(in crate::node) fn update_presence(&self, own: &Announce) -> io::Result<()> {
-        if !own.verify()
+        if !own.valid_presence()
             || own.public() != self.identity.public()
             || own.account_id() != Some(self.account_id())
-            || own.tcp_port == 0
-            || own.name.len() > 1024
         {
             return Err(denied());
         }
@@ -781,9 +777,7 @@ impl Node {
         for proof in proofs {
             if proof.account_id().is_none() {
                 if !state.policy.snapshot().invisible
-                    && proof.verify()
-                    && proof.tcp_port != 0
-                    && proof.name.len() <= 1024
+                    && proof.valid_presence()
                     && state.proofs.by_author(&proof.ed25519_pub).is_none()
                 {
                     successful.push(proof);

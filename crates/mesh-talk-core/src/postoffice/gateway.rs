@@ -57,8 +57,8 @@ pub async fn query_pinned_relay(remote: SocketAddr, expected_id: &str) -> Option
     (announce.post_office
         && announce.user_id == expected_id
         && announce.account_id().is_some()
-        && announce.name.len() <= 1024)
-        .then_some(announce)
+        && announce.valid_presence())
+    .then_some(announce)
 }
 
 /// Repeatedly refresh one remote relay and expose its signed proof only to

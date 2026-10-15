@@ -21,10 +21,7 @@ pub type GatewayRoute = (String, u16);
 pub type DirectoryPage = (Vec<Announce>, Option<GatewayRoute>, bool);
 
 fn valid_directory_proof(proof: &Announce) -> bool {
-    proof.verify()
-        && proof.account_id().is_some()
-        && proof.tcp_port != 0
-        && proof.name.len() <= 1024
+    proof.valid_presence() && proof.account_id().is_some()
 }
 
 fn valid_gateway_route(proofs: &[Announce], gateway: &(String, u16)) -> bool {

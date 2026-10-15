@@ -183,11 +183,9 @@ impl Roster {
         self_user_id: &str,
     ) -> UpdateOutcome {
         if announce.user_id == self_user_id
-            || !announce.verify()
+            || !announce.valid_presence()
             || announce.post_office
             || announce.account_id().is_none()
-            || announce.tcp_port == 0
-            || announce.name.len() > 1024
             || self.peers.get(&announce.user_id).is_some_and(|old| {
                 old.public != announce.public() || old.account_id != announce.account_id()
             })
@@ -269,7 +267,7 @@ impl Roster {
         if announce.user_id == self_user_id {
             return UpdateOutcome::Rejected; // self-filter
         }
-        if !announce.verify() {
+        if !announce.valid_presence() {
             return UpdateOutcome::Rejected;
         }
         if self.historical.get(&announce.user_id).is_some_and(|old| {
@@ -503,6 +501,28 @@ mod routed_tests {
         assert!(peer.routes.iter().any(|route| route.addr.ip() == lan));
         assert!(peer.routes.iter().any(|route| route.addr.ip() == routed));
         assert_eq!(peer.addr.ip(), routed);
+    }
+
+    #[test]
+    fn direct_discovery_rejects_signed_unusable_endpoints() {
+        let id = DeviceIdentity::generate();
+        let source: IpAddr = "192.168.1.20".parse().unwrap();
+        let zero_port = Announce::new(&id, "Bob", 0);
+        let oversized_name = Announce::new(&id, "x".repeat(1025), 47475);
+        assert!(zero_port.verify());
+        assert!(oversized_name.verify());
+        let mut roster = Roster::default();
+        for proof in [&zero_port, &oversized_name] {
+            assert_eq!(
+                roster.update(proof, source, "self"),
+                UpdateOutcome::Rejected
+            );
+            assert_eq!(
+                roster.update_routed(proof, source, "self"),
+                UpdateOutcome::Rejected
+            );
+        }
+        assert!(roster.get(&id.user_id()).is_none());
     }
 
     #[test]

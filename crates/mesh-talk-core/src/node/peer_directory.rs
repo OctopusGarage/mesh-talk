@@ -36,10 +36,7 @@ fn check_path(path: &Path) -> io::Result<bool> {
     }
 }
 fn valid(announce: &Announce) -> bool {
-    announce.name.len() <= 1024
-        && announce.tcp_port != 0
-        && announce.account_cert.is_some()
-        && announce.verify()
+    announce.valid_presence() && announce.account_cert.is_some()
 }
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
