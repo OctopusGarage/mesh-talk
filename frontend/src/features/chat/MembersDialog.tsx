@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Crown, LogOut, MessageCircle, Users, UserPlus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -37,13 +37,31 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const storedMembers = useChat((s) => s.members);
+  const storedOwner = useChat((s) => s.channelOwner);
   const active = useChat((s) => s.active);
-  const [liveMembers, setLiveMembers] = useState<ChannelMemberInfo[] | null>(
-    null,
-  );
-  const members = liveMembers ?? storedMembers;
+  const [liveMembers, setLiveMembers] = useState<{
+    channelId: string;
+    baseline: { members: ChannelMemberInfo[]; owner: string };
+    members: ChannelMemberInfo[];
+    owner: string;
+  } | null>(null);
+  const storedSnapshotRef = useRef({
+    members: storedMembers,
+    owner: storedOwner,
+  });
+  useEffect(() => {
+    storedSnapshotRef.current = { members: storedMembers, owner: storedOwner };
+  }, [storedMembers, storedOwner]);
+  const liveSnapshot =
+    active?.kind === "channel" &&
+    liveMembers?.channelId === active.id &&
+    liveMembers.baseline.members === storedMembers &&
+    liveMembers.baseline.owner === storedOwner
+      ? liveMembers
+      : null;
+  const members = liveSnapshot?.members ?? storedMembers;
+  const channelOwner = liveSnapshot?.owner ?? storedOwner;
   const animateMembers = motionOK && members.length <= MAX_STAGGER_ITEMS;
-  const channelOwner = useChat((s) => s.channelOwner);
   const peers = useChat((s) => s.peers);
   const hiddenContacts = useContactPolicy((s) => s.contacts);
   const policyLoaded = useContactPolicy((s) => s.loaded);
@@ -88,9 +106,16 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
     let live = true;
+    const baseline = storedSnapshotRef.current;
     void chatApi.channelMembers(active.id).then(
       (info) => {
-        if (live) setLiveMembers(info.members);
+        if (live)
+          setLiveMembers({
+            channelId: active.id,
+            baseline,
+            members: info.members,
+            owner: info.owner,
+          });
       },
       () => {},
     );

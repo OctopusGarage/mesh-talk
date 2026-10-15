@@ -41,6 +41,7 @@ const { chatState, avatars, dialog, channelApi } = vi.hoisted(() => ({
   dialog: { onOpenChange: null as null | ((open: boolean) => void) },
   channelApi: {
     channelMembers: vi.fn(async () => ({
+      owner: "owner-device",
       members: [
         {
           user_id: "owner-device",
@@ -156,6 +157,100 @@ it("shows a member's signed replica opt-out", () => {
     expect(html).toContain('data-testid="member-replica-disabled-peer-device"');
   } finally {
     chatState.members = previous;
+  }
+});
+
+it("shows a newer store membership after the dialog's initial fetch", async () => {
+  const previous = chatState.members;
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(
+      container.querySelector('[data-testid="member-profile-peer-device"]'),
+    ).toBeNull();
+
+    chatState.members = [
+      ...previous,
+      {
+        user_id: "peer-device",
+        account_id: "peer-account",
+        name: "Alice",
+        replica_enabled: true,
+      },
+    ];
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(
+      container.querySelector('[data-testid="member-profile-peer-device"]'),
+    ).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    chatState.members = previous;
+  }
+});
+
+it("ignores a fetch started before a membership update", async () => {
+  const previous = chatState.members;
+  let finish!: (members: typeof previous) => void;
+  channelApi.channelMembers.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = (members) => resolve({ owner: "owner-device", members });
+      }),
+  );
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => dialog.onOpenChange?.(true));
+    chatState.members = [
+      ...previous,
+      {
+        user_id: "peer-device",
+        account_id: "peer-account",
+        name: "Alice",
+        replica_enabled: true,
+      },
+    ];
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => finish(previous));
+    expect(
+      container.querySelector('[data-testid="member-profile-peer-device"]'),
+    ).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    chatState.members = previous;
+  }
+});
+
+it("uses the fetched owner with the fetched member list", async () => {
+  channelApi.channelMembers.mockResolvedValueOnce({
+    owner: "peer-device",
+    members: [
+      ...chatState.members,
+      {
+        user_id: "peer-device",
+        account_id: "peer-account",
+        name: "Alice",
+        replica_enabled: true,
+      },
+    ],
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(
+      container.querySelector('[data-testid="dissolve-channel-trigger"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="member-profile-peer-device"]')
+        ?.parentElement?.textContent,
+    ).toContain("Owner");
+  } finally {
+    await act(async () => root.unmount());
   }
 });
 
