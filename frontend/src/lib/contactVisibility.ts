@@ -1,9 +1,6 @@
 import type { PeerInfo, SearchHitInfo } from "./types";
-
-/** Infrastructure remains in the raw roster for routing and diagnostics. */
-export function isContactPeer(peer: Pick<PeerInfo, "post_office">): boolean {
-  return !peer.post_office;
-}
+import { isContactPeer, rosterProjection } from "./rosterProjection";
+export { isContactPeer } from "./rosterProjection";
 
 export function visiblePeers(
   peers: PeerInfo[],
@@ -20,14 +17,11 @@ export function visibleSearchHits(
   hidden: Record<string, unknown>,
   loaded: boolean,
 ) {
+  const roster = rosterProjection(peers);
   return hits.filter(
     (h) =>
       h.is_channel ||
       (loaded &&
-        !hidden[
-          h.account_id ??
-            peers.find((p) => p.user_id === h.target)?.account_id ??
-            h.target
-        ]),
+        !hidden[h.account_id ?? roster.accountForDevice(h.target) ?? h.target]),
   );
 }

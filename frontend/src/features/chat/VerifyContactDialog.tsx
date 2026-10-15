@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { IdentityCrest, SafetyNumber } from "@/components/identity";
 import { chat } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
-import { isContactPeer } from "@/lib/contactVisibility";
+import { rosterProjection } from "@/lib/rosterProjection";
 import { fadeSlideUp, useMotionOK } from "@/lib/motion";
 import { useChat } from "@/store/chat";
 import { useAuth } from "@/store/auth";
@@ -51,8 +51,7 @@ export function VerifyContactDialog({
   const status = presenceStatus(presence);
   // The current device fingerprint presenting this account (any of its devices).
   const fingerprint =
-    peers.find((p) => isContactPeer(p) && p.account_id === accountId)
-      ?.user_id ?? "";
+    rosterProjection(peers).contactForAccount(accountId)?.user_id ?? "";
 
   const [open, setOpen] = useState(false);
   const [trustState, setTrustState] = useState<{

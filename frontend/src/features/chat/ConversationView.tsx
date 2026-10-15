@@ -50,6 +50,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { chat as chatApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
+import { rosterProjection } from "@/lib/rosterProjection";
 import { mentionsName } from "@/lib/mentions";
 import { formatDay } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -137,21 +138,14 @@ export function ConversationView() {
   const myAccountId = useChat((s) => s.myAccountId);
   const members = useChat((s) => s.members);
   const peers = useChat((s) => s.peers);
-  // Map a channel author's device user_id → account id, so the per-message author glyph
-  // resolves the account-keyed (propagated/custom) avatar instead of a device id that never matches.
-  const accountByDevice = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const p of peers) if (p.account_id) map.set(p.user_id, p.account_id);
-    return map;
-  }, [peers]);
+  const roster = rosterProjection(peers);
   // Resolve a channel author's device user_id → display name, so bubbles show names, not raw
   // ids. Channel members win over the general roster (channel-specific naming).
-  const nameByDevice = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const p of peers) if (p.name) map.set(p.user_id, p.name);
-    for (const m of members) if (m.name) map.set(m.user_id, m.name);
+  const memberByDevice = useMemo(() => {
+    const map = new Map<string, (typeof members)[number]>();
+    for (const m of members) map.set(m.user_id, m);
     return map;
-  }, [peers, members]);
+  }, [members]);
   const key = active ? convKey(active) : "";
   useEffect(() => {
     setPendingDelete(null);
@@ -578,6 +572,12 @@ export function ConversationView() {
               const parent = m.replyTo ? (byId.get(m.replyTo) ?? null) : null;
               const mentioned =
                 isChannel && !m.fromMe && mentionsName(m.text, myName);
+              const authorMember = memberByDevice.get(m.who);
+              const authorName =
+                authorMember?.name || roster.nameForDevice(m.who) || undefined;
+              const authorAccount = roster.accountForMember(
+                authorMember ?? { user_id: m.who },
+              );
               return (
                 <div
                   className={cn(
@@ -595,12 +595,12 @@ export function ConversationView() {
                     showTime={showTime}
                     isChannel={isChannel}
                     readOnly={readOnly}
-                    authorAvatarId={accountByDevice.get(m.who) ?? m.who}
-                    authorName={nameByDevice.get(m.who)}
+                    authorAvatarId={authorAccount ?? m.who}
+                    authorName={authorName}
                     onViewAuthor={() =>
                       setMemberProfile({
-                        name: nameByDevice.get(m.who) || m.who,
-                        accountId: accountByDevice.get(m.who) ?? null,
+                        name: authorName || m.who,
+                        accountId: authorAccount,
                         deviceId: m.who,
                       })
                     }

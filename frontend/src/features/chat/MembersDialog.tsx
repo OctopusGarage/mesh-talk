@@ -24,6 +24,7 @@ import { chat as chatApi } from "@/lib/api";
 import type { ChannelActivityInfo, ChannelMemberInfo } from "@/lib/types";
 import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
 import { useContactPolicy } from "@/store/contactPolicy";
+import { rosterProjection } from "@/lib/rosterProjection";
 import { visiblePeers } from "@/lib/contactVisibility";
 import { VirtualRosterList, VIRTUALIZE_AT } from "./VirtualRosterList";
 import { MemberProfileDialog } from "./MemberProfileDialog";
@@ -64,6 +65,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const channelOwner = liveSnapshot?.owner ?? storedOwner;
   const animateMembers = motionOK && members.length <= MAX_STAGGER_ITEMS;
   const peers = useChat((s) => s.peers);
+  const roster = rosterProjection(peers);
   const hiddenContacts = useContactPolicy((s) => s.contacts);
   const policyLoaded = useContactPolicy((s) => s.loaded);
   const favorites = useChat((s) => s.favorites);
@@ -207,18 +209,6 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   // add/remove is rejected by every node), so a non-owner only ever sees a read-only list.
   const isOwner = !dissolved && channelOwner !== "" && channelOwner === myId;
 
-  // Membership retains the verified account id when a device leaves discovery.
-  const accountByUserId = useMemo(() => {
-    const accounts = new Map<string, string>();
-    for (const peer of peers) {
-      if (peer.account_id) accounts.set(peer.user_id, peer.account_id);
-    }
-    for (const member of members) {
-      if (member.account_id) accounts.set(member.user_id, member.account_id);
-    }
-    return accounts;
-  }, [members, peers]);
-
   if (confirming && confirming === channelId) {
     return (
       <Dialog
@@ -331,7 +321,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               // Self isn't in the discovery roster, so it has no peer-derived name/presence:
               // show our own display name and treat ourselves as online.
               const isSelf = m.user_id === myId;
-              const accountId = accountByUserId.get(m.user_id) ?? null;
+              const accountId = roster.accountForMember(m);
               const name = isSelf
                 ? myName || m.name || t("common.unnamed")
                 : displayName(favorites, accountId ?? m.user_id, m.name) ||
@@ -591,7 +581,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                   const dateValid = Number.isFinite(date.getTime());
                   const nameFor = (id: string) =>
                     members.find((member) => member.user_id === id)?.name ||
-                    peers.find((peer) => peer.user_id === id)?.name ||
+                    roster.nameForDevice(id) ||
                     `${id.slice(0, 8)}…`;
                   return (
                     <li

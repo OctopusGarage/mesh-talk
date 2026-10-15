@@ -17,6 +17,7 @@ import { useChat, type Conversation } from "@/store/chat";
 import type { SearchHitInfo } from "@/lib/types";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visibleSearchHits } from "@/lib/contactVisibility";
+import { rosterProjection } from "@/lib/rosterProjection";
 
 /** Highlight every case-insensitive occurrence of `term` in `text` with the signal hue. */
 function Highlighted({ text, term }: { text: string; term: string }) {
@@ -51,6 +52,7 @@ export function SearchDialog() {
   const { t } = useTranslation();
   const open = useChat((s) => s.open);
   const peers = useChat((s) => s.peers);
+  const roster = rosterProjection(peers);
   const ready = useChat((s) => s.ready);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -128,10 +130,9 @@ export function SearchDialog() {
       conv = { kind: "channel", id: h.target, name: h.label };
     } else {
       // Resolve a device-id target to its account so account_history works.
-      const peer = peers.find((p) => p.user_id === h.target);
       conv = {
         kind: "account",
-        id: h.account_id ?? peer?.account_id ?? h.target,
+        id: h.account_id ?? roster.accountForDevice(h.target) ?? h.target,
         name: h.label,
       };
     }

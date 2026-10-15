@@ -7,7 +7,7 @@ import {
 } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { chat as chatApi } from "@/lib/api";
-import { isContactPeer } from "@/lib/contactVisibility";
+import { rosterProjection } from "@/lib/rosterProjection";
 import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import {
@@ -30,7 +30,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
   // Verified state for the crest: a single trust read for the active account (not per-row,
   // so no fan-out), refreshed when the conversation or its presenting device changes.
   const fingerprint =
-    peers.find((p) => isContactPeer(p) && p.account_id === id)?.user_id ?? "";
+    rosterProjection(peers).contactForAccount(id)?.user_id ?? "";
   const [trustResult, setTrustResult] = useState<{
     owner: string;
     id: string;
