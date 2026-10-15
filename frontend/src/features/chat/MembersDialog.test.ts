@@ -30,7 +30,7 @@ const { chatState, avatars, dialog, channelApi } = vi.hoisted(() => ({
     myId: "owner-device",
     myAccountId: "owner-account",
     addMember: () => {},
-    removeMember: () => {},
+    removeMember: vi.fn(async () => true),
     dissolveChannel: vi.fn(async () => true),
     open: vi.fn(),
   },
@@ -419,6 +419,73 @@ it("keeps confirmation available after a failed dissolution", async () => {
     ).not.toBeNull();
   } finally {
     await act(async () => root.unmount());
+    chatState.dissolveChannel.mockClear();
+  }
+});
+
+it("does not carry a removal confirmation into another channel", async () => {
+  const previousMembers = chatState.members;
+  const previousActive = chatState.active;
+  chatState.members = [
+    ...previousMembers,
+    {
+      user_id: "peer-device",
+      account_id: "peer-account",
+      name: "Alice",
+      replica_enabled: true,
+    },
+  ];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Remove Alice"]')!
+        .click(),
+    );
+    expect(container.textContent).toContain("Remove Alice from this channel");
+
+    chatState.active = { kind: "channel", id: "other", name: "Other" };
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(container.textContent).not.toContain(
+      "Remove Alice from this channel",
+    );
+    expect(chatState.removeMember).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    chatState.members = previousMembers;
+    chatState.active = previousActive;
+    chatState.removeMember.mockClear();
+  }
+});
+
+it("does not carry a dissolution confirmation into another channel", async () => {
+  const previousActive = chatState.active;
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="dissolve-channel-trigger"]',
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="dissolve-channel-confirm"]'),
+    ).not.toBeNull();
+
+    chatState.active = { kind: "channel", id: "other", name: "Other" };
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(
+      container.querySelector('[data-testid="dissolve-channel-confirm"]'),
+    ).toBeNull();
+    expect(chatState.dissolveChannel).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    chatState.active = previousActive;
     chatState.dissolveChannel.mockClear();
   }
 });

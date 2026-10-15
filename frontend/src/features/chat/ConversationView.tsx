@@ -806,7 +806,7 @@ export function ConversationView() {
           conversation={{ ...active, name: headerName }}
         />
         {isChannel && !archived && !pendingInvite ? (
-          <MembersDialog dissolved={dissolved} />
+          <MembersDialog key={key} dissolved={dissolved} />
         ) : (
           active.kind === "account" && (
             <>

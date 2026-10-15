@@ -39,6 +39,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const storedMembers = useChat((s) => s.members);
   const storedOwner = useChat((s) => s.channelOwner);
   const active = useChat((s) => s.active);
+  const channelId = active?.kind === "channel" ? active.id : null;
   const [liveMembers, setLiveMembers] = useState<{
     channelId: string;
     baseline: { members: ChannelMemberInfo[]; owner: string };
@@ -80,19 +81,21 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const [open, setOpen] = useState(false);
   const [profileTarget, setProfileTarget] =
     useState<MemberProfileTarget | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingRemoval, setPendingRemoval] = useState<{
+    channelId: string;
     id: string;
     name: string;
   } | null>(null);
   const [removing, setRemoving] = useState(false);
   const [pendingTransfer, setPendingTransfer] = useState<{
+    channelId: string;
     id: string;
     name: string;
   } | null>(null);
   const [transferring, setTransferring] = useState(false);
-  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState<string | null>(null);
   const [leaving, setLeaving] = useState(false);
   const [activity, setActivity] = useState<ChannelActivityInfo[]>([]);
   const [replicaOverride, setReplicaOverride] = useState<boolean | null>(null);
@@ -102,6 +105,11 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     setReplicaOverride(null);
     setReplicaError(false);
     setLiveMembers(null);
+    setProfileTarget(null);
+    setPendingRemoval(null);
+    setPendingTransfer(null);
+    setConfirming(null);
+    setConfirmLeave(null);
   }, [active?.id]);
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
@@ -140,26 +148,32 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   }, [open, active?.id, active?.kind, members, channelOwner]);
 
   const confirmRemoval = async () => {
-    if (!pendingRemoval || removing) return;
+    if (!pendingRemoval || pendingRemoval.channelId !== channelId || removing)
+      return;
     setRemoving(true);
     const removed = await removeMember(pendingRemoval.id);
     setRemoving(false);
     if (removed) setPendingRemoval(null);
   };
   const confirmTransfer = async () => {
-    if (!pendingTransfer || transferring) return;
+    if (
+      !pendingTransfer ||
+      pendingTransfer.channelId !== channelId ||
+      transferring
+    )
+      return;
     setTransferring(true);
     const transferred = await transferChannelOwner(pendingTransfer.id);
     setTransferring(false);
     if (transferred) setPendingTransfer(null);
   };
   const finishLeave = async () => {
-    if (leaving) return;
+    if (confirmLeave !== channelId || leaving) return;
     setLeaving(true);
     const left = await leaveChannel();
     setLeaving(false);
     if (left) {
-      setConfirmLeave(false);
+      setConfirmLeave(null);
       setOpen(false);
     }
   };
@@ -196,14 +210,14 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     return accounts;
   }, [members, peers]);
 
-  if (confirming) {
+  if (confirming && confirming === channelId) {
     return (
       <Dialog
         open={open}
         onOpenChange={(next) => {
           if (busy) return;
           setOpen(next);
-          if (!next) setConfirming(false);
+          if (!next) setConfirming(null);
         }}
       >
         <DialogContent
@@ -220,7 +234,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             <Button
               variant="ghost"
               disabled={busy}
-              onClick={() => setConfirming(false)}
+              onClick={() => setConfirming(null)}
             >
               {t("common.cancel")}
             </Button>
@@ -229,12 +243,13 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               disabled={busy}
               data-testid="dissolve-channel-confirm"
               onClick={() => {
-                if (active?.kind !== "channel") return;
+                if (active?.kind !== "channel" || active.id !== confirming)
+                  return;
                 setBusy(true);
                 void dissolveChannel(active.id).then((success) => {
                   if (success) {
                     setOpen(false);
-                    setConfirming(false);
+                    setConfirming(null);
                   }
                   setBusy(false);
                 });
@@ -258,7 +273,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           setProfileTarget(null);
           setPendingRemoval(null);
           setPendingTransfer(null);
-          setConfirmLeave(false);
+          setConfirmLeave(null);
         }
       }}
     >
@@ -438,7 +453,8 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                       aria-label={`${t("members.transferOwner")} ${name}`}
                       disabled={transferring || removing}
                       onClick={() =>
-                        setPendingTransfer({ id: m.user_id, name })
+                        channelId &&
+                        setPendingTransfer({ channelId, id: m.user_id, name })
                       }
                     >
                       <Crown className="h-4 w-4" />
@@ -452,7 +468,10 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                       title={t("common.remove")}
                       aria-label={`${t("common.remove")} ${name}`}
                       disabled={removing || transferring}
-                      onClick={() => setPendingRemoval({ id: m.user_id, name })}
+                      onClick={() =>
+                        channelId &&
+                        setPendingRemoval({ channelId, id: m.user_id, name })
+                      }
                     >
                       <X className="h-4 w-4" />
                     </Button>
@@ -468,12 +487,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             variant="ghost"
             className="text-destructive hover:text-destructive"
             data-testid="dissolve-channel-trigger"
-            onClick={() => setConfirming(true)}
+            onClick={() => setConfirming(channelId)}
           >
             {t("members.dissolve")}
           </Button>
         )}
-        {pendingRemoval && (
+        {pendingRemoval?.channelId === channelId && (
           <div className="space-y-3 rounded-lg border border-destructive/30 p-3">
             <p className="break-words text-sm" role="status">
               {t("members.confirmRemove", { name: pendingRemoval.name })}
@@ -496,7 +515,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             </div>
           </div>
         )}
-        {pendingTransfer && (
+        {pendingTransfer?.channelId === channelId && (
           <div className="space-y-3 rounded-lg border p-3">
             <p className="break-words text-sm" role="status">
               {t("members.confirmTransfer", { name: pendingTransfer.name })}
@@ -597,7 +616,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             <p className="text-xs text-muted-foreground">
               {t("members.transferBeforeLeave")}
             </p>
-          ) : confirmLeave ? (
+          ) : channelId !== null && confirmLeave === channelId ? (
             <div className="space-y-3">
               <p className="text-sm" role="status">
                 {t("members.confirmLeave")}
@@ -606,7 +625,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 <Button
                   variant="ghost"
                   disabled={leaving}
-                  onClick={() => setConfirmLeave(false)}
+                  onClick={() => setConfirmLeave(null)}
                 >
                   {t("common.cancel")}
                 </Button>
@@ -623,7 +642,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             <Button
               variant="ghost"
               className="text-destructive hover:text-destructive"
-              onClick={() => setConfirmLeave(true)}
+              onClick={() => setConfirmLeave(channelId)}
             >
               <LogOut className="h-4 w-4" />
               {t("members.leave")}
