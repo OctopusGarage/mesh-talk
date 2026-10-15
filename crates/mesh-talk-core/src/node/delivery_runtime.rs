@@ -309,6 +309,16 @@ impl Node {
             .lock()
             .expect("verified DM pull mutex not poisoned")
             .contains(fingerprint)
+            || (self
+                .bridge_discovery_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+                && !self.privacy_snapshot().invisible
+                && self
+                    .bridge_dm_pull_peers
+                    .lock()
+                    .expect("bridge DM pull mutex not poisoned")
+                    .get(fingerprint)
+                    .is_some_and(|seen| seen.elapsed() < std::time::Duration::from_secs(45)))
     }
 
     /// Authorize one immutable outgoing journal entry, then attempt local replay.

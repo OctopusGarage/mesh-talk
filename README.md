@@ -75,6 +75,7 @@ relay (the "post office") delivers messages to peers that are temporarily offlin
 **Network**
 
 - Zero-config LAN discovery: signed UDP multicast announces + announce/response + a unicast subnet-scan fallback
+- Optional routed discovery on an existing user-managed Tailscale network, plus manual IP/hostname entry; Mesh-Talk verifies device identity independently of the network
 - Dual-stack IPv4/IPv6 direct TCP; self-healing discovery that re-announces and re-joins on network changes
 
 **Desktop experience**

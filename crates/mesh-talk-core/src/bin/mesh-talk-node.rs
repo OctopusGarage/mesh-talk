@@ -2,6 +2,7 @@
 //! persistent identity, runs signed-announce LAN discovery and a TCP listener,
 //! and drives 1:1 DMs, channels, and file transfers from a line-based REPL
 //! (`/peers`, `/msg <prefix> <text>`, `/account-msg <account-id> <text>`, `/history <prefix>`,
+//! `/probe <ip:discovery-port>`,
 //! `/channel-new <name> <member-prefix>...`, `/channel-msg <chan-id-prefix> <text>`,
 //! `/channel-replica <chan-id-prefix> on|off`,
 //! `/verify-peer <full-device-fingerprint>`,
@@ -11,12 +12,13 @@
 use clap::Parser;
 use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
-use mesh_talk_core::node::run_relay_accept_loop;
+use mesh_talk_core::node::{DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket};
 use mesh_talk_core::node::{
-    DEFAULT_DISCOVERY_PORT, Node, ReceivedDm, discovery_socket, spawn_discovery,
+    run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway, run_relay_accept_loop,
 };
 use mesh_talk_core::postoffice::PostOffice;
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -60,6 +62,26 @@ struct Args {
     /// the post-office role (no DM REPL — it only relays).
     #[arg(long)]
     post_office: bool,
+    /// Share this public node with an opted-in post-office bridge directory.
+    #[arg(long)]
+    bridge_discovery: bool,
+    /// Serve an opt-in bridge directory alongside the post-office mailbox.
+    #[arg(long, requires = "post_office")]
+    bridge: bool,
+    /// Existing routed endpoint of another bridge post office (UDP discovery).
+    #[arg(long, requires_all = ["post_office", "bridge", "bridge_peer_id"])]
+    bridge_peer: Option<SocketAddr>,
+    /// Exact 32-character Mesh Talk fingerprint of --bridge-peer.
+    #[arg(long, requires = "bridge_peer", value_parser = parse_fingerprint)]
+    bridge_peer_id: Option<String>,
+}
+
+fn parse_fingerprint(value: &str) -> Result<String, String> {
+    if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err("expected a full 32-character hexadecimal device fingerprint".into())
+    }
 }
 
 /// Account addressing is explicit: a full crypto account id, never a local
@@ -334,11 +356,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
     node.configure_privacy(data_dir, password, &announce, visibility.clone())?;
+    node.set_bridge_discovery_enabled(args.bridge_discovery);
 
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
-    mesh_talk_core::discovery::service::spawn_discovery_with_visibility(
+    let routed = Arc::new(mesh_talk_core::discovery::service::RoutedDiscovery::new({
+        let node = Arc::clone(&node);
+        Arc::new(move |nonce, announce| node.signed_discovery_response(nonce, announce))
+    }));
+    mesh_talk_core::discovery::service::spawn_discovery_with_routed(
         Arc::clone(&socket),
         Arc::clone(&roster),
         mesh_talk_core::discovery::service::shared_announce(&announce),
@@ -346,6 +373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.discovery_port,
         None,
         visibility,
+        Some(Arc::clone(&routed)),
     );
 
     // Inbound: serve sync rounds on each accepted connection.
@@ -392,6 +420,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    if args.bridge_discovery {
+        let node = Arc::clone(&node);
+        tokio::spawn(async move {
+            loop {
+                node.refresh_bridge_directory().await;
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+    }
 
     emit(&format!(
         "node {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
@@ -424,6 +461,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                 }
             }
+        } else if let Some(endpoint) = line.strip_prefix("/probe ") {
+            match endpoint.parse::<SocketAddr>() {
+                Ok(endpoint) => match routed.probe(&socket, endpoint).await {
+                    Ok(true) => emit(&format!("discovery query sent to {endpoint}")),
+                    Ok(false) => emit("discovery query already pending for that address"),
+                    Err(error) => emit(&format!("discovery query failed: {error}")),
+                },
+                Err(_) => emit("usage: /probe <ip:discovery-port>"),
+            }
+        } else if line == "/probe" {
+            emit("usage: /probe <ip:discovery-port>");
         } else if let Some(fingerprint) = line.strip_prefix("/verify-peer ") {
             let fingerprint = fingerprint.trim();
             let Some(fingerprint) = canonical_verified_peer(fingerprint) else {
@@ -492,7 +540,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if !line.is_empty() {
             emit(
-                "commands: /peers, /verify-peer <full-device-fingerprint>, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
+                "commands: /peers, /probe <ip:discovery-port>, /verify-peer <full-device-fingerprint>, /msg <user_id-prefix> <text>, /account-msg <account-id> <text>, /history <user_id-prefix> [n], /channel-new <name> <member-prefix>..., /channel-msg <chan-id-prefix> <text>, /channel-replica <chan-id-prefix> on|off, /sendfile <peer-prefix> <path>, /receive <file-id>, /decline <file-id>, /quit",
             );
         }
     }
@@ -579,13 +627,40 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Discovery: advertise ourselves (and harmlessly track peers) on the shared socket.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
-    spawn_discovery(
+    let discovery_identity = DeviceIdentity::from_secret_bytes(ed, x);
+    mesh_talk_core::discovery::service::spawn_discovery_with_routed(
         Arc::clone(&socket),
         Arc::clone(&roster),
-        announce,
+        mesh_talk_core::discovery::service::shared_announce(&announce),
         user_id.clone(),
         args.discovery_port,
+        None,
+        Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::default()),
+        Some(Arc::new(
+            mesh_talk_core::discovery::service::RoutedDiscovery::new(Arc::new(
+                move |nonce, announce| {
+                    mesh_talk_core::discovery::query::encode_response(
+                        nonce,
+                        announce,
+                        &discovery_identity,
+                    )
+                },
+            )),
+        )),
     );
+
+    let gateway = if let (Some(remote), Some(peer_id)) = (args.bridge_peer, args.bridge_peer_id) {
+        let proof = Arc::new(Mutex::new(None));
+        tokio::spawn(mesh_talk_core::postoffice::gateway::run_bridge_gateway(
+            Arc::clone(&proof),
+            tcp_port,
+            remote,
+            peer_id,
+        ));
+        Some(proof)
+    } else {
+        None
+    };
 
     emit(&format!(
         "post-office {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
@@ -594,7 +669,14 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Serve relay connections until killed. This loop never returns; the trailing
     // Ok(()) is unreachable in practice (the process is stopped by a signal).
-    run_relay_accept_loop(transport_identity, listener, store).await;
+    if let Some(gateway) = gateway {
+        run_bridge_relay_accept_loop_with_gateway(transport_identity, listener, store, gateway)
+            .await;
+    } else if args.bridge {
+        run_bridge_relay_accept_loop(transport_identity, listener, store).await;
+    } else {
+        run_relay_accept_loop(transport_identity, listener, store).await;
+    }
     Ok(())
 }
 
@@ -1087,6 +1169,7 @@ mod tests {
         PeerRecord {
             public: DeviceIdentity::generate().public(),
             addr: "127.0.0.1:4000".parse::<SocketAddr>().unwrap(),
+            routes: Vec::new(),
             name: name.to_string(),
             post_office: false,
             account_id: None,

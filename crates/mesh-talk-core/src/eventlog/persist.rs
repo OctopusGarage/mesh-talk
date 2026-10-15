@@ -151,6 +151,14 @@ impl PersistentEventLog {
     pub fn get(&self, id: &EventId) -> Option<&Event> {
         self.log.get(id)
     }
+    pub fn authored_event(
+        &self,
+        conversation: ConversationId,
+        author: crate::eventlog::event::Author,
+        seq: u64,
+    ) -> Option<&Event> {
+        self.log.authored_event(conversation, author, seq)
+    }
     pub fn events(&self, conversation: &ConversationId) -> Vec<&Event> {
         self.log.events(conversation)
     }

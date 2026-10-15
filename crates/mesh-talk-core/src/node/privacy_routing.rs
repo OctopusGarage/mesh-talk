@@ -115,6 +115,7 @@ impl Node {
                     PeerRecord {
                         public,
                         addr: std::net::SocketAddr::new(ip, proof.tcp_port),
+                        routes: Vec::new(),
                         name: proof.name,
                         post_office: proof.post_office,
                         account_id: Some(account),

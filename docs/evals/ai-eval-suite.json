@@ -118,6 +118,36 @@
         "Separately tests offline DM and channel delivery, file offer, complete encrypted file bytes, and multi-relay election against the installed Windows relay.",
         "States that recipient consent needs sender overlap, queued custody is not replicated, and routing metadata remains exposed."
       ]
+    },
+    {
+      "id": "MT-AI-009",
+      "name": "routed discovery and bridge document keeps network and identity boundaries clear",
+      "subject_file": "docs/routed-network-discovery.md",
+      "min_score": 0.9,
+      "scenario": "A user runs A and B on one LAN, C on another, and E as a post office on A and B's LAN. Only C and E have an existing Tailscale connection. Evaluate whether the document explains what is required for bidirectional Mesh Talk discovery and messaging without promising arbitrary LAN bridging.",
+      "rubric": [
+        "Says Mesh Talk never installs, configures, or authorizes Tailscale and treats its addresses only as candidates.",
+        "Requires signed discovery and Noise identity verification before an endpoint is trusted for communication.",
+        "States that E is bridge-enabled, A/B/C explicitly opt in, and A/B do not need Tailscale when they can reach E over LAN.",
+        "Explains that the directory shares self-signed short-lived introductions and cross-LAN encrypted DMs travel through E's opaque mailbox rather than IP subnet forwarding.",
+        "States that the bridge is default off, invisible nodes do not participate, and disabling it ends local participation.",
+        "Does not promise WebRTC media, arbitrary TCP forwarding, or delivery while E is unavailable."
+      ]
+    },
+    {
+      "id": "MT-AI-010",
+      "name": "two post-office gateways preserve identity and mailbox limits",
+      "subject_file": "docs/routed-network-discovery.md",
+      "min_score": 0.9,
+      "scenario": "A/B use E on LAN X and C/D use F on LAN Y. Only E and F can reach each other through an existing Tailscale connection. Evaluate whether the documented solution supports cross-LAN peer discovery and encrypted DMs without implying relay-to-relay mailbox replication or subnet bridging.",
+      "rubric": [
+        "States that both post offices require an explicit pinned bridge-peer configuration and must use distinct TCP ports.",
+        "Says clients opt in to bridge discovery and learn the remote relay through the authenticated local bridge directory.",
+        "Requires a fresh signed remote relay proof and end-to-end Noise authentication through the TCP gateway.",
+        "Explains that all participating clients converge on one elected post-office directory and opaque mailbox for delivery.",
+        "States that relay mailbox contents are not replicated and failure of the elected relay pauses cross-LAN delivery.",
+        "Provides real cross-machine evidence covering all four client identities and bidirectional encrypted DMs."
+      ]
     }
   ]
 }

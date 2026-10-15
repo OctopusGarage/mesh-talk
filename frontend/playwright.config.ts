@@ -13,9 +13,15 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  // Eight concurrent WebViews overwhelm the Windows test host and make visual
-  // snapshots unstable; four keep the suite responsive during full E2E runs.
-  workers: process.env.CI ? 1 : process.platform === "win32" ? 4 : undefined,
+  // A single macOS worker avoids Vite asset decode retries and page-load
+  // timeouts seen in the full suite with four concurrent browsers. CI already
+  // uses one; Windows keeps its existing four-worker limit.
+  workers:
+    process.env.CI || process.platform === "darwin"
+      ? 1
+      : process.platform === "win32"
+        ? 4
+        : undefined,
   reporter: process.env.CI ? "list" : "html",
   snapshotPathTemplate: "e2e/{testFileName}-snapshots/{arg}{ext}",
   expect: {

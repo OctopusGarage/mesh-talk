@@ -65,6 +65,9 @@ pub struct AppSettings {
     /// Whether this account uses discovered post-office relays. Defaults on for existing users.
     #[serde(default = "default_true")]
     pub post_office_enabled: bool,
+    /// Share public presence with an opted-in post-office bridge. Defaults off.
+    #[serde(default)]
+    pub bridge_discovery_enabled: bool,
     /// The incoming-call ringtone id (see frontend `lib/ringtones.ts`). A cosmetic UI
     /// preference; the backend only stores it. Defaults to the classic phone ring.
     #[serde(default = "default_ringtone")]
@@ -104,6 +107,7 @@ impl Default for AppSettings {
             retention_days: 0,
             calls_enabled: false,
             post_office_enabled: true,
+            bridge_discovery_enabled: false,
             ringtone: default_ringtone(),
             privacy_level: PrivacyLevel::Balanced,
             notification_preview: true,
@@ -153,6 +157,7 @@ struct AccountSettings {
     retention_days: u32,
     calls_enabled: bool,
     post_office_enabled: bool,
+    bridge_discovery_enabled: bool,
     ringtone: String,
     privacy_level: PrivacyLevel,
     notification_preview: bool,
@@ -176,6 +181,7 @@ impl From<&AppSettings> for AccountSettings {
             retention_days: value.retention_days,
             calls_enabled: value.calls_enabled,
             post_office_enabled: value.post_office_enabled,
+            bridge_discovery_enabled: value.bridge_discovery_enabled,
             ringtone: value.ringtone.clone(),
             privacy_level: value.privacy_level,
             notification_preview: value.notification_preview,
@@ -198,6 +204,7 @@ impl AccountSettings {
             retention_days: self.retention_days,
             calls_enabled: self.calls_enabled,
             post_office_enabled: self.post_office_enabled,
+            bridge_discovery_enabled: self.bridge_discovery_enabled,
             ringtone: self.ringtone.clone(),
             privacy_level: self.privacy_level,
             notification_preview: self.notification_preview,
@@ -456,6 +463,7 @@ pub async fn set_app_settings(
     let settings = settings.with_privacy_level(level);
     let retention_days = settings.retention_days;
     let post_office_enabled = settings.post_office_enabled;
+    let bridge_discovery_enabled = settings.bridge_discovery_enabled;
     match owner.as_deref() {
         Some(owner) => config_store::with_account(&app_state, owner, SETTINGS_FILE, |path| {
             let previous = state.get_for_owner(owner)?;
@@ -495,6 +503,7 @@ pub async fn set_app_settings(
         };
         if let Some(node) = node {
             node.set_post_office_enabled(post_office_enabled);
+            node.set_bridge_discovery_enabled(bridge_discovery_enabled);
         }
     }
 
@@ -652,6 +661,7 @@ mod tests {
             s.post_office_enabled,
             "existing accounts keep relay delivery enabled"
         );
+        assert!(!s.bridge_discovery_enabled, "bridge discovery defaults off");
     }
 
     #[test]
@@ -661,13 +671,16 @@ mod tests {
         let bob_path = config_store::account_path(root.path(), "bob", SETTINGS_FILE).unwrap();
         let alice = AccountSettings {
             post_office_enabled: false,
+            bridge_discovery_enabled: true,
             ..AccountSettings::default()
         };
         config_store::write_account(&alice_path, &alice).unwrap();
         let saved: AccountSettings = config_store::read_account(&alice_path);
         let other: AccountSettings = config_store::read_account(&bob_path);
         assert!(!saved.post_office_enabled);
+        assert!(saved.bridge_discovery_enabled);
         assert!(other.post_office_enabled);
+        assert!(!other.bridge_discovery_enabled);
         assert!(
             !saved
                 .with_global(&GlobalSettings::default())

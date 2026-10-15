@@ -90,6 +90,15 @@ export const test = base.extend({
           account_id: CAROL.account_id,
         },
       ];
+      if (dataMode === "post-office") {
+        peers.push({
+          user_id: "device_relay_4444",
+          name: "relay node",
+          addr: "192.168.1.50:47100",
+          post_office: true,
+          account_id: "acc_relay_eeee5555",
+        });
+      }
 
       (window as unknown as Record<string, unknown>).__mockRotateBobDevice =
         () => {
@@ -494,6 +503,7 @@ export const test = base.extend({
         retention_days: 0,
         calls_enabled: false,
         post_office_enabled: true,
+        bridge_discovery_enabled: false,
         ringtone: "classic",
         privacy_level: "balanced",
         notification_preview: true,
@@ -562,6 +572,9 @@ export const test = base.extend({
       };
 
       const ok = () => null;
+      const probedEndpoints: string[] = [];
+      (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
+        probedEndpoints;
       let failNextCommand: string | null = null;
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
@@ -843,6 +856,12 @@ export const test = base.extend({
           // The durable chat-media store accessor. The mock has no store, so reject like the
           // real "no stored media" path → the preview hook falls back to read_file.
           read_media: () => {
+            if (dataMode === "screenshot-ipc-fallback") {
+              return (
+                (window as unknown as { __lastWrittenFileBytes?: number[] })
+                  .__lastWrittenFileBytes ?? []
+              );
+            }
             throw new Error("no stored media for this file");
           },
           write_temp_file: (a) => {
@@ -925,6 +944,64 @@ export const test = base.extend({
           },
 
           // device linking
+          get_device_sync_policy: () =>
+            JSON.parse(
+              localStorage.getItem(`mock-device-sync-policy-${SELF.device}`) ??
+                '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
+            ),
+          get_device_sync_status: () => [],
+          set_device_sync_category: (a) => {
+            if (
+              ![
+                "history",
+                "attachments",
+                "profile",
+                "appearance",
+                "contacts",
+              ].includes(String(a.category))
+            )
+              throw new Error("this sync category is not available yet");
+            const policy = responses.get_device_sync_policy({}) as Record<
+              string,
+              boolean
+            >;
+            const next = {
+              ...policy,
+              [String(a.category)]: Boolean(a.enabled),
+            };
+            localStorage.setItem(
+              `mock-device-sync-policy-${SELF.device}`,
+              JSON.stringify(next),
+            );
+            return next;
+          },
+          get_account_preferences: (a) =>
+            JSON.parse(
+              localStorage.getItem(
+                `mock-account-preferences-${SELF.device}-${String(a.category)}`,
+              ) ?? "[]",
+            ),
+          set_account_preference: (a) => {
+            const key = `mock-account-preferences-${SELF.device}-${String(a.category)}`;
+            const rows = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<
+              Record<string, unknown>
+            >;
+            const record = {
+              category: String(a.category),
+              key: String(a.key),
+              value: a.value ?? null,
+              revision: Date.now(),
+              device_id: SELF.device,
+            };
+            localStorage.setItem(
+              key,
+              JSON.stringify([
+                ...rows.filter((row) => row.key !== record.key),
+                record,
+              ]),
+            );
+            return record;
+          },
           start_linking: () => "0123456789abcdef0123456789abcdef", // 32 hex, like a real PairingCode
           stop_linking: ok,
           link_device: () => SELF.account,
@@ -1098,6 +1175,10 @@ export const test = base.extend({
           diag_get_peers: () => diagPeers,
           diag_network_info: () => networkInfo,
           rescan_peers: ok,
+          probe_peer_endpoint: (a) => {
+            probedEndpoints.push(String(a.host));
+            return null;
+          },
           set_badge: ok,
           network_name: () => "TestNet-5G",
           env_info: () => envInfo,

@@ -26,6 +26,11 @@ impl Node {
             .iter()
             .map(|author| author.user_id())
             .collect();
+        let linked_me: std::collections::HashSet<_> = self
+            .linked_devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .collect();
         let delivery = self.delivery.lock().expect("delivery lock not poisoned");
         let mut entries = self
             .received_files
@@ -48,7 +53,9 @@ impl Node {
             .filter(|entry| !delivery.file_erased(entry.conversation, entry.event_id))
             .filter_map(|entry| {
                 let manifest = crate::file::decode_manifest(&entry.plaintext)?;
-                let from_me = entry.from == me || recovered_me.contains(&entry.from);
+                let from_me = entry.from == me
+                    || recovered_me.contains(&entry.from)
+                    || linked_me.contains(&entry.from);
                 Some(HistoryEntry {
                     id: entry.event_id,
                     from_me,
@@ -155,6 +162,11 @@ impl Node {
         // text by wall-clock.
         entries.extend(self.conversation_files(conv));
 
+        // A logical account DM can arrive directly and later be imported from a
+        // sibling with a different transport-event id. Keep its first local copy.
+        let mut seen = std::collections::HashSet::new();
+        entries.retain(|entry| seen.insert(entry.id));
+
         // Tombstone recalled messages: keep the slot (sender + position) but drop the content.
         tombstone_recalled(
             &mut entries,
@@ -181,6 +193,11 @@ impl Node {
     /// stores — that IS the forward-secrecy property, not a limitation.
     pub fn history(&self, conversation: ConversationId, limit: usize) -> Vec<HistoryEntry> {
         let mut entries: Vec<HistoryEntry> = Vec::new();
+        let own_devices: std::collections::HashSet<_> = self
+            .linked_devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .collect();
         for (id, sent) in self.raw_sent_history(conversation) {
             let body = MessageBody::decode(&sent.plaintext);
             entries.push(HistoryEntry {
@@ -203,10 +220,11 @@ impl Node {
             .entries(&conversation)
         {
             let body = MessageBody::decode(&rcv.plaintext);
+            let from_me = own_devices.contains(&rcv.from);
             entries.push(HistoryEntry {
                 id: rcv.event_id,
-                from_me: false,
-                who: rcv.from,
+                from_me,
+                who: if from_me { "you".to_string() } else { rcv.from },
                 text: body.text,
                 wall_clock: rcv.wall_clock,
                 reply_to: body.reply_to,
@@ -219,6 +237,8 @@ impl Node {
         // Merge file/media messages (FileManifest events) so they're ordered inline with
         // text by wall-clock.
         entries.extend(self.conversation_files(conversation));
+        let mut seen = std::collections::HashSet::new();
+        entries.retain(|entry| seen.insert(entry.id));
         // Tombstone recalled messages. Recall is only wired for channels (1:1 chats go
         // through `account_history`); a device-pair DM has no Delete events, so this is an
         // empty set there.
@@ -337,6 +357,11 @@ impl Node {
         account: bool,
     ) -> Vec<ScanMatch> {
         let my_account = self.account.account_id();
+        let own_devices: std::collections::HashSet<_> = self
+            .linked_devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .collect();
         // Materialize (wall_clock, from_me, who, text) for the window, borrowing the
         // stores; only the decoded body bytes of kept lines are owned. Mirror `history`'s
         // ordering (wall_clock, then a sent-before-received tiebreak is irrelevant to a
@@ -371,11 +396,13 @@ impl Node {
                     };
                     (from_me, who, body.text)
                 } else {
-                    (
-                        false,
-                        e.from.clone(),
-                        MessageBody::decode(&e.plaintext).text,
-                    )
+                    let from_me = own_devices.contains(&e.from);
+                    let who = if from_me {
+                        "you".to_string()
+                    } else {
+                        e.from.clone()
+                    };
+                    (from_me, who, MessageBody::decode(&e.plaintext).text)
                 };
                 lines.push((e.wall_clock, from_me, who, body));
             }

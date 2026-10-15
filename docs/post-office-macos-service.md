@@ -23,6 +23,7 @@ file with a different password makes the keystore unreadable.
 ```bash
 ssh -t mac2015
 umask 077
+install -d -m 700 "$HOME/.local/bin" "$HOME/.local/state/mesh-talk-post-office" "$HOME/Library/LaunchAgents"
 install -d -m 700 "$HOME/.local/share/mesh-talk-post-office"
 read -rs 'relay_password?Post-office keystore password: '
 printf '\n'
@@ -38,7 +39,7 @@ directory, and `-rw-------` for the password file. The prompt reads the secret
 without showing it or putting it in a process argument. For recovery, enter the
 original keystore password through the same prompt.
 
-## Build and update
+## Build and install
 
 Build the Intel binary on a Mac with an installed `x86_64-apple-darwin` Rust
 target. Use one toolchain for both Cargo and rustc; mixing Homebrew Cargo with
@@ -49,6 +50,59 @@ RUSTC="$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/rustc" \
   "$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/cargo" \
   build --release --target x86_64-apple-darwin -p mesh-talk-core --bin mesh-talk-node
 file target/x86_64-apple-darwin/release/mesh-talk-node
+```
+
+For a first installation, copy the binary and create the LaunchAgent while
+logged in as `ys-aquria` on mac2015. The absolute paths in `ProgramArguments`
+are required by launchd. This plist contains paths and ports, never the
+keystore password.
+
+```bash
+scp target/x86_64-apple-darwin/release/mesh-talk-node \
+  mac2015:/Users/ys-aquria/.local/bin/mesh-talk-node
+ssh -t mac2015
+chmod 755 "$HOME/.local/bin/mesh-talk-node"
+python3 - <<'PY'
+from pathlib import Path
+import plistlib
+
+home = Path.home()
+data = home / ".local/share/mesh-talk-post-office"
+logs = home / ".local/state/mesh-talk-post-office"
+plist = home / "Library/LaunchAgents/com.octopusgarage.mesh-talk.post-office.plist"
+job = {
+    "Label": "com.octopusgarage.mesh-talk.post-office",
+    "ProgramArguments": [
+        str(home / ".local/bin/mesh-talk-node"),
+        "--keystore", str(data / "identity.keystore"),
+        "--password-file", str(data / "password"),
+        "--name", "mac2015 post office",
+        "--post-office", "--port", "47475", "--discovery-port", "47474",
+    ],
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "StandardOutPath": str(logs / "stdout.log"),
+    "StandardErrorPath": str(logs / "stderr.log"),
+}
+with plist.open("wb") as output:
+    plistlib.dump(job, output)
+plist.chmod(0o600)
+PY
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.octopusgarage.mesh-talk.post-office.plist"
+launchctl print "gui/$(id -u)/com.octopusgarage.mesh-talk.post-office"
+exit
+```
+
+Run the health checks below and confirm TCP 47475 is listening. If launchd
+reports an error, inspect `stderr.log` before retrying. Preserve the data
+directory and password file across subsequent updates.
+
+## Update an existing installation
+
+After rebuilding as above, stage and validate the replacement binary before
+stopping the existing agent:
+
+```bash
 scp target/x86_64-apple-darwin/release/mesh-talk-node \
   mac2015:/Users/ys-aquria/.local/bin/mesh-talk-node.next
 ssh mac2015 'chmod 755 "$HOME/.local/bin/mesh-talk-node.next"; "$HOME/.local/bin/mesh-talk-node.next" --help >/dev/null'

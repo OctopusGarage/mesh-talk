@@ -14,6 +14,8 @@ export const diag = {
   networkInfo: () => invoke<DiagNetworkInfo>("diag_network_info"),
   /** Force an immediate re-announce + rescan (manual "announce now"). */
   rescan: () => invoke<void>("rescan_peers"),
+  probeEndpoint: (host: string) =>
+    invoke<void>("probe_peer_endpoint", { host }),
 };
 
 export const presence = {

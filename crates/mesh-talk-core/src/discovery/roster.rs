@@ -10,12 +10,34 @@ use tokio::sync::Notify;
 /// A peer's stable fingerprint id.
 pub type UserId = String;
 
+/// Origin describes how an address was learned, never who the peer is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteSource {
+    Lan,
+    RoutedQuery,
+    Authenticated,
+    /// Address belongs to a post office, not this peer's TCP listener.
+    PostOffice,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerEndpoint {
+    pub addr: SocketAddr,
+    pub source: RouteSource,
+    pub last_seen: Instant,
+    pub last_authenticated: Option<Instant>,
+}
+
+const MAX_ROUTES_PER_PEER: usize = 8;
+
 /// What we know about a discovered peer: its keys, where to reach it, whether it
 /// serves as a post office, and when we last heard from it.
 #[derive(Debug, Clone)]
 pub struct PeerRecord {
     pub public: PublicIdentity,
     pub addr: SocketAddr,
+    /// Bounded alternative paths for the same verified public identity.
+    pub routes: Vec<PeerEndpoint>,
     pub name: String,
     pub post_office: bool,
     /// The account this device belongs to, from its verified cert (`None` if the
@@ -105,6 +127,122 @@ impl Roster {
         source_ip: IpAddr,
         self_user_id: &str,
     ) -> UpdateOutcome {
+        self.update_from(announce, source_ip, self_user_id, RouteSource::Lan)
+    }
+
+    pub fn update_routed(
+        &mut self,
+        announce: &Announce,
+        source_ip: IpAddr,
+        self_user_id: &str,
+    ) -> UpdateOutcome {
+        self.update_from(announce, source_ip, self_user_id, RouteSource::RoutedQuery)
+    }
+
+    /// Signed relay proof supplied over a Noise-authenticated local bridge
+    /// directory. Its TCP port is served locally by that relay's gateway.
+    pub fn update_gateway(
+        &mut self,
+        announce: &Announce,
+        gateway_ip: IpAddr,
+        self_user_id: &str,
+    ) -> UpdateOutcome {
+        if !announce.post_office || announce.account_id().is_none() {
+            return UpdateOutcome::Rejected;
+        }
+        self.update_from(announce, gateway_ip, self_user_id, RouteSource::RoutedQuery)
+    }
+
+    /// A signed identity introduced by a relay. The relay's address is useful
+    /// for opaque mailbox delivery but is never a direct peer endpoint.
+    pub fn update_relayed(
+        &mut self,
+        announce: &Announce,
+        relay: SocketAddr,
+        self_user_id: &str,
+    ) -> UpdateOutcome {
+        if announce.user_id == self_user_id
+            || !announce.verify()
+            || announce.account_id().is_none()
+            || announce.tcp_port == 0
+            || announce.name.len() > 1024
+            || self.peers.get(&announce.user_id).is_some_and(|old| {
+                old.public != announce.public() || old.account_id != announce.account_id()
+            })
+            || self.historical.get(&announce.user_id).is_some_and(|old| {
+                old.public() != announce.public() || old.account_id() != announce.account_id()
+            })
+        {
+            return UpdateOutcome::Rejected;
+        }
+        let now = Instant::now();
+        let existing = self.peers.get(&announce.user_id);
+        let existed = existing.is_some();
+        let mut routes = existing.map(|peer| peer.routes.clone()).unwrap_or_default();
+        let route_changed = !routes
+            .iter()
+            .any(|route| route.addr == relay && route.source == RouteSource::PostOffice);
+        routes.retain(|route| route.addr != relay || route.source != RouteSource::PostOffice);
+        routes.push(PeerEndpoint {
+            addr: relay,
+            source: RouteSource::PostOffice,
+            last_seen: now,
+            last_authenticated: None,
+        });
+        if routes.len() > MAX_ROUTES_PER_PEER {
+            routes.remove(0);
+        }
+        if !existed
+            && self.peers.len() >= MAX_PEERS
+            && let Some(oldest) = self
+                .peers
+                .iter()
+                .min_by_key(|(_, peer)| peer.last_seen)
+                .map(|(id, _)| id.clone())
+        {
+            self.peers.remove(&oldest);
+            self.announcements.remove(&oldest);
+        }
+        if self.historical.len() < MAX_PEERS || self.historical.contains_key(&announce.user_id) {
+            self.historical
+                .insert(announce.user_id.clone(), announce.clone());
+        }
+        self.announcements
+            .insert(announce.user_id.clone(), announce.clone());
+        let direct = routes
+            .iter()
+            .rev()
+            .find(|route| route.source != RouteSource::PostOffice)
+            .map(|route| route.addr);
+        self.peers.insert(
+            announce.user_id.clone(),
+            PeerRecord {
+                public: announce.public(),
+                addr: direct.unwrap_or(relay),
+                routes,
+                name: announce.name.clone(),
+                post_office: false,
+                account_id: announce.account_id(),
+                last_seen: now,
+            },
+        );
+        if route_changed {
+            self.changes.notify_one();
+        }
+        if existed {
+            UpdateOutcome::Refreshed
+        } else {
+            UpdateOutcome::New
+        }
+    }
+
+    fn update_from(
+        &mut self,
+        announce: &Announce,
+        source_ip: IpAddr,
+        self_user_id: &str,
+        source: RouteSource,
+    ) -> UpdateOutcome {
         if announce.user_id == self_user_id {
             return UpdateOutcome::Rejected; // self-filter
         }
@@ -125,8 +263,27 @@ impl Roster {
         let addr = SocketAddr::new(source_ip, announce.tcp_port);
         let previous = self.peers.get(&announce.user_id);
         let existed = previous.is_some();
-        let route_changed =
-            previous.is_none_or(|peer| peer.addr != addr || peer.public != announce.public());
+        let route_changed = previous.is_none_or(|peer| {
+            peer.public != announce.public() || !peer.routes.iter().any(|route| route.addr == addr)
+        });
+        let now = Instant::now();
+        let mut routes = previous
+            .filter(|peer| peer.public == announce.public())
+            .map(|peer| peer.routes.clone())
+            .unwrap_or_default();
+        let previous_route = routes.iter().find(|route| route.addr == addr);
+        let previous_auth = previous_route.and_then(|route| route.last_authenticated);
+        let source = previous_route.map_or(source, |route| route.source);
+        routes.retain(|route| route.addr != addr && route.addr.ip() != source_ip);
+        routes.push(PeerEndpoint {
+            addr,
+            source,
+            last_seen: now,
+            last_authenticated: previous_auth,
+        });
+        if routes.len() > MAX_ROUTES_PER_PEER {
+            routes.remove(0);
+        }
         // Cap enforcement: a NEW peer that would push us over MAX_PEERS evicts the
         // least-recently-seen existing peer first, so a flood of distinct fake ids can
         // churn the table but never grows it past the cap. Known peers (refreshes) are
@@ -149,10 +306,11 @@ impl Roster {
             PeerRecord {
                 public: announce.public(),
                 addr,
+                routes,
                 name: announce.name.clone(),
                 post_office: announce.post_office,
                 account_id: announce.account_id(),
-                last_seen: Instant::now(),
+                last_seen: now,
             },
         );
         if route_changed {
@@ -167,6 +325,35 @@ impl Roster {
 
     pub fn get(&self, user_id: &str) -> Option<&PeerRecord> {
         self.peers.get(user_id)
+    }
+
+    /// Record a live address only after a pinned Noise handshake succeeded.
+    pub fn mark_authenticated(&mut self, public: &PublicIdentity, addr: SocketAddr) {
+        let Some(peer) = self
+            .peers
+            .get_mut(&public.user_id())
+            .filter(|peer| peer.public == *public)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        if let Some(route) = peer.routes.iter_mut().find(|route| route.addr == addr) {
+            route.last_authenticated = Some(now);
+            route.last_seen = now;
+        } else {
+            peer.routes.push(PeerEndpoint {
+                addr,
+                source: RouteSource::Authenticated,
+                last_seen: now,
+                last_authenticated: Some(now),
+            });
+            if peer.routes.len() > MAX_ROUTES_PER_PEER {
+                peer.routes.remove(0);
+            }
+            self.changes.notify_one();
+        }
+        peer.addr = addr;
+        peer.last_seen = now;
     }
 
     /// Signed source proof retained only while the corresponding roster entry is live.
@@ -216,8 +403,30 @@ impl Roster {
     /// Drop peers not seen within `ttl`.
     pub fn evict_stale(&mut self, ttl: Duration) {
         let now = Instant::now();
-        self.peers
-            .retain(|_, r| now.duration_since(r.last_seen) < ttl);
+        self.peers.retain(|_, r| {
+            r.routes.retain(|route| {
+                let lifespan = match route.source {
+                    RouteSource::Lan => ttl,
+                    RouteSource::RoutedQuery => ttl.max(Duration::from_secs(120)),
+                    RouteSource::Authenticated => ttl.max(Duration::from_secs(300)),
+                    RouteSource::PostOffice => ttl.max(Duration::from_secs(45)),
+                };
+                now.saturating_duration_since(route.last_seen) < lifespan
+            });
+            if let Some(last) = r
+                .routes
+                .iter()
+                .rev()
+                .find(|route| route.source != RouteSource::PostOffice)
+                .or_else(|| r.routes.last())
+            {
+                r.addr = last.addr;
+                r.last_seen = last.last_seen;
+                true
+            } else {
+                now.saturating_duration_since(r.last_seen) < ttl
+            }
+        });
         self.announcements
             .retain(|id, _| self.peers.contains_key(id));
     }
@@ -229,6 +438,135 @@ impl Roster {
             self.peers.remove(&id);
             self.announcements.remove(&id);
         }
+    }
+
+    /// Withdraw only the mailbox introduction, preserving independently
+    /// discovered LAN or routed paths for the same identity.
+    pub fn forget_relayed(&mut self, user_id: &str) {
+        let Some(peer) = self.peers.get_mut(user_id) else {
+            return;
+        };
+        peer.routes
+            .retain(|route| route.source != RouteSource::PostOffice);
+        if let Some(route) = peer.routes.last() {
+            peer.addr = route.addr;
+            peer.last_seen = route.last_seen;
+        } else {
+            self.peers.remove(user_id);
+            self.announcements.remove(user_id);
+        }
+        self.changes.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod routed_tests {
+    use super::*;
+    use crate::identity::account::Account;
+    use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn same_identity_keeps_lan_and_routed_addresses() {
+        let id = DeviceIdentity::generate();
+        let announce = Announce::new(&id, "Bob", 47475);
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        let routed: IpAddr = "100.101.102.20".parse().unwrap();
+        let mut roster = Roster::default();
+        roster.update(&announce, lan, "self");
+        roster.update_routed(&announce, routed, "self");
+        let peer = roster.get(&id.user_id()).unwrap();
+        assert_eq!(peer.routes.len(), 2);
+        assert!(peer.routes.iter().any(|route| route.addr.ip() == lan));
+        assert!(peer.routes.iter().any(|route| route.addr.ip() == routed));
+        assert_eq!(peer.addr.ip(), routed);
+    }
+
+    #[test]
+    fn relay_introduction_keeps_direct_address_and_never_claims_relay_as_peer() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Bob", 47475);
+        let direct: IpAddr = "192.168.1.20".parse().unwrap();
+        let relay: SocketAddr = "100.101.102.30:47800".parse().unwrap();
+        let mut roster = Roster::default();
+        assert_eq!(
+            roster.update_relayed(&proof, relay, "self"),
+            UpdateOutcome::New
+        );
+        assert_eq!(roster.get(&proof.user_id).unwrap().addr, relay);
+        roster.update(&proof, direct, "self");
+        roster.update_relayed(&proof, relay, "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        assert_eq!(peer.addr.ip(), direct);
+        assert!(
+            peer.routes
+                .iter()
+                .any(|r| r.source == RouteSource::PostOffice && r.addr == relay)
+        );
+        roster.forget_relayed(&proof.user_id);
+        assert_eq!(roster.get(&proof.user_id).unwrap().addr.ip(), direct);
+    }
+
+    #[test]
+    fn authenticated_connection_marks_the_existing_route_without_changing_its_origin() {
+        let id = DeviceIdentity::generate();
+        let announce = Announce::new(&id, "Bob", 47475);
+        let ip: IpAddr = "100.101.1.20".parse().unwrap();
+        let addr = SocketAddr::new(ip, 47475);
+        let mut roster = Roster::default();
+        roster.update_routed(&announce, ip, "self");
+        roster.mark_authenticated(&id.public(), addr);
+        let route = &roster.get(&id.user_id()).unwrap().routes[0];
+        assert_eq!(route.source, RouteSource::RoutedQuery);
+        assert!(route.last_authenticated.is_some());
+    }
+
+    #[test]
+    fn gateway_route_requires_a_certified_post_office_proof() {
+        let id = DeviceIdentity::generate();
+        let account = Account::generate();
+        let ordinary = Announce::new_with_account(&id, &account, "ordinary", 47475);
+        let uncertified = Announce::new_post_office(&id, "relay", 47475);
+        let relay = Announce::new_post_office_with_account(&id, &account, "relay", 47475);
+        let ip: IpAddr = "100.101.102.30".parse().unwrap();
+        let mut roster = Roster::default();
+        assert_eq!(
+            roster.update_gateway(&ordinary, ip, "self"),
+            UpdateOutcome::Rejected
+        );
+        assert_eq!(
+            roster.update_gateway(&uncertified, ip, "self"),
+            UpdateOutcome::Rejected
+        );
+        assert_eq!(
+            roster.update_gateway(&relay, ip, "self"),
+            UpdateOutcome::New
+        );
+        let peer = roster.get(&id.user_id()).unwrap();
+        assert!(peer.post_office);
+        assert_eq!(peer.routes[0].source, RouteSource::RoutedQuery);
+        assert_eq!(peer.addr, SocketAddr::new(ip, 47475));
+    }
+
+    #[test]
+    fn authenticated_new_address_is_a_separate_bounded_route() {
+        let id = DeviceIdentity::generate();
+        let proof = Announce::new(&id, "Bob", 47475);
+        let mut roster = Roster::default();
+        roster.update(&proof, "192.168.1.20".parse().unwrap(), "self");
+        let new_addr: SocketAddr = "100.101.1.20:47475".parse().unwrap();
+        roster.mark_authenticated(&id.public(), new_addr);
+        let peer = roster.get(&id.user_id()).unwrap();
+        assert_eq!(peer.addr, new_addr);
+        assert_eq!(peer.routes.len(), 2);
+        let route = peer
+            .routes
+            .iter()
+            .find(|route| route.addr == new_addr)
+            .unwrap();
+        assert_eq!(route.source, RouteSource::Authenticated);
+        assert!(route.last_authenticated.is_some());
+        roster.forget_relayed(&id.user_id());
+        assert_eq!(roster.get(&id.user_id()).unwrap().routes.len(), 2);
     }
 }
 

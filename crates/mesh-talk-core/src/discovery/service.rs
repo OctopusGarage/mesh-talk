@@ -4,12 +4,13 @@
 
 use crate::discovery::DiscoveryVisibility;
 use crate::discovery::announce::{Announce, decode, encode};
+use crate::discovery::query::{self, Nonce, QueryTracker};
 use crate::discovery::roster::{Roster, UpdateOutcome};
 use crate::transport::net::{ipv4_interface_addrs, join_discovery_group_all_ifaces};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -34,6 +35,68 @@ pub fn swap_announce(shared: &SharedAnnounce, announce: &Announce) {
 /// Snapshot the current encoded announce (an `Arc` clone — no byte copy).
 fn current_announce(shared: &SharedAnnounce) -> Arc<Vec<u8>> {
     Arc::clone(&shared.lock().expect("announce mutex not poisoned"))
+}
+
+type ResponseSigner = Arc<dyn Fn(Nonce, &Announce) -> Option<Vec<u8>> + Send + Sync>;
+
+/// Generic unicast discovery state. Candidate enumeration belongs to the host;
+/// this component only sends identity-free queries and processes their replies.
+pub struct RoutedDiscovery {
+    pending: Mutex<QueryTracker>,
+    signer: ResponseSigner,
+    replies: Mutex<ResponseBudget>,
+}
+
+#[derive(Default)]
+struct ResponseBudget {
+    window: Option<Instant>,
+    sent: u8,
+    recent: HashMap<IpAddr, Instant>,
+}
+
+impl ResponseBudget {
+    fn allow(&mut self, source: IpAddr, now: Instant) -> bool {
+        if self
+            .window
+            .is_none_or(|start| now.saturating_duration_since(start) >= Duration::from_secs(1))
+        {
+            self.window = Some(now);
+            self.sent = 0;
+        }
+        self.recent
+            .retain(|_, sent| now.saturating_duration_since(*sent) < Duration::from_secs(1));
+        if self.sent >= 8 || self.recent.contains_key(&source) || self.recent.len() >= 256 {
+            return false;
+        }
+        self.sent += 1;
+        self.recent.insert(source, now);
+        true
+    }
+}
+
+impl RoutedDiscovery {
+    pub fn new(signer: ResponseSigner) -> Self {
+        Self {
+            pending: Mutex::new(QueryTracker::default()),
+            signer,
+            replies: Mutex::new(ResponseBudget::default()),
+        }
+    }
+
+    /// One bounded query to an explicitly supplied candidate endpoint.
+    pub async fn probe(&self, socket: &UdpSocket, target: SocketAddr) -> std::io::Result<bool> {
+        let nonce = uuid::Uuid::new_v4().into_bytes();
+        if !self
+            .pending
+            .lock()
+            .expect("query lock not poisoned")
+            .record(target.ip(), nonce, Instant::now())
+        {
+            return Ok(false);
+        }
+        socket.send_to(&query::encode_query(nonce), target).await?;
+        Ok(true)
+    }
 }
 
 /// Decode + verify + record one received datagram. Returns the [`UpdateOutcome`]
@@ -98,10 +161,65 @@ async fn run_listen_with_visibility(
     discovery_port: u16,
     visibility: Arc<DiscoveryVisibility>,
 ) {
+    run_listen_with_routed(
+        socket,
+        roster,
+        self_user_id,
+        self_announce,
+        discovery_port,
+        visibility,
+        None,
+    )
+    .await;
+}
+
+async fn run_listen_with_routed(
+    socket: Arc<UdpSocket>,
+    roster: Arc<Mutex<Roster>>,
+    self_user_id: String,
+    self_announce: SharedAnnounce,
+    discovery_port: u16,
+    visibility: Arc<DiscoveryVisibility>,
+    routed: Option<Arc<RoutedDiscovery>>,
+) {
     let mut buf = vec![0u8; 2048];
     loop {
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, source))) => {
+                if let Some(routed) = &routed {
+                    if let Some(nonce) = query::decode_query(&buf[..n]) {
+                        let allowed = routed
+                            .replies
+                            .lock()
+                            .expect("reply lock not poisoned")
+                            .allow(source.ip(), Instant::now());
+                        if allowed
+                            && let Some(announce) = decode(&current_announce(&self_announce))
+                            && let Some(reply) = (routed.signer)(nonce, &announce)
+                        {
+                            let _ = visibility.send_announce(&socket, &reply, source).await;
+                        }
+                        continue;
+                    }
+                    if n >= 4 && &buf[..4] == b"MTDR" {
+                        let answer = routed
+                            .pending
+                            .lock()
+                            .expect("query lock not poisoned")
+                            .accept(source.ip(), &buf[..n], Instant::now());
+                        if let Some(announce) = answer {
+                            let outcome = roster
+                                .lock()
+                                .expect("roster mutex not poisoned")
+                                .update_routed(&announce, source.ip(), &self_user_id);
+                            if outcome == UpdateOutcome::New {
+                                let bytes = current_announce(&self_announce);
+                                let _ = visibility.send_announce(&socket, &bytes, source).await;
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if handle_datagram(&roster, &buf[..n], source, &self_user_id) == UpdateOutcome::New
                 {
                     // First sight → unicast our (current) announce back to the peer's
@@ -298,6 +416,12 @@ fn scan_targets(own: Ipv4Addr) -> Vec<Ipv4Addr> {
 fn scan_targets_for_interfaces(own: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
     let local: BTreeSet<_> = own.iter().copied().collect();
     own.iter()
+        // The Tailscale interface is routed, not a LAN. Scanning its /24 would
+        // send our signed identity announce to unrelated tailnet machines.
+        .filter(|addr| {
+            let octets = addr.octets();
+            !(octets[0] == 100 && (64..128).contains(&octets[1]))
+        })
         .flat_map(|addr| scan_targets(*addr))
         .filter(|target| !local.contains(target))
         .collect::<BTreeSet<_>>()
@@ -423,19 +547,43 @@ pub fn spawn_discovery_with_visibility(
     trigger: Option<Arc<Notify>>,
     visibility: Arc<DiscoveryVisibility>,
 ) -> Vec<JoinHandle<()>> {
+    spawn_discovery_with_routed(
+        socket,
+        roster,
+        announce,
+        self_user_id,
+        discovery_port,
+        trigger,
+        visibility,
+        None,
+    )
+}
+
+/// Launch LAN discovery plus optional routed-query handling on the same UDP socket.
+pub fn spawn_discovery_with_routed(
+    socket: Arc<UdpSocket>,
+    roster: Arc<Mutex<Roster>>,
+    announce: SharedAnnounce,
+    self_user_id: String,
+    discovery_port: u16,
+    trigger: Option<Arc<Notify>>,
+    visibility: Arc<DiscoveryVisibility>,
+    routed: Option<Arc<RoutedDiscovery>>,
+) -> Vec<JoinHandle<()>> {
     let target: SocketAddr = (
         crate::transport::net::DISCOVERY_MULTICAST_GROUP,
         discovery_port,
     )
         .into();
     vec![
-        tokio::spawn(run_listen_with_visibility(
+        tokio::spawn(run_listen_with_routed(
             Arc::clone(&socket),
             roster,
             self_user_id,
             Arc::clone(&announce),
             discovery_port,
             Arc::clone(&visibility),
+            routed,
         )),
         tokio::spawn(run_broadcast_with_visibility(
             Arc::clone(&socket),
@@ -456,6 +604,27 @@ pub fn spawn_discovery_with_visibility(
     ]
 }
 
+/// IPv6 uses unicast only; the existing IPv4 LAN multicast loop remains separate.
+pub fn spawn_routed_listener(
+    socket: Arc<UdpSocket>,
+    roster: Arc<Mutex<Roster>>,
+    announce: SharedAnnounce,
+    self_user_id: String,
+    discovery_port: u16,
+    visibility: Arc<DiscoveryVisibility>,
+    routed: Arc<RoutedDiscovery>,
+) -> JoinHandle<()> {
+    tokio::spawn(run_listen_with_routed(
+        socket,
+        roster,
+        self_user_id,
+        announce,
+        discovery_port,
+        visibility,
+        Some(routed),
+    ))
+}
+
 #[cfg(test)]
 #[path = "privacy_tests.rs"]
 mod privacy_tests;
@@ -468,6 +637,89 @@ mod tests {
 
     fn source() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
+    }
+
+    #[tokio::test]
+    async fn routed_query_discovers_a_peer_without_sending_our_identity_first() {
+        let alice = Arc::new(DeviceIdentity::generate());
+        let bob = Arc::new(DeviceIdentity::generate());
+        let a_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let b_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let a_roster = Arc::new(Mutex::new(Roster::default()));
+        let b_roster = Arc::new(Mutex::new(Roster::default()));
+        let a_queries = Arc::new(RoutedDiscovery::new({
+            let alice = Arc::clone(&alice);
+            Arc::new(move |nonce, announce| query::encode_response(nonce, announce, &alice))
+        }));
+        let b_queries = Arc::new(RoutedDiscovery::new({
+            let bob = Arc::clone(&bob);
+            Arc::new(move |nonce, announce| query::encode_response(nonce, announce, &bob))
+        }));
+        let a_task = tokio::spawn(run_listen_with_routed(
+            Arc::clone(&a_socket),
+            Arc::clone(&a_roster),
+            alice.user_id(),
+            shared_announce(&Announce::new(&alice, "Alice", 41001)),
+            47474,
+            Arc::new(DiscoveryVisibility::default()),
+            Some(Arc::clone(&a_queries)),
+        ));
+        let b_task = tokio::spawn(run_listen_with_routed(
+            Arc::clone(&b_socket),
+            Arc::clone(&b_roster),
+            bob.user_id(),
+            shared_announce(&Announce::new(&bob, "Bob", 41002)),
+            47474,
+            Arc::new(DiscoveryVisibility::default()),
+            Some(b_queries),
+        ));
+        a_queries
+            .probe(&a_socket, b_socket.local_addr().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while a_roster.lock().unwrap().get(&bob.user_id()).is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("query discovered Bob");
+        a_task.abort();
+        b_task.abort();
+    }
+
+    #[tokio::test]
+    async fn invisible_node_does_not_answer_an_unknown_routed_query() {
+        let bob = Arc::new(DeviceIdentity::generate());
+        let asker = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let responder = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let query_state = Arc::new(RoutedDiscovery::new({
+            let bob = Arc::clone(&bob);
+            Arc::new(move |nonce, announce| query::encode_response(nonce, announce, &bob))
+        }));
+        let task = tokio::spawn(run_listen_with_routed(
+            Arc::clone(&responder),
+            Arc::new(Mutex::new(Roster::default())),
+            bob.user_id(),
+            shared_announce(&Announce::new(&bob, "Bob", 41002)),
+            47474,
+            Arc::new(DiscoveryVisibility::new(false)),
+            Some(query_state),
+        ));
+        asker
+            .send_to(
+                &query::encode_query([7; 16]),
+                responder.local_addr().unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut buf = [0u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), asker.recv_from(&mut buf))
+                .await
+                .is_err()
+        );
+        task.abort();
     }
 
     #[test]
@@ -544,6 +796,12 @@ mod tests {
         assert!(!targets.contains(&own));
         assert!(targets.contains(&Ipv4Addr::new(10, 0, 0, 2)));
         assert!(targets.contains(&Ipv4Addr::new(10, 0, 0, 254)));
+    }
+
+    #[test]
+    fn lan_scan_never_sweeps_tailscale_address_space() {
+        let tailnet: Ipv4Addr = "100.101.1.20".parse().unwrap();
+        assert!(scan_targets_for_interfaces(&[tailnet]).is_empty());
     }
 
     #[test]

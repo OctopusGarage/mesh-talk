@@ -11,6 +11,10 @@ pub struct DiscoveryVisibility {
 }
 
 impl DiscoveryVisibility {
+    /// Public routed probing follows the same visibility gate as LAN announcing.
+    pub async fn is_public(&self) -> bool {
+        *self.public.read().await
+    }
     pub fn new(public: bool) -> Self {
         Self {
             public: RwLock::new(public),
