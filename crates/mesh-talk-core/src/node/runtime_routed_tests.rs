@@ -293,6 +293,12 @@ fn fake_peer(post_office: bool) -> PeerRecord {
 }
 
 #[test]
+fn channel_invitees_exclude_post_office_nodes() {
+    assert!(channel_invitee_identity(fake_peer(true)).is_none());
+    assert!(channel_invitee_identity(fake_peer(false)).is_some());
+}
+
+#[test]
 fn profile_republish_targets_fires_on_first_sight_and_on_reconnect() {
     let bob = fake_peer(false);
     let mut present = std::collections::HashSet::new();
