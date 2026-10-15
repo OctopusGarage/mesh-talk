@@ -4,7 +4,9 @@
 **Scope:** Entire repository structure; all 129 production frontend TS/TSX modules and their 547 resolved internal import edges were scanned. Rust core, Tauri host, CLI, and feature entry points were mapped; the large implementation modules named below were sampled at their public interfaces and relevant call paths. This is a structural review, not a line-by-line proof of every protocol path.  
 **Brooks-Lint architecture score:** 80/100 (four warnings at five points each). This risk-counting rubric is different from the earlier qualitative 95/100 architecture assessment and the 96/100 lightweight four-dimension dashboard; the numbers are not a time series.
 
-The protocol/host/UI layering is mostly legible. The strongest remaining risks are a runtime frontend dependency cycle, repeated peer identity projections, large UI edit hotspots, and host auth/startup responsibilities sharing one production module.
+The protocol/host/UI layering is mostly legible. The initial audit found a runtime frontend dependency cycle, repeated peer identity projections, large UI edit hotspots, and host auth/startup responsibilities sharing one production module.
+
+**Follow-up:** `5b1bd7f` removed the settings/auth runtime import cycle by injecting the owner resolver into the low-level settings adapter and keeping the existing public facade. ESLint now blocks store imports from IPC adapters and facade imports from the auth store. The current score under this audit's rubric is **85/100** (three warnings); the graph and R5 finding below preserve the original audit snapshot. The remaining structural work is the peer projection, UI boundaries, and host command ownership.
 
 ## Module Dependency Graph
 

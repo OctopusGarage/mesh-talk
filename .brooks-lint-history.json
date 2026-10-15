@@ -31,5 +31,16 @@
       "suggestion": 0
     },
     "scope": "Entire repository structure; all production frontend import edges, Rust crate boundaries, and sampled feature hot paths"
+  },
+  {
+    "date": "2026-10-15",
+    "mode": "Architecture Audit",
+    "score": 85,
+    "findings": {
+      "critical": 0,
+      "warning": 3,
+      "suggestion": 0
+    },
+    "scope": "Same structural audit after settings/auth runtime cycle removal in 5b1bd7f"
   }
 ]
