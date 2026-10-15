@@ -130,22 +130,12 @@ pub async fn list_accounts(
 }
 
 fn merge_account_rows(live: Vec<(String, String, bool)>, known: Vec<String>) -> Vec<AccountInfo> {
-    use std::collections::{BTreeMap, HashSet};
-    let normal_accounts: HashSet<String> = live
-        .iter()
-        .filter_map(|(account_id, _, post_office)| (!post_office).then_some(account_id.clone()))
-        .collect();
-    let relay_only_accounts: HashSet<String> = live
-        .iter()
-        .filter_map(|(account_id, _, post_office)| {
-            (*post_office && !normal_accounts.contains(account_id)).then_some(account_id.clone())
-        })
-        .collect();
+    use std::collections::BTreeMap;
     let mut by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for account_id in known {
-        if !relay_only_accounts.contains(&account_id) {
-            by_account.entry(account_id).or_default();
-        }
+        // A durable conversation remains a contact even if its only device currently
+        // discovered is a relay. Live relay discovery alone never creates a row.
+        by_account.entry(account_id).or_default();
     }
     for (account_id, name, post_office) in live {
         if !post_office {
@@ -193,7 +183,7 @@ mod recovery_accounts_tests {
                 ("relay-account".into(), "mac2015-post-office".into(), true),
                 ("friend-account".into(), "Alice".into(), false),
             ],
-            vec!["relay-account".into()],
+            vec![],
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].account_id, "friend-account");
@@ -213,5 +203,17 @@ mod recovery_accounts_tests {
         assert_eq!(rows[0].account_id, "shared-account");
         assert_eq!(rows[0].device_count, 1);
         assert_eq!(rows[0].names, vec!["Alice"]);
+    }
+
+    #[test]
+    fn history_contact_remains_when_only_its_relay_device_is_online() {
+        let rows = merge_account_rows(
+            vec![("shared-account".into(), "Relay".into(), true)],
+            vec!["shared-account".into()],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id, "shared-account");
+        assert_eq!(rows[0].device_count, 0);
+        assert!(rows[0].names.is_empty());
     }
 }
