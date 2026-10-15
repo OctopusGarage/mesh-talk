@@ -79,6 +79,14 @@ through the relay while the original sender is stopped. The relay remains a
 bounded buffer, not the source of truth: its event-count and 512 MiB ciphertext
 budgets evict whole mailboxes, and authors retain their original durable
 events for direct retry.
+The post office also expires each whole mailbox 30 days after its first event
+arrives. It checks expiry on startup, before serving relay sync, and every
+minute while running. This is an additional maximum-age limit; the existing
+event-count and byte budgets can evict a mailbox sooner. Arrival times are
+stored in a password-encrypted `relay.retention` sidecar. Existing mailboxes
+without an arrival record start their 30-day clock on the first upgrade startup
+so the upgrade does not discard queued messages immediately. A sender that
+still holds an event may upload it again after expiry, starting a new mailbox.
 If election changes, the new relay has a different mailbox ID and does not
 inherit the old relay's stored blobs. An online sender retries to the newly
 elected relay; otherwise delivery waits for that sender or the former relay

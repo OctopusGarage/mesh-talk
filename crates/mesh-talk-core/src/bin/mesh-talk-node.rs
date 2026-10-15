@@ -623,6 +623,20 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         password,
         identity,
     )?));
+    let retention_store = Arc::clone(&store);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(error) = retention_store
+                .lock()
+                .expect("post office lock not poisoned")
+                .prune_expired()
+            {
+                eprintln!("post office retention cleanup failed: {error}");
+            }
+        }
+    });
 
     // Discovery: advertise ourselves (and harmlessly track peers) on the shared socket.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));

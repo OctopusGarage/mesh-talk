@@ -81,6 +81,14 @@ async fn serve_relay_or_bridge_connection<IO>(
         }
         return;
     }
+    if let Err(error) = store
+        .lock()
+        .expect("post office lock not poisoned")
+        .prune_expired()
+    {
+        log::warn!("post office retention cleanup failed: {error}");
+        return;
+    }
     if !matches!(
         tokio::time::timeout(
             RELAY_IDLE_TIMEOUT,

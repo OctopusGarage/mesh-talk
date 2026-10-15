@@ -767,7 +767,7 @@ Noise XX with identity binding; Double-Ratchet + sender-key forward secrecy with
 zeroize-on-drop; signed content-addressed log with fork detection; deterministic relay
 election; the sync `have` id-set is streamed in chunks so arbitrarily large conversations
 reconcile; the relay bounds its storage by event count and 512 MiB of ciphertext
-(LRU whole-conversation eviction) and its serve
+(LRU whole-conversation eviction) plus a 30-day maximum mailbox age, and its serve
 loop (round cap + idle timeout). Known limitations (by design): device linking relies on
 the one-time pairing code (no separate SAS UX); backfill history travels as plaintext over
 the Noise channel. A new client's relay upload contains a pairwise opaque
