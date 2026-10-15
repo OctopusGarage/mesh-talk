@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement, type ReactNode } from "react";
+import { act, createElement, type HTMLAttributes, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
@@ -32,7 +32,7 @@ const { chatState, avatars, dialog, channelApi } = vi.hoisted(() => ({
     addMember: () => {},
     removeMember: () => {},
     dissolveChannel: vi.fn(async () => true),
-    open: () => {},
+    open: vi.fn(),
   },
   avatars: { "peer-account": "data:image/png;base64,AAAA" } as Record<
     string,
@@ -72,15 +72,20 @@ vi.mock("@/store/contactPolicy", () => ({
 }));
 vi.mock("@/store/presence", () => ({
   usePresence: (selector: (state: unknown) => unknown) => selector({ map: {} }),
+  usePresenceFor: () => ({ online: false, last_seen_secs: null }),
   OFFLINE: { online: false, last_seen_secs: 0 },
   presenceStatus: () => "offline",
+  presenceLabel: () => "Offline",
 }));
 vi.mock("@/store/avatars", () => ({
   useAvatar: (id: string) => avatars[id],
 }));
 vi.mock("@/components/ui/dialog", () => {
-  const Wrapper = ({ children }: { children: ReactNode }) =>
-    createElement("div", null, children);
+  const Wrapper = ({
+    children,
+    ...props
+  }: HTMLAttributes<HTMLDivElement> & { children: ReactNode }) =>
+    createElement("div", props, children);
   return {
     Dialog: ({
       children,
@@ -130,6 +135,52 @@ it("shows a member's signed replica opt-out", () => {
     expect(html).toContain('data-testid="member-replica-disabled-peer-device"');
   } finally {
     chatState.members = previous;
+  }
+});
+
+it("opens a member's profile without removing the direct-message action", async () => {
+  const previous = chatState.members;
+  chatState.members = [
+    ...previous,
+    {
+      user_id: "peer-device",
+      account_id: "peer-account",
+      name: "Alice",
+      replica_enabled: true,
+    },
+  ];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="member-profile-peer-device"]',
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="member-profile-dialog"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("peer-account");
+    expect(container.textContent).toContain("127.0.0.1");
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="member-dm-peer-device"]',
+        )!
+        .click(),
+    );
+    expect(chatState.open).toHaveBeenCalledWith({
+      kind: "account",
+      id: "peer-account",
+      name: "Alice",
+    });
+  } finally {
+    await act(async () => root.unmount());
+    chatState.members = previous;
+    chatState.open.mockClear();
   }
 });
 

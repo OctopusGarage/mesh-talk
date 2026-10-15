@@ -34,6 +34,8 @@ import {
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
 import { VerifyContactDialog } from "./VerifyContactDialog";
+import { MemberProfileDialog } from "./MemberProfileDialog";
+import type { MemberProfileTarget } from "./memberProfileDetails";
 import { CallButtons } from "./CallDialog";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
@@ -294,6 +296,7 @@ function DaySeparator({ label }: { label: string }) {
  *  safety number reachable via the verify dialog rendered alongside in the header. */
 function DmHeader({ id, name }: { id: string; name: string }) {
   const { t } = useTranslation();
+  const [profileOpen, setProfileOpen] = useState(false);
   const owner = useAuth((s) => s.user?.id);
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(id);
@@ -334,20 +337,33 @@ function DmHeader({ id, name }: { id: string; name: string }) {
       live = false;
     };
   }, [owner, id, fingerprint]);
+  useEffect(() => setProfileOpen(false), [id]);
 
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <IdentityCrest
-        id={id}
-        name={name}
-        verified={verified}
-        hideId
-        status={status}
-        variant="compact"
+      <button
+        type="button"
+        onClick={() => setProfileOpen(true)}
+        data-testid="conversation-member-profile"
+        aria-label={t("memberProfile.viewNamed", { name })}
+        className="min-w-0 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <IdentityCrest
+          id={id}
+          name={name}
+          verified={verified}
+          hideId
+          status={status}
+          variant="compact"
+        />
+        <span className="block pl-12 text-[11px] text-muted-foreground">
+          {presenceLabel(presence, t)}
+        </span>
+      </button>
+      <MemberProfileDialog
+        target={profileOpen ? { name, accountId: id } : null}
+        onOpenChange={setProfileOpen}
       />
-      <span className="pl-12 text-[11px] text-muted-foreground">
-        {presenceLabel(presence, t)}
-      </span>
     </div>
   );
 }
@@ -433,7 +449,10 @@ export function ConversationView() {
   const sendFile = useChat((s) => s.sendFile);
   const setError = useChat((s) => s.setError);
   const toggleReaction = useChat((s) => s.toggleReaction);
+  const openConversation = useChat((s) => s.open);
   const deleteMessage = useChat((s) => s.deleteMessage);
+  const [memberProfile, setMemberProfile] =
+    useState<MemberProfileTarget | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{
     key: string;
     id: string;
@@ -441,6 +460,7 @@ export function ConversationView() {
   const [deleting, setDeleting] = useState(false);
   const [inviteBusy, setInviteBusy] = useState(false);
   const [declineOpen, setDeclineOpen] = useState(false);
+  useEffect(() => setMemberProfile(null), [active?.id]);
   const acceptChannelInvite = useChat((s) => s.acceptChannelInvite);
   const leaveChannel = useChat((s) => s.leaveChannel);
   const [screenshotBytes, setScreenshotBytes] = useState<Uint8Array | null>(
@@ -927,6 +947,13 @@ export function ConversationView() {
                     readOnly={readOnly}
                     authorAvatarId={accountByDevice.get(m.who) ?? m.who}
                     authorName={nameByDevice.get(m.who)}
+                    onViewAuthor={() =>
+                      setMemberProfile({
+                        name: nameByDevice.get(m.who) || m.who,
+                        accountId: accountByDevice.get(m.who) ?? null,
+                        deviceId: m.who,
+                      })
+                    }
                     fresh={motionOK && isFresh(m, i)}
                     reactions={m.id ? (reactionsByTarget.get(m.id) ?? []) : []}
                     selfReactionId={selfReactionId}
@@ -1246,6 +1273,16 @@ export function ConversationView() {
           }}
         />
       )}
+      <MemberProfileDialog
+        target={memberProfile}
+        onOpenChange={(next) => {
+          if (!next) setMemberProfile(null);
+        }}
+        onMessage={(accountId, name) => {
+          setMemberProfile(null);
+          openConversation({ kind: "account", id: accountId, name });
+        }}
+      />
     </main>
   );
 }

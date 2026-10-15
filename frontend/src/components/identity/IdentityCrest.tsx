@@ -21,6 +21,8 @@ export interface IdentityCrestProps {
   name: string;
   verified?: boolean;
   hideId?: boolean;
+  /** Let names wrap in detail views instead of truncating them. */
+  wrapName?: boolean;
   /** Optional presence; when set, a PresenceDot overlays the glyph. */
   status?: PresenceStatus;
   variant?: "compact" | "large";
@@ -42,6 +44,7 @@ export function IdentityCrest({
   name,
   verified = false,
   hideId = false,
+  wrapName = false,
   status,
   variant = "compact",
   editAvatarId,
@@ -86,7 +89,8 @@ export function IdentityCrest({
           <span
             title={name}
             className={cn(
-              "truncate font-display font-semibold tracking-tight",
+              "min-w-0 font-display font-semibold tracking-tight",
+              wrapName ? "[overflow-wrap:anywhere]" : "truncate",
               large ? "text-lg" : "text-sm",
             )}
           >

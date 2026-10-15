@@ -801,5 +801,20 @@
     "listingMismatch": "El paquete descargado no coincide con su ficha en la tienda.",
     "rightsPending": "Derechos de las imágenes pendientes de revisión",
     "idConflict": "Otro tipo de biblioteca ya usa este ID de paquete."
+  },
+  "memberProfile": {
+    "title": "Perfil del miembro",
+    "description": "Identidad y datos de red conocidos de este miembro.",
+    "presenceUnavailable": "Presencia no disponible",
+    "accountId": "ID de cuenta",
+    "devices": "Dispositivos",
+    "noDevice": "No hay información de dispositivos",
+    "deviceId": "ID de dispositivo",
+    "postOffice": "Oficina de correo",
+    "networkEndpoint": "Dirección de red conocida",
+    "unavailable": "No disponible actualmente",
+    "endpointHint": "Esta es la última ruta de red conocida y puede apuntar a un repetidor. No indica una ubicación geográfica.",
+    "view": "Ver perfil",
+    "viewNamed": "Ver perfil de {{name}}"
   }
 }

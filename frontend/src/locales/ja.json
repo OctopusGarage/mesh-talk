@@ -801,5 +801,20 @@
     "listingMismatch": "ダウンロードしたパックはマーケットの掲載内容と一致しません。",
     "rightsPending": "画像の権利を確認中",
     "idConflict": "別の種類のライブラリがこのパックIDを使用しています。"
+  },
+  "memberProfile": {
+    "title": "メンバープロフィール",
+    "description": "このメンバーの識別情報と既知のネットワーク情報。",
+    "presenceUnavailable": "在席情報なし",
+    "accountId": "アカウントID",
+    "devices": "デバイス",
+    "noDevice": "デバイス情報がありません",
+    "deviceId": "デバイスID",
+    "postOffice": "ポストオフィス",
+    "networkEndpoint": "既知のネットワーク接続先",
+    "unavailable": "現在利用できません",
+    "endpointHint": "最後に確認されたネットワーク経路です。中継ノードを指す場合があり、地理的な位置は示しません。",
+    "view": "プロフィールを見る",
+    "viewNamed": "{{name}}のプロフィールを見る"
   }
 }

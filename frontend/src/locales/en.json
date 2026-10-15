@@ -801,5 +801,20 @@
     "listingMismatch": "The downloaded pack does not match its marketplace listing.",
     "rightsPending": "Artwork rights pending review",
     "idConflict": "A different library type already uses this pack ID."
+  },
+  "memberProfile": {
+    "title": "Member profile",
+    "description": "Identity and known network details for this member.",
+    "presenceUnavailable": "Presence unavailable",
+    "accountId": "Account ID",
+    "devices": "Devices",
+    "noDevice": "No device information available",
+    "deviceId": "Device ID",
+    "postOffice": "Post office",
+    "networkEndpoint": "Known network endpoint",
+    "unavailable": "Not currently available",
+    "endpointHint": "This is the last known network route and may point to a relay. It does not reveal a geographic location.",
+    "view": "View profile",
+    "viewNamed": "View {{name}}'s profile"
   }
 }

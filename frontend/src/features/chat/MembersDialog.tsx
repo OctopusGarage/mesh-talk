@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Crown, LogOut, Users, UserPlus, X } from "lucide-react";
+import { Crown, LogOut, MessageCircle, Users, UserPlus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   Dialog,
@@ -26,6 +26,8 @@ import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visiblePeers } from "@/lib/contactVisibility";
 import { VirtualRosterList, VIRTUALIZE_AT } from "./VirtualRosterList";
+import { MemberProfileDialog } from "./MemberProfileDialog";
+import type { MemberProfileTarget } from "./memberProfileDetails";
 
 // We are always reachable to ourselves, and we never appear in our own discovery roster
 // (so no peer/presence entry exists for us) — show the self member as online.
@@ -58,6 +60,8 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   // Whole presence map (the dialog reads many ids at once; one subscription).
   const presenceMap = usePresence((s) => s.map);
   const [open, setOpen] = useState(false);
+  const [profileTarget, setProfileTarget] =
+    useState<MemberProfileTarget | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pendingRemoval, setPendingRemoval] = useState<{
@@ -226,6 +230,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
         if (removing || transferring || leaving) return;
         setOpen(next);
         if (!next) {
+          setProfileTarget(null);
           setPendingRemoval(null);
           setPendingTransfer(null);
           setConfirmLeave(false);
@@ -296,9 +301,8 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 isSelf && replicaOverride !== null
                   ? replicaOverride
                   : m.replica_enabled !== false;
-              // Tapping a member opens a 1:1 chat with them — but only when it's someone else
-              // AND we know their account (a DM is account-addressed; an offline member we've
-              // never met has no known account, so the row is non-interactive).
+              // A DM needs a known account. The identity itself remains inspectable even
+              // for an offline member with only a device ID.
               const dmAccount = isSelf ? null : accountId;
               const openDm = () => {
                 if (!dmAccount) return;
@@ -315,30 +319,41 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                   tabIndex={members.length > VIRTUALIZE_AT ? 0 : undefined}
                   className="group flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  {dmAccount ? (
-                    <button
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setProfileTarget({
+                        name,
+                        accountId: accountId ?? (isSelf ? myAccountId : null),
+                        deviceId: m.user_id,
+                        isSelf,
+                      })
+                    }
+                    data-testid={`member-profile-${m.user_id}`}
+                    title={t("memberProfile.view")}
+                    aria-label={t("memberProfile.viewNamed", { name })}
+                    className="min-w-0 flex-1 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <IdentityCrest
+                      id={crestId}
+                      name={name}
+                      status={status}
+                      variant="compact"
+                    />
+                  </button>
+                  {dmAccount && (
+                    <Button
                       type="button"
+                      variant="ghost"
+                      size="icon"
                       onClick={openDm}
                       data-testid={`member-dm-${m.user_id}`}
                       title={t("members.openDm")}
-                      className="min-w-0 flex-1 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={t("members.openDm")}
+                      className="h-11 w-11 shrink-0 max-[400px]:hidden"
                     >
-                      <IdentityCrest
-                        id={crestId}
-                        name={name}
-                        status={status}
-                        variant="compact"
-                      />
-                    </button>
-                  ) : (
-                    <div className="min-w-0 flex-1">
-                      <IdentityCrest
-                        id={crestId}
-                        name={name}
-                        status={status}
-                        variant="compact"
-                      />
-                    </div>
+                      <MessageCircle className="h-4 w-4" />
+                    </Button>
                   )}
                   {memberIsOwner && (
                     <span
@@ -590,6 +605,17 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             </Button>
           )}
         </div>
+        <MemberProfileDialog
+          target={profileTarget}
+          onOpenChange={(next) => {
+            if (!next) setProfileTarget(null);
+          }}
+          onMessage={(accountId, name) => {
+            openConversation({ kind: "account", id: accountId, name });
+            setOpen(false);
+            setProfileTarget(null);
+          }}
+        />
       </DialogContent>
     </Dialog>
   );

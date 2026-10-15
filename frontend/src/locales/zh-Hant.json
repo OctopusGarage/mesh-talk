@@ -801,5 +801,20 @@
     "listingMismatch": "下載的資源包與市集條目不一致。",
     "rightsPending": "圖片使用權待審核",
     "idConflict": "其他類型的資源庫已使用這個資源包 ID。"
+  },
+  "memberProfile": {
+    "title": "成員資料",
+    "description": "此成員的身分與已知網絡資訊。",
+    "presenceUnavailable": "在線狀態不可用",
+    "accountId": "帳戶 ID",
+    "devices": "裝置",
+    "noDevice": "暫無裝置資訊",
+    "deviceId": "裝置 ID",
+    "postOffice": "郵局節點",
+    "networkEndpoint": "已知網絡端點",
+    "unavailable": "目前不可用",
+    "endpointHint": "這是最後已知的網絡路徑，可能指向中繼節點；它不表示地理位置。",
+    "view": "查看資料",
+    "viewNamed": "查看{{name}}的資料"
   }
 }

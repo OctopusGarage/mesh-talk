@@ -801,5 +801,20 @@
     "listingMismatch": "下载的资源包与市场条目不一致。",
     "rightsPending": "图片使用权待审核",
     "idConflict": "其他类型的资源库已使用这个资源包 ID。"
+  },
+  "memberProfile": {
+    "title": "成员资料",
+    "description": "此成员的身份和已知网络信息。",
+    "presenceUnavailable": "在线状态不可用",
+    "accountId": "账户 ID",
+    "devices": "设备",
+    "noDevice": "暂无设备信息",
+    "deviceId": "设备 ID",
+    "postOffice": "邮局节点",
+    "networkEndpoint": "已知网络端点",
+    "unavailable": "当前不可用",
+    "endpointHint": "这是最后已知的网络路径，可能指向中继节点；它不表示地理位置。",
+    "view": "查看资料",
+    "viewNamed": "查看{{name}}的资料"
   }
 }
