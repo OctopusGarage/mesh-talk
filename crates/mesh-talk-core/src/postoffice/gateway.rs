@@ -145,7 +145,28 @@ mod tests {
     use crate::discovery::query::{decode_query, encode_response};
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn respond_with_current_proof(
+        socket: UdpSocket,
+        identity: DeviceIdentity,
+        current: Arc<Mutex<Option<Announce>>>,
+        queries: Arc<AtomicUsize>,
+    ) {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (len, source) = socket.recv_from(&mut buf).await.unwrap();
+            let nonce = decode_query(&buf[..len]).unwrap();
+            let proof = current.lock().unwrap().clone();
+            let response = proof
+                .as_ref()
+                .map(|proof| encode_response(nonce, proof, &identity).unwrap())
+                .unwrap_or_else(|| vec![0]);
+            socket.send_to(&response, source).await.unwrap();
+            queries.fetch_add(1, Ordering::Release);
+        }
+    }
 
     #[tokio::test]
     async fn gateway_publishes_only_a_pinned_relay_with_a_distinct_port() {
@@ -252,5 +273,143 @@ mod tests {
                 .is_none()
         );
         responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_waits_for_its_pinned_proxy_port_to_become_available() {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let expected_id = identity.user_id();
+        let occupied = bind_dual_stack_listener(0).await.unwrap();
+        let remote_tcp_port = occupied.local_addr().unwrap().port();
+        let proof =
+            Announce::new_post_office_with_account(&identity, &account, "remote", remote_tcp_port);
+        let current = Arc::new(Mutex::new(Some(proof)));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = socket.local_addr().unwrap();
+        let responder = tokio::spawn(respond_with_current_proof(
+            socket,
+            identity,
+            Arc::clone(&current),
+            Arc::clone(&queries),
+        ));
+        let shared = Arc::new(Mutex::new(None));
+        let gateway = tokio::spawn(run_bridge_gateway(
+            Arc::clone(&shared),
+            remote_tcp_port.wrapping_add(1),
+            remote,
+            expected_id,
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while queries.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(shared.lock().unwrap().is_none());
+        drop(occupied);
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while shared.lock().unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the next signed refresh should bind the now-free proxy port");
+        responder.abort();
+        gateway.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_does_not_proxy_on_its_own_relay_port() {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let expected_id = identity.user_id();
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_tcp_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let proof =
+            Announce::new_post_office_with_account(&identity, &account, "remote", local_tcp_port);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = socket.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (len, source) = socket.recv_from(&mut buf).await.unwrap();
+            let nonce = decode_query(&buf[..len]).unwrap();
+            socket
+                .send_to(&encode_response(nonce, &proof, &identity).unwrap(), source)
+                .await
+                .unwrap();
+        });
+        let shared = Arc::new(Mutex::new(None));
+        let gateway = tokio::spawn(run_bridge_gateway(
+            Arc::clone(&shared),
+            local_tcp_port,
+            remote,
+            expected_id,
+        ));
+        responder.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(shared.lock().unwrap().is_none());
+        assert!(
+            TcpStream::connect((Ipv4Addr::LOCALHOST, local_tcp_port))
+                .await
+                .is_err()
+        );
+        gateway.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_replaces_the_proxy_when_a_pinned_relay_changes_tcp_port() {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let expected_id = identity.user_id();
+        let first = bind_dual_stack_listener(0).await.unwrap();
+        let second = bind_dual_stack_listener(0).await.unwrap();
+        let first_port = first.local_addr().unwrap().port();
+        let second_port = second.local_addr().unwrap().port();
+        drop((first, second));
+        let local_tcp_port = (1..=u16::MAX)
+            .find(|port| *port != first_port && *port != second_port)
+            .unwrap();
+        let first_proof =
+            Announce::new_post_office_with_account(&identity, &account, "remote", first_port);
+        let second_proof =
+            Announce::new_post_office_with_account(&identity, &account, "remote", second_port);
+        let current = Arc::new(Mutex::new(Some(first_proof)));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = socket.local_addr().unwrap();
+        let responder = tokio::spawn(respond_with_current_proof(
+            socket,
+            identity,
+            Arc::clone(&current),
+            Arc::new(AtomicUsize::new(0)),
+        ));
+        let shared = Arc::new(Mutex::new(None));
+        let gateway = tokio::spawn(run_bridge_gateway(
+            Arc::clone(&shared),
+            local_tcp_port,
+            remote,
+            expected_id,
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while shared.lock().unwrap().as_ref().map(|proof| proof.tcp_port) != Some(first_port) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        *current.lock().unwrap() = Some(second_proof);
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while shared.lock().unwrap().as_ref().map(|proof| proof.tcp_port) != Some(second_port) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a signed refresh should replace the old proxy");
+        responder.abort();
+        gateway.abort();
     }
 }

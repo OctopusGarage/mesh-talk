@@ -549,7 +549,11 @@ async fn file_enqueue_progress_never_waits_for_stalled_contact_tcp() {
         .unwrap();
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, []).unwrap();
-        let accepted = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        // Windows runners may pause a local disk/KDF task for more than a second
+        // under the full workspace suite. The separate accept assertion below
+        // still proves enqueue never waits for or initiates contact TCP.
+        let local_budget = if cfg!(windows) { 5 } else { 1 };
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(local_budget), async {
             if account_addressed {
                 a.enqueue_file_to_account_progress(
                     &ba.account_id(),

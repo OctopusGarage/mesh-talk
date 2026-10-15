@@ -111,26 +111,24 @@ impl Node {
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        panic!("peer {id} was not introduced");
+        panic!("expected peer was not introduced within 45 seconds");
     }
 
     fn await_relay(&mut self, id: &str, port: u16) {
         let end = Instant::now() + Duration::from_secs(30);
-        let mut last = String::new();
         while Instant::now() < end {
             self.send(&format!("/probe 127.0.0.1:{port}"));
             self.send("/peers");
             let poll_end = Instant::now() + Duration::from_secs(2);
             while Instant::now() < poll_end {
-                if let Ok(line) = self.lines.recv_timeout(Duration::from_millis(150)) {
-                    if line.contains(id) {
-                        return;
-                    }
-                    last = line;
+                if let Ok(line) = self.lines.recv_timeout(Duration::from_millis(150))
+                    && line.contains(id)
+                {
+                    return;
                 }
             }
         }
-        panic!("relay {id} was not discovered; last output: {last}");
+        panic!("expected relay was not discovered within 30 seconds");
     }
 }
 
