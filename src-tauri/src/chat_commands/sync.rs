@@ -74,6 +74,26 @@ mod tests {
 
         assert!(get_device_sync_policy(state.clone()).await.is_err());
         assert!(get_device_sync_status(state.clone()).await.is_err());
+        assert!(
+            set_device_sync_category(state.clone(), SyncCategory::History, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            get_account_preferences(state.clone(), SyncCategory::Contacts)
+                .await
+                .is_err()
+        );
+        assert!(
+            set_account_preference(
+                state.clone(),
+                SyncCategory::Contacts,
+                "alias".into(),
+                Some("Alice".into()),
+            )
+            .await
+            .is_err()
+        );
 
         let runtime = mesh_talk_core::node::NodeRuntime::start(
             root.path(),
@@ -135,6 +155,16 @@ mod tests {
                 SyncCategory::Appearance,
                 "invalid key".into(),
                 Some("dark".into()),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            set_account_preference(
+                app.state::<NodeState>(),
+                SyncCategory::History,
+                "history".into(),
+                Some("enabled".into()),
             )
             .await
             .is_err()

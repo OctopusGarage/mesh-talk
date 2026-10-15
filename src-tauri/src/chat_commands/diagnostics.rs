@@ -256,6 +256,58 @@ mod tests {
         assert!(get_presence(state.clone()).await.unwrap().is_empty());
         rescan_peers(state.clone()).await.unwrap();
 
+        let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let remote_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let remote = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "remote-diagnostics-test",
+            "Remote Diagnostics",
+            "test-password",
+            remote_port,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let remote_id = remote.user_id().to_owned();
+        let remote_account = remote.account_id().to_owned();
+        assert_eq!(remote.discovery_port(), remote_port);
+        managed
+            .0
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .probe_endpoint(std::net::SocketAddr::from(([127, 0, 0, 1], remote_port)))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if diag_get_peers(state.clone())
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|peer| peer.user_id == remote_id)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let discovered = diag_get_peers(state.clone()).await.unwrap();
+        assert!(
+            discovered
+                .iter()
+                .any(|peer| peer.name == "Remote Diagnostics")
+        );
+        assert!(get_presence(state.clone()).await.unwrap()[&remote_account].online);
+
         for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
             assert!(
                 probe_peer_endpoint(state.clone(), host.into(), None)
@@ -272,5 +324,6 @@ mod tests {
             .await
             .unwrap();
         managed.0.lock().await.take().unwrap().stop().await;
+        remote.stop().await;
     }
 }

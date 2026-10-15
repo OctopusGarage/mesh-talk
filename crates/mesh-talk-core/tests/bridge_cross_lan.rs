@@ -16,6 +16,16 @@ struct Node {
 
 impl Node {
     fn start(dir: &std::path::Path, name: &str, port: u16, relay: bool) -> Self {
+        Self::start_with_gateway(dir, name, port, relay, None)
+    }
+
+    fn start_with_gateway(
+        dir: &std::path::Path,
+        name: &str,
+        port: u16,
+        relay: bool,
+        gateway: Option<(std::net::SocketAddr, &str)>,
+    ) -> Self {
         std::fs::create_dir_all(dir).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_mesh-talk-node"));
         command
@@ -27,6 +37,13 @@ impl Node {
             .args(["--discovery-port", &port.to_string()]);
         if relay {
             command.args(["--post-office", "--bridge"]);
+            if let Some((remote, id)) = gateway {
+                command
+                    .arg("--bridge-peer")
+                    .arg(remote.to_string())
+                    .arg("--bridge-peer-id")
+                    .arg(id);
+            }
         } else {
             command.arg("--bridge-discovery");
         }
@@ -115,6 +132,72 @@ impl Node {
         }
         panic!("relay {id} was not discovered; last output: {last}");
     }
+}
+
+#[test]
+#[ignore = "spawns a real bridge CLI and a signed UDP responder"]
+fn bridge_gateway_exposes_only_the_pinned_remote_relay() {
+    use mesh_talk_core::discovery::Announce;
+    use mesh_talk_core::discovery::query::{decode_query, encode_response};
+    use mesh_talk_core::identity::account::Account;
+    use mesh_talk_core::identity::device::DeviceIdentity;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let remote_id = remote.user_id();
+    let account = Account::generate();
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let remote_tcp_port = reserved.local_addr().unwrap().port();
+    let proof =
+        Announce::new_post_office_with_account(&remote, &account, "remote", remote_tcp_port);
+    let responder = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    responder
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    let responder_addr = responder.local_addr().unwrap();
+
+    let e_udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let e_port = e_udp.local_addr().unwrap().port();
+    drop(e_udp);
+    let c_udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let c_port = c_udp.local_addr().unwrap().port();
+    drop(c_udp);
+    let mut e = Node::start_with_gateway(
+        &dir.path().join("e"),
+        "Gateway E",
+        e_port,
+        true,
+        Some((responder_addr, &remote_id)),
+    );
+    let e_id = e.identity("post-office ");
+    drop(reserved); // E can now bind the remote proof's TCP port as a local proxy.
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let responder_task = std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        while !stopped.load(Ordering::Relaxed) {
+            if let Ok((len, source)) = responder.recv_from(&mut buf)
+                && let Some(nonce) = decode_query(&buf[..len])
+            {
+                responder
+                    .send_to(&encode_response(nonce, &proof, &remote).unwrap(), source)
+                    .unwrap();
+            }
+        }
+    });
+
+    let mut c = Node::start(&dir.path().join("c"), "Client C", c_port, false);
+    c.identity("node ");
+    c.await_relay(&e_id, e_port);
+    c.await_peer(&remote_id);
+
+    stop.store(true, Ordering::Relaxed);
+    responder_task.join().unwrap();
+    c.send("/peers");
+    e.send("/peers");
 }
 
 impl Drop for Node {

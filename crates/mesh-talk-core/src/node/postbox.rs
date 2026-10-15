@@ -356,6 +356,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_listener_returns_a_pinned_gateway_proof_over_noise() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = DeviceIdentity::generate();
+        let relay_keys = relay.secret_bytes();
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(
+                &root.path().join("relay.log"),
+                "pw",
+                DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+            )
+            .unwrap(),
+        ));
+        let remote = DeviceIdentity::generate();
+        let remote_account = Account::generate();
+        let remote_proof =
+            Announce::new_post_office_with_account(&remote, &remote_account, "remote", 47475);
+        let gateway = Arc::new(Mutex::new(Some(remote_proof.clone())));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_bridge_relay_accept_loop_with_gateway(
+            relay, listener, store, gateway,
+        ));
+
+        let client = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof = Announce::new_with_account(&client, &account, "client", 47500);
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut channel = SecureChannel::connect_with_presence(stream, &client, None, Some(&proof))
+            .await
+            .unwrap();
+        channel.send(bridge_directory::request()).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), channel.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (peers, last) = bridge_directory::decode_response(&response).unwrap();
+        assert!(last);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].user_id, remote_proof.user_id);
+        drop(channel);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn production_relay_rejects_clear_event_headers() {
         let dir = tempfile::tempdir().unwrap();
         let sender = DeviceIdentity::generate();
