@@ -58,6 +58,7 @@ import {
   settingsCategory,
   settingsScrollBehavior,
 } from "./settingsScroll";
+import { createSettingSaveQueue } from "./settingSaveQueue";
 
 /** A section group: a small display-font label over a stack of rows. */
 function Section({
@@ -169,7 +170,10 @@ export function SettingsDialog({
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [autostartLoaded, setAutostartLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
-  const savingRef = useRef(false);
+  const saveQueue = useRef<ReturnType<typeof createSettingSaveQueue> | null>(
+    null,
+  );
+  if (!saveQueue.current) saveQueue.current = createSettingSaveQueue(setSaving);
   const loadGeneration = useRef(0);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsErrorKind, setSettingsErrorKind] = useState<"load" | "save">(
@@ -181,48 +185,53 @@ export function SettingsDialog({
     setSettingsLoaded(false);
     setAutostartLoaded(false);
     setSettingsError(null);
-    void settingsApi.get().then(
-      (s) => {
-        if (request !== loadGeneration.current) return;
-        setMinimizeToTray(s.minimize_to_tray);
-        setNotifications(s.notifications);
-        setDownloadDir(s.download_dir);
-        setStaySignedIn(s.stay_signed_in);
-        setRetentionDays(s.retention_days);
-        setCallsEnabled(s.calls_enabled);
-        setPostOfficeEnabled(s.post_office_enabled);
-        setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
-        setBridgeHubId(s.bridge_hub_id ?? "");
-        setRingtone(asRingtoneId(s.ringtone));
-        const policy = privacyFromSettings(s);
-        setPrivacy(policy);
-        useSettings.getState().setPrivacy(policy);
-        setSettingsLoaded(true);
-      },
-      (e) => {
-        if (request === loadGeneration.current) {
-          setSettingsErrorKind("load");
-          setSettingsError(
-            t("settings.loadFailed", { error: errorMessage(e) }),
-          );
-        }
-      },
-    );
-    void settingsApi.autostartEnabled().then(
-      (on) => {
-        if (request !== loadGeneration.current) return;
-        setLaunchAtLogin(on);
-        setAutostartLoaded(true);
-      },
-      (e) => {
-        if (request === loadGeneration.current) {
-          setSettingsErrorKind("load");
-          setSettingsError(
-            t("settings.loadFailed", { error: errorMessage(e) }),
-          );
-        }
-      },
-    );
+    const pendingSaves = saveQueue.current!.whenIdle();
+    void pendingSaves
+      .then(() => settingsApi.get())
+      .then(
+        (s) => {
+          if (request !== loadGeneration.current) return;
+          setMinimizeToTray(s.minimize_to_tray);
+          setNotifications(s.notifications);
+          setDownloadDir(s.download_dir);
+          setStaySignedIn(s.stay_signed_in);
+          setRetentionDays(s.retention_days);
+          setCallsEnabled(s.calls_enabled);
+          setPostOfficeEnabled(s.post_office_enabled);
+          setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
+          setBridgeHubId(s.bridge_hub_id ?? "");
+          setRingtone(asRingtoneId(s.ringtone));
+          const policy = privacyFromSettings(s);
+          setPrivacy(policy);
+          useSettings.getState().setPrivacy(policy);
+          setSettingsLoaded(true);
+        },
+        (e) => {
+          if (request === loadGeneration.current) {
+            setSettingsErrorKind("load");
+            setSettingsError(
+              t("settings.loadFailed", { error: errorMessage(e) }),
+            );
+          }
+        },
+      );
+    void pendingSaves
+      .then(() => settingsApi.autostartEnabled())
+      .then(
+        (on) => {
+          if (request !== loadGeneration.current) return;
+          setLaunchAtLogin(on);
+          setAutostartLoaded(true);
+        },
+        (e) => {
+          if (request === loadGeneration.current) {
+            setSettingsErrorKind("load");
+            setSettingsError(
+              t("settings.loadFailed", { error: errorMessage(e) }),
+            );
+          }
+        },
+      );
   }, [t]);
 
   // Load current state whenever the dialog opens.
@@ -230,21 +239,23 @@ export function SettingsDialog({
     if (open) loadCurrentSettings();
   }, [open, loadCurrentSettings]);
 
-  const saveSetting = async (write: () => Promise<void>, apply: () => void) => {
-    if (!settingsLoaded || savingRef.current) return;
-    savingRef.current = true;
-    setSaving(true);
+  const saveSetting = (write: () => Promise<void>, apply: () => void) => {
+    if (!settingsLoaded) return Promise.resolve();
+    const request = loadGeneration.current;
     setSettingsError(null);
-    try {
-      await write();
-      apply();
-    } catch (e) {
-      setSettingsErrorKind("save");
-      setSettingsError(t("settings.saveFailed", { error: errorMessage(e) }));
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
+    return saveQueue.current!.enqueue(
+      write,
+      () => {
+        if (request === loadGeneration.current) apply();
+      },
+      (error) => {
+        if (request !== loadGeneration.current) return;
+        setSettingsErrorKind("save");
+        setSettingsError(
+          t("settings.saveFailed", { error: errorMessage(error) }),
+        );
+      },
+    );
   };
 
   const onMinimize = (v: boolean) => {

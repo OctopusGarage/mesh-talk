@@ -20,6 +20,20 @@ const MAX_MEMBERS: usize = 128;
 pub type GatewayRoute = (String, u16);
 pub type DirectoryPage = (Vec<Announce>, Option<GatewayRoute>, bool);
 
+fn valid_directory_proof(proof: &Announce) -> bool {
+    proof.verify()
+        && proof.account_id().is_some()
+        && proof.tcp_port != 0
+        && proof.name.len() <= 1024
+}
+
+fn valid_gateway_route(proofs: &[Announce], gateway: &(String, u16)) -> bool {
+    gateway.1 != 0
+        && proofs.iter().any(|proof| {
+            proof.post_office && proof.user_id == gateway.0 && valid_directory_proof(proof)
+        })
+}
+
 #[derive(Default)]
 pub struct BridgeDirectory {
     members: HashMap<String, (Announce, Instant)>,
@@ -46,12 +60,7 @@ impl BridgeDirectory {
         self.members
             .retain(|_, (_, seen)| now.saturating_duration_since(*seen) < TTL);
         let proof = presence.filter(|proof| {
-            publicly_visible
-                && proof.verify()
-                && proof.public() == *public
-                && proof.account_id().is_some()
-                && proof.tcp_port != 0
-                && proof.name.len() <= 1024
+            publicly_visible && valid_directory_proof(proof) && proof.public() == *public
         })?;
         if self.members.len() >= MAX_MEMBERS && !self.members.contains_key(&proof.user_id) {
             return None;
@@ -70,10 +79,7 @@ impl BridgeDirectory {
                 .expect("gateway proof lock not poisoned")
                 .clone()
             && remote.post_office
-            && remote.verify()
-            && remote.account_id().is_some()
-            && remote.tcp_port != 0
-            && remote.name.len() <= 1024
+            && valid_directory_proof(&remote.announce)
         {
             proofs.push(remote.announce);
         }
@@ -82,9 +88,8 @@ impl BridgeDirectory {
 
     pub fn gateway_route(&self) -> Option<(String, u16)> {
         let proof = self.gateway.as_ref()?.lock().ok()?.clone()?;
-        (proof.announce.verify()
-            && proof.announce.post_office
-            && proof.announce.account_id().is_some()
+        (proof.announce.post_office
+            && valid_directory_proof(&proof.announce)
             && proof.proxy_port != 0)
             .then_some((proof.announce.user_id, proof.proxy_port))
     }
@@ -103,28 +108,7 @@ pub fn legacy_request() -> &'static [u8] {
 }
 
 pub fn encode_response(proofs: &[Announce]) -> Option<Vec<Vec<u8>>> {
-    let mut ordered: Vec<_> = proofs
-        .iter()
-        .filter(|proof| proof.verify())
-        .cloned()
-        .collect();
-    ordered.sort_by(|a, b| a.user_id.cmp(&b.user_id));
-    let mut pages = Vec::new();
-    let mut selected = Vec::new();
-    for proof in ordered {
-        selected.push(proof);
-        let encoded = bincode::serialize(&selected).ok()?;
-        if RESPONSE.len() + 1 + encoded.len() > MAX_PLAINTEXT {
-            let overflow = selected.pop()?;
-            if selected.is_empty() {
-                return None;
-            }
-            pages.push(frame(&selected, false)?);
-            selected = vec![overflow];
-        }
-    }
-    pages.push(frame(&selected, true)?);
-    Some(pages)
+    encode_pages(proofs, frame)
 }
 
 const RESPONSE_V2: &[u8] = b"MTBD2R";
@@ -133,17 +117,24 @@ pub fn encode_response_with_gateway(
     proofs: &[Announce],
     gateway: Option<(String, u16)>,
 ) -> Option<Vec<Vec<u8>>> {
-    if gateway.as_ref().is_some_and(|(id, port)| {
-        *port == 0
-            || !proofs
-                .iter()
-                .any(|proof| proof.post_office && &proof.user_id == id)
-    }) {
+    if gateway
+        .as_ref()
+        .is_some_and(|route| !valid_gateway_route(proofs, route))
+    {
         return None;
     }
+    encode_pages(proofs, |selected, last| {
+        frame_v2(selected, gateway_on_page(selected, gateway.as_ref()), last)
+    })
+}
+
+fn encode_pages(
+    proofs: &[Announce],
+    frame_page: impl Fn(&[Announce], bool) -> Option<Vec<u8>>,
+) -> Option<Vec<Vec<u8>>> {
     let mut ordered: Vec<_> = proofs
         .iter()
-        .filter(|proof| proof.verify())
+        .filter(|proof| valid_directory_proof(proof))
         .cloned()
         .collect();
     ordered.sort_by(|a, b| a.user_id.cmp(&b.user_id));
@@ -151,30 +142,16 @@ pub fn encode_response_with_gateway(
     let mut selected = Vec::new();
     for proof in ordered {
         selected.push(proof);
-        if frame_v2(
-            &selected,
-            gateway_on_page(&selected, gateway.as_ref()),
-            false,
-        )
-        .is_none()
-        {
+        if frame_page(&selected, false).is_none() {
             let overflow = selected.pop()?;
             if selected.is_empty() {
                 return None;
             }
-            pages.push(frame_v2(
-                &selected,
-                gateway_on_page(&selected, gateway.as_ref()),
-                false,
-            )?);
+            pages.push(frame_page(&selected, false)?);
             selected = vec![overflow];
         }
     }
-    pages.push(frame_v2(
-        &selected,
-        gateway_on_page(&selected, gateway.as_ref()),
-        true,
-    )?);
+    pages.push(frame_page(&selected, true)?);
     Some(pages)
 }
 
@@ -204,18 +181,10 @@ pub fn decode_response_with_gateway(bytes: &[u8]) -> Option<DirectoryPage> {
         .deserialize(&body[1..])
         .ok()?;
     if proofs.len() > MAX_MEMBERS
-        || proofs.iter().any(|proof| {
-            !proof.verify()
-                || proof.account_id().is_none()
-                || proof.tcp_port == 0
-                || proof.name.len() > 1024
-        })
-        || gateway.as_ref().is_some_and(|(id, port)| {
-            *port == 0
-                || !proofs
-                    .iter()
-                    .any(|proof| proof.post_office && &proof.user_id == id)
-        })
+        || proofs.iter().any(|proof| !valid_directory_proof(proof))
+        || gateway
+            .as_ref()
+            .is_some_and(|route| !valid_gateway_route(&proofs, route))
     {
         return None;
     }
@@ -241,14 +210,8 @@ pub fn decode_response(bytes: &[u8]) -> Option<(Vec<Announce>, bool)> {
         .reject_trailing_bytes()
         .deserialize(&body[1..])
         .ok()?;
-    (proofs.len() <= MAX_MEMBERS
-        && proofs.iter().all(|proof| {
-            proof.verify()
-                && proof.account_id().is_some()
-                && proof.tcp_port != 0
-                && proof.name.len() <= 1024
-        }))
-    .then_some((proofs, last))
+    (proofs.len() <= MAX_MEMBERS && proofs.iter().all(valid_directory_proof))
+        .then_some((proofs, last))
 }
 
 #[cfg(test)]
@@ -316,6 +279,16 @@ mod tests {
         let mut trailing = encoded[0].clone();
         trailing.push(0);
         assert!(decode_response(&trailing).is_none());
+    }
+
+    #[test]
+    fn encoder_omits_proofs_that_the_decoder_cannot_accept() {
+        let identity = DeviceIdentity::generate();
+        let unbound = Announce::new(&identity, "unbound", 47475);
+        let encoded = encode_response(std::slice::from_ref(&unbound)).unwrap();
+        assert_eq!(decode_response(&encoded[0]), Some((vec![], true)));
+        let hub = Announce::new_post_office(&identity, "unbound hub", 47475);
+        assert!(encode_response_with_gateway(&[hub], Some((identity.user_id(), 50000))).is_none());
     }
 
     #[test]

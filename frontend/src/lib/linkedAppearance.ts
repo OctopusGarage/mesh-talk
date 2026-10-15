@@ -1,5 +1,6 @@
 import { chat } from "@/lib/api/chat";
 import { appearanceValues, applyLinkedAppearance, useTheme } from "@/lib/theme";
+import { createLinkedPreferencePublisher } from "./linkedPreferencePublisher";
 
 /** Preserve the existing device's saved look before it issues a pairing code. */
 export async function publishAppearanceBeforeLink(): Promise<void> {
@@ -19,40 +20,16 @@ export function startLinkedAppearance(): () => void {
   let active = true;
   let polling = false;
   let applying = false;
-  let enabled = false;
-  const revisions = new Map<string, number>();
-  const pending = new Set<string>();
-  const dirty = new Map<string, string>();
+  const publisher = createLinkedPreferencePublisher(
+    (key, value) => chat.setAccountPreference("appearance", key, value),
+    (error) => console.warn("Could not save linked appearance", error),
+  );
   let previous = appearanceValues();
-  const publish = (key: string, value: string) => {
-    dirty.set(key, value);
-    if (!enabled || pending.has(key)) return;
-    pending.add(key);
-    void chat
-      .setAccountPreference("appearance", key, value)
-      .then((record) => {
-        if (active) {
-          revisions.set(
-            key,
-            Math.max(revisions.get(key) ?? 0, record.revision),
-          );
-          if (dirty.get(key) === value) dirty.delete(key);
-        }
-      })
-      .catch((error) => {
-        console.warn("Could not save linked appearance", error);
-      })
-      .finally(() => {
-        pending.delete(key);
-        if (active && dirty.has(key) && dirty.get(key) !== value)
-          publish(key, dirty.get(key)!);
-      });
-  };
   const unsubscribe = useTheme.subscribe(() => {
     const next = appearanceValues();
     if (active && !applying) {
       for (const [key, value] of Object.entries(next)) {
-        if (previous[key] !== value) publish(key, value);
+        if (previous[key] !== value) publisher.publish(key, value);
       }
     }
     previous = next;
@@ -66,21 +43,14 @@ export function startLinkedAppearance(): () => void {
         chat.getAccountPreferences("appearance"),
       ]);
       if (!active) return;
-      enabled = policy.appearance;
-      if (enabled) {
-        for (const [key, value] of dirty) publish(key, value);
-      }
+      publisher.setEnabled(policy.appearance);
       if (policy.appearance) {
         applying = true;
         try {
           for (const record of records) {
-            if (
-              !pending.has(record.key) &&
-              !dirty.has(record.key) &&
-              record.revision > (revisions.get(record.key) ?? 0)
-            ) {
+            if (publisher.shouldApply(record.key, record.revision)) {
               applyLinkedAppearance(record.key, record.value);
-              revisions.set(record.key, record.revision);
+              publisher.markApplied(record.key, record.revision);
             }
           }
         } finally {
@@ -100,6 +70,7 @@ export function startLinkedAppearance(): () => void {
   const timer = window.setInterval(() => void reconcile(), 10_000);
   return () => {
     active = false;
+    publisher.stop();
     unsubscribe();
     window.clearInterval(timer);
   };

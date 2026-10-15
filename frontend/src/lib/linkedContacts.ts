@@ -2,6 +2,7 @@ import { chat } from "@/lib/api/chat";
 import { contactPolicy, favorites } from "@/lib/api";
 import { useChat } from "@/store/chat";
 import { useContactPolicy } from "@/store/contactPolicy";
+import { createLinkedPreferencePublisher } from "./linkedPreferencePublisher";
 
 function favoriteValue(record: {
   pinned: boolean;
@@ -79,35 +80,11 @@ export function startLinkedContacts(owner: string): () => void {
   let active = true;
   let polling = false;
   let initialized = false;
-  let enabled = false;
   const baseline = new Map<string, string>();
-  const revisions = new Map<string, number>();
-  const pending = new Set<string>();
-  const dirty = new Map<string, string | null>();
-  const publish = (key: string, value: string | null) => {
-    dirty.set(key, value);
-    if (!enabled || pending.has(key)) return;
-    pending.add(key);
-    void chat
-      .setAccountPreference("contacts", key, value)
-      .then((record) => {
-        if (active) {
-          revisions.set(
-            key,
-            Math.max(revisions.get(key) ?? 0, record.revision),
-          );
-          if (dirty.get(key) === value) dirty.delete(key);
-        }
-      })
-      .catch((error) =>
-        console.warn("Could not save linked contact preference", error),
-      )
-      .finally(() => {
-        pending.delete(key);
-        if (active && dirty.has(key) && dirty.get(key) !== value)
-          publish(key, dirty.get(key)!);
-      });
-  };
+  const publisher = createLinkedPreferencePublisher(
+    (key, value) => chat.setAccountPreference("contacts", key, value),
+    (error) => console.warn("Could not save linked contact preference", error),
+  );
   const reconcile = async () => {
     if (!active || polling) return;
     polling = true;
@@ -118,11 +95,11 @@ export function startLinkedContacts(owner: string): () => void {
         localValues(owner),
       ]);
       if (!active) return;
-      enabled = policy.contacts;
+      publisher.setEnabled(policy.contacts);
       const remoteByKey = new Map(remote.map((record) => [record.key, record]));
       if (!initialized) {
         for (const [key, value] of local) {
-          if (!remoteByKey.has(key)) publish(key, value);
+          if (!remoteByKey.has(key)) publisher.publish(key, value);
         }
         for (const [key, value] of local) baseline.set(key, value);
         initialized = true;
@@ -133,24 +110,15 @@ export function startLinkedContacts(owner: string): () => void {
           if (before !== after) {
             baseline.delete(key);
             if (after !== null) baseline.set(key, after);
-            publish(key, after);
+            publisher.publish(key, after);
           }
         }
       }
-      if (enabled) {
-        for (const [key, value] of dirty) publish(key, value);
-      }
       if (policy.contacts) {
         for (const record of remote) {
-          if (
-            !active ||
-            pending.has(record.key) ||
-            dirty.has(record.key) ||
-            record.revision <= (revisions.get(record.key) ?? 0)
-          )
-            continue;
+          if (!publisher.shouldApply(record.key, record.revision)) continue;
           await applyContactPreference(owner, record.key, record.value);
-          revisions.set(record.key, record.revision);
+          publisher.markApplied(record.key, record.revision);
           if (record.value === null) baseline.delete(record.key);
           else baseline.set(record.key, record.value);
         }
@@ -166,6 +134,7 @@ export function startLinkedContacts(owner: string): () => void {
   const timer = window.setInterval(() => void reconcile(), 10_000);
   return () => {
     active = false;
+    publisher.stop();
     window.clearInterval(timer);
   };
 }
