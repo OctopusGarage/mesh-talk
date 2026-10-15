@@ -48,7 +48,10 @@ import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { SettingsDialog } from "./SettingsDialog";
 import { ContactContextMenu } from "./HiddenContactsDialog";
 import { useContactPolicy } from "@/store/contactPolicy";
+import { isContactPeer } from "@/lib/contactVisibility";
+import { peerAccountKey } from "@/lib/rosterProjection";
 import { ProfileDialog } from "./ProfileDialog";
+import { MemberProfileDialog } from "./MemberProfileDialog";
 import { AboutDialog } from "./AboutDialog";
 import { useAuth } from "@/store/auth";
 import { chat, diag } from "@/lib/api";
@@ -104,6 +107,7 @@ function Row({
 }) {
   const { t } = useTranslation();
   const [actionsOpen, setActionsOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const active = useChat((s) => s.active);
   const unread = useChat((s) => s.unread[convKey(conv)] ?? 0);
   const history = useChat((s) => s.messages[convKey(conv)]);
@@ -130,6 +134,23 @@ function Row({
         isActive ? "bg-signal/10" : "hover:bg-accent/45",
       )}
     >
+      {!channel && (
+        <button
+          type="button"
+          onClick={() => setProfileOpen(true)}
+          data-testid={`contact-profile-${conv.id}`}
+          aria-label={t("memberProfile.viewNamed", { name: conv.name })}
+          className="relative shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <IdentityGlyph seed={conv.id} size={36} title={conv.name} />
+          <PresenceDot
+            status={status}
+            size="md"
+            label={presenceLabel(presence, t)}
+            className="pointer-events-none absolute -bottom-0.5 -right-0.5"
+          />
+        </button>
+      )}
       <button
         onClick={() => open(conv)}
         data-conv-option
@@ -140,22 +161,11 @@ function Row({
         aria-label={`${conv.name}${summary ? `, ${summary}` : ""}`}
         className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <div className="relative shrink-0">
-          {channel ? (
+        {channel && (
+          <div className="relative shrink-0">
             <GroupAvatar channelId={conv.id} size={36} title={conv.name} />
-          ) : (
-            <IdentityGlyph seed={conv.id} size={36} title={conv.name} />
-          )}
-          {/* Presence overlays the glyph — the signature living-LAN cue. */}
-          {!channel && (
-            <PresenceDot
-              status={status}
-              size="md"
-              label={presenceLabel(presence, t)}
-              className="absolute -bottom-0.5 -right-0.5"
-            />
-          )}
-        </div>
+          </div>
+        )}
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-baseline gap-2">
             <span
@@ -250,12 +260,17 @@ function Row({
       </Popover>
     </div>
   );
-  return channel ? (
-    row
-  ) : (
-    <ContactContextMenu account={conv.id} name={conv.name}>
-      {row}
-    </ContactContextMenu>
+  if (channel) return row;
+  return (
+    <>
+      <ContactContextMenu account={conv.id} name={conv.name}>
+        {row}
+      </ContactContextMenu>
+      <MemberProfileDialog
+        target={profileOpen ? { name: conv.name, accountId: conv.id } : null}
+        onOpenChange={setProfileOpen}
+      />
+    </>
   );
 }
 
@@ -529,8 +544,8 @@ export function Sidebar() {
   const networkPeople = useMemo(() => {
     const online = new Set<string>();
     for (const p of peers) {
-      if (p.post_office) continue;
-      const account = p.account_id ?? p.user_id;
+      if (!isContactPeer(p)) continue;
+      const account = peerAccountKey(p);
       if (account === myAccountId) continue;
       if (presenceMap[account]?.online) online.add(account);
     }
@@ -540,9 +555,9 @@ export function Sidebar() {
     if (!policyLoaded) return 0;
     const online = new Set<string>();
     for (const p of peers) {
-      const account = p.account_id ?? p.user_id;
+      const account = peerAccountKey(p);
       if (
-        !p.post_office &&
+        isContactPeer(p) &&
         account !== myAccountId &&
         !hiddenContacts[account] &&
         presenceMap[account]?.online

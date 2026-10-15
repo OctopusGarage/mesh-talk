@@ -3,7 +3,7 @@
 The machine reached through SSH alias `windows10` currently runs Windows 11
 Home (build 26200). Its `MeshTalk-PostOffice` Scheduled Task runs the headless
 relay as `SYSTEM` at boot. The binary is
-`C:\ProgramData\MeshTalk\PostOffice\mesh-talk-node.exe`; its keystore, password
+`D:\ProgramData\MeshTalk\PostOffice\mesh-talk-node.exe`; its keystore, password
 file, `relay.log`, and `node.lock` are in the `data` subdirectory. TCP 47475
 serves peers; signed UDP multicast discovery uses 47474. Firewall rules allow
 these ports from `LocalSubnet` on all network profiles.
@@ -28,10 +28,10 @@ RUSTC="$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/rustc" \
   build --release --target x86_64-pc-windows-gnu \
   -p mesh-talk-core --bin mesh-talk-node
 scp target/x86_64-pc-windows-gnu/release/mesh-talk-node.exe \
-  windows10:'C:/Users/kings/mesh-talk-node.next.exe'
+  windows10:'D:/mesh-talk-node.next.exe'
 scp scripts/install-post-office-windows.ps1 \
-  windows10:'C:/Users/kings/install-post-office-windows.ps1'
-ssh windows10 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\kings\install-post-office-windows.ps1 -StagedBinary C:\Users\kings\mesh-talk-node.next.exe -Name windows10-post-office'
+  windows10:'D:/install-post-office-windows.ps1'
+ssh windows10 'powershell -NoProfile -ExecutionPolicy Bypass -File D:\install-post-office-windows.ps1 -StagedBinary D:\mesh-talk-node.next.exe -Name windows10-post-office'
 ```
 
 Run those commands for a first install and for each update. The installer
@@ -48,8 +48,8 @@ it refuses a lock held by a live process.
 
 ```bash
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47475 | Select-Object LocalAddress,LocalPort,OwningProcess"'
-ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).Principal.UserId; icacls C:\ProgramData\MeshTalk\PostOffice\data\password; icacls C:\ProgramData\MeshTalk\PostOffice\data\identity.keystore"'
-ssh windows10 'powershell -NoProfile -Command "Get-Content C:\ProgramData\MeshTalk\PostOffice\data\node.lock"'
+ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).Principal.UserId; icacls D:\ProgramData\MeshTalk\PostOffice\data\password; icacls D:\ProgramData\MeshTalk\PostOffice\data\identity.keystore"'
+ssh windows10 'powershell -NoProfile -Command "Get-Content D:\ProgramData\MeshTalk\PostOffice\data\node.lock"'
 ssh windows10 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice"'
 ```
 
@@ -83,6 +83,8 @@ MESH_TALK_E2E_WINDOWS10_RELAY_ID=<relay-id> cargo test -p mesh-talk-core --lib w
 ```
 
 Each command targets the installed Windows relay by its signed device ID.
+The disposable recipient verifies the sender's full device fingerprint before
+going offline, as required for automatic relay recovery.
 The first command separately asserts receipt of the offline DM and the private
 channel event after the sender stops and the relay restarts. The second checks
 an offline file offer, then an exact byte roundtrip after the sender returns.

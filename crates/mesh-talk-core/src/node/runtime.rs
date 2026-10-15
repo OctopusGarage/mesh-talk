@@ -68,6 +68,10 @@ fn profile_republish_targets(
     targets
 }
 
+fn channel_invitee_identity(peer: PeerRecord) -> Option<PublicIdentity> {
+    (!peer.post_office).then_some(peer.public)
+}
+
 /// Errors starting the node runtime.
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -760,6 +764,14 @@ impl NodeRuntime {
     /// The public identity of a known peer (to derive its DM conversation), if known.
     pub fn peer_public(&self, user_id: &str) -> Option<PublicIdentity> {
         self.node.routing_peer(user_id).map(|p| p.public)
+    }
+
+    /// Resolve a known chat peer for channel membership. A post office is a
+    /// transport node, not a participant that can accept a channel invitation.
+    pub fn channel_invitee_public(&self, user_id: &str) -> Option<PublicIdentity> {
+        self.node
+            .routing_peer(user_id)
+            .and_then(channel_invitee_identity)
     }
 
     /// Send a DM to a known peer by user-id.

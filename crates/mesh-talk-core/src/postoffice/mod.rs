@@ -15,8 +15,11 @@ use crate::eventlog::persist::PersistentEventLog;
 use crate::eventlog::store::AppendOutcome;
 use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
+use crate::storage::record_log::EncryptedRecordLog;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod election;
 pub mod gateway;
@@ -34,6 +37,25 @@ const RETENTION_SLACK: usize = 5_000;
 /// Bound ciphertext storage even when every event is a large file chunk.
 const MAX_RELAY_BYTES: usize = 512 * 1024 * 1024;
 const RETENTION_BYTE_SLACK: usize = 16 * 1024 * 1024;
+const MAX_RELAY_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const RETENTION_MAGIC: &[u8; 6] = b"MTPOR1";
+
+#[derive(Serialize, Deserialize)]
+struct MailboxArrival {
+    conversation: ConversationId,
+    first_seen_secs: u64,
+}
+
+fn unix_seconds(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+fn next_expiry(first_seen: &HashMap<ConversationId, u64>) -> Option<u64> {
+    first_seen
+        .values()
+        .map(|seen| seen.saturating_add(MAX_RELAY_AGE.as_secs()))
+        .min()
+}
 
 fn stored_bytes(event: &Event) -> usize {
     event
@@ -49,6 +71,9 @@ fn stored_bytes(event: &Event) -> usize {
 /// WHOLE mailboxes once it grows past the event or byte cap.
 pub struct PostOffice {
     log: PersistentEventLog,
+    arrivals: EncryptedRecordLog<MailboxArrival>,
+    first_seen: HashMap<ConversationId, u64>,
+    next_expiry_secs: Option<u64>,
     identity: DeviceIdentity,
     /// Per-conversation last-touch tick, for least-recently-used eviction.
     touch: HashMap<ConversationId, u64>,
@@ -66,7 +91,40 @@ pub struct PostOffice {
 impl PostOffice {
     /// Open (or create) the post office's replica at `path`, under `identity`.
     pub fn open(path: &Path, password: &str, identity: DeviceIdentity) -> Result<Self, LogError> {
+        Self::open_at(path, password, identity, SystemTime::now())
+    }
+
+    fn open_at(
+        path: &Path,
+        password: &str,
+        identity: DeviceIdentity,
+        now: SystemTime,
+    ) -> Result<Self, LogError> {
         let log = PersistentEventLog::open(path, password)?;
+        let (mut arrivals, stored_arrivals) = EncryptedRecordLog::<MailboxArrival>::open(
+            &path.with_extension("retention"),
+            password,
+            RETENTION_MAGIC,
+        )?;
+        let mut first_seen = HashMap::new();
+        for record in stored_arrivals {
+            first_seen.insert(record.conversation, record.first_seen_secs);
+        }
+        let conversations = log.conversations();
+        first_seen.retain(|conversation, _| conversations.contains(conversation));
+        for conversation in &conversations {
+            first_seen
+                .entry(*conversation)
+                .or_insert_with(|| unix_seconds(now));
+        }
+        let records = first_seen
+            .iter()
+            .map(|(&conversation, &first_seen_secs)| MailboxArrival {
+                conversation,
+                first_seen_secs,
+            })
+            .collect::<Vec<_>>();
+        arrivals.rewrite(&records)?;
         // Seed LRU order from the existing conversations (file order ≈ recency); live
         // accepts refine it. Distinct ticks so eviction has a deterministic order.
         let mut touch = HashMap::new();
@@ -83,8 +141,11 @@ impl PostOffice {
             .fold(0usize, |total, event| {
                 total.saturating_add(stored_bytes(event))
             });
-        Ok(Self {
+        let mut office = Self {
             log,
+            arrivals,
+            next_expiry_secs: next_expiry(&first_seen),
+            first_seen,
             identity,
             touch,
             tick,
@@ -95,16 +156,40 @@ impl PostOffice {
             max_bytes: MAX_RELAY_BYTES,
             byte_slack: RETENTION_BYTE_SLACK,
             opaque_only: false,
-        })
+        };
+        office.prune_expired_at(now)?;
+        Ok(office)
     }
 
     /// Append + track recency + enforce the storage bound. Shared by `accept` and the
     /// `SyncStore::ingest` relay path so retention applies however an event arrives.
     fn record(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        self.record_at(event, SystemTime::now())
+    }
+
+    fn record_at(&mut self, event: Event, now: SystemTime) -> Result<AppendOutcome, LogError> {
+        if self
+            .next_expiry_secs
+            .is_some_and(|expiry| unix_seconds(now) >= expiry)
+        {
+            self.prune_expired_at(now)?;
+        }
         let conv = event.conversation_id;
         let event_bytes = stored_bytes(&event);
+        let new_mailbox = !self.first_seen.contains_key(&conv) && !self.log.has(&event.id);
+        let first_seen_secs = unix_seconds(now);
+        if new_mailbox {
+            self.arrivals.append_durable(&MailboxArrival {
+                conversation: conv,
+                first_seen_secs,
+            })?;
+        }
         let outcome = self.log.append(event)?;
         if matches!(outcome, AppendOutcome::Appended) {
+            if new_mailbox {
+                self.first_seen.insert(conv, first_seen_secs);
+                self.next_expiry_secs = next_expiry(&self.first_seen);
+            }
             self.total += 1;
             self.bytes = self.bytes.saturating_add(event_bytes);
             self.tick += 1;
@@ -112,6 +197,67 @@ impl PostOffice {
             self.enforce_retention()?;
         }
         Ok(outcome)
+    }
+
+    /// Expire whole mailboxes so any retained event remains causally complete.
+    /// Existing logs without arrival metadata begin their clock on upgrade.
+    pub fn prune_expired(&mut self) -> Result<(), LogError> {
+        self.prune_expired_at(SystemTime::now())
+    }
+
+    fn prune_expired_at(&mut self, now: SystemTime) -> Result<(), LogError> {
+        if self
+            .next_expiry_secs
+            .is_none_or(|expiry| unix_seconds(now) < expiry)
+        {
+            return Ok(());
+        }
+        let cutoff = unix_seconds(now).saturating_sub(MAX_RELAY_AGE.as_secs());
+        let keep = self
+            .log
+            .conversations()
+            .into_iter()
+            .filter(|conversation| {
+                self.first_seen
+                    .get(conversation)
+                    .is_some_and(|&first_seen| first_seen > cutoff)
+            })
+            .collect::<HashSet<_>>();
+        if keep.len() == self.first_seen.len() {
+            return Ok(());
+        }
+        self.log.retain_conversations(&keep)?;
+        self.first_seen
+            .retain(|conversation, _| keep.contains(conversation));
+        self.next_expiry_secs = next_expiry(&self.first_seen);
+        self.touch
+            .retain(|conversation, _| keep.contains(conversation));
+        self.recount();
+        self.rewrite_arrivals()
+    }
+
+    fn recount(&mut self) {
+        self.total = self.log.all_event_ids().len();
+        self.bytes = self
+            .log
+            .conversations()
+            .iter()
+            .flat_map(|conversation| self.log.events(conversation))
+            .fold(0usize, |total, event| {
+                total.saturating_add(stored_bytes(event))
+            });
+    }
+
+    fn rewrite_arrivals(&mut self) -> Result<(), LogError> {
+        let records = self
+            .first_seen
+            .iter()
+            .map(|(&conversation, &first_seen_secs)| MailboxArrival {
+                conversation,
+                first_seen_secs,
+            })
+            .collect::<Vec<_>>();
+        self.arrivals.rewrite(&records)
     }
 
     /// Evict least-recently-touched WHOLE conversations until total ≤ `max_events`.
@@ -152,6 +298,10 @@ impl PostOffice {
         let dropped = self.log.retain_conversations(&keep)?;
         self.total -= dropped;
         self.bytes = running_bytes;
+        self.first_seen
+            .retain(|conversation, _| keep.contains(conversation));
+        self.next_expiry_secs = next_expiry(&self.first_seen);
+        self.rewrite_arrivals()?;
         Ok(())
     }
 
@@ -276,6 +426,63 @@ mod tests {
         assert_eq!(po.accept(ev.clone()).unwrap(), AppendOutcome::Appended);
         assert!(po.has(&ev.id));
         assert_eq!(po.held_ids(&conv()), vec![ev.id]);
+    }
+
+    #[test]
+    fn relay_mailbox_expires_at_thirty_days_even_without_new_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("po.log");
+        let identity = DeviceIdentity::generate();
+        let sender = DeviceIdentity::generate();
+        let start = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let lifetime = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+        let event = message(&sender, 1, vec![], 1, b"queued");
+
+        let mut po = PostOffice::open_at(&path, "pw", identity, start).unwrap();
+        po.record_at(event.clone(), start).unwrap();
+        po.prune_expired_at(start + lifetime - std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(po.has(&event.id));
+        po.prune_expired_at(start + lifetime).unwrap();
+        assert!(!po.has(&event.id));
+    }
+
+    #[test]
+    fn relay_mailbox_arrival_time_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("po.log");
+        let identity = DeviceIdentity::generate();
+        let sender = DeviceIdentity::generate();
+        let start = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let lifetime = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+        let event = message(&sender, 1, vec![], 1, b"queued");
+
+        let (ed, x) = identity.secret_bytes();
+        let reopened_identity = DeviceIdentity::from_secret_bytes(ed, x);
+        let mut po = PostOffice::open_at(&path, "pw", identity, start).unwrap();
+        po.record_at(event.clone(), start).unwrap();
+        drop(po);
+
+        let po = PostOffice::open_at(&path, "pw", reopened_identity, start + lifetime).unwrap();
+        assert!(!po.has(&event.id));
+    }
+
+    #[test]
+    fn existing_relay_log_starts_its_age_clock_on_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.log");
+        let sender = DeviceIdentity::generate();
+        let event = message(&sender, 1, vec![], 1, b"legacy queued event");
+        let mut old_log = PersistentEventLog::open(&path, "pw").unwrap();
+        old_log.append(event.clone()).unwrap();
+        drop(old_log);
+
+        let upgrade = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut po = PostOffice::open_at(&path, "pw", DeviceIdentity::generate(), upgrade).unwrap();
+        assert!(po.has(&event.id));
+        po.prune_expired_at(upgrade + std::time::Duration::from_secs(30 * 24 * 60 * 60))
+            .unwrap();
+        assert!(!po.has(&event.id));
     }
 
     #[test]

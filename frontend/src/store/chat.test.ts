@@ -157,6 +157,41 @@ it("closes the active channel after a successful leave", async () => {
   expect(useChat.getState().unread["channel:team"]).toBeUndefined();
 });
 
+it("does not clear another channel's members when a leave finishes late", async () => {
+  let finishLeave!: () => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "leave_channel")
+      return new Promise<void>((resolve) => {
+        finishLeave = resolve;
+      });
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "channel", id: "first", name: "First" },
+    members: [{ user_id: "first-member", name: "First member" }],
+    channelOwner: "first-owner",
+    unread: { "channel:first": 2 },
+  });
+  const leaving = useChat.getState().leaveChannel();
+  useChat.setState({
+    active: { kind: "channel", id: "second", name: "Second" },
+    members: [{ user_id: "second-member", name: "Second member" }],
+    channelOwner: "second-owner",
+  });
+  finishLeave();
+  expect(await leaving).toBe(true);
+  expect(useChat.getState().active?.id).toBe("second");
+  expect(useChat.getState().members[0]?.user_id).toBe("second-member");
+  expect(useChat.getState().channelOwner).toBe("second-owner");
+  expect(useChat.getState().unread["channel:first"]).toBeUndefined();
+});
+
 it("refreshes a pending invitation after acceptance", async () => {
   invoke.mockImplementation((command: string) => {
     if (command === "owner_node_identity")

@@ -185,6 +185,8 @@ export interface AppSettings {
   post_office_enabled: boolean;
   /** Share public presence through an opt-in post-office bridge. */
   bridge_discovery_enabled: boolean;
+  /** Full fingerprint of the shared cross-site post-office hub (empty = normal election). */
+  bridge_hub_id: string;
   /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */
   ringtone: string;
   /** Preset name; custom means individual privacy controls differ from a preset. */

@@ -26,12 +26,12 @@ fn is_tailnet_ip(ip: IpAddr) -> bool {
 
 /// The CLI JSON is explicitly subject to change, so every field is optional
 /// except the currently documented running state and peer IP arrays.
-fn parse_status(bytes: &[u8], port: u16) -> Vec<SocketAddr> {
+fn parse_status(bytes: &[u8], port: u16) -> Option<Vec<SocketAddr>> {
     let Ok(status) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return Vec::new();
+        return None;
     };
     if status.get("BackendState").and_then(|v| v.as_str()) != Some("Running") {
-        return Vec::new();
+        return None;
     }
     let self_ips: HashSet<IpAddr> = status
         .get("Self")
@@ -59,13 +59,13 @@ fn parse_status(bytes: &[u8], port: u16) -> Vec<SocketAddr> {
                 {
                     endpoints.push(SocketAddr::new(ip, port));
                     if endpoints.len() == 256 {
-                        return endpoints;
+                        return Some(endpoints);
                     }
                 }
             }
         }
     }
-    endpoints
+    Some(endpoints)
 }
 
 fn cli_locations() -> Vec<PathBuf> {
@@ -112,8 +112,10 @@ async fn local_inventory_from(executables: Vec<PathBuf>, port: u16) -> Vec<Socke
             Some(bytes)
         })
         .await;
-        if let Ok(Some(bytes)) = result {
-            return parse_status(&bytes, port);
+        if let Ok(Some(bytes)) = result
+            && let Some(endpoints) = parse_status(&bytes, port)
+        {
+            return endpoints;
         }
     }
     Vec::new()
@@ -128,6 +130,18 @@ impl CandidateSource for TailscaleCandidates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fake_cli(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
 
     #[test]
     fn status_only_yields_visible_online_peer_ips_when_client_is_running() {
@@ -144,12 +158,16 @@ mod tests {
                 "nodekey:c":{"TailscaleIPs":["100.101.1.2","127.0.0.1"]}
             }
         }"#;
-        let endpoints = parse_status(status, 47474);
+        let endpoints = parse_status(status, 47474).unwrap();
         assert_eq!(endpoints.len(), 2);
         assert!(endpoints.contains(&"100.101.1.2:47474".parse().unwrap()));
         assert!(endpoints.contains(&"[fd7a:115c:a1e0::2]:47474".parse().unwrap()));
-        assert!(parse_status(br#"{"BackendState":"NeedsLogin","Peer":{}}"#, 47474).is_empty());
-        assert!(parse_status(b"not json", 47474).is_empty());
+        assert!(parse_status(br#"{"BackendState":"NeedsLogin","Peer":{}}"#, 47474).is_none());
+        assert!(parse_status(b"not json", 47474).is_none());
+        assert_eq!(
+            parse_status(br#"{"BackendState":"Running","Peer":{}}"#, 47474),
+            Some(Vec::new())
+        );
     }
 
     #[test]
@@ -170,7 +188,7 @@ mod tests {
             "Self": { "TailscaleIPs": ["100.101.0.0"] },
             "Peer": peers,
         });
-        let endpoints = parse_status(&serde_json::to_vec(&status).unwrap(), 47474);
+        let endpoints = parse_status(&serde_json::to_vec(&status).unwrap(), 47474).unwrap();
         assert_eq!(endpoints.len(), 256);
         assert!(
             !endpoints
@@ -182,27 +200,37 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn inventory_uses_an_available_cli_without_changing_the_client() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
-        let failed = dir.path().join("failed-client");
-        let ready = dir.path().join("running-client");
-        std::fs::write(&failed, "#!/bin/sh\nexit 3\n").unwrap();
-        std::fs::write(
-            &ready,
-            "#!/bin/sh\nprintf '%s' '{\"BackendState\":\"Running\",\"Peer\":{\"peer\":{\"Online\":true,\"TailscaleIPs\":[\"100.101.2.3\"]}}}'\n",
-        )
-        .unwrap();
-        for path in [&failed, &ready] {
-            let mut permissions = std::fs::metadata(path).unwrap().permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(path, permissions).unwrap();
-        }
+        let failed = fake_cli(dir.path(), "failed-client", "exit 3");
+        let ready = fake_cli(
+            dir.path(),
+            "running-client",
+            "printf '%s' '{\"BackendState\":\"Running\",\"Peer\":{\"peer\":{\"Online\":true,\"TailscaleIPs\":[\"100.101.2.3\"]}}}'",
+        );
         let candidates = local_inventory_from(
             vec![dir.path().join("missing-client"), failed, ready],
             47474,
         )
         .await;
+        assert_eq!(candidates, vec!["100.101.2.3:47474".parse().unwrap()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inventory_tries_another_cli_when_the_first_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let logged_out = fake_cli(
+            dir.path(),
+            "logged-out-client",
+            "printf '%s' '{\"BackendState\":\"NeedsLogin\",\"Peer\":{}}'",
+        );
+        let running = fake_cli(
+            dir.path(),
+            "running-client",
+            "printf '%s' '{\"BackendState\":\"Running\",\"Peer\":{\"peer\":{\"Online\":true,\"TailscaleIPs\":[\"100.101.2.3\"]}}}'",
+        );
+
+        let candidates = local_inventory_from(vec![logged_out, running], 47474).await;
         assert_eq!(candidates, vec!["100.101.2.3:47474".parse().unwrap()]);
     }
 }

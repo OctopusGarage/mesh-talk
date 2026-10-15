@@ -15,6 +15,7 @@ pub type UserId = String;
 pub enum RouteSource {
     Lan,
     RoutedQuery,
+    Gateway,
     Authenticated,
     /// Address belongs to a post office, not this peer's TCP listener.
     PostOffice,
@@ -127,7 +128,13 @@ impl Roster {
         source_ip: IpAddr,
         self_user_id: &str,
     ) -> UpdateOutcome {
-        self.update_from(announce, source_ip, self_user_id, RouteSource::Lan)
+        self.update_from(
+            announce,
+            source_ip,
+            announce.tcp_port,
+            self_user_id,
+            RouteSource::Lan,
+        )
     }
 
     pub fn update_routed(
@@ -136,7 +143,13 @@ impl Roster {
         source_ip: IpAddr,
         self_user_id: &str,
     ) -> UpdateOutcome {
-        self.update_from(announce, source_ip, self_user_id, RouteSource::RoutedQuery)
+        self.update_from(
+            announce,
+            source_ip,
+            announce.tcp_port,
+            self_user_id,
+            RouteSource::RoutedQuery,
+        )
     }
 
     /// Signed relay proof supplied over a Noise-authenticated local bridge
@@ -145,16 +158,24 @@ impl Roster {
         &mut self,
         announce: &Announce,
         gateway_ip: IpAddr,
+        gateway_port: u16,
         self_user_id: &str,
     ) -> UpdateOutcome {
-        if !announce.post_office || announce.account_id().is_none() {
+        if !announce.post_office || announce.account_id().is_none() || gateway_port == 0 {
             return UpdateOutcome::Rejected;
         }
-        self.update_from(announce, gateway_ip, self_user_id, RouteSource::RoutedQuery)
+        self.update_from(
+            announce,
+            gateway_ip,
+            gateway_port,
+            self_user_id,
+            RouteSource::Gateway,
+        )
     }
 
-    /// A signed identity introduced by a relay. The relay's address is useful
-    /// for opaque mailbox delivery but is never a direct peer endpoint.
+    /// A signed ordinary peer introduced by a relay. The relay's address is
+    /// useful for opaque mailbox delivery but is never a direct peer endpoint.
+    /// Post offices need their own verified gateway route instead.
     pub fn update_relayed(
         &mut self,
         announce: &Announce,
@@ -162,10 +183,9 @@ impl Roster {
         self_user_id: &str,
     ) -> UpdateOutcome {
         if announce.user_id == self_user_id
-            || !announce.verify()
+            || !announce.valid_presence()
+            || announce.post_office
             || announce.account_id().is_none()
-            || announce.tcp_port == 0
-            || announce.name.len() > 1024
             || self.peers.get(&announce.user_id).is_some_and(|old| {
                 old.public != announce.public() || old.account_id != announce.account_id()
             })
@@ -240,13 +260,14 @@ impl Roster {
         &mut self,
         announce: &Announce,
         source_ip: IpAddr,
+        port: u16,
         self_user_id: &str,
         source: RouteSource,
     ) -> UpdateOutcome {
         if announce.user_id == self_user_id {
             return UpdateOutcome::Rejected; // self-filter
         }
-        if !announce.verify() {
+        if !announce.valid_presence() {
             return UpdateOutcome::Rejected;
         }
         if self.historical.get(&announce.user_id).is_some_and(|old| {
@@ -260,7 +281,7 @@ impl Roster {
             self.historical
                 .insert(announce.user_id.clone(), announce.clone());
         }
-        let addr = SocketAddr::new(source_ip, announce.tcp_port);
+        let addr = SocketAddr::new(source_ip, port);
         let previous = self.peers.get(&announce.user_id);
         let existed = previous.is_some();
         let route_changed = previous.is_none_or(|peer| {
@@ -408,6 +429,7 @@ impl Roster {
                 let lifespan = match route.source {
                     RouteSource::Lan => ttl,
                     RouteSource::RoutedQuery => ttl.max(Duration::from_secs(120)),
+                    RouteSource::Gateway => ttl.max(Duration::from_secs(45)),
                     RouteSource::Authenticated => ttl.max(Duration::from_secs(300)),
                     RouteSource::PostOffice => ttl.max(Duration::from_secs(45)),
                 };
@@ -482,6 +504,28 @@ mod routed_tests {
     }
 
     #[test]
+    fn direct_discovery_rejects_signed_unusable_endpoints() {
+        let id = DeviceIdentity::generate();
+        let source: IpAddr = "192.168.1.20".parse().unwrap();
+        let zero_port = Announce::new(&id, "Bob", 0);
+        let oversized_name = Announce::new(&id, "x".repeat(1025), 47475);
+        assert!(zero_port.verify());
+        assert!(oversized_name.verify());
+        let mut roster = Roster::default();
+        for proof in [&zero_port, &oversized_name] {
+            assert_eq!(
+                roster.update(proof, source, "self"),
+                UpdateOutcome::Rejected
+            );
+            assert_eq!(
+                roster.update_routed(proof, source, "self"),
+                UpdateOutcome::Rejected
+            );
+        }
+        assert!(roster.get(&id.user_id()).is_none());
+    }
+
+    #[test]
     fn relay_introduction_keeps_direct_address_and_never_claims_relay_as_peer() {
         let device = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&device, &Account::generate(), "Bob", 47475);
@@ -504,6 +548,21 @@ mod routed_tests {
         );
         roster.forget_relayed(&proof.user_id);
         assert_eq!(roster.get(&proof.user_id).unwrap().addr.ip(), direct);
+    }
+
+    #[test]
+    fn relay_introduction_rejects_post_office_identity() {
+        let device = DeviceIdentity::generate();
+        let proof =
+            Announce::new_post_office_with_account(&device, &Account::generate(), "Relay", 47475);
+        let relay: SocketAddr = "100.101.102.30:47800".parse().unwrap();
+        let mut roster = Roster::default();
+        assert_eq!(
+            roster.update_relayed(&proof, relay, "self"),
+            UpdateOutcome::Rejected
+        );
+        assert!(roster.get(&proof.user_id).is_none());
+        assert!(roster.historical_announcement(&device.public()).is_none());
     }
 
     #[test]
@@ -530,21 +589,21 @@ mod routed_tests {
         let ip: IpAddr = "100.101.102.30".parse().unwrap();
         let mut roster = Roster::default();
         assert_eq!(
-            roster.update_gateway(&ordinary, ip, "self"),
+            roster.update_gateway(&ordinary, ip, 47475, "self"),
             UpdateOutcome::Rejected
         );
         assert_eq!(
-            roster.update_gateway(&uncertified, ip, "self"),
+            roster.update_gateway(&uncertified, ip, 47475, "self"),
             UpdateOutcome::Rejected
         );
         assert_eq!(
-            roster.update_gateway(&relay, ip, "self"),
+            roster.update_gateway(&relay, ip, 50000, "self"),
             UpdateOutcome::New
         );
         let peer = roster.get(&id.user_id()).unwrap();
         assert!(peer.post_office);
-        assert_eq!(peer.routes[0].source, RouteSource::RoutedQuery);
-        assert_eq!(peer.addr, SocketAddr::new(ip, 47475));
+        assert_eq!(peer.routes[0].source, RouteSource::Gateway);
+        assert_eq!(peer.addr, SocketAddr::new(ip, 50000));
     }
 
     #[test]

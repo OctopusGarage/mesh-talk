@@ -43,6 +43,53 @@ test("connection details distinguish load failure from an empty network", async 
   await expect(dialog.getByText("Discovery port")).toBeVisible();
 });
 
+test("a late network load cannot replace details after reopening", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __rejectOldNetwork?: (error: Error) => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const invoke = win.__TAURI_INTERNALS__.invoke.bind(win.__TAURI_INTERNALS__);
+    let first = true;
+    win.__TAURI_INTERNALS__.invoke = (cmd, args) => {
+      if (cmd === "diag_network_info" && first) {
+        first = false;
+        return new Promise((_, reject) => {
+          win.__rejectOldNetwork = reject;
+        });
+      }
+      return invoke(cmd, args);
+    };
+  });
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
+  const dialog = page.getByTestId("diagnostics-dialog");
+  await page.waitForFunction(
+    () =>
+      typeof (window as unknown as { __rejectOldNetwork?: unknown })
+        .__rejectOldNetwork === "function",
+  );
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await openSidebarMenuAction(page, "sidebar-nav-connection");
+  await expect(dialog.getByText("Discovery port")).toBeVisible();
+  await page.evaluate(async () => {
+    (
+      window as unknown as { __rejectOldNetwork: (error: Error) => void }
+    ).__rejectOldNetwork(new Error("stale network failure"));
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+  });
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+});
+
 test("a failed announce is visible on the current connection tab", async ({
   page,
 }) => {

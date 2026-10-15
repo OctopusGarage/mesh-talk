@@ -1,11 +1,15 @@
 # Mesh-Talk Architecture
 
-A decentralized, end-to-end-encrypted LAN messenger. **Tauri** desktop shell, **Rust**
-backend, **React + TypeScript** frontend. No server: peers discover each other over signed UDP
-**multicast** (group `224.0.0.167`, port 47474), connect directly over a Noise-encrypted TCP
+A decentralized, end-to-end-encrypted messenger. **Tauri** desktop shell, **Rust**
+backend, **React + TypeScript** frontend. No vendor-operated server: LAN peers
+discover each other over signed UDP **multicast** (group `224.0.0.167`, port
+47474), connect directly over a Noise-encrypted TCP
 channel, and store messages as an append-only, hash-linked **event log** that syncs CRDT-style.
 When a peer is offline, an elected **post office** node stores-and-forwards the (still-encrypted)
-events.
+events. Existing routed networks can supply optional peer discovery; opted-in
+post-office bridges introduce registered peers across sites without merging
+their IP subnets. See [routed discovery](routed-network-discovery.md) and
+[network topologies](network-topologies.md).
 
 > The earlier RSA-contact / plaintext-UDP / TCP-relay *legacy* stack has been retired;
 > this serverless stack is the entire product and lives at `/`. The only retained
@@ -358,6 +362,10 @@ directory, its fresh, self-signed introductions can be polled from that post
 office's opaque mailboxes. This does not mark safety numbers verified, persists
 no bridge permission, and expires with the directory membership. Invisible mode
 does not participate. See [routed network discovery](routed-network-discovery.md).
+For multi-site bridges, clients can pin one hub fingerprint. Site relays each
+publish that hub's signed proof and their own local TCP proxy port; clients
+authenticate the hub end to end and use its single opaque mailbox. A missing
+configured hub pauses relay delivery instead of electing another mailbox.
 The sender's retry worker independently attempts direct delivery before relay
 replication, so either side can initiate recovery when a route returns.
 
@@ -735,9 +743,10 @@ the UI sends users who suspect compromise to new identity creation.
   fmt,
   `clippy --workspace --all-targets -D warnings`, ESLint, frontend tests (Vitest), full
   `cargo test --workspace`, typos, cargo-deny, cargo-machete, gitleaks, shellcheck, audits,
-  both builds — **mirrors CI** so failures surface locally, not on CI. The `hooks/pre-commit`
-  hook runs a fast slice (`check-health.sh --fast`: fmt/clippy/lint/unit only); GPG-signed
-  commits are enforced by `hooks/pre-push`.
+  both builds — **mirrors CI** for PR/review validation. The `hooks/pre-commit`
+  hook checks staged whitespace and source formatting; focused tests run during
+  development. The optional `check-health.sh --fast` runs a partial gate;
+  GPG-signed commits are enforced by `hooks/pre-push`.
 - **CI** (`.github/workflows/`): `ci.yml` (Linux, macOS, and Windows matrix → the `verify` aggregate
   check, required by branch protection; coverage → Codecov on Linux), `check-health.yml`,
   `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (Dependabot PRs to `dev`, gated by required checks),
@@ -767,7 +776,7 @@ Noise XX with identity binding; Double-Ratchet + sender-key forward secrecy with
 zeroize-on-drop; signed content-addressed log with fork detection; deterministic relay
 election; the sync `have` id-set is streamed in chunks so arbitrarily large conversations
 reconcile; the relay bounds its storage by event count and 512 MiB of ciphertext
-(LRU whole-conversation eviction) and its serve
+(LRU whole-conversation eviction) plus a 30-day maximum mailbox age, and its serve
 loop (round cap + idle timeout). Known limitations (by design): device linking relies on
 the one-time pairing code (no separate SAS UX); backfill history travels as plaintext over
 the Noise channel. A new client's relay upload contains a pairwise opaque

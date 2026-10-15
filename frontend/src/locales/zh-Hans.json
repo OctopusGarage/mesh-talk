@@ -375,6 +375,9 @@
     "postOfficeDesc": "使用局域网中可用的中继节点进行离线投递。事件详情已加密，但中继节点仍可通过连接和时间推断通信对象。关闭后，此设备将停止通过中继节点上传和下载。",
     "bridgeDiscovery": "通过邮局发现跨网络节点",
     "bridgeDiscoveryDesc": "向已启用桥接的邮局共享此设备的公开在线信息，并发现其他参与节点。无法直连时，消息通过加密中继邮箱投递。默认关闭，隐身模式下不可用。",
+    "bridgeHub": "共享桥接中心指纹",
+    "bridgeHubDesc": "连接多个站点时，输入中心邮局完整的 32 位设备指纹。跨站点邮箱统一使用此中心。留空则按常规方式选择邮局。",
+    "bridgeHubPlaceholder": "32 位设备指纹",
     "privacyLevel": "隐私级别",
     "privacyLevelDesc": "选择一个预设，然后按需调整下方选项。",
     "level_balanced": "均衡",
@@ -798,5 +801,20 @@
     "listingMismatch": "下载的资源包与市场条目不一致。",
     "rightsPending": "图片使用权待审核",
     "idConflict": "其他类型的资源库已使用这个资源包 ID。"
+  },
+  "memberProfile": {
+    "title": "成员资料",
+    "description": "此成员的身份和已知网络信息。",
+    "presenceUnavailable": "在线状态不可用",
+    "accountId": "账户 ID",
+    "devices": "设备",
+    "noDevice": "暂无设备信息",
+    "deviceId": "设备 ID",
+    "postOffice": "邮局节点",
+    "networkEndpoint": "已知网络端点",
+    "unavailable": "当前不可用",
+    "endpointHint": "这是最后已知的网络路径，可能指向中继节点；它不表示地理位置。",
+    "view": "查看资料",
+    "viewNamed": "查看{{name}}的资料"
   }
 }

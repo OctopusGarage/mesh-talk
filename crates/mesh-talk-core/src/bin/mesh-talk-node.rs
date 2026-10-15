@@ -65,6 +65,9 @@ struct Args {
     /// Share this public node with an opted-in post-office bridge directory.
     #[arg(long)]
     bridge_discovery: bool,
+    /// Full fingerprint of the shared bridge hub; pins all mailbox traffic to it.
+    #[arg(long, requires = "bridge_discovery", value_parser = parse_fingerprint)]
+    bridge_hub_id: Option<String>,
     /// Serve an opt-in bridge directory alongside the post-office mailbox.
     #[arg(long, requires = "post_office")]
     bridge: bool,
@@ -74,6 +77,9 @@ struct Args {
     /// Exact 32-character Mesh Talk fingerprint of --bridge-peer.
     #[arg(long, requires = "bridge_peer", value_parser = parse_fingerprint)]
     bridge_peer_id: Option<String>,
+    /// Local TCP port for the pinned hub gateway (0 = OS-assigned).
+    #[arg(long, requires = "bridge_peer")]
+    bridge_proxy_port: Option<u16>,
 }
 
 fn parse_fingerprint(value: &str) -> Result<String, String> {
@@ -357,6 +363,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
     node.configure_privacy(data_dir, password, &announce, visibility.clone())?;
     node.set_bridge_discovery_enabled(args.bridge_discovery);
+    node.set_bridge_hub_id(args.bridge_hub_id.as_deref())
+        .expect("clap validated the bridge hub fingerprint");
 
     // Discovery: one shared reuse+multicast socket drives all loops (listen with
     // announce/response, broadcast, /24 scan fallback, periodic re-join).
@@ -623,6 +631,20 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         password,
         identity,
     )?));
+    let retention_store = Arc::clone(&store);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(error) = retention_store
+                .lock()
+                .expect("post office lock not poisoned")
+                .prune_expired()
+            {
+                eprintln!("post office retention cleanup failed: {error}");
+            }
+        }
+    });
 
     // Discovery: advertise ourselves (and harmlessly track peers) on the shared socket.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
@@ -651,12 +673,15 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let gateway = if let (Some(remote), Some(peer_id)) = (args.bridge_peer, args.bridge_peer_id) {
         let proof = Arc::new(Mutex::new(None));
-        tokio::spawn(mesh_talk_core::postoffice::gateway::run_bridge_gateway(
-            Arc::clone(&proof),
-            tcp_port,
-            remote,
-            peer_id,
-        ));
+        tokio::spawn(
+            mesh_talk_core::postoffice::gateway::run_bridge_gateway_on_port(
+                Arc::clone(&proof),
+                tcp_port,
+                remote,
+                peer_id,
+                args.bridge_proxy_port,
+            ),
+        );
         Some(proof)
     } else {
         None
@@ -986,6 +1011,41 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn multi_site_flags_require_a_valid_hub_and_gateway_pair() {
+        let client = [
+            "mesh-talk-node",
+            "--keystore",
+            "client.keystore",
+            "--password",
+            "pw",
+            "--name",
+            "client",
+            "--bridge-hub-id",
+            "0123456789abcdef0123456789abcdef",
+        ];
+        assert!(Args::try_parse_from(client).is_err());
+        assert!(Args::try_parse_from(client.into_iter().chain(["--bridge-discovery"])).is_ok());
+        let gateway = [
+            "mesh-talk-node",
+            "--keystore",
+            "gateway.keystore",
+            "--password",
+            "pw",
+            "--name",
+            "gateway",
+            "--post-office",
+            "--bridge",
+            "--bridge-peer",
+            "127.0.0.1:47474",
+            "--bridge-peer-id",
+            "0123456789abcdef0123456789abcdef",
+            "--bridge-proxy-port",
+            "0",
+        ];
+        assert!(Args::try_parse_from(gateway).is_ok());
     }
 
     #[cfg(unix)]

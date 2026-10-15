@@ -3,12 +3,12 @@
 //! Client upload and drain live in `opaque_relay` and `serving`;
 //! this module provides election lookup and the serving loop.
 
-use crate::discovery::Announce;
 use crate::discovery::roster::{PeerRecord, Roster};
 use crate::identity::device::DeviceIdentity;
 use crate::node::bridge_directory::{self, BridgeDirectory};
 use crate::node::session::{Served, serve_one, serve_wire_bytes};
 use crate::node::transport::secure_accept;
+use crate::postoffice::gateway::GatewayProof;
 use crate::postoffice::{PostOffice, elect};
 use crate::transport::SecureChannel;
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,53 @@ pub fn elected_post_office(roster: &Roster) -> Option<PeerRecord> {
             .collect::<Vec<_>>(),
     )?;
     candidates.into_iter().find(|r| r.public == winner)
+}
+
+/// A configured bridge hub is the sole mailbox for this node. If its verified
+/// route has not been learned yet, wait rather than splitting events across
+/// local post offices.
+pub fn selected_post_office(roster: &Roster, hub_id: Option<&str>) -> Option<PeerRecord> {
+    match hub_id {
+        Some(id) => roster
+            .post_offices()
+            .into_iter()
+            .find(|relay| relay.public.user_id() == id),
+        None => elected_post_office(roster),
+    }
+}
+
+impl super::Node {
+    pub fn set_bridge_hub_id(&self, id: Option<&str>) -> Result<(), &'static str> {
+        if id
+            .is_some_and(|value| value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err("bridge hub ID must be a full 32-character hexadecimal fingerprint");
+        }
+        let new_id = id.map(str::to_ascii_lowercase);
+        let changed = {
+            let mut hub = self
+                .bridge_hub_id
+                .lock()
+                .expect("bridge hub lock not poisoned");
+            let changed = *hub != new_id;
+            *hub = new_id;
+            changed
+        };
+        if changed {
+            self.clear_bridge_introductions();
+        }
+        self.bridge_notify.notify_one();
+        self.delivery_notify.notify_one();
+        Ok(())
+    }
+
+    pub(in crate::node) fn selected_post_office(&self, roster: &Roster) -> Option<PeerRecord> {
+        let hub = self
+            .bridge_hub_id
+            .lock()
+            .expect("bridge hub lock not poisoned");
+        selected_post_office(roster, hub.as_deref())
+    }
 }
 
 /// Serve one authenticated inbound connection as the relay: run sync rounds over
@@ -57,16 +104,25 @@ async fn serve_relay_or_bridge_connection<IO>(
     if bridge_directory::is_request(&first) {
         if let Some(directory) = directory {
             let response = {
-                let peers = directory
+                let mut directory = directory
                     .lock()
-                    .expect("bridge directory lock not poisoned")
-                    .register(
-                        channel.peer_identity(),
-                        channel.peer_announcement(),
-                        channel.peer_publicly_visible(),
-                        std::time::Instant::now(),
-                    );
-                peers.and_then(|peers| bridge_directory::encode_response(&peers))
+                    .expect("bridge directory lock not poisoned");
+                let peers = directory.register(
+                    channel.peer_identity(),
+                    channel.peer_announcement(),
+                    channel.peer_publicly_visible(),
+                    std::time::Instant::now(),
+                );
+                peers.and_then(|peers| {
+                    if first == bridge_directory::legacy_request() {
+                        bridge_directory::encode_response(&peers)
+                    } else {
+                        bridge_directory::encode_response_with_gateway(
+                            &peers,
+                            directory.gateway_route(),
+                        )
+                    }
+                })
             };
             if let Some(response) = response {
                 for page in response {
@@ -79,6 +135,14 @@ async fn serve_relay_or_bridge_connection<IO>(
                 }
             }
         }
+        return;
+    }
+    if let Err(error) = store
+        .lock()
+        .expect("post office lock not poisoned")
+        .prune_expired()
+    {
+        log::warn!("post office retention cleanup failed: {error}");
         return;
     }
     if !matches!(
@@ -146,7 +210,7 @@ pub async fn run_bridge_relay_accept_loop_with_gateway(
     identity: DeviceIdentity,
     listener: TcpListener,
     store: Arc<Mutex<PostOffice>>,
-    gateway: Arc<Mutex<Option<Announce>>>,
+    gateway: Arc<Mutex<Option<GatewayProof>>>,
 ) {
     run_relay_accept_loop_inner(
         identity,
@@ -253,6 +317,27 @@ mod tests {
         assert!(elected.post_office);
     }
 
+    #[test]
+    fn configured_hub_overrides_election_without_mailbox_fallback() {
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let (local, hub) = if a.user_id() < b.user_id() {
+            (&a, &b)
+        } else {
+            (&b, &a)
+        };
+        let roster = po_roster(&[(local, 5001), (hub, 5002)], &[]);
+        assert_eq!(
+            selected_post_office(&roster, Some(&hub.user_id()))
+                .unwrap()
+                .public,
+            hub.public()
+        );
+        assert!(
+            selected_post_office(&po_roster(&[(local, 5001)], &[]), Some(&hub.user_id())).is_none()
+        );
+    }
+
     #[tokio::test]
     async fn relay_ingests_an_event_pushed_over_a_channel() {
         // A client with one event pushes it to a relay (PostOffice) over a
@@ -323,9 +408,10 @@ mod tests {
         let alice_proof = Announce::new_with_account(&alice, &account, "Alice", 4001);
         let bob_proof = Announce::new_with_account(&bob, &account, "Bob", 4002);
 
-        for (client, proof, expected) in [
-            (&alice, &alice_proof, None),
-            (&bob, &bob_proof, Some(alice_proof.user_id.as_str())),
+        for (client, proof, expected, legacy) in [
+            (&alice, &alice_proof, None, false),
+            (&bob, &bob_proof, Some(alice_proof.user_id.as_str()), false),
+            (&bob, &bob_proof, Some(alice_proof.user_id.as_str()), true),
         ] {
             let (client_io, relay_io) = tokio::io::duplex(64 * 1024);
             let identity = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
@@ -339,10 +425,21 @@ mod tests {
                 SecureChannel::connect_with_presence(client_io, client, None, Some(proof))
                     .await
                     .unwrap();
-            channel.send(bridge_directory::request()).await.unwrap();
+            let request = if legacy {
+                bridge_directory::legacy_request()
+            } else {
+                bridge_directory::request()
+            };
+            channel.send(request).await.unwrap();
             let response = channel.recv().await.unwrap();
-            let (peers, last) = bridge_directory::decode_response(&response).unwrap();
+            let (peers, gateway, last) = if legacy {
+                let (peers, last) = bridge_directory::decode_response(&response).unwrap();
+                (peers, None, last)
+            } else {
+                bridge_directory::decode_response_with_gateway(&response).unwrap()
+            };
             assert!(last);
+            assert!(gateway.is_none());
             match expected {
                 None => assert!(peers.is_empty()),
                 Some(id) => assert_eq!(
@@ -372,7 +469,10 @@ mod tests {
         let remote_account = Account::generate();
         let remote_proof =
             Announce::new_post_office_with_account(&remote, &remote_account, "remote", 47475);
-        let gateway = Arc::new(Mutex::new(Some(remote_proof.clone())));
+        let gateway = Arc::new(Mutex::new(Some(GatewayProof {
+            announce: remote_proof.clone(),
+            proxy_port: 50000,
+        })));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(run_bridge_relay_accept_loop_with_gateway(
@@ -391,8 +491,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let (peers, last) = bridge_directory::decode_response(&response).unwrap();
+        let (peers, gateway, last) =
+            bridge_directory::decode_response_with_gateway(&response).unwrap();
         assert!(last);
+        assert_eq!(gateway, Some((remote_proof.user_id.clone(), 50000)));
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].user_id, remote_proof.user_id);
         drop(channel);

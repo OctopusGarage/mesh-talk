@@ -44,7 +44,8 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
 - `make smoke-full` is the complete real smoke command for release-critical changes. It
   runs deterministic eval contracts, AI eval harness tests, workspace Rust tests,
   frontend unit tests with coverage, backend multi-process E2E, and frontend Playwright E2E.
-- `./scripts/check-health.sh --fast` must pass before commit.
+- The pre-commit hook checks staged whitespace and source formatting. Run
+  affected tests during development; reserve comprehensive gates for PR/review.
 - `./scripts/check-health.sh` must pass before review or release.
 - Backend networking / relay / sync / crypto changes must run `make e2e` or document why
   the environment cannot run multicast/TCP tests.
@@ -60,7 +61,8 @@ sides, run `make smoke-full`, which includes both workflows and the eval smoke.
 
 ## Trigger Rules
 
-- Local pre-commit runs `./scripts/check-health.sh --fast`, which includes `make eval-smoke`.
+- Local pre-commit checks staged whitespace and source formatting. `make
+  eval-smoke` runs in CI and before PR submission when relevant.
 - CI runs `make eval-smoke` and the AI eval harness tests directly on Ubuntu and still runs
   the normal test, lint, security, backend E2E, and UI E2E workflows.
 - `.github/workflows/ai-eval.yml` runs deterministic eval checks on eval/prompt/agent PRs.

@@ -375,6 +375,9 @@
     "postOfficeDesc": "Use an available LAN relay for offline delivery. Event details are encrypted, but relays can infer contacts from connections and timing. Turning this off stops relay uploads and downloads on this device.",
     "bridgeDiscovery": "Discover peers through a post office",
     "bridgeDiscoveryDesc": "Share this device's public presence with a bridge-enabled post office and discover its other participants across networks. Messages use encrypted relay mailboxes when peers cannot connect directly. This is off by default and unavailable in invisible mode.",
+    "bridgeHub": "Shared bridge hub fingerprint",
+    "bridgeHubDesc": "For multi-site bridges, enter the hub post office's full 32-character device fingerprint. All cross-site mailboxes use this hub. Leave blank for normal relay election.",
+    "bridgeHubPlaceholder": "32 hex characters",
     "privacyLevel": "Privacy level",
     "privacyLevelDesc": "Choose a starting point, then adjust the controls below.",
     "level_balanced": "Balanced",
@@ -798,5 +801,20 @@
     "listingMismatch": "The downloaded pack does not match its marketplace listing.",
     "rightsPending": "Artwork rights pending review",
     "idConflict": "A different library type already uses this pack ID."
+  },
+  "memberProfile": {
+    "title": "Member profile",
+    "description": "Identity and known network details for this member.",
+    "presenceUnavailable": "Presence unavailable",
+    "accountId": "Account ID",
+    "devices": "Devices",
+    "noDevice": "No device information available",
+    "deviceId": "Device ID",
+    "postOffice": "Post office",
+    "networkEndpoint": "Known network endpoint",
+    "unavailable": "Not currently available",
+    "endpointHint": "This is the last known network route and may point to a relay. It does not reveal a geographic location.",
+    "view": "View profile",
+    "viewNamed": "View {{name}}'s profile"
   }
 }

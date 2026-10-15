@@ -278,7 +278,9 @@ node --version  # CI uses Node.js 22
 
 #### Network Discovery Not Working
 1. Ensure UDP port 47474 (multicast group 224.0.0.167) is not blocked by firewall
-2. Check that all nodes are on the same local network segment
+2. For automatic LAN discovery, check that nodes share a local network segment;
+   for routed or bridged discovery, check the configured network path and client
+   opt-in in the [topology guide](../docs/network-topologies.md)
 3. Verify that the network allows multicast/UDP between hosts (some guest/AP-isolated
    Wi-Fi blocks it); on macOS the app ships the `com.apple.developer.networking.multicast`
    entitlement so the OS permits multicast
@@ -316,5 +318,6 @@ For additional help, please:
 2. Search existing issues on the project's GitHub repository
 3. Create a new issue with detailed information about your problem
 
-Version: 0.3.0
-Last Updated: 2026-10-08
+For current release packages and verification steps, use the
+[Releases page](https://github.com/OctopusGarage/mesh-talk/releases) and the
+[release guide](../docs/updates.md).

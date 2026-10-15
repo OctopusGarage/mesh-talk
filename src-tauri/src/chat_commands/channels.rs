@@ -180,9 +180,9 @@ pub async fn create_channel(
         let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
         let mut members = Vec::new();
         for uid in &member_ids {
-            let p = rt
-                .peer_public(uid)
-                .ok_or_else(|| CommandError::Validation(format!("unknown peer: {uid}")))?;
+            let p = rt.channel_invitee_public(uid).ok_or_else(|| {
+                CommandError::Validation(format!("unknown or ineligible peer: {uid}"))
+            })?;
             members.push(p);
         }
         (rt.handle(), members)
@@ -204,9 +204,9 @@ pub async fn add_channel_member(
     let (node, member) = {
         let guard = state.0.lock().await;
         let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        let member = rt
-            .peer_public(&member_id)
-            .ok_or_else(|| CommandError::Validation(format!("unknown peer: {member_id}")))?;
+        let member = rt.channel_invitee_public(&member_id).ok_or_else(|| {
+            CommandError::Validation(format!("unknown or ineligible peer: {member_id}"))
+        })?;
         (rt.handle(), member)
     };
     node.add_channel_member(channel, member)

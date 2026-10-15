@@ -42,6 +42,41 @@ export default tseslint.config(
     },
   },
   {
+    // IPC adapters stay independent of app stores and feature components.
+    files: ["src/lib/api/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            "@/store/*",
+            "@/features/*",
+            "../../store/*",
+            "../../features/*",
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The public API facade composes the auth owner for settings. Importing that
+    // facade from auth would recreate an eager runtime cycle.
+    files: ["src/store/auth.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@/lib/api",
+              message: "Import the auth/chat IPC adapters directly.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // shadcn/ui primitives intentionally co-export variant helpers with components.
     files: ["src/components/ui/**/*.{ts,tsx}"],
     rules: { "react-refresh/only-export-components": "off" },

@@ -111,6 +111,22 @@ impl NodeState {
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
         Ok(runtime.handle())
     }
+
+    /// Clone a node only when its runtime and the live host session own the
+    /// requested account. The caller can then release the runtime lock before
+    /// doing asynchronous or blocking work.
+    pub(crate) async fn node_for_owner(
+        &self,
+        session: &SessionState,
+        owner: &str,
+    ) -> Option<Arc<Node>> {
+        let guard = self.0.lock().await;
+        guard.as_ref().and_then(|runtime| {
+            (runtime.host_account_id() == Some(owner)
+                && matches!(session.capture(), Ok(ref lease) if lease.owner() == owner))
+            .then(|| runtime.handle())
+        })
+    }
 }
 
 impl Default for NodeState {

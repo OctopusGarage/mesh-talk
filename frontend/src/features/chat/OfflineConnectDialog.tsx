@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Cable, Radar, Wifi } from "lucide-react";
 import {
@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useMotionOK } from "@/lib/motion";
 import { diag } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
+import { useAsyncFeedback } from "./useAsyncFeedback";
 
 /** The signature mark: two devices joined by a signal arc with nothing between them —
  * mesh-talk needs no router or tower, just a direct link. The arc traces itself once on a
@@ -127,59 +127,21 @@ export function OfflineConnectDialog({
   includeSharedNetwork?: boolean;
 }) {
   const { t } = useTranslation();
-  const [announcing, setAnnouncing] = useState(false);
-  const [announced, setAnnounced] = useState(false);
-  const [announceError, setAnnounceError] = useState<string | null>(null);
+  const announceFeedback = useAsyncFeedback();
   const [showHotspot, setShowHotspot] = useState(false);
   const [endpoint, setEndpoint] = useState("");
-  const [probing, setProbing] = useState(false);
-  const [probeSent, setProbeSent] = useState(false);
-  const [probeError, setProbeError] = useState<string | null>(null);
-  const announceRequest = useRef(0);
-  const announce = async () => {
-    const request = ++announceRequest.current;
-    setAnnouncing(true);
-    setAnnounced(false);
-    setAnnounceError(null);
-    try {
-      await diag.rescan();
-      if (request === announceRequest.current) setAnnounced(true);
-    } catch (error) {
-      if (request === announceRequest.current)
-        setAnnounceError(errorMessage(error));
-    } finally {
-      if (request === announceRequest.current) setAnnouncing(false);
+  const probeFeedback = useAsyncFeedback();
+  const resetAnnounce = announceFeedback.reset;
+  const resetProbe = probeFeedback.reset;
+  useEffect(() => {
+    if (!open) {
+      resetAnnounce();
+      resetProbe();
+      setShowHotspot(false);
     }
-  };
-  const probe = async () => {
-    setProbing(true);
-    setProbeSent(false);
-    setProbeError(null);
-    try {
-      await diag.probeEndpoint(endpoint.trim());
-      setProbeSent(true);
-    } catch (error) {
-      setProbeError(errorMessage(error));
-    } finally {
-      setProbing(false);
-    }
-  };
+  }, [open, resetAnnounce, resetProbe]);
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        onOpenChange(next);
-        if (!next) {
-          announceRequest.current++;
-          setAnnouncing(false);
-          setAnnounced(false);
-          setAnnounceError(null);
-          setShowHotspot(false);
-          setProbeSent(false);
-          setProbeError(null);
-        }
-      }}
-    >
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg" data-testid="offline-connect-dialog">
         <DialogHeader>
           <DialogTitle>
@@ -212,7 +174,9 @@ export function OfflineConnectDialog({
               className="flex gap-2"
               onSubmit={(event) => {
                 event.preventDefault();
-                void probe();
+                void probeFeedback.run(() =>
+                  diag.probeEndpoint(endpoint.trim()),
+                );
               }}
             >
               <Input
@@ -221,27 +185,27 @@ export function OfflineConnectDialog({
                 value={endpoint}
                 onChange={(event) => {
                   setEndpoint(event.target.value);
-                  setProbeSent(false);
+                  probeFeedback.reset();
                 }}
               />
               <Button
                 type="submit"
                 variant="outline"
-                disabled={!endpoint.trim() || probing}
+                disabled={!endpoint.trim() || probeFeedback.busy}
               >
-                {probing
+                {probeFeedback.busy
                   ? t("common.loading")
                   : t("offlineConnect.manualProbe")}
               </Button>
             </form>
-            {probeSent && (
+            {probeFeedback.succeeded && (
               <p role="status" className="text-xs text-muted-foreground">
                 {t("offlineConnect.manualSent")}
               </p>
             )}
-            {probeError && (
+            {probeFeedback.error && (
               <p role="alert" className="break-words text-xs text-destructive">
-                {probeError}
+                {probeFeedback.error}
               </p>
             )}
           </section>
@@ -259,26 +223,28 @@ export function OfflineConnectDialog({
                 variant="outline"
                 size="sm"
                 data-testid="connect-announce"
-                disabled={announcing}
-                onClick={() => void announce()}
+                disabled={announceFeedback.busy}
+                onClick={() => void announceFeedback.run(() => diag.rescan())}
               >
-                {announcing
+                {announceFeedback.busy
                   ? t("common.loading")
-                  : announced
+                  : announceFeedback.succeeded
                     ? t("diagnostics.rescanned")
                     : t("diagnostics.rescan")}
               </Button>
-              {announced && (
+              {announceFeedback.succeeded && (
                 <p role="status" className="text-xs text-muted-foreground">
                   {t("redesign.announceFeedback")}
                 </p>
               )}
-              {announceError && (
+              {announceFeedback.error && (
                 <p
                   role="alert"
                   className="break-words text-xs text-destructive"
                 >
-                  {t("diagnostics.actionFailed", { error: announceError })}
+                  {t("diagnostics.actionFailed", {
+                    error: announceFeedback.error,
+                  })}
                 </p>
               )}
             </section>

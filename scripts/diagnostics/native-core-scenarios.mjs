@@ -199,13 +199,13 @@ export async function revealLatestNativeMessage({ execute, until, command, now =
   let jumpAt = 0;
   let domClickFallback = false;
   try { await until("incoming attachment visibly rendered in native message log", async () => {
-    const state = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect(),b=document.querySelector('button[aria-label=\"Jump to latest messages\"]'),q=b?.getBoundingClientRect();return {visible:!!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right,jump:!!q&&q.width>0&&q.height>0};", [text]);
+    const state = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect(),b=document.querySelector('[data-testid=jump-to-latest]'),q=b?.getBoundingClientRect();return {visible:!!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right,jump:!!q&&q.width>0&&q.height>0};", [text]);
     if (state.visible) return true;
     // The production virtual list deliberately preserves a history reader's
     // position. Reveal new content through its real user-facing control, not
     // by replacing IPC or directly mutating the scroll position.
     if (state.jump && !jumpRequested) {
-      const button = await command("POST", "/element", { using: "css selector", value: 'button[aria-label="Jump to latest messages"]' });
+      const button = await command("POST", "/element", { using: "css selector", value: '[data-testid="jump-to-latest"]' });
       await command("POST", `/element/${button["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
       // Repeated clicks restart Virtuoso's smooth scroll, which can keep a
       // large preceding message in view until the whole probe times out.
@@ -215,11 +215,11 @@ export async function revealLatestNativeMessage({ execute, until, command, now =
       // Some embedded WebDriver click implementations report success without
       // dispatching the button action. Activate that same visible UI control
       // once through the webview DOM; the message must still become visible.
-      domClickFallback = await execute("const b=document.querySelector('button[aria-label=\"Jump to latest messages\"]');if(!b)return false;b.click();return true;");
+      domClickFallback = await execute("const b=document.querySelector('[data-testid=jump-to-latest]');if(!b)return false;b.click();return true;");
     }
     return false;
   }); } catch (error) {
-    const state = await execute("const log=document.querySelector('[role=log]'),bubbles=Array.from(document.querySelectorAll('[data-testid=message-bubble]')),jump=document.querySelector('button[aria-label=\"Jump to latest messages\"]');return {count:bubbles.length,tails:bubbles.slice(-3).map(e=>e.textContent.slice(-120)),scrollTop:log?.scrollTop,scrollHeight:log?.scrollHeight,clientHeight:log?.clientHeight,jump:!!jump,targetInDom:bubbles.some(e=>e.textContent.includes(arguments[0]))};", [text]);
+    const state = await execute("const log=document.querySelector('[role=log]'),bubbles=Array.from(document.querySelectorAll('[data-testid=message-bubble]')),jump=document.querySelector('[data-testid=jump-to-latest]');return {count:bubbles.length,tails:bubbles.slice(-3).map(e=>e.textContent.slice(-120)),scrollTop:log?.scrollTop,scrollHeight:log?.scrollHeight,clientHeight:log?.clientHeight,jump:!!jump,targetInDom:bubbles.some(e=>e.textContent.includes(arguments[0]))};", [text]);
     throw new Error(`${error.message}; native log state ${JSON.stringify({ ...state, jumpRequested, domClickFallback })}`);
   }
 }
@@ -339,8 +339,8 @@ export async function coreScenarios(c) {
   await revealLatestNativeMessage(c, fileName);
   const classification = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e && !!e.querySelector('button') && !e.querySelector('[data-testid=file-image],[data-testid=file-video]');", [fileName]);
   assert.equal(classification, true);
-  await until("incoming attachment awaits recipient approval", () => execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e?.querySelector('button[aria-label=Receive]');", [fileName]));
-  const receiveButton = await c.command("POST", "/element", { using: "css selector", value: '[data-testid="message-bubble"] button[aria-label="Receive"]' });
+  await until("incoming attachment awaits recipient approval", () => execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e?.querySelector('[data-testid=receive-file]');", [fileName]));
+  const receiveButton = await c.command("POST", "/element", { using: "css selector", value: '[data-testid="message-bubble"] [data-testid="receive-file"]' });
   await c.command("POST", `/element/${receiveButton["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
   await until("incoming attachment decrypted bytes available", async () => {
     const received = await c.readFileBytes(attachment.file.file_conv);

@@ -21,6 +21,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_LIMIT: Duration = Duration::from_secs(3600);
 const MAX_PROXY_CONNECTIONS: usize = 256;
 
+#[derive(Clone, Debug)]
+pub struct GatewayProof {
+    pub announce: Announce,
+    pub proxy_port: u16,
+}
+
+impl std::ops::Deref for GatewayProof {
+    type Target = Announce;
+
+    fn deref(&self) -> &Self::Target {
+        &self.announce
+    }
+}
+
 /// Probe one explicitly configured endpoint. A fresh nonce, the remote signed
 /// announcement, and the configured fingerprint all have to agree.
 pub async fn query_pinned_relay(remote: SocketAddr, expected_id: &str) -> Option<Announce> {
@@ -43,23 +57,45 @@ pub async fn query_pinned_relay(remote: SocketAddr, expected_id: &str) -> Option
     (announce.post_office
         && announce.user_id == expected_id
         && announce.account_id().is_some()
-        && announce.name.len() <= 1024)
-        .then_some(announce)
+        && announce.valid_presence())
+    .then_some(announce)
 }
 
 /// Repeatedly refresh one remote relay and expose its signed proof only to
-/// opted-in clients through the local bridge directory. Its signed TCP port
-/// must differ from this relay's own because the proxy binds that port locally.
+/// opted-in clients through the local bridge directory. The default proxy
+/// binds the remote signed port, so it must differ from this relay's own.
 pub async fn run_bridge_gateway(
-    gateway_proof: Arc<Mutex<Option<Announce>>>,
+    gateway_proof: Arc<Mutex<Option<GatewayProof>>>,
     local_tcp_port: u16,
     remote_discovery: SocketAddr,
     expected_id: String,
 ) {
-    let mut proxy: Option<(u16, JoinHandle<()>)> = None;
+    run_bridge_gateway_on_port(
+        gateway_proof,
+        local_tcp_port,
+        remote_discovery,
+        expected_id,
+        None,
+    )
+    .await;
+}
+
+/// `proxy_bind_port = Some(0)` asks the OS for an available local port. The
+/// directory advertises the chosen port separately from the hub's signed port.
+pub async fn run_bridge_gateway_on_port(
+    gateway_proof: Arc<Mutex<Option<GatewayProof>>>,
+    local_tcp_port: u16,
+    remote_discovery: SocketAddr,
+    expected_id: String,
+    proxy_bind_port: Option<u16>,
+) {
+    let mut proxy: Option<(u16, u16, JoinHandle<()>)> = None;
     let mut misses = 0u8;
     loop {
-        if proxy.as_ref().is_some_and(|(_, task)| task.is_finished()) {
+        if proxy
+            .as_ref()
+            .is_some_and(|(_, _, task)| task.is_finished())
+        {
             proxy.take();
             *gateway_proof
                 .lock()
@@ -68,9 +104,10 @@ pub async fn run_bridge_gateway(
         if let Some(announce) = query_pinned_relay(remote_discovery, &expected_id).await {
             misses = 0;
             let port = announce.tcp_port;
-            if port != local_tcp_port {
-                if proxy.as_ref().is_some_and(|(active, _)| *active != port)
-                    && let Some((_, task)) = proxy.take()
+            let bind_port = proxy_bind_port.unwrap_or(port);
+            if bind_port != local_tcp_port || bind_port == 0 {
+                if proxy.as_ref().is_some_and(|(active, _, _)| *active != port)
+                    && let Some((_, _, task)) = proxy.take()
                 {
                     task.abort();
                     *gateway_proof
@@ -78,29 +115,39 @@ pub async fn run_bridge_gateway(
                         .expect("gateway proof lock not poisoned") = None;
                 }
                 if proxy.is_none() {
-                    match bind_dual_stack_listener(port).await {
+                    match bind_dual_stack_listener(bind_port).await {
                         Ok(listener) => {
+                            let proxy_port = listener.local_addr().expect("bound listener").port();
                             let target = SocketAddr::new(remote_discovery.ip(), port);
-                            proxy = Some((port, tokio::spawn(proxy_connections(listener, target))));
+                            proxy = Some((
+                                port,
+                                proxy_port,
+                                tokio::spawn(proxy_connections(listener, target)),
+                            ));
                         }
                         Err(error) => {
-                            log::warn!("bridge gateway could not bind tcp/{port}: {error}")
+                            log::warn!("bridge gateway could not bind tcp/{bind_port}: {error}")
                         }
                     }
                 }
-                if proxy.is_some() {
+                if let Some((_, proxy_port, _)) = proxy.as_ref() {
                     *gateway_proof
                         .lock()
-                        .expect("gateway proof lock not poisoned") = Some(announce);
+                        .expect("gateway proof lock not poisoned") = Some(GatewayProof {
+                        announce,
+                        proxy_port: *proxy_port,
+                    });
                 }
             } else {
-                if let Some((_, task)) = proxy.take() {
+                if let Some((_, _, task)) = proxy.take() {
                     task.abort();
                 }
                 *gateway_proof
                     .lock()
                     .expect("gateway proof lock not poisoned") = None;
-                log::warn!("bridge peer uses this relay's tcp/{port}; configure distinct ports");
+                log::warn!(
+                    "bridge proxy would use this relay's tcp/{local_tcp_port}; configure a different proxy port"
+                );
             }
         } else {
             misses = misses.saturating_add(1);
@@ -247,6 +294,61 @@ mod tests {
         assert_eq!(&response, b"pong");
         upstream_task.await.unwrap();
         proxy.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_advertises_an_independent_proxy_port_and_forwards_bytes() {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_port = upstream.local_addr().unwrap().port();
+        let proof = Announce::new_post_office_with_account(&identity, &account, "hub", remote_port);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = socket.local_addr().unwrap();
+        let expected_id = identity.user_id();
+        let responder = tokio::spawn(respond_with_current_proof(
+            socket,
+            identity,
+            Arc::new(Mutex::new(Some(proof))),
+            Arc::new(AtomicUsize::new(0)),
+        ));
+        let shared = Arc::new(Mutex::new(None));
+        let gateway = tokio::spawn(run_bridge_gateway_on_port(
+            Arc::clone(&shared),
+            47475,
+            remote,
+            expected_id,
+            Some(0),
+        ));
+        let proxy_port = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(proof) = shared.lock().unwrap().as_ref() {
+                    break proof.proxy_port;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_ne!(proxy_port, remote_port);
+        assert_ne!(proxy_port, 47475);
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut message = [0; 4];
+            stream.read_exact(&mut message).await.unwrap();
+            assert_eq!(&message, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+        });
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy_port))
+            .await
+            .unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut response = [0; 4];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"pong");
+        upstream_task.await.unwrap();
+        gateway.abort();
+        responder.abort();
     }
 
     #[tokio::test]
@@ -419,10 +521,9 @@ mod tests {
         let second = bind_dual_stack_listener(0).await.unwrap();
         let first_port = first.local_addr().unwrap().port();
         let second_port = second.local_addr().unwrap().port();
-        drop((first, second));
-        let local_tcp_port = (1..=u16::MAX)
-            .find(|port| *port != first_port && *port != second_port)
-            .unwrap();
+        // Keep both remote ports reserved so parallel tests cannot claim them.
+        // The gateway's independent local proxy port is assigned by the OS.
+        let local_tcp_port = first_port;
         let first_proof =
             Announce::new_post_office_with_account(&identity, &account, "remote", first_port);
         let second_proof =
@@ -437,11 +538,12 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
         ));
         let shared = Arc::new(Mutex::new(None));
-        let gateway = tokio::spawn(run_bridge_gateway(
+        let gateway = tokio::spawn(run_bridge_gateway_on_port(
             Arc::clone(&shared),
             local_tcp_port,
             remote,
             expected_id,
+            Some(0),
         ));
         tokio::time::timeout(Duration::from_secs(3), async {
             while shared.lock().unwrap().as_ref().map(|proof| proof.tcp_port) != Some(first_port) {
@@ -450,8 +552,16 @@ mod tests {
         })
         .await
         .unwrap();
+        assert_ne!(
+            shared.lock().unwrap().as_ref().unwrap().proxy_port,
+            first_port
+        );
+        assert_ne!(
+            shared.lock().unwrap().as_ref().unwrap().proxy_port,
+            second_port
+        );
         *current.lock().unwrap() = Some(second_proof);
-        tokio::time::timeout(Duration::from_secs(7), async {
+        tokio::time::timeout(Duration::from_secs(12), async {
             while shared.lock().unwrap().as_ref().map(|proof| proof.tcp_port) != Some(second_port) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

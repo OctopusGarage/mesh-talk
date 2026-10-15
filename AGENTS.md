@@ -12,14 +12,20 @@
   `mod tests` (e.g. `node/node_tests.rs`).
 - React client sits in `frontend/src`; Vite tooling in `frontend/package.json`.
 - Operational scripts in `scripts/` (`setup-hooks.sh`, `check-health.sh`); architecture in
-  `docs/ARCHITECTURE.md`; conventions in `specifications/`. All docs are indexed in
-  [`docs/README.md`](docs/README.md) (documentation map).
+  `docs/ARCHITECTURE.md`; conventions in `specifications/`. The
+  [documentation map](docs/README.md) routes readers to maintained guides; the
+  [documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md) define ownership
+  across the README, guides, and project site.
 
 ## Build, Test, and Development Commands
 - `make dev` primes Rust + Node deps and installs git hooks.
 - `make build` / `make frontend-build` — release build / Vite production build.
-- Three test layers: `make test` runs the workspace unit/integration suite
-  (`cargo test --workspace`; filter with `cargo test -p mesh-talk-core --lib node::node`);
+- During feature development, run affected tests only: `make test-focused
+  TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
+  tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.
+  `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`
+  selects a frontend unit file. `make test` runs the full workspace suite
+  (`cargo test --workspace`) for pre-PR and CI gates;
   `make e2e` runs the `#[ignore]`d multi-process backend rigs; `cd frontend && npm run e2e`
   runs the Playwright UI suite. Test builds use cheap KDF params (the `fast-test-kdf`
   feature), and `.cargo/config.toml` caps test/compile parallelism.
@@ -36,13 +42,14 @@
 - Reference `specifications/development_conventions.md` for naming nuances.
 
 ## Architecture & Components
-- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No server.
+- Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
 - The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
   (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
   low-level socket in `transport/net.rs`) + the content-addressed event log + DM/channel/
   file crypto. Messages are events synced as a bounded append-only log, account-addressed
-  across a user's devices; offline delivery via an elected post office. Wire formats are
-  versioned bincode.
+  across a user's devices; offline delivery via an elected post office. Optional
+  routed discovery and opt-in post-office bridges connect reachable sites without
+  joining their IP subnets. Wire formats are versioned bincode.
 - See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport.
 
 ## Testing Guidelines
@@ -50,6 +57,10 @@
   unit tests near the code. Networking/crypto changes ship a loopback integration assertion.
 - Backend multi-process E2E via `make e2e` (CI: `e2e-backend.yml`); Playwright UI E2E via
   `cd frontend && npm run e2e` (CI: `e2e-ui.yml`).
+- Do not run full suites or E2E automatically during ordinary feature work. Run
+  the affected unit or integration tests as changes are made; run E2E and the
+  comprehensive health gate on explicit request, before PR/review, or in CI.
+- See `docs/testing-feedback-loop.md` for selection examples and escalation triggers.
 - Document executed validation commands in every PR (minimum `make test`).
 
 ## Commit & Pull Request Guidelines

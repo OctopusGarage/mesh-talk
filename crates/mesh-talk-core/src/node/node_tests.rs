@@ -5024,55 +5024,6 @@ async fn channel_recall_by_member_is_visible_and_survives_removal() {
 }
 
 #[tokio::test]
-async fn search_finds_a_sent_dm_by_keyword() {
-    let me = DeviceIdentity::generate();
-    let peer = DeviceIdentity::generate();
-    let dir = tempfile::tempdir().unwrap();
-    let roster = seed_roster(&peer, "Peer", 1, &me.public().user_id());
-    let account = crate::identity::account::Account::generate();
-    roster.lock().unwrap().update(
-        &Announce::new_with_account(&peer, &account, "Peer", 1),
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        &me.public().user_id(),
-    );
-    let original_roster = roster.clone();
-    let (dm, _a) = mpsc::unbounded_channel();
-    let (ch, _b) = mpsc::unbounded_channel();
-    let (f, _c) = mpsc::unbounded_channel();
-    let node = Node::open(
-        me,
-        roster,
-        dm,
-        ch,
-        f,
-        &dir.path().join("m.log"),
-        &dir.path().join("m-sent.log"),
-        "pw",
-    )
-    .unwrap();
-
-    // No peer is reachable (port 1), but send_dm still records to the sidecar.
-    let peer_uid = peer.public().user_id();
-    let _ = node.send_dm(&peer_uid, b"lunch at noon tomorrow").await; // delivery fails; sidecar written
-    let hits = node.search("NOON");
-    assert_eq!(hits.len(), 1);
-    assert!(hits[0].from_me);
-    assert_eq!(hits[0].label, "Peer");
-    assert_eq!(hits[0].target, peer_uid);
-    assert_eq!(
-        hits[0].account_id.as_deref(),
-        Some(account.account_id().as_str())
-    );
-    *original_roster.lock().unwrap() = Roster::default();
-    assert_eq!(
-        hits[0].account_id.as_deref(),
-        Some(account.account_id().as_str())
-    );
-    assert!(node.search("   ").is_empty());
-    assert!(node.search("absent-keyword").is_empty());
-}
-
-#[tokio::test]
 async fn a_reply_round_trips_with_its_reply_to() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();

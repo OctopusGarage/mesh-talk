@@ -35,9 +35,9 @@ async fn manual_allow_publishes_private_route_without_online_presence() {
     let (alice, mut arx) = start(dir.path(), "alice", 0).await;
     let (bob, _) = start(dir.path(), "bob", 0).await;
     alice.set_invisible(true).await.unwrap();
-    let ba = bob.node.signed_announce("Bob", bob.listen_tcp_port());
+    let bob_announcement = bob.node.signed_announce("Bob", bob.listen_tcp_port());
     alice.roster.lock().unwrap().update(
-        &ba,
+        &bob_announcement,
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         alice.user_id(),
     );
@@ -118,10 +118,10 @@ async fn both_invisible_runtimes_restart_with_pinned_routes_and_return_dm() {
     let (bob, mut brx) = start(dir.path(), "bob", port).await;
     alice.set_invisible(true).await.unwrap();
     // Verified LAN presence is received passively while Alice is invisible.
-    let ba = bob.node.signed_announce("Bob", bob.listen_tcp_port());
+    let bob_announcement = bob.node.signed_announce("Bob", bob.listen_tcp_port());
     let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     udp.send_to(
-        &crate::discovery::announce::encode(&ba),
+        &crate::discovery::announce::encode(&bob_announcement),
         (std::net::Ipv4Addr::LOCALHOST, port),
     )
     .await
@@ -497,8 +497,8 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
     let (bob, _) = start(dir.path(), "bob", 0).await;
     bob.node.set_attachment_global_auto(true).unwrap();
     let aa = alice.node.signed_announce("Alice", alice.listen_tcp_port());
-    let ba = bob.node.signed_announce("Bob", bob.listen_tcp_port());
-    for (receiver, announcement) in [(&alice, &ba), (&bob, &aa)] {
+    let bob_announcement = bob.node.signed_announce("Bob", bob.listen_tcp_port());
+    for (receiver, announcement) in [(&alice, &bob_announcement), (&bob, &aa)] {
         receiver.roster.lock().unwrap().update(
             announcement,
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bell,
@@ -33,6 +39,7 @@ import { Badge } from "@/components/ui/badge";
 import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { balancedPrivacy, useSettings } from "@/store/settings";
+import { useAuth } from "@/store/auth";
 import type { AppSettings } from "@/lib/types";
 import { useTheme } from "@/lib/theme";
 import {
@@ -58,6 +65,7 @@ import {
   settingsCategory,
   settingsScrollBehavior,
 } from "./settingsScroll";
+import { createSettingsDialogSession } from "./settingsDialogSession";
 
 /** A section group: a small display-font label over a stack of rows. */
 function Section({
@@ -142,8 +150,13 @@ export function SettingsDialog({
   onOpenChange?: (open: boolean) => void;
 } = {}) {
   const { t, i18n } = useTranslation();
+  const translate = useRef(t);
+  useEffect(() => {
+    translate.current = t;
+  }, [t]);
   const wallpaperEnabled = useTheme((s) => s.wallpaperEnabled);
   const setWallpaperEnabled = useTheme((s) => s.setWallpaperEnabled);
+  const owner = useAuth((s) => s.user?.id ?? null);
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
@@ -160,29 +173,44 @@ export function SettingsDialog({
   const [callsEnabled, setCallsEnabled] = useState(false);
   const [postOfficeEnabled, setPostOfficeEnabled] = useState(true);
   const [bridgeDiscoveryEnabled, setBridgeDiscoveryEnabled] = useState(false);
+  const [bridgeHubId, setBridgeHubId] = useState("");
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
   const [privacy, setPrivacy] = useState(balancedPrivacy);
   const settingsScroll = useRef<HTMLDivElement>(null);
   const [moreBelow, setMoreBelow] = useState(true);
   const [activeSection, setActiveSection] = useState("privacy");
+  useLayoutEffect(() => {
+    if (open) {
+      setMoreBelow(true);
+      setActiveSection("privacy");
+    }
+  }, [open]);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [loadedOwner, setLoadedOwner] = useState<string | null>(null);
   const [autostartLoaded, setAutostartLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
-  const savingRef = useRef(false);
-  const loadGeneration = useRef(0);
+  const session = useRef<ReturnType<typeof createSettingsDialogSession> | null>(
+    null,
+  );
+  if (!session.current)
+    session.current = createSettingsDialogSession(setSaving);
+  useLayoutEffect(() => {
+    session.current!.setOwner(owner);
+  }, [owner]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsErrorKind, setSettingsErrorKind] = useState<"load" | "save">(
     "load",
   );
 
   const loadCurrentSettings = useCallback(() => {
-    const request = ++loadGeneration.current;
+    const request = session.current!.beginLoad();
     setSettingsLoaded(false);
     setAutostartLoaded(false);
     setSettingsError(null);
-    void settingsApi.get().then(
+    void session.current!.load(
+      request,
+      () => settingsApi.get(),
       (s) => {
-        if (request !== loadGeneration.current) return;
         setMinimizeToTray(s.minimize_to_tray);
         setNotifications(s.notifications);
         setDownloadDir(s.download_dir);
@@ -191,58 +219,62 @@ export function SettingsDialog({
         setCallsEnabled(s.calls_enabled);
         setPostOfficeEnabled(s.post_office_enabled);
         setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
+        setBridgeHubId(s.bridge_hub_id ?? "");
         setRingtone(asRingtoneId(s.ringtone));
         const policy = privacyFromSettings(s);
         setPrivacy(policy);
         useSettings.getState().setPrivacy(policy);
+        setLoadedOwner(owner);
         setSettingsLoaded(true);
       },
       (e) => {
-        if (request === loadGeneration.current) {
-          setSettingsErrorKind("load");
-          setSettingsError(
-            t("settings.loadFailed", { error: errorMessage(e) }),
-          );
-        }
+        setSettingsErrorKind("load");
+        setSettingsError(
+          translate.current("settings.loadFailed", {
+            error: errorMessage(e),
+          }),
+        );
       },
     );
-    void settingsApi.autostartEnabled().then(
+    void session.current!.load(
+      request,
+      () => settingsApi.autostartEnabled(),
       (on) => {
-        if (request !== loadGeneration.current) return;
         setLaunchAtLogin(on);
         setAutostartLoaded(true);
       },
       (e) => {
-        if (request === loadGeneration.current) {
-          setSettingsErrorKind("load");
-          setSettingsError(
-            t("settings.loadFailed", { error: errorMessage(e) }),
-          );
-        }
+        setSettingsErrorKind("load");
+        setSettingsError(
+          translate.current("settings.loadFailed", {
+            error: errorMessage(e),
+          }),
+        );
       },
     );
-  }, [t]);
+  }, [owner]);
 
   // Load current state whenever the dialog opens.
   useEffect(() => {
     if (open) loadCurrentSettings();
-  }, [open, loadCurrentSettings]);
+    const current = session.current!;
+    return () => {
+      current.invalidateView();
+    };
+  }, [open, owner, loadCurrentSettings]);
 
-  const saveSetting = async (write: () => Promise<void>, apply: () => void) => {
-    if (!settingsLoaded || savingRef.current) return;
-    savingRef.current = true;
-    setSaving(true);
+  const saveSetting = <T,>(
+    write: () => Promise<T>,
+    apply: (value: T) => void,
+  ) => {
+    if (!settingsLoaded || loadedOwner !== owner) return Promise.resolve();
     setSettingsError(null);
-    try {
-      await write();
-      apply();
-    } catch (e) {
+    return session.current!.save(write, apply, (error) => {
       setSettingsErrorKind("save");
-      setSettingsError(t("settings.saveFailed", { error: errorMessage(e) }));
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
+      setSettingsError(
+        t("settings.saveFailed", { error: errorMessage(error) }),
+      );
+    });
   };
 
   const onMinimize = (v: boolean) => {
@@ -269,15 +301,23 @@ export function SettingsDialog({
       () => setBridgeDiscoveryEnabled(enabled),
     );
   };
+  const saveBridgeHub = () => {
+    const id = bridgeHubId.trim().toLowerCase();
+    void saveSetting(
+      () => settingsApi.update({ bridge_hub_id: id }),
+      () => setBridgeHubId(id),
+    );
+  };
   const savePrivacy = (patch: Partial<AppSettings>) => {
     void saveSetting(
       async () => {
         await settingsApi.update(patch);
-        const saved = privacyFromSettings(await settingsApi.get());
+        return privacyFromSettings(await settingsApi.get());
+      },
+      (saved) => {
         setPrivacy(saved);
         useSettings.getState().setPrivacy(saved);
       },
-      () => {},
     );
   };
   // Toggling "stay signed in" off makes the backend immediately forget the saved
@@ -324,18 +364,20 @@ export function SettingsDialog({
       async () => {
         await settingsApi.setAutostart(v);
         // The OS launch agent is the source of truth.
-        setLaunchAtLogin(await settingsApi.autostartEnabled());
+        return settingsApi.autostartEnabled();
       },
-      () => {},
+      (enabled) => setLaunchAtLogin(enabled),
     ).finally(() => setAutostartBusy(false));
   };
 
   const chooseDir = async () => {
+    const request = session.current!.request();
     try {
       const dir = await openDialog({
         directory: true,
         defaultPath: downloadDir || undefined,
       });
+      if (!session.current!.isCurrent(request)) return;
       if (typeof dir === "string") {
         await saveSetting(
           () => settingsApi.update({ download_dir: dir }),
@@ -343,8 +385,10 @@ export function SettingsDialog({
         );
       }
     } catch (e) {
-      setSettingsErrorKind("save");
-      setSettingsError(t("settings.saveFailed", { error: errorMessage(e) }));
+      if (session.current!.isCurrent(request)) {
+        setSettingsErrorKind("save");
+        setSettingsError(t("settings.saveFailed", { error: errorMessage(e) }));
+      }
     }
   };
 
@@ -357,7 +401,6 @@ export function SettingsDialog({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (next) setMoreBelow(true);
       }}
     >
       {controlledOpen === undefined && (
@@ -495,6 +538,31 @@ export function SettingsDialog({
                     checked={bridgeDiscoveryEnabled}
                     onCheckedChange={onBridgeDiscovery}
                     disabled={!settingsLoaded || saving || !postOfficeEnabled}
+                  />
+                }
+              />
+              <Row
+                id="setting-bridge-hub"
+                icon={<ShieldCheck className="h-4 w-4" />}
+                title={t("settings.bridgeHub")}
+                desc={t("settings.bridgeHubDesc")}
+                control={
+                  <input
+                    id="setting-bridge-hub"
+                    type="text"
+                    value={bridgeHubId}
+                    onChange={(event) => setBridgeHubId(event.target.value)}
+                    onBlur={saveBridgeHub}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                    placeholder={t("settings.bridgeHubPlaceholder")}
+                    aria-label={t("settings.bridgeHub")}
+                    maxLength={32}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={!settingsLoaded || saving || !postOfficeEnabled}
+                    className="w-44 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
                   />
                 }
               />

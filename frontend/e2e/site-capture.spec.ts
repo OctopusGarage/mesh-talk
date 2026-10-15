@@ -36,7 +36,7 @@ test("capture current desktop surfaces for the site and README", async ({
   await mkdir(output, { recursive: true });
   const avatarFiles: Record<string, string> = {
     "players/Cesc Fàbregas.webp": resolve(
-      "e2e/fixtures/site-capture/Cesc Fàbregas.webp",
+      "e2e/fixtures/site-capture/Cesc-Fabregas.webp",
     ),
     "players/Lionel Messi.webp": resolve(
       "e2e/fixtures/site-capture/Lionel Messi.webp",

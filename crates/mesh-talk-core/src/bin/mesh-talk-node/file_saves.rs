@@ -204,14 +204,15 @@ mod tests {
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let bpublic = bob.public();
         let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let bp =
+            Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _) = open(ad.path(), alice, aa, &bp);
-        let (b, incoming) = open(bd.path(), bob, ba, &ap);
+        let (b, incoming) = open(bd.path(), bob, bob_account, &ap);
         let at = tokio::spawn(a.clone().run_accept_loop(al));
         let bt = tokio::spawn(b.clone().run_accept_loop(bl));
         let channel = a.create_channel("media", vec![bpublic]).await.unwrap();

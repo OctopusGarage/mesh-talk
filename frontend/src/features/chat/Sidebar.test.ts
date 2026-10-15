@@ -111,6 +111,7 @@ it("shows a contact's latest message and unread count in the peer list", () => {
   expect(html).toContain("See you on the LAN");
   expect(html).toContain('aria-label="Alice, See you on the LAN"');
   expect(html).toContain(">2</span>");
+  expect(html).toContain('data-testid="contact-profile-alice"');
 });
 
 it("excludes a hidden contact from the visible peer list", () => {

@@ -95,7 +95,7 @@ pub(crate) fn encode_response_signed(
     public: &crate::identity::device::PublicIdentity,
     sign: impl FnOnce(&[u8]) -> [u8; 64],
 ) -> Option<Vec<u8>> {
-    if !announce.verify() || announce.public() != *public || announce.tcp_port == 0 {
+    if !announce.valid_presence() || announce.public() != *public {
         return None;
     }
     let body = encode_announce(announce);
@@ -128,7 +128,7 @@ pub fn decode_response(bytes: &[u8], expected_nonce: Nonce) -> Option<Announce> 
     }
     let body = &bytes[REPLY_HEADER..REPLY_HEADER + len];
     let announce = decode_announce(body)?;
-    if !announce.verify() || announce.tcp_port == 0 {
+    if !announce.valid_presence() {
         return None;
     }
     let signature: [u8; 64] = bytes[REPLY_HEADER + len..].try_into().ok()?;

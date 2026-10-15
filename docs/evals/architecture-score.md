@@ -1,4 +1,71 @@
-# Architecture score — 2026-10-09
+# Architecture health assessments
+
+## Optimization series — 2026-10-15
+
+The repository-wide starting assessment was **90/100**: module depth 22/25,
+seam integrity 23/25, test surface 24/25, and locality 21/25. This is a
+qualitative review of the current core, host, and frontend, including the
+recent bridge and linked-device sync work. It is not a measured decline from
+the narrower 9 October review below.
+
+Round 1 concentrates Account history page records, bounded scanning, and
+inbound frame assembly in `node/account_sync/page.rs`. The receive loop now
+coordinates the wire stream and applies a completed page through one method.
+The Node interface, versioned frames, limits, and persistence formats are
+unchanged. A focused assembler regression covers incomplete records, overflow,
+and a complete page; existing linked-device backfill and process tests exercise
+the path end to end.
+
+| Dimension | Starting | Round 1 | Round 2 | Round 3 | Round 4 | Evidence |
+|---|---:|---:|---:|---:|---:|---|
+| Module depth | 22/25 | 23/25 | 23/25 | 23/25 | 23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly belongs to the directory module. |
+| Seam integrity | 23/25 | 23/25 | 23/25 | 23/25 | 24/25 | Host settings and periodic retention use one owner-scoped `NodeState` interface rather than duplicating runtime/session checks. |
+| Test surface | 24/25 | 24/25 | 24/25 | 24/25 | 24/25 | Focused page, bridge, settings, and host ownership regressions; full-round bridge refresh still lacks one isolated test interface. |
+| Locality | 21/25 | 22/25 | 23/25 | 24/25 | 24/25 | Account completion, gateway consistency, Settings dialog lifetime, and host account ownership each have one owner. |
+| **Total** | **90/100** | **92/100** | **93/100** | **94/100** | **95/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
+
+Verification: `cargo test -p mesh-talk-core --lib node::account_sync`,
+`cargo test -p mesh-talk-core --lib account_history_backfills_to_a_linked_device`,
+`make test`, `cargo clippy --all-targets -- -D warnings`, and `make e2e` passed.
+Round 2 moves directory response assembly from the Node's network query into
+`node/bridge_directory.rs`. The directory now owns v2/v1 decoding, legacy
+gateway selection, cross-page gateway consistency, and the 128-proof bound.
+The Node still owns the 128-page and 10-second network limits. A regression
+rejects conflicting valid gateway routes across pages. `make test`,
+`cargo test -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all -- --check`
+passed. Wire bytes and public interfaces are unchanged. The score remains
+below the 95/100 goal because bridge refresh, Account sync application, and
+settings ownership still span multiple places.
+
+Round 3 gives the Settings dialog one session owner for ordered saves, load
+generations, account switches, and state publication. Queued writes from a
+previous account are skipped; writes already started or queued when the dialog
+closes still finish for the same account, while their stale UI updates are
+suppressed. Saved privacy and OS autostart read-backs now publish through the
+same successful-save path. A late directory picker result cannot save into a
+new view. Existing settings IPC and stored document shapes are unchanged.
+The full frontend unit suite (378 tests), typecheck, lint, format check, and
+production build passed. Fifteen targeted Playwright settings/privacy/dialog
+tests passed; after moving owner invalidation to a layout effect, the five
+settings recovery tests passed again. The remaining point to the target is
+primarily the host's repeated settings application lease and the dialog's
+field-level presentation state.
+
+Round 4 moves host runtime and live-session ownership checks into
+`NodeState::node_for_owner`. Settings application and periodic retention use
+that interface; immediate retention pruning checks ownership again after
+relay application can yield. The focused host regression covers the matching
+owner, a different requested owner, and a replaced session. The normal local
+workflow now selects one Rust module/integration target or frontend test file;
+pre-commit performs source checks, while comprehensive suites remain the PR/CI
+gate. This review rates seam integrity one point higher. The 95/100 is a
+qualitative architecture score, not a measured performance or test coverage
+percentage. Round 4 was validated with focused host tests, strict Clippy,
+formatting, and workflow checks; the comprehensive health gate was stopped
+when the user changed the local testing policy.
+
+## Earlier review — 2026-10-09
 
 **95/100**, up from **86/100** in the broad-scope review of commit `6640d30`.
 This is a qualitative score for the codebase's active core, host, and frontend

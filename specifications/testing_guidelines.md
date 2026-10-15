@@ -38,7 +38,14 @@ crates/mesh-talk-core/
 └── src/node/node_tests.rs         # node behaviour (unit + integration)
 ```
 
-Run the workspace unit/integration suite:
+During feature development, run only the affected module or integration target:
+
+```bash
+make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync
+make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke
+```
+
+Run the workspace unit/integration suite before PR submission or in CI:
 
 ```bash
 cargo test --workspace        # or: make test
@@ -70,7 +77,13 @@ React frontend tests should use Vitest + Testing Library and can be organized in
        └── user.spec.ts
    ```
 
-Execute frontend unit tests (Vitest) with:
+Execute the affected frontend unit file during development:
+
+```bash
+cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts
+```
+
+Execute the full frontend unit suite before PR submission or in CI:
 
 ```bash
 cd frontend && npm run test

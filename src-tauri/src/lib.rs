@@ -23,11 +23,13 @@ pub mod contact_policy;
 pub mod diagnostics;
 pub mod events;
 pub mod favorites;
+mod linked_account;
 pub mod logger;
 pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
 pub mod recovery;
+mod runtime_bootstrap;
 pub mod services;
 pub mod session_store;
 pub mod settings;
@@ -219,17 +221,8 @@ pub fn run_tauri_configured(
                             let node = {
                                 let node_state =
                                     app_handle.state::<crate::chat_commands::NodeState>();
-                                let guard = node_state.0.lock().await;
-                                guard.as_ref().and_then(|rt| {
-                                    (rt.host_account_id() == Some(owner.as_str())
-                                        && matches!(
-                                            app_handle.state::<crate::state::AppState>()
-                                                .session()
-                                                .capture(),
-                                            Ok(ref lease) if lease.owner() == owner
-                                        ))
-                                    .then(|| rt.handle())
-                                })
+                                let app_state = app_handle.state::<crate::state::AppState>();
+                                node_state.node_for_owner(app_state.session(), &owner).await
                             };
                             if let Some(node) = node {
                                 let _ = tokio::task::spawn_blocking(move || {

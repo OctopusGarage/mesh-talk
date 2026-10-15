@@ -4,8 +4,8 @@ test.use({ viewport: { width: 1100, height: 800 } });
 const CHANNEL = "chan_team_dddd4444";
 const BOB_DEVICE = "device_bob_2222";
 
-// Tapping a channel member opens a 1:1 chat with them.
-test("clicking a channel member opens their private chat", async ({ page }) => {
+// The member identity opens its profile; the adjacent message action keeps the DM shortcut.
+test("the member message action opens their private chat", async ({ page }) => {
   await page.goto("/");
   for (const tab of ["register", "signin"]) {
     await page.getByTestId(`login-tab-${tab}`).click();

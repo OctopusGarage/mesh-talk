@@ -375,6 +375,9 @@
     "postOfficeDesc": "使用區域網絡中可用的中繼節點進行離線投遞。事件詳情已加密，但中繼節點仍可透過連線和時間推斷通訊對象。關閉後，此裝置將停止透過中繼節點上傳及下載。",
     "bridgeDiscovery": "透過郵局探索跨網絡節點",
     "bridgeDiscoveryDesc": "向已啟用橋接的郵局分享此裝置的公開在線資訊，並探索其他參與節點。無法直連時，訊息經加密中繼郵箱投遞。預設關閉，隱身模式下不可用。",
+    "bridgeHub": "共用橋接中心指紋",
+    "bridgeHubDesc": "連接多個站點時，輸入中心郵局完整的 32 位裝置指紋。跨站點郵箱統一使用此中心。留空則按一般方式選擇郵局。",
+    "bridgeHubPlaceholder": "32 位裝置指紋",
     "privacyLevel": "私隱級別",
     "privacyLevelDesc": "選擇預設，再按需要調整下方選項。",
     "level_balanced": "均衡",
@@ -798,5 +801,20 @@
     "listingMismatch": "下載的資源包與市集條目不一致。",
     "rightsPending": "圖片使用權待審核",
     "idConflict": "其他類型的資源庫已使用這個資源包 ID。"
+  },
+  "memberProfile": {
+    "title": "成員資料",
+    "description": "此成員的身分與已知網絡資訊。",
+    "presenceUnavailable": "在線狀態不可用",
+    "accountId": "帳戶 ID",
+    "devices": "裝置",
+    "noDevice": "暫無裝置資訊",
+    "deviceId": "裝置 ID",
+    "postOffice": "郵局節點",
+    "networkEndpoint": "已知網絡端點",
+    "unavailable": "目前不可用",
+    "endpointHint": "這是最後已知的網絡路徑，可能指向中繼節點；它不表示地理位置。",
+    "view": "查看資料",
+    "viewNamed": "查看{{name}}的資料"
   }
 }

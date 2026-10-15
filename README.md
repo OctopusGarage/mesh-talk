@@ -1,307 +1,106 @@
-<a id="readme-top"></a>
-
 # Mesh-Talk
 
 [![CI](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml)
-[![UI E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml)
-[![Backend E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml)
-[![Sanitizers](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml)
-[![Fuzz](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml)
-[![Mutation sample](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml)
-[![Gitleaks](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml)
-[![Scorecard](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/OctopusGarage/mesh-talk/badge)](https://scorecard.dev/viewer/?uri=github.com/OctopusGarage/mesh-talk)
-[![codecov](https://codecov.io/gh/OctopusGarage/mesh-talk/branch/main/graph/badge.svg)](https://codecov.io/gh/OctopusGarage/mesh-talk)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
-[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![platform: macOS | Windows | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000?logo=linux&logoColor=white)](#build-from-source)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-docs-8A2BE2)](https://deepwiki.com/OctopusGarage/mesh-talk)
 [![Release](https://img.shields.io/github/v/release/OctopusGarage/mesh-talk?sort=semver)](https://github.com/OctopusGarage/mesh-talk/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**A serverless, end-to-end-encrypted messenger for your local network.** Mesh-Talk peers find
-each other on the LAN and talk directly. Accounts are created and kept locally; no cloud
-registration or central service is required. An optional peer-operated post office can hold
-encrypted events for offline peers.
+**Private desktop conversations, starting on your local network.** Mesh-Talk lets peers find
+each other and exchange end-to-end-encrypted messages without a cloud account or a
+vendor-operated server. It runs on macOS, Windows, and Linux. Devices can also communicate
+across existing routed networks when their owners configure that path.
 
-<p align="center">
-  <a href="docs/README.md"><strong>Documentation</strong></a>
-  ·
-  <a href="docs/ARCHITECTURE.md">Architecture</a>
-  ·
-  <a href="https://github.com/OctopusGarage/mesh-talk/issues/new?template=bug_report.yml">Report Bug</a>
-  ·
-  <a href="https://github.com/OctopusGarage/mesh-talk/issues/new?template=feature_request.yml">Request Feature</a>
-</p>
+[Download a release](https://github.com/OctopusGarage/mesh-talk/releases) ·
+[Read the documentation](docs/README.md) ·
+[View the project site](https://octopusgarage.github.io/mesh-talk/)
 
 <p align="center">
   <img src="docs/screenshots/hero-barcelona.webp" width="860"
-       alt="Mesh-Talk Barcelona theme showing a football team chat with Lionel Messi, Neymar Jr., player avatars, and a message composer">
+       alt="Mesh-Talk desktop app showing a group conversation, contact list, and message composer">
 </p>
-
-<p align="center"><sub>Barcelona × Argentina demo, captured with deterministic sample messages.</sub></p>
-
----
-
-## Overview
-
-Mesh-Talk is a desktop chat app ([Tauri](https://tauri.app/) v2 + React) for macOS, Windows, and
-Linux, built on a UI-free Rust protocol core (`mesh-talk-core`) that also runs headless as the
-`mesh-talk-node` CLI. Peers discover one another over signed UDP multicast, connect over a
-Noise-encrypted TCP channel, and converge by replicating a per-conversation append-only event
-log. Every message is end-to-end encrypted with forward secrecy; an optional store-and-forward
-relay (the "post office") delivers messages to peers that are temporarily offline.
-
-## Features
-
-**Messaging**
-
-- One-to-one DMs and group channels, addressed by identity (and fanned out across a user's linked devices)
-- Reactions, @mentions, replies/threads, and full-text search over local history
-- Large-file transfer (up to ~4 GiB) — chunked, encrypted per chunk, with progress and resume
-- Persistent, offline-capable history; a "post office" relay delivers to peers that are away
-- Message recall, configurable history retention, per-contact visibility controls, and automatic delivery confirmation (not read receipts)
-- Manual encrypted `.mtbackup` exports and signed-out recovery with a separate recovery key; restored channels remain read-only until reinvited
-
-**Security & privacy**
-
-- End-to-end encryption with **forward secrecy** — Double Ratchet for DMs, a sender-key ratchet for channels
-- Ed25519 device identities (your ID is your key fingerprint), X25519 key agreement, Noise-encrypted transport
-- Safety-number contact verification with trust-on-first-use and key-change warnings
-- Encrypted-at-rest keystores and message logs; no servers, no telemetry, no central account
-- Balanced, Private, and Strict privacy presets for notification previews, app locking, and sensitive copying; invisible mode stops public presence announcements and lets approved accounts reach you
-
-**Network**
-
-- Zero-config LAN discovery: signed UDP multicast announces + announce/response + a unicast subnet-scan fallback
-- Optional routed discovery on an existing user-managed Tailscale network, plus manual IP/hostname entry; Mesh-Talk verifies device identity independently of the network
-- Dual-stack IPv4/IPv6 direct TCP; self-healing discovery that re-announces and re-joins on network changes
-
-**Desktop experience**
-
-- Multi-device accounts with QR/code device linking
-- Live presence (online / last-seen), your own online indicator in channel member lists, pinned contacts, and an in-app diagnostics panel
-- Resizable conversation sidebar, keyboard navigation, and dialogs with focus and reduced-motion support
-- Built-in avatar gallery, custom profile and channel photos, optional conversation wallpaper
-- Tray icon, launch-at-login, native notifications, seven themes in the default edition, and English, Spanish, Japanese, Mandarin (Simplified/Traditional), and Cantonese
-- Default and lite desktop editions; optional avatar, theme, and sticker packs can be installed locally or from the marketplace
-
-## Screenshots
-
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/hero-argentina.webp" alt="Argentina theme with the same football team conversation and player avatars">
-      <br><sub><b>Argentina theme</b></sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/hero-messi.webp" alt="Messi theme with the same football team conversation and player avatars">
-      <br><sub><b>Messi theme</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/stickers.webp" alt="The sticker panel open in a direct message">
-      <br><sub><b>Animated stickers (default edition)</b></sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/screenshots/themes.webp" alt="The settings theme picker with Barcelona selected alongside dark, light, OLED, and other palettes">
-      <br><sub><b>Selectable themes</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="docs/screenshots/verify.webp" alt="The verify-contact dialog showing a safety number">
-      <br><sub><b>End-to-end verification (safety number)</b></sub>
-    </td>
-    <td align="center">
-      <img src="docs/screenshots/settings.webp" alt="The settings dialog showing invisible mode and privacy level controls">
-      <br><sub><b>Privacy &amp; security settings</b></sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="docs/screenshots/avatars-players.webp" alt="The avatar picker gallery">
-      <br><sub><b>Pick an avatar</b></sub>
-    </td>
-    <td align="center">
-      <img src="docs/screenshots/avatars-clubs.webp" alt="Group avatar crest gallery">
-      <br><sub><b>Group avatars</b></sub>
-    </td>
-  </tr>
-</table>
+<p align="center"><sub>Desktop interface with deterministic demo identities and messages.</sub></p>
 
 ## How it works
 
-1. **Discover** — each peer broadcasts a signed announce over UDP multicast (`224.0.0.167:47474`) on
-   every interface; peers verify the signature and record one another. A unicast subnet scan and
-   announce/response replies cover networks where multicast is flaky.
-2. **Connect** — peers dial each other over TCP and run a Noise handshake for an authenticated,
-   encrypted channel.
-3. **Sync** — conversations are append-only event logs; peers exchange only the events the other is
-   missing (bounded rounds), so history converges and survives restarts.
-4. **Encrypt** — message payloads are sealed with per-conversation ratchets (Double Ratchet / sender
-   key), so a compromised key can't decrypt past traffic.
-5. **Relay when offline** — if a recipient is away, an elected post-office node holds the encrypted
-   events and forwards them on reconnect. It never sees plaintext.
+Each device has a local identity. Nearby devices discover signed announcements on the LAN,
+establish an authenticated Noise-encrypted connection, and sync conversation events. Direct
+messages use a Double Ratchet; channels use sender-key ratchets. You can compare a contact's
+safety number to verify their identity.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
+| Situation                   | Path                                                                                                                                                  | What to know                                                                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Peers share a LAN           | Automatic local discovery and direct connection                                                                                                       | Works on an isolated LAN; firewall rules and multicast support still matter.                                                          |
+| Peers are on different LANs | Optional [routed discovery](docs/routed-network-discovery.md) over an existing network, or an opt-in [post-office bridge](docs/network-topologies.md) | Mesh-Talk verifies identities; it does not configure a VPN or join IP subnets.                                                        |
+| A recipient is offline      | A peer-operated post office stores recipient-encrypted events for later delivery                                                                      | Mailboxes have capacity limits and a maximum age of 30 days; the relay sees [routing metadata](docs/post-office-metadata-privacy.md). |
 
-## Download & first run
+The [architecture reference](docs/ARCHITECTURE.md) explains the protocol, trust boundaries,
+and sync model. The [network topology guide](docs/network-topologies.md) distinguishes tested
+message paths from unsupported assumptions about cross-network calls, file transfer, or
+mailbox replication.
 
-Grab the `.zip` for your OS/arch and edition from the [**Releases**](https://github.com/OctopusGarage/mesh-talk/releases)
-page (e.g. `mesh-talk_vX.Y.Z_macos_arm64.zip`) and **unzip it** — inside are the installer(s) for
-your platform plus a `SHA256SUMS` file. The macOS zip contains a DMG with the app inside. The
-default edition includes removable packs, including 40 animated Google Noto stickers; ZIPs ending in `_lite.zip`
-omit those bundled assets while retaining the core messaging features. Both editions can install
-packs later. See the [pack guide](docs/CUSTOMIZATION_PACKS.md).
+## What you can do
 
-The builds are **free and unsigned** (no paid Apple/Windows code-signing certificate), so macOS and
-Windows show a one-time "unidentified developer" /
-SmartScreen prompt the first time — this is expected for unsigned open-source software and does
-**not** mean the app is unsafe. Every release also ships a `SHA256SUMS` list, a Sigstore `cosign`
-signature, and a SLSA build-provenance attestation; the **release page documents the exact verify
-commands** (`shasum -c`, `cosign verify-blob`, `gh attestation verify`). How to open, per platform:
+- **Converse:** one-to-one DMs and group channels, with reactions, replies, mentions,
+  search, presence, and local history.
+- **Share and recover:** encrypted chunked file transfer, linked devices, and manual
+  [encrypted backups](docs/backup-recovery.md) with a separate recovery key.
+- **Control exposure:** contact verification, [privacy presets and invisible mode](docs/privacy-controls.md),
+  local retention controls, and message recall.
+- **Make it yours:** desktop themes, avatars, stickers, and installable
+  [customization packs](docs/CUSTOMIZATION_PACKS.md).
 
-- **Linux** — no prompt at all.
-  - **AppImage** (portable, no install): `chmod +x Mesh-Talk_*.AppImage && ./Mesh-Talk_*.AppImage`
-  - or install the `.deb` / `.rpm` (adds an app-menu entry): `sudo dpkg -i mesh-talk_*.deb`
-- **macOS** — open the `.dmg`, drag **mesh-talk** to Applications. On first launch macOS blocks an
-  unsigned app, so **right-click the app → Open → Open** (only needed once). If it says
-  "damaged", clear the quarantine flag with the full path (a Homebrew/Conda `xattr` in `PATH` may
-  shadow the system one and lack `-r`): `/usr/bin/xattr -dr com.apple.quarantine /Applications/mesh-talk.app`.
-- **Windows** — run the `.exe` (or `.msi`) installer. SmartScreen shows "Windows protected your
-  PC" → click **More info → Run anyway** (only the first time). WebView2 is fetched automatically
-  if missing.
+The desktop app is built with Tauri and React. Its UI-free Rust core also runs as the
+`mesh-talk-node` CLI, including in post-office mode.
 
-After the one-time approval it behaves like any installed app. To remove the prompt entirely you'd
-need paid signing (Apple Developer ID for macOS, a code-signing cert or the Microsoft Store for
-Windows); Linux is always prompt-free.
+## Get started
 
-> Two peers must be on the **same LAN** with the firewall allowing UDP `47474` (multicast
-> `224.0.0.167`) and the app's TCP port. If they can't see each other, the in-app **Diagnostics**
-> panel (under **Connection**) and the [troubleshooting guide](specifications/troubleshooting_guide.md) walk through it.
+Download the archive for your OS and architecture from [Releases](https://github.com/OctopusGarage/mesh-talk/releases).
+The default edition includes optional visual packs; the lite edition omits bundled packs
+and animated sticker assets. Both can install packs later. Release archives include checksums,
+and the release page explains signature and provenance verification.
 
-## Build from source
+Desktop installers lack Apple Developer ID and commercial Windows code signing, so those
+platforms may ask for a one-time first-launch confirmation. Follow the platform steps in
+the [installation and update guide](docs/updates.md). Once installed, create a local account
+and open **Connection → Diagnostics** if a nearby peer does not appear. The
+[troubleshooting guide](specifications/troubleshooting_guide.md) covers network and platform issues.
 
-### Prerequisites
+### Build from source
 
-- **Rust** (stable, edition 2024) + Cargo
-- **Node.js 22+** (frontend toolchain)
-- **Tauri CLI** — `cargo install tauri-cli`
-- **Linux only** — the GTK/WebKit stack:
-  `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf`
-
-### Desktop app
+Install stable Rust, Node.js 22+, and the [Tauri prerequisites](specifications/deployment_guide.md)
+for your platform, then:
 
 ```bash
 git clone https://github.com/OctopusGarage/mesh-talk.git
 cd mesh-talk
-make dev          # install Rust + Node deps + git hooks (first run is slow)
-make tauri-dev    # run the app in dev mode (hot-reload frontend)
-make tauri-build  # or: produce a release bundle (.app / .dmg / .exe / .deb / ...)
+make dev
+make tauri-dev
 ```
 
-### Headless node (CLI / post-office relay)
+For a headless node, relay flags, and production builds, use the
+[deployment guide](specifications/deployment_guide.md). Each node needs its own keystore.
 
-The same core runs without a UI as `mesh-talk-node` — also the offline-delivery relay:
+## Project structure
 
-```bash
-cargo run --bin mesh-talk-node -- --keystore alice.ks --password <pw> --name alice
-```
+| Area                                                      | Responsibility                                                                           |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| [`crates/mesh-talk-core/`](crates/mesh-talk-core/)        | UI-free protocol, identity, transport, discovery, encrypted event log, and headless CLI. |
+| [`src-tauri/`](src-tauri/)                                | Desktop shell and IPC boundary.                                                          |
+| [`frontend/`](frontend/)                                  | React desktop interface.                                                                 |
+| [`site/`](site/)                                          | GitHub Pages project site.                                                               |
+| [`docs/`](docs/) and [`specifications/`](specifications/) | Architecture, feature guides, deployment, conventions, and evaluation evidence.          |
 
-| Flag | Meaning |
-|------|---------|
-| `--keystore <path>` | encrypted identity keystore, created if absent (**required**) |
-| `--password <pw>` | password that encrypts the keystore (**required**) |
-| `--name <name>` | display name advertised to peers (**required**) |
-| `--port <n>` | TCP port to listen on (`0` = OS-assigned) |
-| `--discovery-port <n>` | UDP discovery port, default `47474` (**must match across peers**) |
-| `--post-office` | run as a store-and-forward relay for offline delivery (no chat REPL) |
+For documentation by task, start at the [documentation map](docs/README.md). Contributors
+should read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md). During development, run only
+affected tests; use the [testing feedback loop](docs/testing-feedback-loop.md) for commands
+and full-gate triggers.
 
-Each instance needs its **own** keystore path — two nodes sharing one clobber each other's data.
-In the chat REPL: `/msg <peer-id-prefix> <text>` to DM, `/history <peer-id-prefix>` to view a thread.
+## Security and community
 
-## Architecture
+Message content is end-to-end encrypted, while network peers and post offices can observe
+some connection or routing metadata. Read the [security posture](docs/ARCHITECTURE.md#8-security-posture-summary)
+and [relay privacy guide](docs/post-office-metadata-privacy.md) for the precise boundaries.
+Report vulnerabilities privately through [SECURITY.md](SECURITY.md), not a public issue.
 
-Two Rust crates plus a React frontend, layered so the protocol is independent of the UI:
-
-```
-mesh-talk/
-├── crates/mesh-talk-core/   # UI-free protocol SDK (no Tauri dep)
-│   ├── src/
-│   │   ├── node/            # the serverless node: orchestration
-│   │   ├── identity/  transport/  discovery/  eventlog/
-│   │   ├── ratchet/  channel/  dm.rs  file/  postoffice/
-│   │   ├── storage/         # encrypted append-only logs + at-rest crypto
-│   │   ├── util/            # shared helpers (net, safety-number, …)
-│   │   └── bin/mesh-talk-node.rs   # headless node CLI (--post-office relay mode)
-│   └── tests/               # multi-process integration tests (real nodes over UDP/TCP)
-├── src-tauri/               # Tauri desktop shell — a thin bridge over mesh-talk-core
-├── frontend/                # React 19 + TypeScript + Tailwind (native desktop visual system)
-├── docs/                    # architecture + documentation map
-├── specifications/          # process, deployment, and convention docs
-└── Makefile                 # dev/build/test/e2e/lint shortcuts
-```
-
-The frontend talks to the backend only through Tauri commands; the desktop crate holds no protocol
-or crypto logic. Wire formats are versioned `bincode` framed with a magic + version byte. Full
-reference: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
-## Documentation
-
-Everything is indexed in the **[documentation map](docs/README.md)** — start there. Highlights:
-
-- [Architecture](docs/ARCHITECTURE.md) — components, data flow, and crypto
-- [Contributing](CONTRIBUTING.md) — dev setup, commands, and conventions
-- [Domain model](CONTEXT.md) and [repo conventions](AGENTS.md)
-- [Deployment](specifications/deployment_guide.md) · [Troubleshooting](specifications/troubleshooting_guide.md) · [Security](SECURITY.md)
-- [Backup and recovery](docs/backup-recovery.md) · [Privacy controls](docs/privacy-controls.md) · [Customization packs](docs/CUSTOMIZATION_PACKS.md)
-
-## Development
-
-```bash
-make tauri-dev    # run the desktop app (hot reload)
-make test         # Rust workspace unit tests
-make e2e          # multi-process backend E2E (real nodes)
-make lint fix     # clippy -D warnings · auto-fix + format
-make check        # the full local health gate
-```
-
-The UI flow is covered by a Playwright suite (`cd frontend && npm run e2e`), including
-worst-case content, seven default-edition themes, keyboard and touch interactions, and automated WCAG A/AA scans
-of representative states. These scans complement manual accessibility review. Quality is enforced in
-CI across macOS/Windows/Linux — formatting, Clippy (`-D warnings`), tests + coverage, the frontend
-build + ESLint, supply-chain policy (`cargo deny`), unused-dep and spelling checks — plus fuzzing,
-mutation testing, secret scanning, and OpenSSF Scorecard. Commits are GPG-signed (the hooks set up
-by `make dev` enforce it). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
-
-## Contributing
-
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup,
-build/test/lint commands, and conventions, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the
-community guidelines.
-
-## Security
-
-Mesh-Talk is end-to-end encrypted with forward secrecy and has no servers or telemetry. Please
-report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not open a public issue for
-security reports.
-
-Want a second opinion before installing? Ask an AI coding agent to review the source:
-
-1. Clone the repository: `git clone https://github.com/OctopusGarage/mesh-talk.git`.
-2. Enter it: `cd mesh-talk`.
-3. Start an AI agent with access to local files, such as Codex, Claude Code, or Gemini CLI.
-4. Copy the prompt from the [independent AI-assisted review guide](docs/evals/prompts/independent-review.md),
-   paste it into the agent, and press Enter.
-
-The prompt asks for evidence, risks, and a conditional install recommendation. An AI-generated
-review is not a security certification.
-
-## License
-
-Open source under the [MIT License](LICENSE).
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+Contributions are welcome under the [code of conduct](CODE_OF_CONDUCT.md). Mesh-Talk is
+released under the [MIT License](LICENSE).

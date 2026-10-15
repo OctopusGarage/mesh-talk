@@ -213,8 +213,8 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 1);
+    let bob_account = Account::generate();
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
     let (a, _) = node(dir.path(), alice, aa, &bp);
     a.configure_privacy(
         dir.path(),
@@ -226,16 +226,19 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     )
     .unwrap();
     let denied = a
-        .enqueue_to_account_if(&ba.account_id(), b"before permission", None, |_| {
-            Err(NodeError::Authorization("host replaced".into()))
-        })
+        .enqueue_to_account_if(
+            &bob_account.account_id(),
+            b"before permission",
+            None,
+            |_| Err(NodeError::Authorization("host replaced".into())),
+        )
         .await;
     assert!(matches!(denied, Err(NodeError::Authorization(_))));
     assert!(a.privacy_snapshot().allowed_accounts.is_empty());
     let before_sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     let mut checks = 0;
     let denied = a
-        .enqueue_to_account_if(&ba.account_id(), b"deny WAL", None, |accept| {
+        .enqueue_to_account_if(&bob_account.account_id(), b"deny WAL", None, |accept| {
             checks += 1;
             if checks <= 2 {
                 accept()
@@ -259,7 +262,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     let during_staging = authorized.clone();
     let denied = a
         .enqueue_file_to_account_progress_if(
-            &ba.account_id(),
+            &bob_account.account_id(),
             &path,
             crate::file::FileKind::File,
             move |_| during_staging.store(false, std::sync::atomic::Ordering::Release),
@@ -275,7 +278,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
         )
         .await;
     assert!(matches!(denied, Err(NodeError::Authorization(_))));
-    assert!(a.account_history(&ba.account_id(), 10).is_empty());
+    assert!(a.account_history(&bob_account.account_id(), 10).is_empty());
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     // Chunk staging was real, but no local file card/WAL transaction was accepted.
     assert!(!a.log.lock().unwrap().conversations().is_empty());
@@ -290,12 +293,12 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = bob.secret_bytes();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 1);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"before rekey", None)
         .await
@@ -411,21 +414,21 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let source_secret = alice.secret_bytes();
     let source_account = aa.secret_bytes();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let other = DeviceIdentity::generate();
     let ca = Account::from_secret_bytes(aa.secret_bytes());
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let cp = Announce::new_with_account(&other, &ca, "Own copy", cl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     a.roster
         .lock()
         .unwrap()
         .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let (c, _) = node(cd.path(), other, ca, &ap);
     let path = ad.path().join("空文件.txt");
     std::fs::write(&path, []).unwrap();
@@ -535,9 +538,14 @@ async fn file_enqueue_progress_never_waits_for_stalled_contact_tcp() {
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", stalled.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            stalled.local_addr().unwrap().port(),
+        );
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
         let (a, _) = node(dir.path(), alice, aa, &bp);
         a.configure_privacy(
@@ -556,7 +564,7 @@ async fn file_enqueue_progress_never_waits_for_stalled_contact_tcp() {
         let accepted = tokio::time::timeout(std::time::Duration::from_secs(local_budget), async {
             if account_addressed {
                 a.enqueue_file_to_account_progress(
-                    &ba.account_id(),
+                    &bob_account.account_id(),
                     &path,
                     crate::file::FileKind::File,
                     |_| {},
@@ -716,13 +724,13 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     for (node, dir, proof) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
         node.configure_privacy(
             dir,
@@ -860,12 +868,13 @@ async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() 
         let bob = DeviceIdentity::generate();
         let bob_keys = bob.secret_bytes();
         let aa = Account::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let bp =
+            Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _) = node(ad.path(), alice, aa, &bp);
-        let (b, _) = node(bd.path(), bob, ba, &ap);
+        let (b, _) = node(bd.path(), bob, bob_account, &ap);
         for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
             node.configure_privacy(
                 dir,
@@ -945,15 +954,15 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = alice.secret_bytes();
     let account_secret = aa.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
         node.configure_privacy(
             dir,
@@ -1497,10 +1506,10 @@ fn erased_static_manifest_reopen(adopt: bool) {
     let aa = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = bob.secret_bytes();
-    let mut account_secret = ba.secret_bytes();
-    let (b, _) = node(dir.path(), bob, ba, &ap);
+    let mut account_secret = bob_account.secret_bytes();
+    let (b, _) = node(dir.path(), bob, bob_account, &ap);
     let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
     let manifest = crate::file::FileManifest {
         name: "erase.txt".into(),
@@ -1564,13 +1573,13 @@ async fn automatic_file_card_receipt_and_chunk_resume_without_manual_flush() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let bytes = vec![5; crate::file::CHUNK_SIZE + 1];
     let path = ad.path().join("boundary.bin");
     std::fs::write(&path, &bytes).unwrap();
@@ -1670,13 +1679,13 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(dir.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     let result = a
         .enqueue_to_account(&bp.account_id().unwrap(), &vec![b'x'; 128 * 1024], None)
@@ -1728,13 +1737,13 @@ async fn live_receive_recovery_emits_exactly_one_callback_after_durable_install(
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"live recovery", None)
         .await
@@ -1795,15 +1804,16 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let secret = bob.secret_bytes();
-        let account_secret = ba.secret_bytes();
+        let account_secret = bob_account.secret_bytes();
         let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let bp =
+            Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _) = node(ad.path(), alice, aa, &bp);
-        let (mut b, _, mut files) = node_with_files(bd.path(), bob, ba, &ap);
+        let (mut b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
         let path = ad.path().join("empty.txt");
         std::fs::write(&path, []).unwrap();
         let (id, file) = a
@@ -2681,8 +2691,8 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
         let dir = tempfile::tempdir().unwrap();
         let alice = DeviceIdentity::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+        let bob_account = Account::generate();
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
         let conv = super::conversation::dm_conversation_id(&alice.public(), &bob.public());
         let competing = Event::new(&alice, conv, 1, vec![], 1, 11, EventKind::React, vec![2]);
         let (a, _) = node(dir.path(), alice, Account::generate(), &bp);
@@ -2709,12 +2719,12 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
                 message: OutgoingDelivery {
                     logical_id: original.id,
                     sender_account: a.account_id(),
-                    recipient_account: Some(ba.account_id()),
+                    recipient_account: Some(bob_account.account_id()),
                     conversation: conv,
                     wall_clock: 10,
                     destinations: vec![DeliveryDestination {
                         device: bob.public(),
-                        account: Some(ba.account_id()),
+                        account: Some(bob_account.account_id()),
                         event: original.clone(),
                         receipt_eligible: true,
                     }],
@@ -2879,9 +2889,9 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let po = DeviceIdentity::generate();
     let pa = Account::generate();
     let pp = Announce::new_post_office_with_account(&po, &pa, "PO", 9);
@@ -2910,7 +2920,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
     };
     let payload = super::delivery_receipt::ReceiptPayload::prepare(
         &bob.public(),
-        &ba.account_id(),
+        &bob_account.account_id(),
         &ap,
         &original,
         &received,
@@ -2935,7 +2945,9 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .ingest(ack.clone())
             .is_err()
     );
-    p.set_allowed(&ba.account_id(), true).await.unwrap();
+    p.set_allowed(&bob_account.account_id(), true)
+        .await
+        .unwrap();
     assert!(
         p.sync_store(&alice.public())
             .lock()
@@ -2974,7 +2986,9 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .ingest(forged)
             .is_err()
     );
-    p.set_allowed(&ba.account_id(), false).await.unwrap();
+    p.set_allowed(&bob_account.account_id(), false)
+        .await
+        .unwrap();
     assert!(
         p.sync_store(&alice.public())
             .lock()
@@ -2997,13 +3011,13 @@ async fn automatic_worker_stalled_fanout_does_not_starve_other_messages_and_drop
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let extra = DeviceIdentity::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let ep = Announce::new_with_account(
         &extra,
         &aa,
@@ -3015,7 +3029,7 @@ async fn automatic_worker_stalled_fanout_does_not_starve_other_messages_and_drop
         .lock()
         .unwrap()
         .update(&ep, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let first = a
         .enqueue_to_account(&b.account_id(), b"first fair", None)
         .await
@@ -3066,13 +3080,13 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
             let akeys = alice.secret_bytes();
             let own = aa.account_id();
             let bob = DeviceIdentity::generate();
-            let ba = Account::generate();
+            let bob_account = Account::generate();
             let bkeys = bob.secret_bytes();
-            let baccount = ba.secret_bytes();
+            let baccount = bob_account.secret_bytes();
             let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-            let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+            let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
             let (a, _) = node(ad.path(), alice, aa, &bp);
-            let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+            let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
             b.configure_privacy(
                 bd.path(),
                 "pw",
@@ -3243,18 +3257,18 @@ async fn automatic_offline_roundtrip(evict: bool) {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let akeys = alice.secret_bytes();
     let aaccount = aa.secret_bytes();
     let bkeys = bob.secret_bytes();
-    let baccount = ba.secret_bytes();
-    let target = ba.account_id();
+    let baccount = bob_account.secret_bytes();
+    let target = bob_account.account_id();
     let own = aa.account_id();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
-    let (initial_bob, _) = node(bd.path(), bob, ba, &ap);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (initial_bob, _) = node(bd.path(), bob, bob_account, &ap);
     drop(initial_bob);
     drop(bl); // Bob's prior profile is closed and listener stopped before enqueue.
     let po = DeviceIdentity::generate();
@@ -3402,8 +3416,8 @@ async fn automatic_offline_roundtrip(evict: bool) {
 async fn durable_raw_send_offline_is_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(
         dir.path(),
         DeviceIdentity::generate(),
@@ -3422,10 +3436,14 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
     let dir = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp =
-        Announce::new_with_account(&bob, &ba, "Offline Bob", dead.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Offline Bob",
+        dead.local_addr().unwrap().port(),
+    );
     drop(dead);
     let po = DeviceIdentity::generate();
     let po_secret = po.secret_bytes();
@@ -3450,7 +3468,7 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
         .unwrap()
         .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
     let id = a
-        .enqueue_to_account(&ba.account_id(), b"relay is not recipient", None)
+        .enqueue_to_account(&bob_account.account_id(), b"relay is not recipient", None)
         .await
         .unwrap();
     let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
@@ -3480,15 +3498,15 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bp_port = bl.local_addr().unwrap().port();
     drop(bl);
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bp_port);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bp_port);
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let path = ad.path().join("resume.bin");
     let bytes = vec![6; crate::file::CHUNK_SIZE + 1];
     std::fs::write(&path, &bytes).unwrap();
@@ -3600,12 +3618,12 @@ async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
     b.set_attachment_global_auto(false).unwrap();
     b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
 
@@ -3783,12 +3801,17 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "File Alice", 1);
-    let bp = Announce::new_with_account(&bob, &ba, "File Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "File Bob",
+        bl.local_addr().unwrap().port(),
+    );
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
     b.set_attachment_global_auto(false).unwrap();
     b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
     for peer in [&a, &b] {
@@ -3900,17 +3923,17 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let akeys = alice.secret_bytes();
     let aaccount = aa.secret_bytes();
     let bkeys = bob.secret_bytes();
-    let baccount = ba.secret_bytes();
+    let baccount = bob_account.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let mut bytes = vec![6; 1024];
     bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
     let path = ad.path().join("preview.png");
@@ -3979,11 +4002,11 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     let alice = DeviceIdentity::from_secret_bytes(akeys.0, akeys.1);
     let aa = Account::from_secret_bytes(aaccount);
     let bob = DeviceIdentity::from_secret_bytes(bkeys.0, bkeys.1);
-    let ba = Account::from_secret_bytes(baccount);
+    let bob_account = Account::from_secret_bytes(baccount);
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     assert_eq!(b.read_media(file).unwrap(), bytes);
     assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
     assert!(!b.historical_file_completion(file, EventId::new([1; 32]), &ap.public()));
@@ -4026,11 +4049,11 @@ async fn completed_file_fixture(
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(ad, alice, aa, &bp);
-    let (b, _) = node(bd, bob, ba, &ap);
+    let (b, _) = node(bd, bob, bob_account, &ap);
     let bytes = vec![7; crate::file::CHUNK_SIZE + 11];
     let path = ad.join("completion.bin");
     std::fs::write(&path, &bytes).unwrap();
@@ -4535,11 +4558,11 @@ async fn durable_enqueue_is_awaiting_without_transport_and_survives_restart() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let secret = alice.secret_bytes();
     let acct = aa.secret_bytes();
-    let target = ba.account_id();
+    let target = bob_account.account_id();
     let (a, _) = node(dir.path(), alice, aa, &proof);
     let id = a
         .enqueue_to_account(&target, b"durable offline", None)
@@ -4565,17 +4588,17 @@ async fn actual_durable_receive_sends_control_receipt_without_chat_callback() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
-    let target = ba.account_id();
+    let bob_account = Account::generate();
+    let target = bob_account.account_id();
     let own = aa.account_id();
     let sender_secret = alice.secret_bytes();
     let sender_account = aa.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, mut arx) = node(ad.path(), alice, aa, &bp);
-    let (b, mut brx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut brx) = node(bd.path(), bob, bob_account, &ap);
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     let id = a
@@ -4632,11 +4655,11 @@ async fn malformed_routes_and_control_scopes_never_advance_live_ratchet_or_emit(
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let before = std::fs::read(bd.path().join("ratchet.sessions")).unwrap();
     let conv = super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
     for (scope, body) in [
@@ -4692,9 +4715,9 @@ async fn malformed_routes_and_control_scopes_never_advance_live_ratchet_or_emit(
 async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let target = ba.account_id();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let target = bob_account.account_id();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(
         dir.path(),
         DeviceIdentity::generate(),
@@ -4763,8 +4786,8 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
 async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(
         dir.path(),
         DeviceIdentity::generate(),
@@ -4773,7 +4796,7 @@ async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
     );
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     assert!(
-        a.enqueue_to_account(&ba.account_id(), &vec![7; 256 * 1024], None)
+        a.enqueue_to_account(&bob_account.account_id(), &vec![7; 256 * 1024], None)
             .await
             .is_err()
     );
@@ -4781,7 +4804,7 @@ async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
     );
-    assert!(a.account_history(&ba.account_id(), 10).is_empty());
+    assert!(a.account_history(&bob_account.account_id(), 10).is_empty());
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
 }
 
@@ -4792,11 +4815,11 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
     let secret = alice.secret_bytes();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(dir.path(), alice, aa, &proof);
     let id = a
-        .enqueue_to_account(&ba.account_id(), b"keep on failed adoption", None)
+        .enqueue_to_account(&bob_account.account_id(), b"keep on failed adoption", None)
         .await
         .unwrap();
     let new_account = Account::generate();
@@ -4814,7 +4837,7 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
     a.persist_account_adoption(&new_account.account_id(), || Ok(()))
         .unwrap();
     assert!(
-        a.enqueue_to_account(&ba.account_id(), b"old runtime must stop", None)
+        a.enqueue_to_account(&bob_account.account_id(), b"old runtime must stop", None)
             .await
             .is_err()
     );
@@ -4845,11 +4868,11 @@ async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_none
     let aa = Account::generate();
     let own_secret = aa.secret_bytes();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(dir.path(), alice, aa, &proof);
     let id = a
-        .enqueue_to_account(&ba.account_id(), b"pre-save crash", None)
+        .enqueue_to_account(&bob_account.account_id(), b"pre-save crash", None)
         .await
         .unwrap();
     let new_account = Account::generate();
@@ -4879,7 +4902,7 @@ async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_none
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert_eq!(a.delivery.lock().unwrap().retry_messages(8).len(), 1);
-    assert_eq!(a.account_history(&ba.account_id(), 8)[0].id, id);
+    assert_eq!(a.account_history(&bob_account.account_id(), 8)[0].id, id);
     assert!(
         a.delivery
             .lock()
@@ -4953,13 +4976,13 @@ async fn receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_earl
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let secret = bob.secret_bytes();
-    let account = ba.secret_bytes();
+    let account = bob_account.secret_bytes();
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"recover recipient", None)
         .await
@@ -5009,14 +5032,14 @@ async fn early_recipient_receipt_preserves_offline_own_fanout_across_sender_rest
     let other = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = alice.secret_bytes();
     let account = aa.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let cp =
         Announce::new_with_account(&other, &aa, "Other Alice", cl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
@@ -5024,7 +5047,7 @@ async fn early_recipient_receipt_preserves_offline_own_fanout_across_sender_rest
         .lock()
         .unwrap()
         .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    let (b, mut brx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut brx) = node(bd.path(), bob, bob_account, &ap);
     let (c, mut crx) = node(cd.path(), other, Account::from_secret_bytes(account), &ap);
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
@@ -5082,14 +5105,14 @@ async fn private_control_receipt_obeys_current_permission_and_queued_account_bin
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bob_secret = bob.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, mut arx) = node(ad.path(), alice, aa, &bp);
-    let (b, mut brx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut brx) = node(bd.path(), bob, bob_account, &ap);
     a.configure_privacy(
         ad.path(),
         "pw",
@@ -5175,13 +5198,13 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let keys = bob.secret_bytes();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _, mut files) = node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
     for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
         node.configure_privacy(
             dir,
@@ -5245,15 +5268,15 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bob_secret = bob.secret_bytes();
-    let bob_account = ba.secret_bytes();
+    let bob_account_secret = bob_account.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     a.configure_privacy(
         ad.path(),
         "pw",
@@ -5293,9 +5316,9 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     drop(b);
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bob = DeviceIdentity::from_secret_bytes(bob_secret.0, bob_secret.1);
-    let ba = Account::from_secret_bytes(bob_account);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let bob_account = Account::from_secret_bytes(bob_account_secret);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     b.configure_privacy(
         bd.path(),
         "pw",

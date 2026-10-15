@@ -2462,7 +2462,7 @@ async fn explicit_send_grants_and_authenticates_return_contact_without_discovery
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let aa = alice.signed_announce("Alice", al.local_addr().unwrap().port());
-    let ba = bob.signed_announce("Bob", bl.local_addr().unwrap().port());
+    let bob_announcement = bob.signed_announce("Bob", bl.local_addr().unwrap().port());
     alice
         .configure_privacy(
             &dir.path().join("alice"),
@@ -2474,16 +2474,16 @@ async fn explicit_send_grants_and_authenticates_return_contact_without_discovery
     bob.configure_privacy(
         &dir.path().join("bob"),
         "pw",
-        &ba,
+        &bob_announcement,
         Arc::new(DiscoveryVisibility::new(true)),
     )
     .unwrap();
     alice.set_invisible(true).await.unwrap();
-    alice
-        .roster
-        .lock()
-        .unwrap()
-        .update(&ba, IpAddr::V4(Ipv4Addr::LOCALHOST), &alice.user_id());
+    alice.roster.lock().unwrap().update(
+        &bob_announcement,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &alice.user_id(),
+    );
     let aserver = tokio::spawn(alice.clone().run_accept_loop(al));
     let bserver = tokio::spawn(bob.clone().run_accept_loop(bl));
     alice.send_dm(&bob.user_id(), b"hello").await.unwrap();

@@ -60,6 +60,12 @@ class Peer:
                 pass
         raise AssertionError(f"{user_id} was not discovered; recent output: {self.history[-15:]}")
 
+    def verify(self, user_id):
+        # The fixture obtains the full fingerprint from the peer's own startup
+        # line. Automatic relay recovery requires an explicit verification.
+        self.send(f"/verify-peer {user_id}")
+        self.wait(r"^peer verified for automatic DM recovery$", timeout=15)
+
     def stop(self):
         if self.process.poll() is None:
             if self.post_office:
@@ -77,7 +83,7 @@ def relay_log_size(host, remote_os="macos"):
     if remote_os == "windows":
         command = (
             'powershell -NoProfile -Command "(Get-Item -LiteralPath '
-            'C:\\ProgramData\\MeshTalk\\PostOffice\\data\\relay.log).Length"'
+            'D:\\ProgramData\\MeshTalk\\PostOffice\\data\\relay.log).Length"'
         )
     else:
         command = 'stat -f %z "$HOME/.local/share/mesh-talk-post-office/relay.log"'
@@ -180,6 +186,7 @@ def run_file_roundtrip(args):
             alice.discover(args.relay_id)
             bob.discover(alice_id)
             bob.discover(args.relay_id)
+            bob.verify(alice_id)
 
             # The offer is held while Bob is offline. Alice stops before Bob
             # returns, so the offer cannot arrive by direct peer sync.
@@ -195,7 +202,11 @@ def run_file_roundtrip(args):
             bob = Peer(args.binary, bob_key, "LAN-File-Bob", args.discovery_port)
             peers.append(bob)
             assert bob.wait(r"^node ([0-9a-f]+) ", 120).group(1) == bob_id
-            offer = bob.wait(r"^file offer from " + re.escape(alice_id) + r": .* id ([0-9a-f]{64})", 90)
+            bob.discover(args.relay_id)
+            offer_pattern = r"^file offer from " + re.escape(alice_id) + r": .* id ([0-9a-f]{64})"
+            offer = next((match for line in bob.history if (match := re.search(offer_pattern, line))), None)
+            if offer is None:
+                offer = bob.wait(offer_pattern, 90)
             file_id = offer.group(1)
             bob.send(f"/receive {file_id}")
             bob.wait(r"^file approved$", 30)
@@ -240,6 +251,7 @@ def run_multi_relay(args):
                 peer.discover(other)
                 peer.discover(local_id)
                 peer.discover(args.relay_id)
+            bob.verify(alice_id)
             elected = min(local_id, args.relay_id)
             local_log = local_path / "relay.log"
             before = (local_log.stat().st_size if elected == local_id
@@ -302,6 +314,7 @@ def main():
             alice.discover(args.relay_id)
             bob.discover(alice_id)
             bob.discover(args.relay_id)
+            bob.verify(alice_id)
             before = relay_log_size(args.ssh_host, args.remote_os)
             bob.stop()
             marker = str(int(time.time()))
@@ -324,7 +337,13 @@ def main():
             bob = Peer(args.binary, Path(root) / "bob/identity.keystore", "LAN-Bob", args.discovery_port)
             peers.append(bob)
             assert bob.wait(r"^node ([0-9a-f]+) ", 120).group(1) == bob_id
+            bob.discover(args.relay_id)
             seen = set()
+            for line in bob.history:
+                if line.startswith(f"from {alice_id}") and dm in line:
+                    seen.add("dm")
+                if line.startswith(f"channel {group} from {alice_id}:") and channel_text in line:
+                    seen.add("channel")
             deadline = time.monotonic() + 90
             while len(seen) < 2 and time.monotonic() < deadline:
                 try:
@@ -335,7 +354,11 @@ def main():
                     seen.add("dm")
                 if line.startswith(f"channel {group} from {alice_id}:") and channel_text in line:
                     seen.add("channel")
-            assert seen == {"dm", "channel"}, f"missing delivery: {seen}; recent output: {bob.history[-20:]}"
+            assert seen == {"dm", "channel"}, (
+                f"missing delivery: {seen}; sender: {alice.history[-30:]}; "
+                f"recipient: {bob.history[-30:]}; relay log: {before} -> "
+                f"{relay_log_size(args.ssh_host, args.remote_os)}"
+            )
             print(f"PASS: remote relay {args.relay_id} stored and delivered offline DM and private channel event")
             print(f"PASS: sender was stopped before recipient restarted; relay log grew from {before} to {relay_log_size(args.ssh_host, args.remote_os)} bytes")
             if args.restart_relay_before_drain:
