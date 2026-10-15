@@ -26,7 +26,6 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md) | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks. |
 | [`docs/updates.md`](updates.md) | Manual release check, verified package download, and platform install steps. |
 | [`docs/privacy-controls.md`](privacy-controls.md) | Privacy presets, app lock, invisible mode, hidden contacts, and limits. |
-| [`docs/evals/architecture-score.md`](evals/architecture-score.md) | Fixed-rubric architecture review, before/after score, evidence, and remaining seams. |
 | [`specifications/TODO.md`](../specifications/TODO.md) | Implementation status (feature-complete) + deliberate design notes / external constraints. |
 
 ## Development
@@ -40,21 +39,35 @@ plus a headless `mesh-talk-node` CLI over a shared Rust core).
 | [`docs/testing-feedback-loop.md`](testing-feedback-loop.md) | Focused local test commands, module boundaries, and full-gate triggers. |
 | [`specifications/git_standards.md`](../specifications/git_standards.md) | Conventional-commit format, scopes, and GPG signing / hook enforcement. |
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements. |
-| [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md) | Delivery validation, full real smoke, real AI eval coverage, commands, triggers, gaps, and hardening plan. |
-| [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md) | Stable AI eval and smoke cases. |
-| [`docs/evals/linked-device-sync-ai-eval-suite.json`](evals/linked-device-sync-ai-eval-suite.json) | Model-backed code review cases for linked-device history, certificates, erasure, profiles, and channel enrollment. |
-| [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md) | Screenshot-assisted UI and UX review, browser evidence, and decisions. |
-| [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md) | File and image transfer audit, interaction states, and validation evidence. |
-| [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md) | Screenshot interaction evaluation, test evidence, and native release gate. |
-| [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md) | Hidden-contact real mesh, three-platform native UI, evidence gates and usability rubric. |
-| [`docs/evals/quality-gates.md`](evals/quality-gates.md) | Scenario-based review, mutation evidence, six-platform artifact verification and controlled release publication. |
-| [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md) | Product workflow evaluation layers, three-platform real backend/native evidence, portable browser boundaries and fail-closed CI gating. |
-| [`docs/evals/channel-lifecycle-worktree.md`](evals/channel-lifecycle-worktree.md) | Channel lifecycle E2E, AI review findings, regression evidence, and bootstrap privacy boundary. |
+| [`scripts/README.md`](../scripts/README.md) | Script entry points, CI globs, manual real-machine rigs, and maintenance tools. |
 | [`docs/chat-ui-manual-test.md`](chat-ui-manual-test.md) | Supplementary manual smoke checklist for the desktop chat UI. |
 | [`fuzz/README.md`](../fuzz/README.md) | Current protocol fuzz targets, scope, and local commands. |
 | [`frontend/DESIGN.md`](../frontend/DESIGN.md) | Current native-direction visual system and interaction rules. |
 | [`docs/screenshots/README.md`](screenshots/README.md) | How current demo screenshots are captured and shared with the site. |
 | [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md) | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing. |
+
+## Evaluations and evidence
+
+These dated reports record what was tested and the limits of that evidence. Use
+the current guides above for commands and implementation behavior.
+
+| Doc | What it covers |
+|-----|----------------|
+| [`docs/evals/architecture-score.md`](evals/architecture-score.md) | Architecture review and the optimization series score. |
+| [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md) | Delivery and AI validation contract. |
+| [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md) | Stable AI eval and smoke cases. |
+| [`docs/evals/ai-eval-suite.json`](evals/ai-eval-suite.json) | Machine-readable AI evaluation suite. |
+| [`docs/evals/linked-device-sync-ai-eval-suite.json`](evals/linked-device-sync-ai-eval-suite.json) | Model-backed linked-device review cases. |
+| [`docs/evals/module-coverage.json`](evals/module-coverage.json) | Module coverage inventory used by the AI evaluation harness. |
+| [`docs/evals/prompts/agent-contract-evaluator.md`](evals/prompts/agent-contract-evaluator.md) | Evaluator prompt for agent-contract verdicts. |
+| [`docs/evals/prompts/ui-ux-review.md`](evals/prompts/ui-ux-review.md) | UI review prompt used with screenshot evidence. |
+| [`docs/evals/quality-gates.md`](evals/quality-gates.md) | Review, mutation, and release evidence requirements. |
+| [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md) | Backend, native, and browser evidence boundaries. |
+| [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md) | Hidden-contact native evidence. |
+| [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md) | Screenshot-assisted UI review. |
+| [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md) | File transfer audit and validation. |
+| [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md) | Screenshot interaction evaluation. |
+| [`docs/evals/channel-lifecycle-worktree.md`](evals/channel-lifecycle-worktree.md) | Channel lifecycle E2E evidence from its development worktree. |
 
 ## Operations & Deployment
 
@@ -82,6 +95,6 @@ documented in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). Personal working plans 
 `docs/superpowers/` and the root `plans/` directory stay local and are not part of
 the committed documentation set.
 
-The `docs/evals/` files record dated evaluations and validation evidence. Read
+The `docs/evals/` files contain evaluation contracts and dated validation evidence. Read
 [`ARCHITECTURE.md`](ARCHITECTURE.md), the guides above, and the current code for
 the present implementation when an earlier evaluation describes a pre-fix state.
