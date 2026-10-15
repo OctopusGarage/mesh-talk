@@ -519,6 +519,55 @@ mod routed_tests {
         assert_eq!(route.source, RouteSource::RoutedQuery);
         assert!(route.last_authenticated.is_some());
     }
+
+    #[test]
+    fn gateway_route_requires_a_certified_post_office_proof() {
+        let id = DeviceIdentity::generate();
+        let account = Account::generate();
+        let ordinary = Announce::new_with_account(&id, &account, "ordinary", 47475);
+        let uncertified = Announce::new_post_office(&id, "relay", 47475);
+        let relay = Announce::new_post_office_with_account(&id, &account, "relay", 47475);
+        let ip: IpAddr = "100.101.102.30".parse().unwrap();
+        let mut roster = Roster::default();
+        assert_eq!(
+            roster.update_gateway(&ordinary, ip, "self"),
+            UpdateOutcome::Rejected
+        );
+        assert_eq!(
+            roster.update_gateway(&uncertified, ip, "self"),
+            UpdateOutcome::Rejected
+        );
+        assert_eq!(
+            roster.update_gateway(&relay, ip, "self"),
+            UpdateOutcome::New
+        );
+        let peer = roster.get(&id.user_id()).unwrap();
+        assert!(peer.post_office);
+        assert_eq!(peer.routes[0].source, RouteSource::RoutedQuery);
+        assert_eq!(peer.addr, SocketAddr::new(ip, 47475));
+    }
+
+    #[test]
+    fn authenticated_new_address_is_a_separate_bounded_route() {
+        let id = DeviceIdentity::generate();
+        let proof = Announce::new(&id, "Bob", 47475);
+        let mut roster = Roster::default();
+        roster.update(&proof, "192.168.1.20".parse().unwrap(), "self");
+        let new_addr: SocketAddr = "100.101.1.20:47475".parse().unwrap();
+        roster.mark_authenticated(&id.public(), new_addr);
+        let peer = roster.get(&id.user_id()).unwrap();
+        assert_eq!(peer.addr, new_addr);
+        assert_eq!(peer.routes.len(), 2);
+        let route = peer
+            .routes
+            .iter()
+            .find(|route| route.addr == new_addr)
+            .unwrap();
+        assert_eq!(route.source, RouteSource::Authenticated);
+        assert!(route.last_authenticated.is_some());
+        roster.forget_relayed(&id.user_id());
+        assert_eq!(roster.get(&id.user_id()).unwrap().routes.len(), 2);
+    }
 }
 
 #[cfg(test)]

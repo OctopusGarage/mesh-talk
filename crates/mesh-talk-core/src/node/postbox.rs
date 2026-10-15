@@ -205,6 +205,7 @@ mod tests {
     use crate::discovery::announce::Announce;
     use crate::eventlog::event::{ConversationId, Event, EventKind};
     use crate::eventlog::store::EventLog;
+    use crate::identity::account::Account;
     use crate::node::session::request_round;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -305,6 +306,53 @@ mod tests {
             relay_store.lock().unwrap().has(&event_id),
             "relay persisted the pushed event"
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_directory_introduces_only_authenticated_opted_in_devices() {
+        let root = tempfile::tempdir().unwrap();
+        let relay = DeviceIdentity::generate();
+        let relay_keys = relay.secret_bytes();
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("relay.log"), "pw", relay).unwrap(),
+        ));
+        let directory = Arc::new(Mutex::new(BridgeDirectory::default()));
+        let account = Account::generate();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let alice_proof = Announce::new_with_account(&alice, &account, "Alice", 4001);
+        let bob_proof = Announce::new_with_account(&bob, &account, "Bob", 4002);
+
+        for (client, proof, expected) in [
+            (&alice, &alice_proof, None),
+            (&bob, &bob_proof, Some(alice_proof.user_id.as_str())),
+        ] {
+            let (client_io, relay_io) = tokio::io::duplex(64 * 1024);
+            let identity = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
+            let relay_store = Arc::clone(&store);
+            let relay_directory = Arc::clone(&directory);
+            let server = tokio::spawn(async move {
+                let channel = SecureChannel::accept(relay_io, &identity).await.unwrap();
+                serve_relay_or_bridge_connection(channel, relay_store, Some(relay_directory)).await;
+            });
+            let mut channel =
+                SecureChannel::connect_with_presence(client_io, client, None, Some(proof))
+                    .await
+                    .unwrap();
+            channel.send(bridge_directory::request()).await.unwrap();
+            let response = channel.recv().await.unwrap();
+            let (peers, last) = bridge_directory::decode_response(&response).unwrap();
+            assert!(last);
+            match expected {
+                None => assert!(peers.is_empty()),
+                Some(id) => assert_eq!(
+                    peers.iter().map(|p| p.user_id.as_str()).collect::<Vec<_>>(),
+                    vec![id]
+                ),
+            }
+            drop(channel);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

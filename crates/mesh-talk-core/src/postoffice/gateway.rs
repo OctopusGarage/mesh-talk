@@ -36,7 +36,7 @@ pub async fn query_pinned_relay(remote: SocketAddr, expected_id: &str) -> Option
         .await
         .ok()?
         .ok()?;
-    if source.ip() != remote.ip() {
+    if source != remote {
         return None;
     }
     let announce = decode_response(&bytes[..len], nonce)?;
@@ -226,5 +226,31 @@ mod tests {
         assert_eq!(&response, b"pong");
         upstream_task.await.unwrap();
         proxy.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_query_rejects_a_valid_proof_sent_from_another_address() {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let expected_id = identity.user_id();
+        let proof = Announce::new_post_office_with_account(&identity, &account, "remote", 47475);
+        let pinned = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let pinned_addr = pinned.local_addr().unwrap();
+        let unexpected = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (len, source) = pinned.recv_from(&mut buf).await.unwrap();
+            let nonce = decode_query(&buf[..len]).unwrap();
+            unexpected
+                .send_to(&encode_response(nonce, &proof, &identity).unwrap(), source)
+                .await
+                .unwrap();
+        });
+        assert!(
+            query_pinned_relay(pinned_addr, &expected_id)
+                .await
+                .is_none()
+        );
+        responder.await.unwrap();
     }
 }
