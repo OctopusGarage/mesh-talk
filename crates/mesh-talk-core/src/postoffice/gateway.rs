@@ -324,6 +324,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_withdraws_stale_proof_after_repeated_invalid_replies() {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let expected_id = identity.user_id();
+        let reserved = bind_dual_stack_listener(0).await.unwrap();
+        let remote_tcp_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let proof =
+            Announce::new_post_office_with_account(&identity, &account, "remote", remote_tcp_port);
+        let current = Arc::new(Mutex::new(Some(proof)));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = socket.local_addr().unwrap();
+        let responder = tokio::spawn(respond_with_current_proof(
+            socket,
+            identity,
+            Arc::clone(&current),
+            Arc::clone(&queries),
+        ));
+        let shared = Arc::new(Mutex::new(None));
+        let gateway = tokio::spawn(run_bridge_gateway(
+            Arc::clone(&shared),
+            remote_tcp_port.wrapping_add(1),
+            remote,
+            expected_id,
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while shared.lock().unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the pinned relay should first appear in the bridge directory");
+
+        *current.lock().unwrap() = None;
+        tokio::time::timeout(Duration::from_secs(25), async {
+            while shared.lock().unwrap().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("invalid refreshes must withdraw the advertised relay proof");
+        assert!(queries.load(Ordering::Acquire) >= 4);
+        responder.abort();
+        gateway.abort();
+    }
+
+    #[tokio::test]
     async fn gateway_does_not_proxy_on_its_own_relay_port() {
         let identity = DeviceIdentity::generate();
         let account = Account::generate();
