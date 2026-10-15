@@ -210,3 +210,67 @@ pub async fn get_presence(
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::Manager;
+
+    #[tokio::test]
+    async fn diagnostics_expose_a_live_runtime_and_reject_invalid_manual_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let managed = NodeState::empty();
+        let app = tauri::test::mock_builder()
+            .manage(managed.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let state = app.state::<NodeState>();
+        assert!(diag_get_peers(state.clone()).await.is_err());
+        assert!(diag_network_info(state.clone()).await.is_err());
+
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "diagnostics-test",
+            "Diagnostics Test",
+            "test-password",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let own_user_id = runtime.user_id().to_owned();
+        *managed.0.lock().await = Some(runtime);
+
+        assert!(diag_get_peers(state.clone()).await.unwrap().is_empty());
+        let info = diag_network_info(state.clone()).await.unwrap();
+        assert_eq!(info.own_user_id, own_user_id);
+        assert_eq!(
+            info.discovery_port,
+            mesh_talk_core::node::DEFAULT_DISCOVERY_PORT
+        );
+        assert!(!info.multicast_group.is_empty());
+        assert!(get_presence(state.clone()).await.unwrap().is_empty());
+        rescan_peers(state.clone()).await.unwrap();
+
+        for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
+            assert!(
+                probe_peer_endpoint(state.clone(), host.into(), None)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            probe_peer_endpoint(state.clone(), "127.0.0.1".into(), Some(0))
+                .await
+                .is_err()
+        );
+        probe_peer_endpoint(state, " 127.0.0.1 ".into(), Some(47474))
+            .await
+            .unwrap();
+        managed.0.lock().await.take().unwrap().stop().await;
+    }
+}
