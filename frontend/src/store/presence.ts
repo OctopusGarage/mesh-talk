@@ -21,6 +21,7 @@ const RECENT_SECS = 5 * 60;
 interface PresenceState {
   /** Per-conversation presence keyed by account_id (DMs) and channel_id (channels). */
   map: PresenceMap;
+  clear: () => void;
   /** Begin polling; returns a stop fn. Safe to start once per session. */
   start: () => () => void;
 }
@@ -53,9 +54,10 @@ function reconcile(prev: PresenceMap, next: PresenceMap): PresenceMap {
 
 export const usePresence = create<PresenceState>((set, get) => ({
   map: EMPTY,
+  clear: () => set({ map: EMPTY }),
   start: () => {
     const lease = captureOwner();
-    set({ map: EMPTY });
+    get().clear();
     let cancelled = false;
     let nextPoll = 0;
     let lastApplied = 0;

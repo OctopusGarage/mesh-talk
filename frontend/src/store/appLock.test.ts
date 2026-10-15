@@ -10,6 +10,10 @@ import { useAuth } from "./auth";
 import { useChat } from "./chat";
 import { useTransfers } from "./transfers";
 import { useFileAvailability } from "./fileAvailability";
+import { useAvatars } from "./avatars";
+import { usePresence } from "./presence";
+import { useContactPolicy } from "./contactPolicy";
+import { usePrivacy } from "./privacy";
 
 beforeEach(() => {
   useAppLock.setState({ locked: false, busy: false, error: null });
@@ -44,6 +48,30 @@ beforeEach(() => {
   useFileAvailability
     .getState()
     .merge([{ file_conv: "private-file", ready: true, done: 10, total: 10 }]);
+  useAvatars.setState({
+    owner: "owner",
+    ownId: "private-account",
+    local: { friend: "private-photo" },
+    received: { other: "received-photo" },
+  });
+  usePresence.setState({
+    map: { friend: { online: true, last_seen_secs: 0 } },
+  });
+  useContactPolicy.setState({
+    owner: "owner",
+    contacts: { friend: { account_id: "friend", name: "Friend" } },
+    loaded: true,
+  });
+  usePrivacy.setState({
+    owner: "owner",
+    snapshot: {
+      owner: "owner",
+      version: 1,
+      invisible: false,
+      allowed_accounts: [],
+    },
+    loaded: true,
+  });
   invoke.mockReset();
   invoke.mockResolvedValue(undefined);
 });
@@ -64,6 +92,11 @@ it("clears session chat and file metadata when locking", async () => {
   expect(chat.channelOwner).toBe("");
   expect(useTransfers.getState().transfers).toEqual({});
   expect(useFileAvailability.getState().statuses).toEqual({});
+  expect(useAvatars.getState().local).toEqual({});
+  expect(useAvatars.getState().received).toEqual({});
+  expect(usePresence.getState().map).toEqual({});
+  expect(useContactPolicy.getState().contacts).toEqual({});
+  expect(usePrivacy.getState().snapshot).toBeNull();
   expect(chat.runEpoch).toBe(1);
   expect(invoke).toHaveBeenCalledWith("lock_app");
 });
