@@ -143,6 +143,10 @@ export function SettingsDialog({
   onOpenChange?: (open: boolean) => void;
 } = {}) {
   const { t, i18n } = useTranslation();
+  const translate = useRef(t);
+  useEffect(() => {
+    translate.current = t;
+  }, [t]);
   const wallpaperEnabled = useTheme((s) => s.wallpaperEnabled);
   const setWallpaperEnabled = useTheme((s) => s.setWallpaperEnabled);
   const [internalOpen, setInternalOpen] = useState(false);
@@ -210,7 +214,9 @@ export function SettingsDialog({
           if (request === loadGeneration.current) {
             setSettingsErrorKind("load");
             setSettingsError(
-              t("settings.loadFailed", { error: errorMessage(e) }),
+              translate.current("settings.loadFailed", {
+                error: errorMessage(e),
+              }),
             );
           }
         },
@@ -227,16 +233,22 @@ export function SettingsDialog({
           if (request === loadGeneration.current) {
             setSettingsErrorKind("load");
             setSettingsError(
-              t("settings.loadFailed", { error: errorMessage(e) }),
+              translate.current("settings.loadFailed", {
+                error: errorMessage(e),
+              }),
             );
           }
         },
       );
-  }, [t]);
+  }, []);
 
   // Load current state whenever the dialog opens.
   useEffect(() => {
     if (open) loadCurrentSettings();
+    const generation = loadGeneration;
+    return () => {
+      generation.current++;
+    };
   }, [open, loadCurrentSettings]);
 
   const saveSetting = (write: () => Promise<void>, apply: () => void) => {

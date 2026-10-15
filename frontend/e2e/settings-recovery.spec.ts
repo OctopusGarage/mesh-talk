@@ -36,6 +36,18 @@ test("bridge discovery is off by default and requires post-office relays", async
   await expect(bridge).toBeDisabled();
 });
 
+test("changing language preserves an unsaved bridge hub draft", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const hub = page.locator("#setting-bridge-hub");
+  await expect(hub).toBeEnabled();
+  await hub.fill("abcd");
+  await page.getByTestId("settings-language-select").selectOption("ja");
+  await expect(hub).toHaveValue("abcd");
+});
+
 test("a failed settings save keeps the stored value and offers recovery", async ({
   page,
 }) => {

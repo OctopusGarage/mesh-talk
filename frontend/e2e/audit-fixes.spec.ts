@@ -185,6 +185,60 @@ test("failed sync choice leaves the device policy unchanged", async ({
   await expect(history).toHaveAttribute("aria-checked", "true");
 });
 
+test("late sync choice cannot replace policy after the dialog reopens", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __resolveSyncSave?: (policy: unknown) => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const invoke = win.__TAURI_INTERNALS__.invoke.bind(win.__TAURI_INTERNALS__);
+    win.__TAURI_INTERNALS__.invoke = (cmd, args) =>
+      cmd === "set_device_sync_category"
+        ? new Promise((resolve) => {
+            win.__resolveSyncSave = resolve;
+          })
+        : invoke(cmd, args);
+  });
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-link").click();
+  const dialog = page.getByTestId("link-device-dialog");
+  const history = dialog.getByRole("switch", { name: "Message history" });
+  await expect(history).toHaveAttribute("aria-checked", "true");
+  await history.click();
+  await page.waitForFunction(
+    () =>
+      typeof (window as unknown as { __resolveSyncSave?: unknown })
+        .__resolveSyncSave === "function",
+  );
+  await dialog.getByRole("button", { name: "Close" }).click();
+  const linkAction = page.getByTestId("sidebar-action-link");
+  if (!(await linkAction.isVisible()))
+    await page.getByTestId("sidebar-overflow").click();
+  await linkAction.click();
+  await expect(history).toHaveAttribute("aria-checked", "true");
+  await page.evaluate(() => {
+    (
+      window as unknown as { __resolveSyncSave: (policy: unknown) => void }
+    ).__resolveSyncSave({
+      history: false,
+      attachments: false,
+      profile: true,
+      appearance: false,
+      contacts: false,
+    });
+  });
+  await expect(history).toBeEnabled();
+  await expect(history).toHaveAttribute("aria-checked", "true");
+});
+
 test("diagnostics copy controls report clipboard failure", async ({ page }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-connection");

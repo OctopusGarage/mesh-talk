@@ -865,15 +865,9 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     if let Ok(settings) = app_handle
                         .state::<crate::settings::SettingsState>()
                         .get_for_owner(&account_id)
+                        && let Err(error) = crate::settings::apply_relay_settings(&node, &settings)
                     {
-                        node.set_post_office_enabled(settings.post_office_enabled);
-                        if let Err(error) = node.set_bridge_hub_id(
-                            (!settings.bridge_hub_id.is_empty())
-                                .then_some(settings.bridge_hub_id.as_str()),
-                        ) {
-                            log::warn!("Ignored invalid bridge hub setting: {error}");
-                        }
-                        node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
+                        log::warn!("Ignored invalid bridge hub setting: {error}");
                     }
                 }
                 // Keep lifecycle diagnostics without persisting an account identifier.

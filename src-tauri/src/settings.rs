@@ -454,6 +454,19 @@ fn preserve_login_bookkeeping(
     (settings, clear_user)
 }
 
+/// Apply the persisted relay preferences in the same order at startup and after a save.
+pub(crate) fn apply_relay_settings(
+    node: &mesh_talk_core::node::Node,
+    settings: &AppSettings,
+) -> Result<(), &'static str> {
+    node.set_post_office_enabled(settings.post_office_enabled);
+    let hub_result = node.set_bridge_hub_id(
+        (!settings.bridge_hub_id.is_empty()).then_some(settings.bridge_hub_id.as_str()),
+    );
+    node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
+    hub_result
+}
+
 /// Update the toggles and persist them. If "stay signed in" was just turned OFF,
 /// immediately forget the saved keychain secret + `last_user` so the next launch
 /// shows the login screen (the toggle is the user's control over the stored secret).
@@ -476,9 +489,7 @@ pub async fn set_app_settings(
     }
     settings.bridge_hub_id = hub.to_ascii_lowercase();
     let retention_days = settings.retention_days;
-    let post_office_enabled = settings.post_office_enabled;
-    let bridge_discovery_enabled = settings.bridge_discovery_enabled;
-    let bridge_hub_id = settings.bridge_hub_id.clone();
+    let relay_settings = settings.clone();
     match owner.as_deref() {
         Some(owner) => config_store::with_account(&app_state, owner, SETTINGS_FILE, |path| {
             let previous = state.get_for_owner(owner)?;
@@ -517,10 +528,8 @@ pub async fn set_app_settings(
             })
         };
         if let Some(node) = node {
-            node.set_post_office_enabled(post_office_enabled);
-            node.set_bridge_hub_id((!bridge_hub_id.is_empty()).then_some(bridge_hub_id.as_str()))
+            apply_relay_settings(&node, &relay_settings)
                 .expect("settings fingerprint validated before persistence");
-            node.set_bridge_discovery_enabled(bridge_discovery_enabled);
         }
     }
 

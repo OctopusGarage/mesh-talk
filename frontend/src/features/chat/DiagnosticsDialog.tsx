@@ -35,6 +35,8 @@ import { errorMessage } from "@/lib/error";
 import { formatAgo, formatTime, shortId } from "@/lib/format";
 import { useChat } from "@/store/chat";
 import { CONNECTION_LABEL, connectionState } from "./connectionState";
+import { useCopyFeedback } from "./useCopyFeedback";
+import { useSerialPoll } from "./useSerialPoll";
 import type { DiagNetworkInfo, DiagPeerInfo, EnvInfo } from "@/lib/types";
 
 const POLL_MS = 1500;
@@ -50,27 +52,11 @@ interface LogLine {
 /** A monospace value that copies itself to the clipboard when clicked. */
 function CopyValue({ value, label }: { value: string; label?: string }) {
   const { t } = useTranslation();
-  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
-    null,
-  );
-  const copy = async () => {
-    setCopyStatus(null);
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopyStatus("copied");
-      setTimeout(
-        () =>
-          setCopyStatus((current) => (current === "copied" ? null : current)),
-        1200,
-      );
-    } catch {
-      setCopyStatus("failed");
-    }
-  };
+  const { status: copyStatus, copy } = useCopyFeedback();
   return (
     <button
       type="button"
-      onClick={() => void copy()}
+      onClick={() => void copy(() => navigator.clipboard.writeText(value))}
       title={t("common.copy")}
       className="group inline-flex max-w-full items-center gap-1 font-mono text-xs hover:text-foreground"
     >
@@ -180,30 +166,40 @@ export function DiagnosticsDialog({
   const [error, setLocalError] = useState<string | null>(null);
   const [rescanned, setRescanned] = useState(false);
   const prevPeers = useRef<DiagPeerInfo[]>([]);
+  const networkRequest = useRef(0);
+  const environmentRequest = useRef(0);
 
   const loadNetwork = useCallback(async () => {
+    const request = ++networkRequest.current;
     setNetworkLoading(true);
     setNetworkError(null);
     try {
-      setInfo(await diag.networkInfo());
+      const info = await diag.networkInfo();
+      if (request === networkRequest.current) setInfo(info);
     } catch (e) {
-      setInfo(null);
-      setNetworkError(errorMessage(e));
+      if (request === networkRequest.current) {
+        setInfo(null);
+        setNetworkError(errorMessage(e));
+      }
     } finally {
-      setNetworkLoading(false);
+      if (request === networkRequest.current) setNetworkLoading(false);
     }
   }, []);
 
   const loadEnvironment = useCallback(async () => {
+    const request = ++environmentRequest.current;
     setEnvironmentLoading(true);
     setEnvironmentError(null);
     try {
-      setEnv(await obs.envInfo());
+      const env = await obs.envInfo();
+      if (request === environmentRequest.current) setEnv(env);
     } catch (e) {
-      setEnv(null);
-      setEnvironmentError(errorMessage(e));
+      if (request === environmentRequest.current) {
+        setEnv(null);
+        setEnvironmentError(errorMessage(e));
+      }
     } finally {
-      setEnvironmentLoading(false);
+      if (request === environmentRequest.current) setEnvironmentLoading(false);
     }
   }, []);
 
@@ -256,25 +252,10 @@ export function DiagnosticsDialog({
     }
   };
 
-  const poll = useCallback(async () => {
-    try {
-      const next = await diag.getPeers();
-      const lines = diffPeers(prevPeers.current, next, t);
-      prevPeers.current = next;
-      setPeers(next);
-      setPeersError(null);
-      if (lines.length > 0) {
-        setLog((l) => [...lines.reverse(), ...l].slice(0, LOG_CAP));
-      }
-    } catch (e) {
-      setPeersError(errorMessage(e));
-    } finally {
-      setPeersLoading(false);
-    }
-  }, [t]);
-
   useEffect(() => {
     if (!open) return;
+    const network = networkRequest;
+    const environment = environmentRequest;
     // Reset the diff baseline each time the panel opens so we don't replay a stale snapshot.
     prevPeers.current = [];
     setInfo(null);
@@ -286,10 +267,31 @@ export function DiagnosticsDialog({
     void loadEnvironment();
     setLogTail(null);
     setLocalError(null);
-    void poll();
-    const id = setInterval(() => void poll(), POLL_MS);
-    return () => clearInterval(id);
-  }, [open, poll, loadNetwork, loadEnvironment]);
+    return () => {
+      network.current++;
+      environment.current++;
+    };
+  }, [open, loadNetwork, loadEnvironment]);
+
+  useSerialPoll(
+    open,
+    POLL_MS,
+    () => diag.getPeers(),
+    (next) => {
+      const lines = diffPeers(prevPeers.current, next, t);
+      prevPeers.current = next;
+      setPeers(next);
+      setPeersError(null);
+      setPeersLoading(false);
+      if (lines.length > 0) {
+        setLog((l) => [...lines.reverse(), ...l].slice(0, LOG_CAP));
+      }
+    },
+    (error) => {
+      setPeersError(errorMessage(error));
+      setPeersLoading(false);
+    },
+  );
 
   // Group discovered peers by account (devices sharing an account_id are one user).
   const grouped = new Map<string, DiagPeerInfo[]>();
@@ -714,27 +716,11 @@ export function DiagnosticsDialog({
 /** A copyable shell command block, rendered as a mono code block. */
 function CommandLine({ cmd }: { cmd: string }) {
   const { t } = useTranslation();
-  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
-    null,
-  );
-  const copy = async () => {
-    setCopyStatus(null);
-    try {
-      await navigator.clipboard.writeText(cmd);
-      setCopyStatus("copied");
-      setTimeout(
-        () =>
-          setCopyStatus((current) => (current === "copied" ? null : current)),
-        1200,
-      );
-    } catch {
-      setCopyStatus("failed");
-    }
-  };
+  const { status: copyStatus, copy } = useCopyFeedback();
   return (
     <button
       type="button"
-      onClick={() => void copy()}
+      onClick={() => void copy(() => navigator.clipboard.writeText(cmd))}
       title={t("common.copy")}
       className="group flex w-full items-start gap-2 rounded-md border bg-muted/50 p-2.5 text-left font-mono text-[11px] leading-relaxed hover:bg-muted"
     >
