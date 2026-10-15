@@ -167,3 +167,91 @@ fn search_does_not_present_a_relay_only_account_as_a_contact() {
     assert!(node.known_account_ids().contains(&relay_id));
     assert!(node.search("diagnostic").is_empty());
 }
+
+#[tokio::test]
+async fn search_excludes_recalled_account_text() {
+    use crate::eventlog::event::EventId;
+    use crate::node::DmEnvelope;
+    use crate::node::conversation::account_conversation_id;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (ch, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        ch,
+        file,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let own = node.account_id();
+    let contact = "b".repeat(32);
+    let conv = account_conversation_id(&own, &contact);
+    let recalled = EventId::new([1; 32]);
+    let now = crate::node::node::now_millis();
+    for (seq, id, text) in [
+        (1, recalled, b"withdrawn account text".as_slice()),
+        (
+            2,
+            EventId::new([2; 32]),
+            b"retained account text".as_slice(),
+        ),
+    ] {
+        let message = DmEnvelope::new(
+            own.clone(),
+            contact.clone(),
+            *id.as_bytes(),
+            MessageBody::new(text.to_vec(), None).encode(),
+        );
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(conv, seq, now, &message.encode())
+            .unwrap();
+    }
+    assert_eq!(node.search("account text").len(), 2);
+    node.recall_account(&contact, recalled).await.unwrap();
+    assert!(node.search("withdrawn").is_empty());
+    assert_eq!(node.search("retained").len(), 1);
+}
+
+#[tokio::test]
+async fn search_excludes_recalled_channel_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (ch, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        ch,
+        file,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("project", vec![]).await.unwrap();
+    node.send_channel_message(channel, b"withdrawn channel text")
+        .await
+        .unwrap();
+    node.send_channel_message(channel, b"retained channel text")
+        .await
+        .unwrap();
+    let recalled = node
+        .channel_history(channel, 10)
+        .into_iter()
+        .find(|entry| entry.text == b"withdrawn channel text")
+        .unwrap()
+        .id;
+    assert_eq!(node.search("channel text").len(), 2);
+    node.recall_channel(channel, recalled).await.unwrap();
+    assert!(node.search("withdrawn").is_empty());
+    assert_eq!(node.search("retained").len(), 1);
+}

@@ -10,10 +10,9 @@ impl Node {
     /// Search decrypted history across all known DMs + channels for `query`
     /// (case-insensitive substring). Empty/whitespace query → no hits.
     ///
-    /// Scans the sent + received stores BY REFERENCE — it never clones a full
-    /// conversation Vec, only the plaintext of the lines that actually match — and skips
-    /// the seq->id log scan `history` does (search results carry no event id), so a
-    /// keystroke no longer copies every plaintext in every conversation.
+    /// Scans the sent + received stores by reference without cloning their
+    /// entry vectors. It resolves channel sent event IDs only when a matching
+    /// channel has recalls; other searches skip the history log scan.
     pub fn search(&self, query: &str) -> Vec<SearchHit> {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
@@ -50,7 +49,7 @@ impl Node {
         }));
         for (public, account_id, name) in dm_peers {
             let conv = dm_conversation_id(&self.identity.public(), &public);
-            for m in self.scan_conversation(conv, &q, PER_CONV, false) {
+            for m in self.scan_conversation(conv, &q, PER_CONV, SearchScope::LegacyDm) {
                 hits.push(SearchHit {
                     is_channel: false,
                     target: public.user_id(),
@@ -104,7 +103,7 @@ impl Node {
                 .and_then(Clone::clone)
                 .unwrap_or_else(|| acct.clone());
             let conv = account_conversation_id(&my_account, &acct);
-            for m in self.scan_conversation(conv, &q, PER_CONV, true) {
+            for m in self.scan_conversation(conv, &q, PER_CONV, SearchScope::Account(&acct)) {
                 hits.push(SearchHit {
                     is_channel: false,
                     target: acct.clone(),
@@ -118,7 +117,7 @@ impl Node {
             }
         }
         for ch in self.list_channels() {
-            for m in self.scan_conversation(ch.id, &q, PER_CONV, false) {
+            for m in self.scan_conversation(ch.id, &q, PER_CONV, SearchScope::Channel) {
                 hits.push(SearchHit {
                     is_channel: true,
                     account_id: None,
@@ -137,15 +136,16 @@ impl Node {
 
     /// Scan one conversation's sent + received plaintext for a lowercased substring `q`,
     /// matching the same most-recent-`limit` window and the same `from_me`/`who`/`text`
-    /// derivation as [`Node::history`] / [`Node::account_history`], but borrowing the
-    /// stores (no full-Vec clone) and cloning only the matching lines. `account` selects
-    /// the account-conversation envelope decode + sender derivation.
+    /// derivation as [`Node::history`] / [`Node::account_history`], while borrowing
+    /// the stores rather than cloning their entry vectors. Recall
+    /// tombstones keep their positions in the recent-message window while their
+    /// plaintext is excluded from the returned matches.
     fn scan_conversation(
         &self,
         conv: ConversationId,
         q: &str,
         limit: usize,
-        account: bool,
+        scope: SearchScope<'_>,
     ) -> Vec<ScanMatch> {
         let my_account = self.account.account_id();
         let own_devices: std::collections::HashSet<_> = self
@@ -153,39 +153,41 @@ impl Node {
             .into_iter()
             .map(|device| device.public.user_id())
             .collect();
-        // Materialize (wall_clock, from_me, who, text) for the window, borrowing the
-        // stores; only the decoded body bytes of kept lines are owned. Mirror `history`'s
-        // ordering (wall_clock, then a sent-before-received tiebreak is irrelevant to a
-        // substring scan) and most-recent-`limit` truncation.
-        let mut lines: Vec<(u64, bool, String, Vec<u8>)> = Vec::new();
+        // Decode text from the borrowed stores, then apply the same recent-message
+        // window as history before checking the query. Recalled rows occupy a
+        // window slot even though search must omit their text.
+        let mut lines = Vec::new();
         {
             let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
             for e in sentlog.entries_ref(&conv) {
-                let (from_me, who, body) = if account {
-                    let (_, body) = decode_account_entry(&e.plaintext);
-                    (true, "you".to_string(), body.text)
+                let (id, body, sent_seq) = if matches!(scope, SearchScope::Account(_)) {
+                    let (id, body) = decode_account_entry(&e.plaintext);
+                    (Some(id), body.text, None)
                 } else {
-                    (
-                        true,
-                        "you".to_string(),
-                        MessageBody::decode(&e.plaintext).text,
-                    )
+                    (None, MessageBody::decode(&e.plaintext).text, Some(e.seq))
                 };
-                lines.push((e.wall_clock, from_me, who, body));
+                lines.push(ScanMatch {
+                    from_me: true,
+                    who: "you".to_string(),
+                    text: body,
+                    wall_clock: e.wall_clock,
+                    id,
+                    sent_seq,
+                });
             }
         }
         {
             let received = self.received.lock().expect("received mutex not poisoned");
             for e in received.entries_ref(&conv) {
-                let (from_me, who, body) = if account {
-                    let (_, body) = decode_account_entry(&e.plaintext);
+                let (from_me, who, body, id) = if matches!(scope, SearchScope::Account(_)) {
+                    let (id, body) = decode_account_entry(&e.plaintext);
                     let from_me = e.from == my_account;
                     let who = if from_me {
                         "you".to_string()
                     } else {
                         e.from.clone()
                     };
-                    (from_me, who, body.text)
+                    (from_me, who, body.text, id)
                 } else {
                     let from_me = own_devices.contains(&e.from);
                     let who = if from_me {
@@ -193,26 +195,75 @@ impl Node {
                     } else {
                         e.from.clone()
                     };
-                    (from_me, who, MessageBody::decode(&e.plaintext).text)
+                    (
+                        from_me,
+                        who,
+                        MessageBody::decode(&e.plaintext).text,
+                        e.event_id,
+                    )
                 };
-                lines.push((e.wall_clock, from_me, who, body));
+                lines.push(ScanMatch {
+                    from_me,
+                    who,
+                    text: body,
+                    wall_clock: e.wall_clock,
+                    id: Some(id),
+                    sent_seq: None,
+                });
             }
         }
-        lines.sort_by_key(|l| l.0);
+        lines.sort_by_key(|line| line.wall_clock);
         if lines.len() > limit {
             lines.drain(0..lines.len() - limit);
         }
-        lines
+        let mut matches: Vec<_> = lines
             .into_iter()
-            .filter(|(_, _, _, text)| String::from_utf8_lossy(text).to_lowercase().contains(q))
-            .map(|(wall_clock, from_me, who, text)| ScanMatch {
-                from_me,
-                who,
-                text,
-                wall_clock,
+            .filter(|line| {
+                String::from_utf8_lossy(&line.text)
+                    .to_lowercase()
+                    .contains(q)
             })
-            .collect()
+            .collect();
+        if matches.is_empty() {
+            return matches;
+        }
+        let recalled = match scope {
+            SearchScope::LegacyDm => return matches,
+            SearchScope::Account(peer) => self.recalled_targets_account(peer),
+            SearchScope::Channel => self.recalled_targets_channel(conv),
+        };
+        if recalled.is_empty() {
+            return matches;
+        }
+        // Channel sent entries store sequence numbers, while recall markers
+        // name event IDs. Reuse the history resolver only for channel matches
+        // that might contain recalled text.
+        let recalled_sent_sequences: std::collections::HashSet<u64> =
+            if matches!(scope, SearchScope::Channel)
+                && matches.iter().any(|line| line.sent_seq.is_some())
+            {
+                self.raw_sent_history(conv)
+                    .into_iter()
+                    .filter_map(|(id, entry)| recalled.contains(&id).then_some(entry.seq))
+                    .collect()
+            } else {
+                Default::default()
+            };
+        matches.retain(|line| {
+            !line.id.is_some_and(|id| recalled.contains(&id))
+                && !line
+                    .sent_seq
+                    .is_some_and(|seq| recalled_sent_sequences.contains(&seq))
+        });
+        matches
     }
+}
+
+#[derive(Clone, Copy)]
+enum SearchScope<'a> {
+    LegacyDm,
+    Account(&'a str),
+    Channel,
 }
 
 /// One matching line from [`Node::scan_conversation`] (the fields `search` needs).
@@ -221,6 +272,8 @@ struct ScanMatch {
     who: String,
     text: Vec<u8>,
     wall_clock: u64,
+    id: Option<crate::eventlog::event::EventId>,
+    sent_seq: Option<u64>,
 }
 
 #[cfg(test)]
