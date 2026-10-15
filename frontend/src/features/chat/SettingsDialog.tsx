@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bell,
@@ -33,6 +39,7 @@ import { Badge } from "@/components/ui/badge";
 import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { balancedPrivacy, useSettings } from "@/store/settings";
+import { useAuth } from "@/store/auth";
 import type { AppSettings } from "@/lib/types";
 import { useTheme } from "@/lib/theme";
 import {
@@ -58,7 +65,7 @@ import {
   settingsCategory,
   settingsScrollBehavior,
 } from "./settingsScroll";
-import { createSettingSaveQueue } from "./settingSaveQueue";
+import { createSettingsDialogSession } from "./settingsDialogSession";
 
 /** A section group: a small display-font label over a stack of rows. */
 function Section({
@@ -149,6 +156,7 @@ export function SettingsDialog({
   }, [t]);
   const wallpaperEnabled = useTheme((s) => s.wallpaperEnabled);
   const setWallpaperEnabled = useTheme((s) => s.setWallpaperEnabled);
+  const owner = useAuth((s) => s.user?.id ?? null);
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
@@ -172,102 +180,95 @@ export function SettingsDialog({
   const [moreBelow, setMoreBelow] = useState(true);
   const [activeSection, setActiveSection] = useState("privacy");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [loadedOwner, setLoadedOwner] = useState<string | null>(null);
   const [autostartLoaded, setAutostartLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
-  const saveQueue = useRef<ReturnType<typeof createSettingSaveQueue> | null>(
+  const session = useRef<ReturnType<typeof createSettingsDialogSession> | null>(
     null,
   );
-  if (!saveQueue.current) saveQueue.current = createSettingSaveQueue(setSaving);
-  const loadGeneration = useRef(0);
+  if (!session.current)
+    session.current = createSettingsDialogSession(setSaving);
+  useLayoutEffect(() => {
+    session.current!.setOwner(owner);
+  }, [owner]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsErrorKind, setSettingsErrorKind] = useState<"load" | "save">(
     "load",
   );
 
   const loadCurrentSettings = useCallback(() => {
-    const request = ++loadGeneration.current;
+    const request = session.current!.beginLoad();
     setSettingsLoaded(false);
     setAutostartLoaded(false);
     setSettingsError(null);
-    const pendingSaves = saveQueue.current!.whenIdle();
-    void pendingSaves
-      .then(() => settingsApi.get())
-      .then(
-        (s) => {
-          if (request !== loadGeneration.current) return;
-          setMinimizeToTray(s.minimize_to_tray);
-          setNotifications(s.notifications);
-          setDownloadDir(s.download_dir);
-          setStaySignedIn(s.stay_signed_in);
-          setRetentionDays(s.retention_days);
-          setCallsEnabled(s.calls_enabled);
-          setPostOfficeEnabled(s.post_office_enabled);
-          setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
-          setBridgeHubId(s.bridge_hub_id ?? "");
-          setRingtone(asRingtoneId(s.ringtone));
-          const policy = privacyFromSettings(s);
-          setPrivacy(policy);
-          useSettings.getState().setPrivacy(policy);
-          setSettingsLoaded(true);
-        },
-        (e) => {
-          if (request === loadGeneration.current) {
-            setSettingsErrorKind("load");
-            setSettingsError(
-              translate.current("settings.loadFailed", {
-                error: errorMessage(e),
-              }),
-            );
-          }
-        },
-      );
-    void pendingSaves
-      .then(() => settingsApi.autostartEnabled())
-      .then(
-        (on) => {
-          if (request !== loadGeneration.current) return;
-          setLaunchAtLogin(on);
-          setAutostartLoaded(true);
-        },
-        (e) => {
-          if (request === loadGeneration.current) {
-            setSettingsErrorKind("load");
-            setSettingsError(
-              translate.current("settings.loadFailed", {
-                error: errorMessage(e),
-              }),
-            );
-          }
-        },
-      );
-  }, []);
+    void session.current!.load(
+      request,
+      () => settingsApi.get(),
+      (s) => {
+        setMinimizeToTray(s.minimize_to_tray);
+        setNotifications(s.notifications);
+        setDownloadDir(s.download_dir);
+        setStaySignedIn(s.stay_signed_in);
+        setRetentionDays(s.retention_days);
+        setCallsEnabled(s.calls_enabled);
+        setPostOfficeEnabled(s.post_office_enabled);
+        setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
+        setBridgeHubId(s.bridge_hub_id ?? "");
+        setRingtone(asRingtoneId(s.ringtone));
+        const policy = privacyFromSettings(s);
+        setPrivacy(policy);
+        useSettings.getState().setPrivacy(policy);
+        setLoadedOwner(owner);
+        setSettingsLoaded(true);
+      },
+      (e) => {
+        setSettingsErrorKind("load");
+        setSettingsError(
+          translate.current("settings.loadFailed", {
+            error: errorMessage(e),
+          }),
+        );
+      },
+    );
+    void session.current!.load(
+      request,
+      () => settingsApi.autostartEnabled(),
+      (on) => {
+        setLaunchAtLogin(on);
+        setAutostartLoaded(true);
+      },
+      (e) => {
+        setSettingsErrorKind("load");
+        setSettingsError(
+          translate.current("settings.loadFailed", {
+            error: errorMessage(e),
+          }),
+        );
+      },
+    );
+  }, [owner]);
 
   // Load current state whenever the dialog opens.
   useEffect(() => {
     if (open) loadCurrentSettings();
-    const generation = loadGeneration;
+    const current = session.current!;
     return () => {
-      generation.current++;
+      current.invalidateView();
     };
-  }, [open, loadCurrentSettings]);
+  }, [open, owner, loadCurrentSettings]);
 
-  const saveSetting = (write: () => Promise<void>, apply: () => void) => {
-    if (!settingsLoaded) return Promise.resolve();
-    const request = loadGeneration.current;
+  const saveSetting = <T,>(
+    write: () => Promise<T>,
+    apply: (value: T) => void,
+  ) => {
+    if (!settingsLoaded || loadedOwner !== owner) return Promise.resolve();
     setSettingsError(null);
-    return saveQueue.current!.enqueue(
-      write,
-      () => {
-        if (request === loadGeneration.current) apply();
-      },
-      (error) => {
-        if (request !== loadGeneration.current) return;
-        setSettingsErrorKind("save");
-        setSettingsError(
-          t("settings.saveFailed", { error: errorMessage(error) }),
-        );
-      },
-    );
+    return session.current!.save(write, apply, (error) => {
+      setSettingsErrorKind("save");
+      setSettingsError(
+        t("settings.saveFailed", { error: errorMessage(error) }),
+      );
+    });
   };
 
   const onMinimize = (v: boolean) => {
@@ -305,11 +306,12 @@ export function SettingsDialog({
     void saveSetting(
       async () => {
         await settingsApi.update(patch);
-        const saved = privacyFromSettings(await settingsApi.get());
+        return privacyFromSettings(await settingsApi.get());
+      },
+      (saved) => {
         setPrivacy(saved);
         useSettings.getState().setPrivacy(saved);
       },
-      () => {},
     );
   };
   // Toggling "stay signed in" off makes the backend immediately forget the saved
@@ -356,18 +358,20 @@ export function SettingsDialog({
       async () => {
         await settingsApi.setAutostart(v);
         // The OS launch agent is the source of truth.
-        setLaunchAtLogin(await settingsApi.autostartEnabled());
+        return settingsApi.autostartEnabled();
       },
-      () => {},
+      (enabled) => setLaunchAtLogin(enabled),
     ).finally(() => setAutostartBusy(false));
   };
 
   const chooseDir = async () => {
+    const request = session.current!.request();
     try {
       const dir = await openDialog({
         directory: true,
         defaultPath: downloadDir || undefined,
       });
+      if (!session.current!.isCurrent(request)) return;
       if (typeof dir === "string") {
         await saveSetting(
           () => settingsApi.update({ download_dir: dir }),
@@ -375,8 +379,10 @@ export function SettingsDialog({
         );
       }
     } catch (e) {
-      setSettingsErrorKind("save");
-      setSettingsError(t("settings.saveFailed", { error: errorMessage(e) }));
+      if (session.current!.isCurrent(request)) {
+        setSettingsErrorKind("save");
+        setSettingsError(t("settings.saveFailed", { error: errorMessage(e) }));
+      }
     }
   };
 

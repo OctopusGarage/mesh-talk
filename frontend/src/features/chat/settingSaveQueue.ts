@@ -6,17 +6,17 @@ export function createSettingSaveQueue(setBusy: (busy: boolean) => void) {
     whenIdle(): Promise<void> {
       return tail;
     },
-    enqueue(
-      write: () => Promise<void>,
-      apply: () => void,
+    enqueue<T>(
+      write: () => Promise<T>,
+      apply: (value: T) => void,
       onError: (error: unknown) => void,
     ): Promise<void> {
       pending++;
       setBusy(true);
       const task = tail.then(async () => {
         try {
-          await write();
-          apply();
+          const value = await write();
+          apply(value);
         } catch (error) {
           onError(error);
         } finally {

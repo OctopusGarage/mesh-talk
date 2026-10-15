@@ -16,13 +16,13 @@ unchanged. A focused assembler regression covers incomplete records, overflow,
 and a complete page; existing linked-device backfill and process tests exercise
 the path end to end.
 
-| Dimension | Starting | Round 1 | Round 2 | Evidence |
-|---|---:|---:|---:|---|
-| Module depth | 22/25 | 23/25 | 23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly now belongs to the directory module. |
-| Seam integrity | 23/25 | 23/25 | 23/25 | Core, host, and client interfaces are unchanged; wire and storage seams remain distinct. |
-| Test surface | 24/25 | 24/25 | 24/25 | Focused page and bridge response regressions plus linked-device and real-process bridge coverage; full-round bridge refresh still lacks one isolated test interface. |
-| Locality | 21/25 | 22/25 | 23/25 | Account record completion and cross-page gateway consistency are now local to their respective modules. |
-| **Total** | **90/100** | **92/100** | **93/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
+| Dimension | Starting | Round 1 | Round 2 | Round 3 | Evidence |
+|---|---:|---:|---:|---:|---|
+| Module depth | 22/25 | 23/25 | 23/25 | 23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly belongs to the directory module. |
+| Seam integrity | 23/25 | 23/25 | 23/25 | 23/25 | Core, host, and client interfaces are unchanged; wire, storage, and settings persistence seams remain distinct. |
+| Test surface | 24/25 | 24/25 | 24/25 | 24/25 | Focused page, bridge, and settings races plus linked-device, bridge process, and UI E2E coverage; full-round bridge refresh still lacks one isolated test interface. |
+| Locality | 21/25 | 22/25 | 23/25 | 24/25 | Account record completion, cross-page gateway consistency, and Settings dialog save/load lifetime now each have one owner. |
+| **Total** | **90/100** | **92/100** | **93/100** | **94/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
 
 Verification: `cargo test -p mesh-talk-core --lib node::account_sync`,
 `cargo test -p mesh-talk-core --lib account_history_backfills_to_a_linked_device`,
@@ -37,6 +37,20 @@ rejects conflicting valid gateway routes across pages. `make test`,
 passed. Wire bytes and public interfaces are unchanged. The score remains
 below the 95/100 goal because bridge refresh, Account sync application, and
 settings ownership still span multiple places.
+
+Round 3 gives the Settings dialog one session owner for ordered saves, load
+generations, account switches, and state publication. Queued writes from a
+previous account are skipped; writes already started or queued when the dialog
+closes still finish for the same account, while their stale UI updates are
+suppressed. Saved privacy and OS autostart read-backs now publish through the
+same successful-save path. A late directory picker result cannot save into a
+new view. Existing settings IPC and stored document shapes are unchanged.
+The full frontend unit suite (378 tests), typecheck, lint, format check, and
+production build passed. Fifteen targeted Playwright settings/privacy/dialog
+tests passed; after moving owner invalidation to a layout effect, the five
+settings recovery tests passed again. The remaining point to the target is
+primarily the host's repeated settings application lease and the dialog's
+field-level presentation state.
 
 ## Earlier review — 2026-10-09
 

@@ -53,3 +53,14 @@ it("continues after a failed save without applying the failed value", async () =
   expect(error).toHaveBeenCalledTimes(1);
   expect(apply).toHaveBeenCalledTimes(1);
 });
+
+it("publishes the saved read-back value only after the write succeeds", async () => {
+  const published: number[] = [];
+  const queue = createSettingSaveQueue(vi.fn());
+  await queue.enqueue(
+    async () => 42,
+    (value) => published.push(value),
+    vi.fn(),
+  );
+  expect(published).toEqual([42]);
+});
