@@ -79,7 +79,7 @@ LAN X:  clients ── C (ordinary local post office)
                                         ⇐ Tailscale ⇒ H ── clients: LAN Z
 ```
 
-D runs `--post-office --bridge` and has a stable keystore. G and H each run `--post-office --bridge` with **one** `--bridge-peer` endpoint pointing to D and `--bridge-peer-id` set to D's full fingerprint. They do not connect to each other. C can continue serving local devices. All clients enable bridge discovery and register with every reachable, verified relay. Clients on Y/Z learn D through their local gateway. Choosing D as a preferred post office is optional and affects mailbox order, not whether cross-site discovery works. This one-way topology still depends on D for introductions between Y and Z; reciprocal site-to-site paths would be needed to remove that dependency.
+D runs `--post-office --bridge` and has a stable keystore. G and H each run `--post-office --bridge` with **one** `--bridge-peer` endpoint pointing to D and `--bridge-peer-id` set to D's full fingerprint. They do not connect to each other. C can continue serving local devices. All clients enable bridge discovery and register with every reachable, verified relay. Clients on Y/Z learn D through their local gateway. Desktop Settings offers only directly discovered LAN relays as manual preferences; remote D remains available automatically for cross-site delivery. This one-way topology still depends on D for introductions between Y and Z; reciprocal site-to-site paths would be needed to remove that dependency.
 
 Example relay flags, using site-specific discovery endpoints and persistent identities:
 

@@ -2,7 +2,9 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { expect, test } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
-test("reopening settings selects the visible privacy section", async ({ page }) => {
+test("reopening settings selects the visible privacy section", async ({
+  page,
+}) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   const dialog = page.getByTestId("settings-dialog");
@@ -64,6 +66,9 @@ test("selecting a preferred post office persists across settings reopen", async 
   const preferred = page.locator("#setting-bridge-hub");
   await expect(preferred).toBeEnabled();
   await expect(preferred.locator("option")).toHaveCount(2);
+  await expect(
+    preferred.locator("option", { hasText: "remote relay node" }),
+  ).toHaveCount(0);
   await preferred.selectOption("44444444444444444444444444444444");
   await expect(preferred).toHaveValue("44444444444444444444444444444444");
   await page.getByRole("button", { name: "Close" }).click();

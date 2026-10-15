@@ -67,6 +67,15 @@ pub struct PeerRecord {
     pub last_seen: Instant,
 }
 
+impl PeerRecord {
+    /// Whether this peer has a current, directly discovered LAN path.
+    pub fn has_lan_route(&self) -> bool {
+        self.routes
+            .iter()
+            .any(|route| route.source == RouteSource::Lan)
+    }
+}
+
 /// The outcome of feeding an announce to the roster. Distinguishing `New` from
 /// `Refreshed` lets the listener unicast a reply only on first sight of a peer
 /// (LocalSend's announce/response), avoiding a reply storm on every re-announce.
@@ -625,7 +634,9 @@ mod routed_tests {
         let direct = SocketAddr::new(lan, 47475);
         let mut roster = Roster::default();
         roster.update_gateway(&relay, gateway, 47476, "self");
+        assert!(!roster.get(&id.user_id()).unwrap().has_lan_route());
         roster.update(&relay, lan, "self");
+        assert!(roster.get(&id.user_id()).unwrap().has_lan_route());
         roster.update_gateway(&relay, gateway, 47476, "self");
         let peer = roster.get(&id.user_id()).unwrap();
         assert_eq!(peer.addr, direct);

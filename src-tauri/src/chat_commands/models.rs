@@ -7,6 +7,8 @@ pub struct PeerInfo {
     pub name: String,
     pub addr: String,
     pub post_office: bool,
+    /// True when this device has a directly discovered LAN route.
+    pub discovered_on_lan: bool,
     /// The account this device belongs to (devices sharing it are one user's). The
     /// UI keys conversations by this so a multi-device contact is one conversation.
     pub account_id: Option<String>,

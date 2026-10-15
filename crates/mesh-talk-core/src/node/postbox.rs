@@ -39,10 +39,7 @@ pub fn post_office_candidates(roster: &Roster, preferred_id: Option<&str>) -> Ve
     candidates.sort_by_key(|relay| {
         (
             preferred_id != Some(relay.public.user_id().as_str()),
-            !relay
-                .routes
-                .iter()
-                .any(|route| route.source == RouteSource::Lan),
+            !relay.has_lan_route(),
             relay.public.user_id(),
         )
     });

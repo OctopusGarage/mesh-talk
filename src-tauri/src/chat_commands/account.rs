@@ -17,6 +17,7 @@ pub async fn list_peers(state: tauri::State<'_, NodeState>) -> Result<Vec<PeerIn
         .peers()
         .into_iter()
         .map(|p| PeerInfo {
+            discovered_on_lan: p.has_lan_route(),
             user_id: p.public.user_id(),
             name: p.name,
             addr: p.addr.to_string(),

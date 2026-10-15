@@ -80,6 +80,7 @@ export const test = base.extend({
           name: BOB.name,
           addr: "192.168.1.20:47100",
           post_office: false,
+          discovered_on_lan: true,
           account_id: BOB.account_id,
         },
         {
@@ -87,6 +88,7 @@ export const test = base.extend({
           name: CAROL.name,
           addr: "192.168.1.30:47100",
           post_office: false,
+          discovered_on_lan: true,
           account_id: CAROL.account_id,
         },
       ];
@@ -96,7 +98,16 @@ export const test = base.extend({
           name: "relay node",
           addr: "192.168.1.50:47100",
           post_office: true,
+          discovered_on_lan: true,
           account_id: "acc_relay_eeee5555",
+        });
+        peers.push({
+          user_id: "55555555555555555555555555555555",
+          name: "remote relay node",
+          addr: "192.168.1.50:47477",
+          post_office: true,
+          discovered_on_lan: false,
+          account_id: "acc_relay_ffff6666",
         });
       }
 
@@ -116,6 +127,7 @@ export const test = base.extend({
           name,
           addr: "192.168.1.40:47100",
           post_office: false,
+          discovered_on_lan: true,
         });
         accounts.push({
           account_id: accountId,
@@ -214,6 +226,7 @@ export const test = base.extend({
             name,
             addr: `192.168.1.${40 + i}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         });
@@ -243,6 +256,7 @@ export const test = base.extend({
             name: `Colleague ${String(i + 1).padStart(4, "0")}`,
             addr: `10.0.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         }
@@ -259,6 +273,7 @@ export const test = base.extend({
             name,
             addr: `10.1.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         }

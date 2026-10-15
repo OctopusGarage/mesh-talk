@@ -38,6 +38,10 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
+import {
+  localPostOffices,
+  savedRemotePostOffice,
+} from "@/lib/postOfficeOptions";
 import { balancedPrivacy, useSettings } from "@/store/settings";
 import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
@@ -176,6 +180,8 @@ export function SettingsDialog({
   const [postOfficeEnabled, setPostOfficeEnabled] = useState(true);
   const [bridgeDiscoveryEnabled, setBridgeDiscoveryEnabled] = useState(false);
   const [bridgeHubId, setBridgeHubId] = useState("");
+  const localRelays = localPostOffices(peers);
+  const savedRemoteRelay = savedRemotePostOffice(peers, bridgeHubId);
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
   const [privacy, setPrivacy] = useState(balancedPrivacy);
   const settingsScroll = useRef<HTMLDivElement>(null);
@@ -558,23 +564,24 @@ export function SettingsDialog({
                   >
                     <option value="">{t("settings.bridgeHubAutomatic")}</option>
                     {bridgeHubId &&
-                      !peers.some(
-                        (peer) =>
-                          peer.post_office && peer.user_id === bridgeHubId,
+                      !localRelays.some(
+                        (peer) => peer.user_id === bridgeHubId,
                       ) && (
-                        <option value={bridgeHubId}>
-                          {t("settings.bridgeHubUnavailable", {
-                            id: bridgeHubId.slice(0, 8),
-                          })}
+                        <option value={bridgeHubId} disabled>
+                          {savedRemoteRelay
+                            ? t("settings.bridgeHubRemote", {
+                                name: savedRemoteRelay.name,
+                              })
+                            : t("settings.bridgeHubUnavailable", {
+                                id: bridgeHubId.slice(0, 8),
+                              })}
                         </option>
                       )}
-                    {peers
-                      .filter((peer) => peer.post_office)
-                      .map((peer) => (
-                        <option key={peer.user_id} value={peer.user_id}>
-                          {peer.name} · {peer.user_id.slice(0, 8)}
-                        </option>
-                      ))}
+                    {localRelays.map((peer) => (
+                      <option key={peer.user_id} value={peer.user_id}>
+                        {peer.name} · {peer.user_id.slice(0, 8)}
+                      </option>
+                    ))}
                   </select>
                 }
               />
