@@ -1,138 +1,76 @@
-# mac2015 post-office service
+# macOS post-office boot service
 
-The Intel Mac at SSH alias `mac2015` runs the headless post office as the
-`ys-aquria` user. Its LaunchAgent label is
-`com.octopusgarage.mesh-talk.post-office`. The installed binary is
-`~/.local/bin/mesh-talk-node`; the relay's identity, account key, and encrypted
-event log live in `~/.local/share/mesh-talk-post-office`. Its password is read
-from that directory's owner-only `password` file. The password is absent from
-the LaunchAgent plist and process arguments. The service listens on TCP 47475
-and uses signed UDP multicast discovery on port 47474.
+A post office that must survive a reboot runs as a **LaunchDaemon**, with
+`RunAtLoad` and `KeepAlive`. A LaunchAgent only starts after its user logs in;
+that older setup does not satisfy unattended boot. The daemon plist is owned by
+root, but `UserName` runs the node as the ordinary service user. The encrypted
+keystore, password file, and relay log remain in
+`~/.local/share/mesh-talk-post-office`; logs are in
+`~/.local/state/mesh-talk-post-office`. Never replace an existing password
+file or keystore during an update.
 
-The LaunchAgent plist is at
-`~/Library/LaunchAgents/com.octopusgarage.mesh-talk.post-office.plist`.
-`RunAtLoad` and `KeepAlive` start and restart it while this user is logged in;
-the agent does not run before login or after logout. Logs are under
-`~/.local/state/mesh-talk-post-office`.
+Build `mesh-talk-node` for the target Mac architecture from the desired source
+revision. The repository's `scripts/install-post-office-macos.sh` has two
+phases:
 
-For a first installation, open an interactive shell on mac2015 and create the
-private password file there. Use the same password when creating the keystore.
-If the keystore already exists, preserve its original password; replacing this
-file with a different password makes the keystore unreadable.
+1. As the service user, run `prepare` with a staged binary, relay name and
+   ports. It verifies the binary, preserves existing identity and queued mail,
+   creates a password only for a new relay, and writes a private staged plist.
+2. Interactively run `activate` on that Mac. It asks for administrator
+   authorization, installs a root-owned plist in `/Library/LaunchDaemons`,
+   stops the old per-login agent if present, and starts the boot service.
 
-```bash
-ssh -t mac2015
-umask 077
-install -d -m 700 "$HOME/.local/bin" "$HOME/.local/state/mesh-talk-post-office" "$HOME/Library/LaunchAgents"
-install -d -m 700 "$HOME/.local/share/mesh-talk-post-office"
-read -rs 'relay_password?Post-office keystore password: '
-printf '\n'
-printf '%s\n' "$relay_password" > "$HOME/.local/share/mesh-talk-post-office/password"
-unset relay_password
-chmod 600 "$HOME/.local/share/mesh-talk-post-office/password"
-stat -f '%Su %Sp %N' "$HOME/.local/share/mesh-talk-post-office" "$HOME/.local/share/mesh-talk-post-office/password"
-exit
-```
+For a hub, use `--bridge` and a dedicated discovery port if another Mesh Talk
+process on the same host already owns UDP 47474. For a spoke, use
+`--bridge-peer <hub-IP>:<hub-discovery-port>` and the hub's exact signed
+32-character device fingerprint. Its proxy port must differ from its own TCP
+relay port. Routed UDP queries and the hub's TCP port must be reachable from
+the spoke over the existing network, such as Tailscale.
 
-The last command should show the service user as owner, `drwx------` for the
-directory, and `-rw-------` for the password file. The prompt reads the secret
-without showing it or putting it in a process argument. For recovery, enter the
-original keystore password through the same prompt.
-
-## Build and install
-
-Build the Intel binary on a Mac with an installed `x86_64-apple-darwin` Rust
-target. Use one toolchain for both Cargo and rustc; mixing Homebrew Cargo with
-a rustup target can fail with `can't find crate for core`.
+Example for an Intel hub (paths and address are deployment-specific):
 
 ```bash
-RUSTC="$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/rustc" \
-  "$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/cargo" \
-  build --release --target x86_64-apple-darwin -p mesh-talk-core --bin mesh-talk-node
-file target/x86_64-apple-darwin/release/mesh-talk-node
+scp target/x86_64-apple-darwin/release/mesh-talk-node scripts/install-post-office-macos.sh mac2015:~/.local/state/mesh-talk-post-office/
+ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node --name mac2015-post-office --port 47475 --discovery-port 47479 --bridge'
+ssh -tt mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
-For a first installation, copy the binary and create the LaunchAgent while
-logged in as `ys-aquria` on mac2015. The absolute paths in `ProgramArguments`
-are required by launchd. This plist contains paths and ports, never the
-keystore password.
+Example for a spoke on another LAN:
 
 ```bash
-scp target/x86_64-apple-darwin/release/mesh-talk-node \
-  mac2015:/Users/ys-aquria/.local/bin/mesh-talk-node
-ssh -t mac2015
-chmod 755 "$HOME/.local/bin/mesh-talk-node"
-python3 - <<'PY'
-from pathlib import Path
-import plistlib
-
-home = Path.home()
-data = home / ".local/share/mesh-talk-post-office"
-logs = home / ".local/state/mesh-talk-post-office"
-plist = home / "Library/LaunchAgents/com.octopusgarage.mesh-talk.post-office.plist"
-job = {
-    "Label": "com.octopusgarage.mesh-talk.post-office",
-    "ProgramArguments": [
-        str(home / ".local/bin/mesh-talk-node"),
-        "--keystore", str(data / "identity.keystore"),
-        "--password-file", str(data / "password"),
-        "--name", "mac2015 post office",
-        "--post-office", "--port", "47475", "--discovery-port", "47474",
-    ],
-    "RunAtLoad": True,
-    "KeepAlive": True,
-    "StandardOutPath": str(logs / "stdout.log"),
-    "StandardErrorPath": str(logs / "stderr.log"),
-}
-with plist.open("wb") as output:
-    plistlib.dump(job, output)
-plist.chmod(0o600)
-PY
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.octopusgarage.mesh-talk.post-office.plist"
-launchctl print "gui/$(id -u)/com.octopusgarage.mesh-talk.post-office"
-exit
+scp target/aarch64-apple-darwin/release/mesh-talk-node mac2015:~/.local/state/mesh-talk-post-office/mesh-talk-node-arm
+ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/mesh-talk-node-arm mac-mini:/Users/stella/.local/state/mesh-talk-post-office/'
+ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh mac-mini:~/.local/state/mesh-talk-post-office/'
+ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare \
+  --binary /Users/stella/.local/state/mesh-talk-post-office/mesh-talk-node-arm \
+  --name mac-mini-post-office --port 47476 \
+  --bridge-peer 100.82.240.19:47479 \
+  --bridge-peer-id edbbf0daac94d930e687ba86c20d3f06 \
+  --bridge-proxy-port 47475'
+ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
-Run the health checks below and confirm TCP 47475 is listening. If launchd
-reports an error, inspect `stderr.log` before retrying. Preserve the data
-directory and password file across subsequent updates.
+In the current three-relay deployment, mac2015 is the shared hub, and Windows
+and mac-mini each point directly to it. This is a **single elected mailbox and
+directory**, not replicated custody or arbitrary subnet routing. Participating
+clients must enable bridge discovery and pin the same hub fingerprint. A client
+that has not opted in remains a local-only peer. The hub is a single point of
+failure for cross-LAN delivery.
 
-## Update an existing installation
-
-After rebuilding as above, stage and validate the replacement binary before
-stopping the existing agent:
+Check boot-service state and listeners:
 
 ```bash
-scp target/x86_64-apple-darwin/release/mesh-talk-node \
-  mac2015:/Users/ys-aquria/.local/bin/mesh-talk-node.next
-ssh mac2015 'chmod 755 "$HOME/.local/bin/mesh-talk-node.next"; "$HOME/.local/bin/mesh-talk-node.next" --help >/dev/null'
-ssh mac2015 'launchctl bootout gui/$(id -u)/com.octopusgarage.mesh-talk.post-office'
-ssh mac2015 'mv "$HOME/.local/bin/mesh-talk-node.next" "$HOME/.local/bin/mesh-talk-node"'
-ssh mac2015 'launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.octopusgarage.mesh-talk.post-office.plist"'
+sudo launchctl print system/com.octopusgarage.mesh-talk.post-office
+lsof -nP -iTCP:47475 -sTCP:LISTEN
+lsof -nP -iUDP:47479
+shasum -a 256 ~/.local/bin/mesh-talk-node
 ```
 
-Keep the data directory and its password file when updating the binary.
-They preserve the relay identity and queued opaque events. The password file
-must be a regular file with mode `0600`; the data directory should be mode
-`0700`. Back up the password with the keystore if durable custody matters.
-
-## Check and operate
-
-```bash
-ssh mac2015 'launchctl print gui/$(id -u)/com.octopusgarage.mesh-talk.post-office | grep -E "state =|pid =|last exit code ="'
-ssh mac2015 'lsof -nP -iTCP:47475 -sTCP:LISTEN'
-ssh mac2015 'tail -n 20 "$HOME/.local/state/mesh-talk-post-office/stdout.log"'
-ssh mac2015 'tail -n 20 "$HOME/.local/state/mesh-talk-post-office/stderr.log"'
-ssh mac2015 'launchctl kickstart -k gui/$(id -u)/com.octopusgarage.mesh-talk.post-office'
-```
-
-The stdout startup line begins `post-office` and reports the relay device ID
-and listening ports. Clients on the same LAN discover it automatically when
-post-office use is enabled. If another relay has a lower elected fingerprint,
-this node is a standby; queued events are not replicated between relays. The
-relay sees connecting device identities, mailbox activity, timing, and size
-buckets. See [metadata privacy](post-office-metadata-privacy.md) for the full
-trust boundary.
+The LaunchDaemon restarts the process after a crash and after boot, before a
+user logs in. Tailscale availability is separate: a spoke may start before its
+VPN is ready, and its gateway loop retries until the routed path returns. To
+verify an actual reboot, restart one machine at a time and recheck the system
+launchd job, signed discovery, proxy listener and an encrypted message.
 
 ## Cross-machine delivery test
 

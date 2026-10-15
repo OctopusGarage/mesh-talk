@@ -3,7 +3,13 @@ param(
     [string]$StagedBinary,
     [string]$Root = 'D:\ProgramData\MeshTalk\PostOffice',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
-    [string]$Name = 'post-office'
+    [string]$Name = 'post-office',
+    [switch]$Bridge,
+    [string]$BridgePeer,
+    [ValidatePattern('^[0-9A-Fa-f]{32}$')]
+    [string]$BridgePeerId,
+    [ValidateRange(1, 65535)]
+    [int]$BridgeProxyPort = 47476
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +17,13 @@ $taskName = 'MeshTalk-PostOffice'
 $binary = Join-Path $Root 'mesh-talk-node.exe'
 $data = Join-Path $Root 'data'
 $passwordFile = Join-Path $data 'password'
+
+if ([bool]$BridgePeer -ne [bool]$BridgePeerId) {
+    throw 'BridgePeer and BridgePeerId must be supplied together'
+}
+if ($BridgePeer -and $BridgeProxyPort -eq 47475) {
+    throw 'The bridge proxy port must differ from the local relay port 47475'
+}
 
 if (-not (Test-Path -LiteralPath $StagedBinary -PathType Leaf)) {
     throw "Staged Windows binary is missing: $StagedBinary"
@@ -75,16 +88,25 @@ if ($existing) {
 Copy-Item -LiteralPath $StagedBinary -Destination $binary -Force
 
 $arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47475 --discovery-port 47474' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name
+if ($BridgePeer) {
+    $arguments += ' --bridge --bridge-peer "{0}" --bridge-peer-id "{1}" --bridge-proxy-port {2}' -f $BridgePeer, $BridgePeerId.ToLowerInvariant(), $BridgeProxyPort
+} elseif ($Bridge) {
+    $arguments += ' --bridge'
+}
 $action = New-ScheduledTaskAction -Execute $binary -Argument $arguments -WorkingDirectory $Root
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
-foreach ($rule in @(
+$firewallRules = @(
     @{ Name = 'MeshTalk PostOffice TCP 47475'; Protocol = 'TCP'; Port = 47475 },
     @{ Name = 'MeshTalk PostOffice UDP 47474'; Protocol = 'UDP'; Port = 47474 }
-)) {
+)
+if ($BridgePeer) {
+    $firewallRules += @{ Name = "MeshTalk PostOffice Bridge TCP $BridgeProxyPort"; Protocol = 'TCP'; Port = $BridgeProxyPort }
+}
+foreach ($rule in $firewallRules) {
     if (-not (Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Port -RemoteAddress LocalSubnet -Profile Any | Out-Null
     }
@@ -103,6 +125,19 @@ do {
 } while ((Get-Date) -lt $deadline)
 if (-not $listener -or (Get-ScheduledTask -TaskName $taskName).State -ne 'Running') {
     throw 'Post-office task did not start a TCP 47475 listener within 30 seconds'
+}
+if ($BridgePeer) {
+    $proxyDeadline = (Get-Date).AddSeconds(45)
+    do {
+        $proxy = Get-NetTCPConnection -State Listen -LocalPort $BridgeProxyPort -ErrorAction SilentlyContinue |
+            Where-Object { $_.OwningProcess -eq $listener.OwningProcess } |
+            Select-Object -First 1
+        if ($proxy) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $proxyDeadline)
+    if (-not $proxy) {
+        throw "Bridge gateway did not bind TCP $BridgeProxyPort within 45 seconds"
+    }
 }
 Write-Output "Installed $binary"
 Write-Output "Data $data"

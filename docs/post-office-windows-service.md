@@ -5,8 +5,10 @@ Home (build 26200). Its `MeshTalk-PostOffice` Scheduled Task runs the headless
 relay as `SYSTEM` at boot. The binary is
 `D:\ProgramData\MeshTalk\PostOffice\mesh-talk-node.exe`; its keystore, password
 file, `relay.log`, and `node.lock` are in the `data` subdirectory. TCP 47475
-serves peers; signed UDP multicast discovery uses 47474. Firewall rules allow
-these ports from `LocalSubnet` on all network profiles.
+serves peers; signed UDP multicast discovery uses 47474. In the current
+three-relay deployment, the node also runs a local TCP 47476 gateway to the
+mac2015 hub. Firewall rules allow these listener ports from `LocalSubnet` on
+all network profiles.
 
 The task passes `--password-file`, never a password argument. The installer
 creates a random password on the Windows host only on first installation and
@@ -31,7 +33,7 @@ scp target/x86_64-pc-windows-gnu/release/mesh-talk-node.exe \
   windows10:'D:/mesh-talk-node.next.exe'
 scp scripts/install-post-office-windows.ps1 \
   windows10:'D:/install-post-office-windows.ps1'
-ssh windows10 'powershell -NoProfile -ExecutionPolicy Bypass -File D:\install-post-office-windows.ps1 -StagedBinary D:\mesh-talk-node.next.exe -Name windows10-post-office'
+ssh windows10 'powershell -NoProfile -ExecutionPolicy Bypass -File D:\install-post-office-windows.ps1 -StagedBinary D:\mesh-talk-node.next.exe -Name windows10-post-office -BridgePeer 192.168.3.72:47479 -BridgePeerId edbbf0daac94d930e687ba86c20d3f06 -BridgeProxyPort 47476'
 ```
 
 Run those commands for a first install and for each update. The installer
@@ -40,14 +42,18 @@ to choose a distinct LAN display name. On first install,
 the script creates the random password and the first task start creates the
 keystore; on update, it stops an
 existing task, replaces only the binary, checks ACLs, registers the boot task,
-starts it, and waits for the TCP listener. It preserves the data directory and
-identity. The CLI reclaims a `node.lock` from a terminated process on Windows;
-it refuses a lock held by a live process.
+starts it, and waits for the TCP listener and, when configured, the bridge
+proxy. It preserves the data directory and identity. `-Bridge` alone enables a
+local directory; `-BridgePeer` plus `-BridgePeerId` pins a signed remote hub
+and enables the gateway. The example points to mac2015's dedicated routed
+discovery port. Participating clients must separately enable bridge discovery
+and pin the same hub fingerprint. The CLI reclaims a `node.lock` from a
+terminated process on Windows; it refuses a lock held by a live process.
 
 ## Check and operate
 
 ```bash
-ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47475 | Select-Object LocalAddress,LocalPort,OwningProcess"'
+ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47475,47476 | Select-Object LocalAddress,LocalPort,OwningProcess"'
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).Principal.UserId; icacls D:\ProgramData\MeshTalk\PostOffice\data\password; icacls D:\ProgramData\MeshTalk\PostOffice\data\identity.keystore"'
 ssh windows10 'powershell -NoProfile -Command "Get-Content D:\ProgramData\MeshTalk\PostOffice\data\node.lock"'
 ssh windows10 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice"'
