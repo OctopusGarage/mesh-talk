@@ -956,10 +956,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       set((state) => {
         const unread = { ...state.unread };
         delete unread[convKey(c)];
+        const leavingActive =
+          state.active?.kind === "channel" && state.active.id === c.id;
         return {
-          active: state.active?.id === c.id ? null : state.active,
-          members: [],
-          channelOwner: "",
+          active: leavingActive ? null : state.active,
+          members: leavingActive ? [] : state.members,
+          channelOwner: leavingActive ? "" : state.channelOwner,
           unread,
         };
       });
