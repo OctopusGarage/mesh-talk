@@ -4,7 +4,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 prepare --binary PATH --name NAME --port PORT [--discovery-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] | activate" >&2
+    echo "usage: $0 prepare --binary PATH --name NAME --port PORT [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] | activate" >&2
     exit 2
 }
 
@@ -40,19 +40,21 @@ source_binary=
 name=
 port=
 discovery_port=47474
+lan_announce_port=
 bridge=false
 bridge_peer=
 bridge_peer_id=
 bridge_proxy_port=
 while (($#)); do
     case $1 in
-        --binary|--name|--port|--discovery-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port)
+        --binary|--name|--port|--discovery-port|--lan-announce-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port)
             (($# >= 2)) || usage
             case $1 in
                 --binary) source_binary=$2 ;;
                 --name) name=$2 ;;
                 --port) port=$2 ;;
                 --discovery-port) discovery_port=$2 ;;
+                --lan-announce-port) lan_announce_port=$2 ;;
                 --bridge-peer) bridge_peer=$2 ;;
                 --bridge-peer-id) bridge_peer_id=$2 ;;
                 --bridge-proxy-port) bridge_proxy_port=$2 ;;
@@ -64,6 +66,10 @@ while (($#)); do
 done
 [[ -f $source_binary && -n $name && $port =~ ^[0-9]+$ && $discovery_port =~ ^[0-9]+$ ]] || usage
 ((port >= 1 && port <= 65535 && discovery_port >= 1 && discovery_port <= 65535)) || usage
+if [[ -n $lan_announce_port ]]; then
+    [[ $lan_announce_port =~ ^[0-9]+$ ]] || usage
+    ((lan_announce_port >= 1 && lan_announce_port <= 65535)) || usage
+fi
 if [[ -n $bridge_peer || -n $bridge_peer_id || -n $bridge_proxy_port ]]; then
     [[ -n $bridge_peer && $bridge_peer_id =~ ^[0-9a-fA-F]{32}$ && $bridge_proxy_port =~ ^[0-9]+$ ]] || usage
     ((bridge_proxy_port >= 1 && bridge_proxy_port <= 65535 && bridge_proxy_port != port)) || usage
@@ -83,11 +89,11 @@ install -m 755 "$source_binary" "$binary.next"
 "$binary.next" --help >/dev/null
 mv -f "$binary.next" "$binary"
 
-python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" <<'PY'
+python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$lan_announce_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" <<'PY'
 import plistlib
 import sys
 
-plist, home, user, name, port, discovery_port, bridge, peer, peer_id, proxy_port = sys.argv[1:]
+plist, home, user, name, port, discovery_port, lan_announce_port, bridge, peer, peer_id, proxy_port = sys.argv[1:]
 args = [
     f"{home}/.local/bin/mesh-talk-node",
     "--keystore", f"{home}/.local/share/mesh-talk-post-office/identity.keystore",
@@ -96,6 +102,8 @@ args = [
     "--post-office", "--port", port,
     "--discovery-port", discovery_port,
 ]
+if lan_announce_port:
+    args.extend(["--lan-announce-port", lan_announce_port])
 if bridge == "true":
     args.append("--bridge")
 if peer:

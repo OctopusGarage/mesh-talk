@@ -58,6 +58,10 @@ struct Args {
     /// UDP port for signed-announce discovery (must match across peers).
     #[arg(long, default_value_t = DEFAULT_DISCOVERY_PORT)]
     discovery_port: u16,
+    /// Also announce this relay on the LAN's shared discovery port when its
+    /// own receive port differs (for example, when a desktop app shares the host).
+    #[arg(long, requires = "post_office", value_parser = clap::value_parser!(u16).range(1..))]
+    lan_announce_port: Option<u16>,
     /// Run as a post office: a durable store-and-forward relay that advertises
     /// the post-office role (no DM REPL — it only relays).
     #[arg(long)]
@@ -649,11 +653,12 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Discovery: advertise ourselves (and harmlessly track peers) on the shared socket.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
+    let shared_announce = mesh_talk_core::discovery::service::shared_announce(&announce);
     let discovery_identity = DeviceIdentity::from_secret_bytes(ed, x);
     mesh_talk_core::discovery::service::spawn_discovery_with_routed(
         Arc::clone(&socket),
         Arc::clone(&roster),
-        mesh_talk_core::discovery::service::shared_announce(&announce),
+        Arc::clone(&shared_announce),
         user_id.clone(),
         args.discovery_port,
         None,
@@ -670,6 +675,28 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             )),
         )),
     );
+    if let Some(port) = args
+        .lan_announce_port
+        .filter(|port| *port != args.discovery_port)
+    {
+        let target = SocketAddr::new(
+            mesh_talk_core::transport::net::DISCOVERY_MULTICAST_GROUP.into(),
+            port,
+        );
+        tokio::spawn(mesh_talk_core::discovery::service::run_broadcast(
+            Arc::clone(&socket),
+            Arc::clone(&shared_announce),
+            target,
+            Duration::from_secs(2),
+            None,
+        ));
+        tokio::spawn(mesh_talk_core::discovery::service::run_scan(
+            socket,
+            shared_announce,
+            port,
+            None,
+        ));
+    }
 
     let gateway = if let (Some(remote), Some(peer_id)) = (args.bridge_peer, args.bridge_peer_id) {
         let proof = Arc::new(Mutex::new(None));
@@ -1010,6 +1037,28 @@ mod tests {
                 "secret.txt",
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn auxiliary_lan_announce_is_relay_only() {
+        let base = [
+            "mesh-talk-node",
+            "--keystore",
+            "node.keystore",
+            "--password",
+            "pw",
+            "--name",
+            "relay",
+            "--lan-announce-port",
+            "47474",
+        ];
+        assert!(Args::try_parse_from(base).is_err());
+        assert_eq!(
+            Args::try_parse_from(base.into_iter().chain(["--post-office"]))
+                .unwrap()
+                .lan_announce_port,
+            Some(47474)
         );
     }
 

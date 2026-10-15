@@ -21,7 +21,11 @@ phases:
    stops the old per-login agent if present, and starts the boot service.
 
 For a hub, use `--bridge` and a dedicated discovery port if another Mesh Talk
-process on the same host already owns UDP 47474. For a spoke, use
+process on the same host already owns UDP 47474. In that case, also set
+`--lan-announce-port 47474`: the relay keeps receiving on its dedicated port
+while advertising its signed identity to ordinary LAN clients directly. This
+lets clients use the relay even when another post office on the LAN is offline.
+For a spoke, use
 `--bridge-peer <hub-IP>:<hub-discovery-port>` and the hub's exact signed
 32-character device fingerprint. Its proxy port must differ from its own TCP
 relay port. Routed UDP queries and the hub's TCP port must be reachable from
@@ -31,7 +35,7 @@ Example for an Intel hub (paths and address are deployment-specific):
 
 ```bash
 scp target/x86_64-apple-darwin/release/mesh-talk-node scripts/install-post-office-macos.sh mac2015:~/.local/state/mesh-talk-post-office/
-ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node --name mac2015-post-office --port 47475 --discovery-port 47479 --bridge'
+ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node --name mac2015-post-office --port 47475 --discovery-port 47479 --lan-announce-port 47474 --bridge'
 ssh -tt mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 

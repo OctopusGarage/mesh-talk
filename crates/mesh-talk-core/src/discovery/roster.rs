@@ -31,6 +31,25 @@ pub struct PeerEndpoint {
 
 const MAX_ROUTES_PER_PEER: usize = 8;
 
+/// Keep a directly discovered endpoint ahead of a bridge gateway, even when
+/// the gateway refreshes its directory more recently. Routes within each tier
+/// retain their existing newest-first behavior.
+fn preferred_route(routes: &[PeerEndpoint]) -> Option<&PeerEndpoint> {
+    routes
+        .iter()
+        .rev()
+        .find(|route| {
+            route.source != RouteSource::Gateway && route.source != RouteSource::PostOffice
+        })
+        .or_else(|| {
+            routes
+                .iter()
+                .rev()
+                .find(|route| route.source != RouteSource::PostOffice)
+        })
+        .or_else(|| routes.last())
+}
+
 /// What we know about a discovered peer: its keys, where to reach it, whether it
 /// serves as a post office, and when we last heard from it.
 #[derive(Debug, Clone)]
@@ -229,11 +248,7 @@ impl Roster {
         }
         self.announcements
             .insert(announce.user_id.clone(), announce.clone());
-        let direct = routes
-            .iter()
-            .rev()
-            .find(|route| route.source != RouteSource::PostOffice)
-            .map(|route| route.addr);
+        let direct = preferred_route(&routes).map(|route| route.addr);
         self.peers.insert(
             announce.user_id.clone(),
             PeerRecord {
@@ -326,7 +341,7 @@ impl Roster {
             announce.user_id.clone(),
             PeerRecord {
                 public: announce.public(),
-                addr,
+                addr: preferred_route(&routes).map_or(addr, |route| route.addr),
                 routes,
                 name: announce.name.clone(),
                 post_office: announce.post_office,
@@ -435,13 +450,7 @@ impl Roster {
                 };
                 now.saturating_duration_since(route.last_seen) < lifespan
             });
-            if let Some(last) = r
-                .routes
-                .iter()
-                .rev()
-                .find(|route| route.source != RouteSource::PostOffice)
-                .or_else(|| r.routes.last())
-            {
+            if let Some(last) = preferred_route(&r.routes) {
                 r.addr = last.addr;
                 r.last_seen = last.last_seen;
                 true
@@ -470,7 +479,7 @@ impl Roster {
         };
         peer.routes
             .retain(|route| route.source != RouteSource::PostOffice);
-        if let Some(route) = peer.routes.last() {
+        if let Some(route) = preferred_route(&peer.routes) {
             peer.addr = route.addr;
             peer.last_seen = route.last_seen;
         } else {
@@ -604,6 +613,30 @@ mod routed_tests {
         assert!(peer.post_office);
         assert_eq!(peer.routes[0].source, RouteSource::Gateway);
         assert_eq!(peer.addr, SocketAddr::new(ip, 50000));
+    }
+
+    #[test]
+    fn direct_lan_relay_survives_gateway_directory_refresh() {
+        let id = DeviceIdentity::generate();
+        let account = Account::generate();
+        let relay = Announce::new_post_office_with_account(&id, &account, "relay", 47475);
+        let lan: IpAddr = "192.168.3.72".parse().unwrap();
+        let gateway: IpAddr = "192.168.3.16".parse().unwrap();
+        let direct = SocketAddr::new(lan, 47475);
+        let mut roster = Roster::default();
+        roster.update_gateway(&relay, gateway, 47476, "self");
+        roster.update(&relay, lan, "self");
+        roster.update_gateway(&relay, gateway, 47476, "self");
+        let peer = roster.get(&id.user_id()).unwrap();
+        assert_eq!(peer.addr, direct);
+        assert_eq!(peer.routes.len(), 2);
+        assert!(
+            peer.routes
+                .iter()
+                .any(|route| route.source == RouteSource::Gateway)
+        );
+        roster.evict_stale(Duration::from_secs(30));
+        assert_eq!(roster.get(&id.user_id()).unwrap().addr, direct);
     }
 
     #[test]
