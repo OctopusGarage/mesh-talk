@@ -20,6 +20,13 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308141a'/%3E%3Cg stroke='%232fe6ce' stroke-width='1.4' fill='%232fe6ce'%3E%3Cline x1='9' y1='10' x2='23' y2='9' stroke-opacity='.5'/%3E%3Cline x1='9' y1='10' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='24' y2='22' stroke-opacity='.5'/%3E%3Ccircle cx='9' cy='10' r='2.6'/%3E%3Ccircle cx='23' cy='9' r='2.6'/%3E%3Ccircle cx='15' cy='23' r='2.6'/%3E%3Ccircle cx='24' cy='22' r='2.2' fill='%23f4c77b'/%3E%3C/g%3E%3C/svg%3E"
     />
     <style>
+      @font-face {
+        font-family: "Space Grotesk";
+        src: url("fonts/space-grotesk-latin.woff2") format("woff2");
+        font-style: normal;
+        font-weight: 300 700;
+        font-display: swap;
+      }
       :root {
         --ink: #08141a;
         --ink-2: #0c1d24;
@@ -32,7 +39,9 @@
         --muted: #84a39e;
         --faint: #9bb3ad;
         --presence: #f4c77b;
-        --display: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --display:
+          "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
         --body: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
         --maxw: 1140px;
@@ -254,43 +263,11 @@
         font-size: 1.05rem;
       }
 
-      /* ---------- trust strip (three absences) ---------- */
-      .absences {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1px;
-        background: color-mix(in srgb, var(--line) 55%, transparent);
-        border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
-        border-radius: 14px;
-        overflow: hidden;
-      }
-      .absence {
-        background: var(--ink);
-        padding: 1.6rem;
-      }
-      .absence b {
-        font-family: var(--display);
-        font-size: 1.5rem;
-        font-weight: 600;
-        letter-spacing: -0.01em;
-      }
-      .absence p {
-        color: var(--muted);
-        font-size: 0.92rem;
-        margin: 0.4rem 0 0;
-      }
-      @media (max-width: 640px) {
-        .absences {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      /* ---------- steps (the one real sequence) ---------- */
+      /* ---------- communication paths ---------- */
       .steps {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
         gap: 1.4rem;
-        counter-reset: step;
       }
       .step {
         position: relative;
@@ -317,21 +294,9 @@
         font-size: 0.94rem;
         margin: 0;
       }
-      .step .edge {
-        position: absolute;
-        top: 2.1rem;
-        right: -1.1rem;
-        width: 1.4rem;
-        height: 1px;
-        background: var(--line-2);
-        z-index: 1;
-      }
       @media (max-width: 800px) {
         .steps {
           grid-template-columns: 1fr;
-        }
-        .step .edge {
-          display: none;
         }
       }
 
@@ -390,6 +355,9 @@
         text-decoration: underline;
         text-underline-offset: 3px;
       }
+      .network-heading {
+        margin-top: clamp(3rem, 6vw, 5rem);
+      }
       @media (max-width: 720px) {
         .bridge {
           grid-template-columns: 1fr;
@@ -424,11 +392,16 @@
         font-size: 0.74rem;
         color: var(--faint);
       }
+      .secure a {
+        color: var(--signal);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
 
       /* ---------- capabilities grid ---------- */
       .caps {
         display: grid;
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(3, 1fr);
         gap: 1px;
         background: color-mix(in srgb, var(--line) 55%, transparent);
         border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
@@ -621,9 +594,9 @@
         </a>
         <nav class="nav__links">
           <a class="hide-sm" href="#how">How it works</a>
+          <a class="hide-sm" href="#networks">Across LANs</a>
           <a class="hide-sm" href="#security">Security</a>
           <a class="hide-sm" href="#features">Features</a>
-          <a class="hide-sm" href="#networks">Across networks</a>
           <a class="hide-sm" href="https://octopusgarage.github.io/marketplace/"
             >Marketplace</a
           >
@@ -644,13 +617,12 @@
       <section class="hero">
         <canvas id="mesh" aria-hidden="true"></canvas>
         <div class="wrap hero__in reveal in">
-          <h1>Private conversations on your local network.</h1>
+          <h1>Private conversations start on your local network.</h1>
           <p class="hero__sub">
-            Create a local account, find peers on your
-            <b>local network</b>, and talk directly. Existing routed networks
-            can connect peers across LANs when they opt in. Messages stay
-            end-to-end encrypted; a peer-operated post office can hold them
-            while someone is offline.
+            Create a local account and talk directly with nearby peers. Keep
+            messages end-to-end encrypted, reach other LANs through a network
+            you manage, and use a peer-operated post office for offline
+            delivery.
           </p>
           <div class="hero__cta">
             <a
@@ -660,8 +632,8 @@
             >
             <a
               class="btn btn--ghost"
-              href="https://github.com/OctopusGarage/mesh-talk"
-              >Read the source</a
+              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/README.md"
+              >Explore the docs</a
             >
           </div>
           <p class="ticker">
@@ -671,70 +643,39 @@
         </div>
       </section>
 
-      <!-- ===== three absences ===== -->
-      <section class="section" aria-label="How Mesh-Talk operates">
-        <div class="wrap">
-          <div class="absences reveal">
-            <div class="absence">
-              <b>Direct connections</b>
-              <p>
-                Devices connect directly over the LAN. An optional peer-run post
-                office can store encrypted events for offline delivery.
-              </p>
-            </div>
-            <div class="absence">
-              <b>Local accounts</b>
-              <p>
-                Create an account on your device. No email address, phone
-                number, or cloud identity provider is required.
-              </p>
-            </div>
-            <div class="absence">
-              <b>Offline networks</b>
-              <p>
-                Local peers can chat on an isolated LAN with no internet
-                connection.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ===== how it works (the real sequence) ===== -->
+      <!-- ===== communication paths ===== -->
       <section class="section" id="how">
         <div class="wrap">
           <div class="section__head reveal">
-            <h2>Discover, verify, then talk — directly.</h2>
+            <h2>One identity. Three ways to reach a peer.</h2>
             <p>
-              No cloud directory to register with. Discovery, verification, and
-              chat happen between devices on the network they share.
+              Mesh-Talk starts with direct LAN connections. Other paths are
+              explicit choices built on networks and devices you control.
             </p>
           </div>
           <div class="steps reveal">
             <div class="step">
-              <div class="step__no">STEP 01</div>
-              <h3>Discover on the LAN</h3>
+              <div class="step__no">01 / LOCAL</div>
+              <h3>Meet nearby peers</h3>
               <p>
-                Each device announces itself with a multicast beacon and builds
-                a live roster of the peers around it.
+                Signed discovery finds devices on the same LAN, even without
+                internet. Peers connect directly and sync encrypted events.
               </p>
-              <div class="edge" aria-hidden="true"></div>
             </div>
             <div class="step">
-              <div class="step__no">STEP 02</div>
-              <h3>Verify it's really them</h3>
+              <div class="step__no">02 / ROUTED</div>
+              <h3>Reach another LAN</h3>
               <p>
-                Compare a short safety number out loud or by sight. Once
-                verified, an identity change is flagged loudly.
+                Use an existing route, such as your Tailscale network, to find
+                reachable peers. Mesh-Talk verifies their identity separately.
               </p>
-              <div class="edge" aria-hidden="true"></div>
             </div>
             <div class="step">
-              <div class="step__no">STEP 03</div>
-              <h3>Talk end-to-end encrypted</h3>
+              <div class="step__no">03 / OFFLINE</div>
+              <h3>Deliver while away</h3>
               <p>
-                Direct messages use a Double Ratchet; channels use per-sender
-                sender keys. Messages, files, and reactions stay encrypted.
+                A peer-operated post office holds recipient-encrypted events
+                temporarily, subject to capacity and a 30-day maximum age.
               </p>
             </div>
           </div>
@@ -747,10 +688,9 @@
           <div class="section__head reveal">
             <h2>Across LANs, when you choose.</h2>
             <p>
-              Discover a reachable peer through an existing routed network, such
-              as your own Tailscale setup. An opt-in post-office bridge can
-              introduce registered peers at separate sites and carry
-              recipient-encrypted messages through a shared mailbox.
+              For a group spread across sites, an opt-in post-office bridge
+              introduces registered peers through pinned relays. Participating
+              devices can exchange encrypted DMs through a shared mailbox.
             </p>
           </div>
           <div
@@ -801,9 +741,16 @@
           <div class="section__head reveal" style="margin-bottom: 0">
             <h2>You can check it's the right person.</h2>
             <p>
-              Compare the safety number over a trusted channel, then mark the
-              contact as verified. Mesh-Talk warns you if a verified identity
-              changes.
+              Compare a contact's safety number over a trusted channel, then
+              mark them as verified. Mesh-Talk warns when a verified identity
+              changes. Message content is end-to-end encrypted; a relay still
+              sees routing metadata.
+            </p>
+            <p>
+              <a
+                href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/post-office-metadata-privacy.md"
+                >Read the relay privacy guide →</a
+              >
             </p>
           </div>
           <figure class="security-shot reveal">
@@ -834,94 +781,52 @@
           </div>
           <div class="caps reveal">
             <div class="cap">
-              <div class="cap__k">Conversations</div>
-              <b>DMs &amp; channels</b>
-              <p>One-to-one chats and group channels with members and roles.</p>
-            </div>
-            <div class="cap">
-              <div class="cap__k">Forward secrecy</div>
-              <b>Double Ratchet</b>
+              <div class="cap__k">CONVERSE</div>
+              <b>DMs and channels</b>
               <p>
-                Double Ratchet protects DMs, while sender-key ratchets protect
-                channels. Both provide forward secrecy.
+                One-to-one and group conversations with replies, reactions,
+                mentions, and search.
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">Sharing</div>
-              <b>Files &amp; media</b>
+              <div class="cap__k">SHARE</div>
+              <b>Encrypted files</b>
               <p>
-                Send images and videos inline, large files in chunks, all
-                encrypted.
+                Send media and large files in encrypted chunks with progress and
+                resume.
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">Expression</div>
-              <b>Reactions &amp; stickers</b>
-              <p>Animated stickers, emoji reactions, replies, and @mentions.</p>
-            </div>
-            <div class="cap">
-              <div class="cap__k">Control</div>
-              <b>Recall &amp; retention</b>
+              <div class="cap__k">CONTINUE</div>
+              <b>Linked devices</b>
               <p>
-                Delete, recall within a window, clear history, or auto-prune by
-                age.
+                Use one account on your devices and keep a local conversation
+                history.
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">Identity</div>
-              <b>Multi-device</b>
+              <div class="cap__k">RECOVER</div>
+              <b>Manual backup</b>
               <p>
-                Link your own devices to one account with a code-authorized
-                pairing.
+                Export an encrypted backup with a separate recovery key for
+                restoring an account.
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">Recovery</div>
-              <b>Encrypted backup</b>
+              <div class="cap__k">CONTROL</div>
+              <b>Privacy choices</b>
               <p>
-                Export a manual backup with a separate recovery key. Restore an
-                account on a new device after a loss; old devices are not
-                revoked.
+                Choose notification, app lock, visibility, and local retention
+                settings.
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">Privacy</div>
-              <b>Choose your exposure</b>
+              <div class="cap__k">PERSONALIZE</div>
+              <b>Themes and packs</b>
               <p>
-                Privacy presets control previews, app locking, and copying.
-                Invisible mode stops public announcements while approved
-                accounts can still reach you.
+                Choose an interface theme and add optional avatar, theme, or
+                sticker packs.
               </p>
-            </div>
-            <div class="cap">
-              <div class="cap__k">Personalization</div>
-              <b>Installable packs</b>
-              <p>
-                Add avatar, theme, and sticker packs from a local ZIP or the
-                curated marketplace.
-              </p>
-            </div>
-            <div class="cap">
-              <div class="cap__k">Availability</div>
-              <b>Live presence</b>
-              <p>
-                See online and last-seen status for nearby contacts. Your own
-                row in a channel member list shows online.
-              </p>
-            </div>
-            <div class="cap">
-              <div class="cap__k">Delivery</div>
-              <b>Bounded offline relay</b>
-              <p>
-                A peer-operated post office holds encrypted events for an absent
-                recipient, subject to capacity limits and a 30-day maximum
-                mailbox age.
-              </p>
-            </div>
-            <div class="cap">
-              <div class="cap__k">Anywhere</div>
-              <b>macOS · Windows · Linux</b>
-              <p>One native desktop app, built on Tauri and a Rust core.</p>
             </div>
           </div>
         </div>

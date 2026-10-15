@@ -12,8 +12,10 @@
   `mod tests` (e.g. `node/node_tests.rs`).
 - React client sits in `frontend/src`; Vite tooling in `frontend/package.json`.
 - Operational scripts in `scripts/` (`setup-hooks.sh`, `check-health.sh`); architecture in
-  `docs/ARCHITECTURE.md`; conventions in `specifications/`. All docs are indexed in
-  [`docs/README.md`](docs/README.md) (documentation map).
+  `docs/ARCHITECTURE.md`; conventions in `specifications/`. The
+  [documentation map](docs/README.md) routes readers to maintained guides; the
+  [documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md) define ownership
+  across the README, guides, and project site.
 
 ## Build, Test, and Development Commands
 - `make dev` primes Rust + Node deps and installs git hooks.
