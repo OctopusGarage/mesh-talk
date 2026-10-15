@@ -47,6 +47,25 @@ command names for Tauri registration. Commands clone a node handle from
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
+### Fixed-deadline messages
+
+The composer selects a per-message duration (five minutes by default) and computes
+one UTC expiry timestamp at send time. The timestamp is inside authenticated DM,
+channel, or file-manifest plaintext (`MTEX1` frame), so every recipient device
+receives the same deadline. The sender's local copy remains in history. Recipient
+history, search, and incoming notifications exclude expired content. A one-second
+maintenance task removes recipient plaintext sidecars, suppresses replay through
+account sync, and removes locally managed media. A monotonic observation timer
+also bounds the lifetime by the sender event's intended duration if the local
+wall clock was already wrong when the message arrived. On restart the prior monotonic
+clock anchor cannot be recovered; expiring recipient copies are erased early to
+avoid extending their lifetime after a backward clock change. This is a local
+retention feature: a recipient who controls their device can copy content or
+modify the client, so remote deletion cannot be guaranteed. Older clients do
+not understand the `MTEX1` frame and may keep its decrypted bytes; only updated
+recipient devices enforce expiry.
+
+
 - **DeviceIdentity** — per device: Ed25519 (sign) + X25519 (DH). `user_id =
   SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
 - **Account** (multi-device) — cross-device Ed25519. `account_id =

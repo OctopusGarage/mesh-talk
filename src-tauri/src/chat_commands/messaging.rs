@@ -89,6 +89,7 @@ pub async fn send_sticker(
     sticker_id: String,
     fallback: String,
     is_channel: bool,
+    expires_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
     let channel = if is_channel {
         Some(parse_channel_id(&conv_id)?)
@@ -98,7 +99,7 @@ pub async fn send_sticker(
     let node = state.node_handle().await?;
     match channel {
         Some(channel) => node
-            .send_sticker_channel(channel, &sticker_id, fallback.as_bytes())
+            .send_sticker_channel_expiring(channel, &sticker_id, fallback.as_bytes(), expires_at_ms)
             .await
             .map_err(CommandError::from),
         None => node

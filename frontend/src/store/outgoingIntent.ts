@@ -19,9 +19,19 @@ import type { ChatMessage, Conversation, Set, Get } from "./chat";
 
 export const SEND_INTENT_CAP = 256;
 export type SendPayload =
-  | { kind: "text"; text: string; replyTo: string | null }
-  | { kind: "sticker"; stickerId: string; fallback: string }
-  | { kind: "file"; path: string; media: boolean };
+  | {
+      kind: "text";
+      text: string;
+      replyTo: string | null;
+      expiresAtMs?: number | null;
+    }
+  | {
+      kind: "sticker";
+      stickerId: string;
+      fallback: string;
+      expiresAtMs?: number | null;
+    }
+  | { kind: "file"; path: string; media: boolean; expiresAtMs?: number | null };
 export interface SendIntent {
   conversation: Conversation;
   payload: SendPayload;
@@ -44,13 +54,25 @@ function sendFileFor(
   path: string,
   media: boolean,
   progressKey: string,
+  expiresAtMs?: number | null,
 ) {
   return c.kind === "account"
     ? chat.sendFileToAccount(c.id, path, media)
-    : chat.sendFileChannel(c.id, path, media, progressKey);
+    : chat.sendFileChannel(c.id, path, media, progressKey, expiresAtMs);
 }
-function sendStickerFor(c: Conversation, stickerId: string, fallback: string) {
-  return chat.sendSticker(c.id, stickerId, fallback, c.kind === "channel");
+function sendStickerFor(
+  c: Conversation,
+  stickerId: string,
+  fallback: string,
+  expiresAtMs?: number | null,
+) {
+  return chat.sendSticker(
+    c.id,
+    stickerId,
+    fallback,
+    c.kind === "channel",
+    expiresAtMs,
+  );
 }
 
 const HISTORY_LIMIT = 200;
@@ -358,6 +380,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
             c.id,
             payload.text,
             payload.replyTo,
+            payload.expiresAtMs,
           ),
           pending: false,
         };
@@ -369,6 +392,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
             c.id,
             payload.stickerId,
             payload.fallback,
+            payload.expiresAtMs,
           ),
           pending: false,
         };
@@ -379,6 +403,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
           payload.path,
           payload.media,
           clientId,
+          payload.expiresAtMs,
         );
         accepted = {
           ...message,
@@ -393,10 +418,27 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
       if (!hadIntent) return;
     } else {
       if (payload.kind === "text")
-        await chat.sendChannelMessage(c.id, payload.text, payload.replyTo);
+        await chat.sendChannelMessage(
+          c.id,
+          payload.text,
+          payload.replyTo,
+          payload.expiresAtMs,
+        );
       else if (payload.kind === "sticker")
-        await sendStickerFor(c, payload.stickerId, payload.fallback);
-      else await sendFileFor(c, payload.path, payload.media, clientId);
+        await sendStickerFor(
+          c,
+          payload.stickerId,
+          payload.fallback,
+          payload.expiresAtMs,
+        );
+      else
+        await sendFileFor(
+          c,
+          payload.path,
+          payload.media,
+          clientId,
+          payload.expiresAtMs,
+        );
       if (!lease.current()) return;
       update(null); // Legacy void never claims acceptance/receipt for a placeholder.
     }

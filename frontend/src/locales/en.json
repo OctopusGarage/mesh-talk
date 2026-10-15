@@ -282,6 +282,12 @@
     "receivingProgress": "Receiving file: {{percent}}%"
   },
   "composer": {
+    "expireAfterSend": "Expire after send",
+    "keep": "Keep",
+    "oneMinute": "1 min",
+    "fiveMinutes": "5 min",
+    "oneHour": "1 hour",
+    "oneDay": "1 day",
     "replyingTo": "Replying to",
     "message": "message",
     "send": "Send",

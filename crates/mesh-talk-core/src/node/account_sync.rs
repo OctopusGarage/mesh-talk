@@ -269,6 +269,11 @@ impl Node {
                         {
                             continue;
                         }
+                        if env.route.sender_account != own
+                            && self.recipient_expired(&env.body, entry.event_id, entry.wall_clock)
+                        {
+                            continue;
+                        }
                         page.offer(
                             HistoryCursor {
                                 tag: 0,
@@ -334,6 +339,9 @@ impl Node {
                     if entry.plaintext.is_empty() || entry.plaintext.len() > MAX_RECORD {
                         continue;
                     }
+                    if self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock) {
+                        continue;
+                    }
                     page.offer(
                         HistoryCursor {
                             tag: 1,
@@ -380,6 +388,11 @@ impl Node {
                 };
                 for entry in rows.entries_ref(&host) {
                     if entry.plaintext.is_empty()
+                        || self.recipient_expired(
+                            &entry.plaintext,
+                            entry.event_id,
+                            entry.wall_clock,
+                        )
                         || delivery.file_erased(host, entry.event_id)
                         || delivery.manifest_event_erased(entry.event_id)
                         || suppression.contains(host, entry.event_id)
@@ -624,6 +637,9 @@ impl Node {
             wall_clock: record.wall_clock,
             plaintext: payload.manifest,
         };
+        if self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock) {
+            return Ok(());
+        }
         if payload.proof.id != event_id
             || payload.proof.kind != crate::eventlog::EventKind::FileManifest
             || !payload.proof.verify_integrity()
@@ -1036,6 +1052,9 @@ impl Node {
                 if let HistoryRecord::Channel(record) = record {
                     let conversation = ConversationId::new(record.conversation);
                     let event_id = EventId::new(record.event_id);
+                    if self.recipient_expired(&record.plaintext, event_id, record.wall_clock) {
+                        continue;
+                    }
                     if self
                         .account_suppression
                         .lock()

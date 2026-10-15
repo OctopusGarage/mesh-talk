@@ -155,6 +155,7 @@ pub async fn owner_enqueue_text(
     account: String,
     text: String,
     reply_to: Option<String>,
+    expires_at_ms: Option<u64>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
@@ -166,9 +167,13 @@ pub async fn owner_enqueue_text(
             Box::pin(async move {
                 let id = runtime
                     .handle()
-                    .enqueue_to_account_if(&account, text.as_bytes(), reply, |accept| {
-                        admission.authorize_accept(runtime, accept)
-                    })
+                    .enqueue_to_account_expiring_if(
+                        &account,
+                        text.as_bytes(),
+                        reply,
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
                     .await
                     .map_err(CommandError::from)?;
                 Ok(hex::encode(id.as_bytes()))
@@ -183,6 +188,7 @@ pub async fn owner_enqueue_sticker(
     account: String,
     sticker_id: String,
     fallback: String,
+    expires_at_ms: Option<u64>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
@@ -193,10 +199,11 @@ pub async fn owner_enqueue_sticker(
             Box::pin(async move {
                 let id = runtime
                     .handle()
-                    .enqueue_sticker_to_account_if(
+                    .enqueue_sticker_to_account_expiring_if(
                         &account,
                         &sticker_id,
                         fallback.as_bytes(),
+                        expires_at_ms,
                         |accept| admission.authorize_accept(runtime, accept),
                     )
                     .await
@@ -221,6 +228,7 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
     path: String,
     media: bool,
     progress_key: Option<String>,
+    expires_at_ms: Option<u64>,
     handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
@@ -254,7 +262,7 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                 let progress_hook = admission.app.owner_file_progress_hook.clone();
                 let result = runtime
                     .handle()
-                    .enqueue_file_to_account_progress_if(
+                    .enqueue_file_to_account_progress_expiring_if(
                         &account,
                         std::path::Path::new(&path),
                         kind,
@@ -268,6 +276,7 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                                 }
                             }
                         },
+                        expires_at_ms,
                         |accept| admission.authorize_accept(runtime, accept),
                     )
                     .await;
@@ -1097,6 +1106,7 @@ mod tests {
                 target,
                 path.to_string_lossy().into_owned(),
                 false,
+                None,
                 None,
                 handle.clone(),
                 handle.state::<AppState>(),

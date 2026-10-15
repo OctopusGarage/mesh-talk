@@ -116,7 +116,16 @@ impl Node {
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
             _ = Arc::clone(&self).run_account_history_loop() => {}
+            _ = Arc::clone(&self).run_expiry_loop() => {}
             _ = self.accept_connections(listener) => {}
+        }
+    }
+
+    async fn run_expiry_loop(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let node = Arc::clone(&self);
+            let _ = tokio::task::spawn_blocking(move || node.prune_expired_received()).await;
         }
     }
 
@@ -358,6 +367,17 @@ impl Node {
                     Err(_) => continue,
                 }
             };
+            let own_device = self
+                .linked_devices()
+                .iter()
+                .any(|device| device.public.user_id() == event.author.user_id());
+            if !own_device && self.recipient_expired(&plaintext, event.id, event.wall_clock) {
+                self.files
+                    .lock()
+                    .expect("files mutex not poisoned")
+                    .mark_emitted(event.id);
+                continue;
+            }
             let Some(manifest) = super::files::validated_manifest(&plaintext) else {
                 continue;
             };
@@ -545,6 +565,13 @@ impl Node {
             book.process(&self.identity, conv, &refs)
         };
         for msg in messages {
+            let own_device = self
+                .linked_devices()
+                .iter()
+                .any(|device| device.public.user_id() == msg.from);
+            if !own_device && self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock) {
+                continue;
+            }
             // Persist the decrypted plaintext: the sender-key wire key is single-use,
             // so channel history is served from the received store, not re-opened.
             let _ = self

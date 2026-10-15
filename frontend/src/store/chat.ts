@@ -254,9 +254,17 @@ export interface ChatState {
   reload: () => Promise<boolean>;
   refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
-  admitText: (text: string, replyTo: string | null) => boolean;
+  admitText: (
+    text: string,
+    replyTo: string | null,
+    expiresAtMs?: number | null,
+  ) => boolean;
   retry: (clientId: string) => Promise<void>;
-  sendFile: (path: string, media: boolean) => Promise<void>;
+  sendFile: (
+    path: string,
+    media: boolean,
+    expiresAtMs?: number | null,
+  ) => Promise<void>;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
   toggleReaction: (target: string, emoji: string) => Promise<void>;
   /** Delete one message from this device only (local). */
@@ -266,7 +274,11 @@ export interface ChatState {
   /** Clear all local history for the active conversation. */
   clearConversation: () => Promise<boolean>;
   /** Send an animated sticker (by id) as its own message; `fallback` is its emoji char. */
-  sendSticker: (stickerId: string, fallback: string) => Promise<void>;
+  sendSticker: (
+    stickerId: string,
+    fallback: string,
+    expiresAtMs?: number | null,
+  ) => Promise<void>;
   createChannel: (name: string, memberIds: string[]) => Promise<boolean>;
   dissolveChannel: (channelId: string) => Promise<boolean>;
   addMember: (memberId: string) => Promise<boolean>;
@@ -691,7 +703,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   // The composer needs an immediate admission answer so it never clears a draft that
   // could not enter the local optimistic queue. Delivery still settles asynchronously.
-  admitText: (text, replyTo) => {
+  admitText: (text, replyTo, expiresAtMs) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
@@ -704,6 +716,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         kind: "text",
         text,
         replyTo,
+        expiresAtMs,
       },
     );
     if (!dispatch) return false;
@@ -748,13 +761,13 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     await dispatchIntent(set, get, { ...intent, message: pending });
   },
 
-  sendFile: async (path, media) => {
+  sendFile: async (path, media, expiresAtMs) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(set, get, c, { kind: "file", path, media });
+    await sendIntent(set, get, c, { kind: "file", path, media, expiresAtMs });
   },
 
   toggleReaction: async (target, emoji) => {
@@ -833,13 +846,18 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }
   },
 
-  sendSticker: async (stickerId, fallback) => {
+  sendSticker: async (stickerId, fallback, expiresAtMs) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(set, get, c, { kind: "sticker", stickerId, fallback });
+    await sendIntent(set, get, c, {
+      kind: "sticker",
+      stickerId,
+      fallback,
+      expiresAtMs,
+    });
   },
 
   createChannel: async (name, memberIds) => {

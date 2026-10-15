@@ -804,7 +804,14 @@ impl Node {
                         if !incoming {
                             self.install_file_card_scopes_for(store, Some(entry.event_id));
                         }
-                        if incoming && fresh {
+                        if incoming
+                            && fresh
+                            && !self.recipient_expired(
+                                &entry.plaintext,
+                                entry.event_id,
+                                entry.wall_clock,
+                            )
+                        {
                             self.pending_files
                                 .lock()
                                 .expect("pending files lock not poisoned")
@@ -827,6 +834,11 @@ impl Node {
                     .expect("emitted lock not poisoned")
                     .insert(entry.event_id)
                 {
+                    let inner = DmEnvelope::decode(&entry.plaintext)
+                        .map_or_else(|| entry.plaintext.clone(), |env| env.body);
+                    if self.recipient_expired(&inner, entry.event_id, entry.wall_clock) {
+                        continue;
+                    }
                     let body = DmEnvelope::decode(&entry.plaintext).map_or_else(
                         || MessageBody::decode(&entry.plaintext),
                         |env| MessageBody::decode(&env.body),

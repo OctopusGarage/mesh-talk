@@ -102,6 +102,11 @@ export function ConversationView() {
   const admitText = useChat((s) => s.admitText);
   const retry = useChat((s) => s.retry);
   const sendFile = useChat((s) => s.sendFile);
+  const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(
+    300_000,
+  );
+  const expiresAtSend = () =>
+    expiryDurationMs === null ? null : Date.now() + expiryDurationMs;
   const setError = useChat((s) => s.setError);
   const toggleReaction = useChat((s) => s.toggleReaction);
   const openConversation = useChat((s) => s.open);
@@ -319,7 +324,8 @@ export function ConversationView() {
         return false;
       }
       // Image button / paste / screenshot → media intent (inline preview).
-      await sendFile(tempPath, true);
+      await sendFile(tempPath, true, expiresAtSend());
+      setExpiryDurationMs(300_000);
       return true;
     } catch (e) {
       if (lease())
@@ -718,6 +724,8 @@ export function ConversationView() {
         </div>
       ) : (
         <Composer
+          expiryDurationMs={expiryDurationMs}
+          onExpiryDurationChange={setExpiryDurationMs}
           screenshotAvailable={screenshotAvailable}
           key={key}
           initialDraft={drafts.current.get(key) ?? ""}
@@ -734,7 +742,10 @@ export function ConversationView() {
           myName={myName}
           replyTo={replyTo}
           prefill={prefill?.key === key ? prefill : null}
-          onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
+          onSendSticker={(id, fallback) => {
+            void sendSticker(id, fallback, expiresAtSend());
+            setExpiryDurationMs(300_000);
+          }}
           onCancelReply={() => setReply(null)}
           onAttach={async () => {
             const current = captureComposer();
@@ -743,7 +754,8 @@ export function ConversationView() {
               const path = await openFileDialog({ multiple: false });
               // Attach button → generic attachment (lands in the received-files tray).
               if (current() && typeof path === "string")
-                await sendFile(path, false);
+                await sendFile(path, false, expiresAtSend());
+              setExpiryDurationMs(300_000);
             } catch (e) {
               if (current())
                 setError(
@@ -760,7 +772,8 @@ export function ConversationView() {
                 multiple: false,
               });
               if (current() && typeof path === "string")
-                await sendFile(path, false);
+                await sendFile(path, false, expiresAtSend());
+              setExpiryDurationMs(300_000);
             } catch (e) {
               if (current())
                 setError(
@@ -785,7 +798,8 @@ export function ConversationView() {
                 ],
               });
               if (current() && typeof path === "string")
-                await sendFile(path, true);
+                await sendFile(path, true, expiresAtSend());
+              setExpiryDurationMs(300_000);
             } catch (e) {
               if (current())
                 setError(
@@ -794,8 +808,9 @@ export function ConversationView() {
             }
           }}
           onSend={(t) => {
-            const accepted = admitText(t, replyTo?.id ?? null);
+            const accepted = admitText(t, replyTo?.id ?? null, expiresAtSend());
             if (accepted) {
+              setExpiryDurationMs(300_000);
               setReply(null);
               setPrefill(null);
             }
@@ -827,7 +842,9 @@ export function ConversationView() {
                   file.type.startsWith("image/") ||
                     isImage(file.name) ||
                     isVideo(file.name),
+                  expiresAtSend(),
                 );
+                setExpiryDurationMs(300_000);
               } catch (e) {
                 if (current())
                   setError(

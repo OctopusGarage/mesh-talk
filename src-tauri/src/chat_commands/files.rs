@@ -182,6 +182,7 @@ pub async fn send_file_channel(
     path: String,
     media: bool,
     progress_key: Option<String>,
+    expires_at_ms: Option<u64>,
 ) -> Result<String, CommandError> {
     let id = parse_channel_id(&channel_id)?;
     let node = state.node_handle().await?;
@@ -191,11 +192,12 @@ pub async fn send_file_channel(
         "prepare",
     );
     let result = node
-        .send_file_channel_progress(
+        .send_file_channel_progress_expiring(
             id,
             std::path::Path::new(&path),
             file_kind(media),
             move |p| prog.emit(p.done, p.total),
+            expires_at_ms,
         )
         .await;
     cleanup_pasted_file(&app, &path);

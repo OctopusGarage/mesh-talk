@@ -267,6 +267,214 @@ async fn invisible_mode_clears_bridge_presence_and_recovery_permission() {
     assert!(roster.lock().unwrap().get(&proof.user_id).is_none());
 }
 
+#[tokio::test]
+async fn channel_file_card_carries_fixed_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_rx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_rx,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("ttl", vec![]).await.unwrap();
+    let path = dir.path().join("secret.txt");
+    std::fs::write(&path, b"secret").unwrap();
+    let deadline = super::now_millis() + 300_000;
+    node.send_file_channel_progress_expiring(
+        channel,
+        &path,
+        crate::file::FileKind::File,
+        |_| {},
+        Some(deadline),
+    )
+    .await
+    .unwrap();
+    let rows = node.received_files.lock().unwrap().entries(&channel);
+    assert_eq!(
+        crate::expiry::deadline(&rows.last().unwrap().plaintext),
+        Some(deadline)
+    );
+}
+
+#[tokio::test]
+async fn channel_message_carries_fixed_deadline_in_sender_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_rx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_rx,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("ttl", vec![]).await.unwrap();
+    let deadline = super::now_millis() + 300_000;
+    node.send_channel_message_reply_expiring(channel, b"hello", None, Some(deadline))
+        .await
+        .unwrap();
+    let sent = node.sentlog.lock().unwrap().entries(&channel);
+    assert_eq!(
+        crate::expiry::deadline(&sent.last().unwrap().plaintext),
+        Some(deadline)
+    );
+}
+
+#[test]
+fn expired_incoming_account_message_is_hidden_from_history() {
+    use crate::eventlog::EventId;
+    use crate::node::conversation::account_conversation_id;
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let peer = crate::identity::account::Account::generate().account_id();
+    let own = node.account_id();
+    let conv = account_conversation_id(&own, &peer);
+    let body = MessageBody::new(b"expired secret".to_vec(), None).encode();
+    let deadline = super::now_millis().saturating_sub(1);
+    let env = crate::node::DmEnvelope::new(
+        peer.clone(),
+        own,
+        [7; 32],
+        crate::expiry::wrap(&body, Some(deadline)),
+    );
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conv,
+            peer.clone(),
+            deadline.saturating_sub(1),
+            &env.encode(),
+            EventId::new([8; 32]),
+        )
+        .unwrap();
+    assert!(node.account_history(&peer, 20).is_empty());
+    assert_eq!(node.prune_expired_received().unwrap(), 1);
+    assert!(node.received.lock().unwrap().entries(&conv).is_empty());
+}
+
+#[test]
+fn restart_erases_unexpired_recipient_copy_without_erasing_sender_copy() {
+    use crate::node::conversation::account_conversation_id;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let secret = identity.secret_bytes();
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open(
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("node.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open();
+    let peer = crate::identity::account::Account::generate().account_id();
+    let own = node.account_id();
+    let conv = account_conversation_id(&own, &peer);
+    let deadline = super::now_millis() + 3_600_000;
+    for (from, id) in [(peer.clone(), [13; 32]), (own.clone(), [14; 32])] {
+        let body = crate::expiry::wrap(
+            &MessageBody::new(b"secret".to_vec(), None).encode(),
+            Some(deadline),
+        );
+        let env = crate::node::DmEnvelope::new(
+            from.clone(),
+            if from == own {
+                peer.clone()
+            } else {
+                own.clone()
+            },
+            id,
+            body,
+        );
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conv,
+                from,
+                super::now_millis(),
+                &env.encode(),
+                crate::eventlog::EventId::new(id),
+            )
+            .unwrap();
+    }
+    drop(node);
+    let reopened = open();
+    let rows = reopened.received.lock().unwrap().entries(&conv);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].from, own);
+    assert!(
+        reopened
+            .account_suppression
+            .lock()
+            .unwrap()
+            .contains(conv, crate::eventlog::EventId::new([13; 32]))
+    );
+}
+
+#[test]
+fn monotonic_observation_bounds_expiry_even_with_a_future_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let id = crate::eventlog::EventId::new([91; 32]);
+    let deadline = super::now_millis() + 3_600_000;
+    let wire = crate::expiry::wrap(b"secret", Some(deadline));
+    assert!(!node.recipient_expired(&wire, id, deadline - 10));
+    node.expiry_first_seen.lock().unwrap().insert(
+        id,
+        std::time::Instant::now() - std::time::Duration::from_millis(20),
+    );
+    assert!(node.recipient_expired(&wire, id, deadline - 10));
+}
+
 #[test]
 fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     use crate::eventlog::event::{ConversationId, EventId};

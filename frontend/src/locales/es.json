@@ -282,6 +282,12 @@
     "saving": "Guardando archivo…"
   },
   "composer": {
+    "expireAfterSend": "Caducar tras enviar",
+    "keep": "Conservar",
+    "oneMinute": "1 min",
+    "fiveMinutes": "5 min",
+    "oneHour": "1 hora",
+    "oneDay": "1 día",
     "replyingTo": "Respondiendo a",
     "message": "mensaje",
     "send": "Enviar",

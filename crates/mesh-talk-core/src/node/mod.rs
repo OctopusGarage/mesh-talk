@@ -30,6 +30,7 @@ pub(crate) mod delivery_store;
 pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
+pub(crate) mod expiry_policy;
 mod file_completion;
 pub(crate) mod filebook;
 pub(crate) mod files;

@@ -51,6 +51,12 @@ impl Node {
         entries
             .into_iter()
             .filter(|entry| !delivery.file_erased(entry.conversation, entry.event_id))
+            .filter(|entry| {
+                entry.from == me
+                    || linked_me.contains(&entry.from)
+                    || recovered_me.contains(&entry.from)
+                    || !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
+            })
             .filter_map(|entry| {
                 let manifest = crate::file::decode_manifest(&entry.plaintext)?;
                 let from_me = entry.from == me
@@ -142,6 +148,14 @@ impl Node {
             .expect("received mutex not poisoned")
             .entries(&conv)
         {
+            let envelope = super::dm_envelope::DmEnvelope::decode(&rcv.plaintext);
+            let inner = envelope
+                .as_ref()
+                .map_or(rcv.plaintext.as_slice(), |e| e.body.as_slice());
+            if rcv.from != my_account && self.recipient_expired(inner, rcv.event_id, rcv.wall_clock)
+            {
+                continue;
+            }
             let (id, body) = decode_account_entry(&rcv.plaintext);
             let from_me = rcv.from == my_account;
             entries.push(HistoryEntry {
@@ -219,6 +233,11 @@ impl Node {
             .expect("received mutex not poisoned")
             .entries(&conversation)
         {
+            if !own_devices.contains(&rcv.from)
+                && self.recipient_expired(&rcv.plaintext, rcv.event_id, rcv.wall_clock)
+            {
+                continue;
+            }
             let body = MessageBody::decode(&rcv.plaintext);
             let from_me = own_devices.contains(&rcv.from);
             entries.push(HistoryEntry {
