@@ -6,7 +6,7 @@ test("new channel peers show received account avatars without hiding device IDs"
 }) => {
   await enterChat(page);
   await expect(
-    page.getByTestId("conversation-row-acc_bob_bbbb2222").locator("img"),
+    page.getByTestId("contact-profile-acc_bob_bbbb2222").locator("img"),
   ).toBeVisible();
   await page.getByRole("button", { name: "New channel" }).click();
   const bob = page
