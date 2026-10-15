@@ -16,19 +16,27 @@ unchanged. A focused assembler regression covers incomplete records, overflow,
 and a complete page; existing linked-device backfill and process tests exercise
 the path end to end.
 
-| Dimension | Starting | After round 1 | Evidence |
-|---|---:|---:|---|
-| Module depth | 22/25 | 23/25 | The page module owns bounded record assembly and scanning instead of exposing those steps inside the Node receive loop. |
-| Seam integrity | 23/25 | 23/25 | Core, host, and client interfaces are unchanged; the Account sync wire and storage seams remain distinct. |
-| Test surface | 24/25 | 24/25 | New page assembly test plus existing linked-device and process coverage; application still lacks a single isolated full-round test interface. |
-| Locality | 21/25 | 22/25 | Frame bounds and record completion now sit with the page types; Account sync storage application remains in `account_sync.rs`. |
-| **Total** | **90/100** | **92/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
+| Dimension | Starting | Round 1 | Round 2 | Evidence |
+|---|---:|---:|---:|---|
+| Module depth | 22/25 | 23/25 | 23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly now belongs to the directory module. |
+| Seam integrity | 23/25 | 23/25 | 23/25 | Core, host, and client interfaces are unchanged; wire and storage seams remain distinct. |
+| Test surface | 24/25 | 24/25 | 24/25 | Focused page and bridge response regressions plus linked-device and real-process bridge coverage; full-round bridge refresh still lacks one isolated test interface. |
+| Locality | 21/25 | 22/25 | 23/25 | Account record completion and cross-page gateway consistency are now local to their respective modules. |
+| **Total** | **90/100** | **92/100** | **93/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
 
 Verification: `cargo test -p mesh-talk-core --lib node::account_sync`,
 `cargo test -p mesh-talk-core --lib account_history_backfills_to_a_linked_device`,
 `make test`, `cargo clippy --all-targets -- -D warnings`, and `make e2e` passed.
-The score remains below the 95/100 goal because Account sync application,
-bridge introduction, and settings ownership still span multiple places.
+Round 2 moves directory response assembly from the Node's network query into
+`node/bridge_directory.rs`. The directory now owns v2/v1 decoding, legacy
+gateway selection, cross-page gateway consistency, and the 128-proof bound.
+The Node still owns the 128-page and 10-second network limits. A regression
+rejects conflicting valid gateway routes across pages. `make test`,
+`cargo test -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all -- --check`
+passed. Wire bytes and public interfaces are unchanged. The score remains
+below the 95/100 goal because bridge refresh, Account sync application, and
+settings ownership still span multiple places.
 
 ## Earlier review — 2026-10-09
 

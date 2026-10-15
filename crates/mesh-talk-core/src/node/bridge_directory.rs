@@ -214,11 +214,92 @@ pub fn decode_response(bytes: &[u8]) -> Option<(Vec<Announce>, bool)> {
         .then_some((proofs, last))
 }
 
+/// A validated, bounded response from one authenticated relay query.
+pub(crate) type DirectorySnapshot = (Vec<Announce>, Option<GatewayRoute>);
+
+pub(crate) enum DirectoryProgress {
+    More,
+    Complete(DirectorySnapshot),
+}
+
+pub(crate) struct DirectoryResponse {
+    relay_public: PublicIdentity,
+    proofs: Vec<Announce>,
+    gateway: Option<GatewayRoute>,
+    finished: bool,
+}
+
+impl DirectoryResponse {
+    pub(crate) fn new(relay_public: PublicIdentity) -> Self {
+        Self {
+            relay_public,
+            proofs: Vec::new(),
+            gateway: None,
+            finished: false,
+        }
+    }
+
+    pub(crate) fn add_page(&mut self, bytes: &[u8]) -> Option<DirectoryProgress> {
+        if self.finished {
+            return None;
+        }
+        let (page, route, last) = decode_response_with_gateway(bytes).or_else(|| {
+            decode_response(bytes).map(|(page, last)| {
+                let route = page
+                    .iter()
+                    .find(|proof| proof.post_office && proof.public() != self.relay_public)
+                    .map(|proof| (proof.user_id.clone(), proof.tcp_port));
+                (page, route, last)
+            })
+        })?;
+        if self.gateway.is_some() && route.is_some() && self.gateway != route {
+            return None;
+        }
+        self.gateway = route.or(self.gateway.take());
+        self.proofs.extend(page);
+        if self.proofs.len() > MAX_MEMBERS {
+            return None;
+        }
+        if last {
+            self.finished = true;
+            Some(DirectoryProgress::Complete((
+                std::mem::take(&mut self.proofs),
+                self.gateway.take(),
+            )))
+        } else {
+            Some(DirectoryProgress::More)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn response_assembly_rejects_conflicting_gateway_routes_across_pages() {
+        let relay = DeviceIdentity::generate();
+        let first_gateway = DeviceIdentity::generate();
+        let second_gateway = DeviceIdentity::generate();
+        let account = Account::generate();
+        let first_proof =
+            Announce::new_post_office_with_account(&first_gateway, &account, "first", 47475);
+        let second_proof =
+            Announce::new_post_office_with_account(&second_gateway, &account, "second", 47476);
+        let first_route = (first_gateway.user_id(), 50001);
+        let second_route = (second_gateway.user_id(), 50002);
+        let first_page = frame_v2(&[first_proof], Some(&first_route), false).unwrap();
+        let second_page = frame_v2(&[second_proof], Some(&second_route), true).unwrap();
+        let mut response = DirectoryResponse::new(relay.public());
+
+        assert!(matches!(
+            response.add_page(&first_page),
+            Some(DirectoryProgress::More)
+        ));
+        assert!(response.add_page(&second_page).is_none());
+    }
 
     #[test]
     fn directory_requests_distinguish_legacy_and_gateway_aware_clients() {

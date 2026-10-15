@@ -222,30 +222,14 @@ impl Node {
         let mut channel = self.privacy_dial(relay.addr, &relay.public).await.ok()?;
         let response = tokio::time::timeout(BRIDGE_TIMEOUT, async {
             channel.send(request).await.ok()?;
-            let mut proofs = Vec::new();
-            let mut gateway = None;
+            let mut response = bridge_directory::DirectoryResponse::new(relay.public.clone());
             for _ in 0..128 {
                 let bytes = channel.recv().await.ok()?;
-                let (page, route, last) = bridge_directory::decode_response_with_gateway(&bytes)
-                    .or_else(|| {
-                        bridge_directory::decode_response(&bytes).map(|(page, last)| {
-                            let route = page
-                                .iter()
-                                .find(|proof| proof.post_office && proof.public() != relay.public)
-                                .map(|proof| (proof.user_id.clone(), proof.tcp_port));
-                            (page, route, last)
-                        })
-                    })?;
-                if gateway.is_some() && route.is_some() && gateway != route {
-                    return None;
-                }
-                gateway = route.or(gateway);
-                proofs.extend(page);
-                if proofs.len() > 128 {
-                    return None;
-                }
-                if last {
-                    return Some((proofs, gateway));
+                match response.add_page(&bytes)? {
+                    bridge_directory::DirectoryProgress::More => {}
+                    bridge_directory::DirectoryProgress::Complete(snapshot) => {
+                        return Some(snapshot);
+                    }
                 }
             }
             None
