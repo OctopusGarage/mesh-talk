@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { auth, chat } from "@/lib/api";
+import { auth } from "@/lib/api/auth";
+import { chat } from "@/lib/api/chat";
 import { errorMessage as errMsg } from "@/lib/error";
 import type { UserInfo } from "@/lib/types";
 
