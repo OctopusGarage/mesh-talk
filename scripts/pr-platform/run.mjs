@@ -61,29 +61,31 @@ $node=(Get-Command node.exe).Source
 $rustRoot=(& rustc --print sysroot).Trim()
 if ($LASTEXITCODE -ne 0 -or !$rustRoot) { throw 'An installed Rust toolchain is required' }
 foreach ($dir in @($source,$evidence,"$cache/cargo","$cache/rustup","$cache/target","$cache/npm","$cache/browsers","$cache/temp","$cache/profile","$cache/appdata","$cache/localappdata")) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+$env:TEMP="$cache/temp"
+$env:TMP="$cache/temp"
+$env:TMPDIR="$cache/temp"
+if ((Get-FileHash "$work/source.tar" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${archiveSha}') { throw 'Source archive digest mismatch' }
+& tar -xf "$work/source.tar" -C $source
+if ($LASTEXITCODE -ne 0) { throw 'Committed archive extraction failed' }
+$cargoHome=(& $node "$source/scripts/pr-platform/plan.mjs" --windows-cargo-home "$cache/cargo").Trim()
+if ($LASTEXITCODE -ne 0 -or !$cargoHome) { throw 'Cargo home selection failed' }
 # Installed tools may be read from C:. New cache, profile, build and temp data use D:.
 $env:PATH="$rustRoot/bin;"+$env:PATH
 $env:MESH_PR_CARGO="$rustRoot/bin/cargo.exe"
 $env:RUSTC="$rustRoot/bin/rustc.exe"
 $env:RUSTDOC="$rustRoot/bin/rustdoc.exe"
-$env:CARGO_HOME="$cache/cargo"
+$env:CARGO_HOME="$cargoHome"
 $env:RUSTUP_HOME="$cache/rustup"
 $env:CARGO_TARGET_DIR="$cache/target"
 $env:npm_config_cache="$cache/npm"
 $env:npm_config_userconfig="$cache/npm/npmrc"
 $env:PLAYWRIGHT_BROWSERS_PATH="$cache/browsers"
-$env:TEMP="$cache/temp"
-$env:TMP="$cache/temp"
-$env:TMPDIR="$cache/temp"
 $env:USERPROFILE="$cache/profile"
 $env:APPDATA="$cache/appdata"
 $env:LOCALAPPDATA="$cache/localappdata"
 $env:XDG_CACHE_HOME="$cache/localappdata"
 $env:MESH_PR_ARCHIVE="$work/source.tar"
 $env:MESH_PR_PLATFORM_TIMEOUT_SECONDS='${timeoutSeconds}'
-if ((Get-FileHash "$work/source.tar" -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${archiveSha}') { throw 'Source archive digest mismatch' }
-& tar -xf "$work/source.tar" -C $source
-if ($LASTEXITCODE -ne 0) { throw 'Committed archive extraction failed' }
 $child=Start-Process -FilePath $node -ArgumentList @("$source/scripts/pr-platform/guest.mjs","$work/plan.json","$evidence/report.json") -WorkingDirectory $source -RedirectStandardOutput "$evidence/guest.stdout.log" -RedirectStandardError "$evidence/guest.stderr.log" -PassThru
 if (!$child.WaitForExit(${timeoutSeconds * 1000})) { & taskkill.exe /PID $child.Id /T /F | Out-Null; throw 'Windows guest deadline exhausted' }
 exit $child.ExitCode

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPlan, hasSelectedTests, parseFlags, validateWindowsRoot } from "../pr-platform/plan.mjs";
+import { buildPlan, hasSelectedTests, parseFlags, selectWindowsCargoHome, validateWindowsRoot } from "../pr-platform/plan.mjs";
 import { executePlan, rustTestCount, runCommand } from "../pr-platform/guest.mjs";
 import { collectPlatforms, createArchive, validateGuestReport, windowsBootstrap } from "../pr-platform/run.mjs";
 
@@ -47,6 +47,9 @@ test("Windows state must stay on a validated D drive and selectors never enter P
   assert.doesNotMatch(script, /name;\$\(/);
   assert.match(script, /Get-FileHash/);
   assert.match(script, /taskkill/);
+  assert.match(script, /--windows-cargo-home/);
+  assert(script.indexOf("--windows-cargo-home") < script.indexOf('$env:USERPROFILE='));
+  assert.match(script, /\$env:CARGO_HOME=\"\$cargoHome\"/);
 });
 
 test("both platform failures are collected even when an adapter throws", async () => {
@@ -186,4 +189,16 @@ test("selected Playwright files require real passing executions, not an all-skip
   const missing = structuredClone(passed);
   missing.results.at(-1).ui.tests = missing.results.at(-1).ui.tests.filter(row => row.file !== "e2e/packs-lite.spec.ts");
   assert.throws(() => validateGuestReport(missing, plan, process.platform), /Playwright|spec/);
+});
+
+
+test("Cargo home reuses canonical D registry configuration but never a physical C home", () => {
+  const fallback = "D:/MeshTalk/PRPreflight/cache/cargo";
+  assert.equal(selectWindowsCargoHome("D:\\DevData\\kings\\cargo", fallback), "D:/DevData/kings/cargo");
+  assert.equal(selectWindowsCargoHome("\\\\?\\D:\\DevData\\kings\\cargo", fallback), "D:/DevData/kings/cargo");
+  assert.equal(selectWindowsCargoHome("C:/Users/kings/.cargo", fallback), fallback);
+  assert.equal(selectWindowsCargoHome(undefined, fallback), fallback);
+  assert.equal(selectWindowsCargoHome("//server/cargo", fallback), fallback);
+  assert.equal(selectWindowsCargoHome("D:/../escape", fallback), fallback);
+  assert.throws(() => selectWindowsCargoHome("C:/cargo", "C:/new-cache"), /D:/);
 });

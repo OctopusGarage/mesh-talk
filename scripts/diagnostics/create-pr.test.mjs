@@ -52,6 +52,14 @@ test("PR creation requires successful preflight and preserves argument boundarie
   assert.deepEqual(releaseTrace[1].args, ["pr", "create", "--base", "release", ...args.slice(4)]);
 
   writeFileSync(trace, "");
+  const docsOnly = run(0, ["--", "--draft"]);
+  assert.equal(docsOnly.status, 0, docsOnly.stderr);
+  assert.deepEqual(readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse), [
+    { kind: "preflight", args: [] },
+    { kind: "gh", args: ["pr", "create", "--base", "main", "--draft"] },
+  ]);
+
+  writeFileSync(trace, "");
   writeFileSync(join(root, "scripts/pr-preflight.sh"), "#!/usr/bin/env bash\ngit -c user.name=Test -c user.email=preflight@example.test commit --allow-empty -qm changed\n", { mode: 0o755 });
   const changed = run(0);
   assert.notEqual(changed.status, 0, "cannot publish a revision changed during verification");

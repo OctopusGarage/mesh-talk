@@ -1,4 +1,8 @@
 /** Explicit affected-test selection shared by Linux and Windows guests. */
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 export function parseFlags(argv) {
   const flags = { base: "origin/main", coreFilters: [], coreTests: [], hostFilters: [], uiSpecs: [], planOnly: false };
   for (let i = 0; i < argv.length; i++) {
@@ -56,4 +60,21 @@ export function validatePlan(plan) {
     ...plan.hostFilters.flatMap(filter => ["--host-filter", filter]),
     ...plan.uiSpecs,
   ]);
+}
+
+
+/** Reuse configured registry/mirror state only when its physical home is on D:. */
+export function selectWindowsCargoHome(canonical, fallback) {
+  const physical = typeof canonical === "string" ? canonical.replaceAll("\\", "/").replace(/^\/\/\?\//u, "") : "";
+  if (/^D:\//iu.test(physical) && !/[\x00-\x1f\x7f]/u.test(physical) && !physical.split("/").some(part => part === "." || part === "..")) return `D:${physical.slice(2)}`;
+  return validateWindowsRoot(fallback);
+}
+
+// Invoked from the extracted committed source before the guest profile changes.
+// Only the selected path is returned; registry/proxy/credential contents stay private.
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  if (process.argv[2] !== "--windows-cargo-home" || !process.argv[3]) throw Error("Usage: plan.mjs --windows-cargo-home D:/fallback/cargo");
+  let canonical;
+  try { canonical = realpathSync(process.env.CARGO_HOME || path.join(process.env.USERPROFILE || homedir(), ".cargo")); } catch { /* Missing home uses the isolated D: fallback. */ }
+  console.log(selectWindowsCargoHome(canonical, process.argv[3]));
 }

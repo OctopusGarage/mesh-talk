@@ -33,7 +33,8 @@ for arg in "$@"; do
     esac
 done
 
-base_ref="$(node --input-type=module - "${preflight_args[@]}" <<'JS'
+# Bash 3.2 treats an empty array as unset under nounset.
+base_ref="$(node --input-type=module - ${preflight_args[@]+"${preflight_args[@]}"} <<'JS'
 import { parseFlags } from './scripts/pr-platform/plan.mjs';
 console.log(parseFlags(['--base', process.env.PATCH_COVERAGE_BASE ?? 'origin/main', ...process.argv.slice(2)]).base);
 JS
@@ -48,7 +49,7 @@ esac
 git check-ref-format --branch "$pr_base" >/dev/null
 
 candidate="$(git rev-parse HEAD)"
-"$repo_root/scripts/pr-preflight.sh" "${preflight_args[@]}"
+"$repo_root/scripts/pr-preflight.sh" ${preflight_args[@]+"${preflight_args[@]}"}
 if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ]; then
     echo "The candidate changed during preflight. Verify the new revision before creating its PR." >&2
     exit 1

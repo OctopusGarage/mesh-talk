@@ -59,6 +59,11 @@ isolated from installed applications and post-office services. Both results
 are collected even if one fails. Logs and revision-bound reports remain
 untracked under `target/pr-platform/`; dependency and build caches can be
 reused, but successful verdicts are never reused for another revision.
+Windows reuses an installed Cargo home only when its resolved physical
+directory is on drive D, including a C: junction that points to D. This
+preserves that directory's registry and network configuration without logging
+its contents. Otherwise, Cargo uses the isolated D: cache. Source, build
+output, browser downloads and temporary directories remain isolated.
 
 For an existing PR, run `scripts/pr-preflight.sh` directly with the same
 selectors before pushing the candidate. Preview the plan without starting
