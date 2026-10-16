@@ -67,7 +67,7 @@ the current guides above for commands and implementation behavior.
 | Doc                                                                                               | What it covers                                                                                       |
 | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | [`docs/evals/settings-pane-review-2026-10-16.md`](evals/settings-pane-review-2026-10-16.md)       | Settings inventory, source/browser findings, proposed categories and redesign acceptance boundaries. |
-| [`docs/evals/architecture-score.md`](evals/architecture-score.md)                                 | Architecture review and the optimization series score.                                               |
+| [`docs/evals/architecture-score.md`](evals/architecture-score.md)                                 | Current fixed-rubric architecture health loop and historical assessments.                            |
 | [`docs/evals/architecture-boundaries-2026-10-15.md`](evals/architecture-boundaries-2026-10-15.md) | Feature responsibility map, dependency risks, and ordered refactoring steps.                         |
 | [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md)                         | Delivery and AI validation contract.                                                                 |
 | [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md)                                           | Stable AI eval and smoke cases.                                                                      |
