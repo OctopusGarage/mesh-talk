@@ -39,8 +39,8 @@ import { Badge } from "@/components/ui/badge";
 import { settings as settingsApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import {
-  localPostOffices,
-  savedRemotePostOffice,
+  selectablePostOffices,
+  savedIndirectPostOffice,
 } from "@/lib/postOfficeOptions";
 import { balancedPrivacy, useSettings } from "@/store/settings";
 import { useAuth } from "@/store/auth";
@@ -184,8 +184,8 @@ export function SettingsDialog({
   const [physicalLanOnly, setPhysicalLanOnly] = useState(false);
   const [bridgeDiscoveryEnabled, setBridgeDiscoveryEnabled] = useState(false);
   const [bridgeHubId, setBridgeHubId] = useState("");
-  const localRelays = localPostOffices(peers);
-  const savedRemoteRelay = savedRemotePostOffice(peers, bridgeHubId);
+  const selectableRelays = selectablePostOffices(peers);
+  const savedIndirectRelay = savedIndirectPostOffice(peers, bridgeHubId);
   const [ringtone, setRingtone] = useState<RingtoneId>(DEFAULT_RINGTONE);
   const [privacy, setPrivacy] = useState(balancedPrivacy);
   const settingsScroll = useRef<HTMLDivElement>(null);
@@ -629,20 +629,20 @@ export function SettingsDialog({
                   >
                     <option value="">{t("settings.bridgeHubAutomatic")}</option>
                     {bridgeHubId &&
-                      !localRelays.some(
+                      !selectableRelays.some(
                         (peer) => peer.user_id === bridgeHubId,
                       ) && (
                         <option value={bridgeHubId} disabled>
-                          {savedRemoteRelay
+                          {savedIndirectRelay
                             ? t("settings.bridgeHubRemote", {
-                                name: savedRemoteRelay.name,
+                                name: savedIndirectRelay.name,
                               })
                             : t("settings.bridgeHubUnavailable", {
                                 id: bridgeHubId.slice(0, 8),
                               })}
                         </option>
                       )}
-                    {localRelays.map((peer) => (
+                    {selectableRelays.map((peer) => (
                       <option key={peer.user_id} value={peer.user_id}>
                         {peer.name} · {peer.user_id.slice(0, 8)}
                       </option>

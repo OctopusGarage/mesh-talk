@@ -1,4 +1,5 @@
 import { test as base, expect } from "@playwright/test";
+import type { PeerInfo } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -74,7 +75,7 @@ export const test = base.extend({
         CHANNEL.name = "Barcelona × Argentina";
       }
 
-      const peers = [
+      const peers: PeerInfo[] = [
         {
           user_id: BOB.device_id,
           name: BOB.name,
@@ -108,6 +109,15 @@ export const test = base.extend({
           post_office: true,
           discovered_on_lan: false,
           account_id: "acc_relay_ffff6666",
+        });
+        peers.push({
+          user_id: "66666666666666666666666666666666",
+          name: "Tailscale relay node",
+          addr: "100.101.1.50:47475",
+          post_office: true,
+          discovered_on_lan: false,
+          directly_reachable: true,
+          account_id: "acc_relay_aaaa7777",
         });
       }
 

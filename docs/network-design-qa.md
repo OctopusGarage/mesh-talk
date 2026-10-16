@@ -212,9 +212,25 @@ Desktop Tailscale candidate discovery is best effort, and the headless CLI needs
 
 ## Q7. Which post offices should an app be allowed to select?
 
-**Proposed:** Offer relays that this client can reach and authenticate directly over an application path (local LAN or an actual routed Tailscale path). Prefer a local relay automatically, allow a user preference, and fall back per failed operation. Return to the preferred relay when it is healthy, without requiring the user to select it again. A relay that is visible only through another relay should not be presented as an ordinary directly reachable choice. A fallback relay provides cross-site continuity only when it has its own surviving route toward the recipient.
+**Current:** Offer relays with a known direct application route, including physical LAN and routed/Tailscale discovery. Connectivity and identity are rechecked when used. Prefer a local relay automatically, allow a user preference, and fall back per failed operation. Return to the preferred relay when it is healthy, without requiring the user to select it again. A relay that is visible only through another relay should not be presented as an ordinary directly reachable choice. A fallback relay provides cross-site continuity only when it has its own surviving route toward the recipient.
 
-**Current nuance.** Candidate ordering already prefers LAN routes and has fallback, but a user preference can put a directly reachable routed relay ahead of a LAN relay. The older `--bridge-peer` gateway can expose a remote relay through a local TCP proxy for compatibility. This is an exception to the proposed **direct-reachability-only UI rule** and should be marked as such if retained. The app can register with multiple reachable directories; it does not require every user to pin a global hub ID. The relay's ability to forward to another site depends on its own trusted route graph.
+**Current nuance.** Candidate ordering already prefers LAN routes and has fallback, but a user preference can put a directly reachable routed relay ahead of a LAN relay. The older `--bridge-peer` gateway can expose a remote relay through a local TCP proxy for compatibility. Gateway-only relays are excluded from new preferred-relay choices; a saved indirect preference is retained with an unavailable-route label. A direct route learned later makes that identity selectable again. The app can register with multiple reachable directories; it does not require every user to pin a global hub ID. The relay's ability to forward to another site depends on its own trusted route graph.
+
+### Does an app connected to a remote post office join its network?
+
+**Yes at the Mesh Talk application level**, when the client and the other participants permit public bridge discovery. It participates in the relay's discovery and encrypted-mailbox domain. This is a useful meaning of “join,” and it does not require an extra post office on the client's physical LAN.
+
+Example: A is on LAN X; Q, B and C are on LAN Y. A can reach Q through Tailscale, while B and C reach Q locally. Q runs `--post-office --bridge`. A/B/C enable **Use post offices** and **Discover peers through a post office**; for bidirectional mailbox traffic, sending and receiving are enabled. A leaves **Physical LAN discovery only** off.
+
+1. A discovers Q by a signed routed query; B/C discover Q locally.
+2. Each participant registers its own eligible signed presence with Q.
+3. Q introduces B/C to A and A to B/C. A can select Q as its preferred directly reachable relay, despite Q being on another physical LAN.
+4. If A cannot connect directly to B, A publishes B-encrypted mail to Q. B drains it through its local Q connection; replies and recipient receipts can return through Q to A.
+5. An accepted group can use the same encrypted relay paths. Directory participation does not grant group membership, keys or unrestricted history access.
+
+A now participates alongside B/C in Mesh Talk. It does not receive Ethernet/Wi-Fi multicast from LAN Y, gain IP routes to unrelated machines, or introduce all of LAN X merely by connecting. Q also does not list every machine on LAN Y: only eligible Mesh Talk registrations appear. If Q stops, continuity requires another reachable relay with a surviving onward path or a direct peer route.
+
+The settings picker uses the core's direct-route capability, not physical-LAN provenance. Gateway-only/mailbox-only routes remain excluded. A saved preference remains visible if its route disappears, and becomes selectable again when a direct route returns. Older desktop backends conservatively fall back to their LAN flag.
 
 ## Q8. What visibility and relay switches should users have?
 

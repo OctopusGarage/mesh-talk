@@ -31,6 +31,8 @@ export interface PeerInfo {
   post_office: boolean;
   /** Directly discovered LAN route; absent only with an older desktop backend. */
   discovered_on_lan?: boolean;
+  /** Known direct application route; transport rechecks connectivity and identity. */
+  directly_reachable?: boolean;
   account_id: string | null;
 }
 

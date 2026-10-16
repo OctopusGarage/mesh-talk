@@ -1,6 +1,9 @@
 import { expect, it } from "vitest";
 import type { PeerInfo } from "./types";
-import { localPostOffices, savedRemotePostOffice } from "./postOfficeOptions";
+import {
+  selectablePostOffices,
+  savedIndirectPostOffice,
+} from "./postOfficeOptions";
 
 const peer = (
   user_id: string,
@@ -22,7 +25,7 @@ it("offers only directly discovered LAN relays, regardless of peer order", () =>
     peer("windows-relay", true, true),
     peer("mac-relay", true, true),
   ];
-  expect(localPostOffices(peers).map((p) => p.user_id)).toEqual([
+  expect(selectablePostOffices(peers).map((p) => p.user_id)).toEqual([
     "mac-relay",
     "windows-relay",
   ]);
@@ -30,12 +33,51 @@ it("offers only directly discovered LAN relays, regardless of peer order", () =>
 
 it("distinguishes a saved remote relay from an offline preference", () => {
   const peers = [peer("remote-relay", true, false)];
-  expect(savedRemotePostOffice(peers, "remote-relay")?.name).toBe(
+  expect(savedIndirectPostOffice(peers, "remote-relay")?.name).toBe(
     "remote-relay",
   );
-  expect(savedRemotePostOffice(peers, "missing")).toBeNull();
-  expect(savedRemotePostOffice(peers, "")).toBeNull();
+  expect(savedIndirectPostOffice(peers, "missing")).toBeNull();
+  expect(savedIndirectPostOffice(peers, "")).toBeNull();
   expect(
-    savedRemotePostOffice([peer("local", true, true)], "local"),
+    savedIndirectPostOffice([peer("local", true, true)], "local"),
   ).toBeNull();
+});
+
+it("offers direct routed relays without promoting indirect or unknown routes", () => {
+  const routed = {
+    ...peer("tailscale-relay", true, false),
+    directly_reachable: true,
+  };
+  const indirect = {
+    ...peer("gateway-relay", true, false),
+    directly_reachable: false,
+  };
+  const contradictory = {
+    ...peer("old-lan-hint", true, true),
+    directly_reachable: false,
+  };
+  expect(
+    selectablePostOffices([
+      routed,
+      indirect,
+      contradictory,
+      peer("unknown", true, false),
+    ]).map((p) => p.user_id),
+  ).toEqual(["tailscale-relay"]);
+  expect(savedIndirectPostOffice([routed], routed.user_id)).toBeNull();
+  expect(savedIndirectPostOffice([indirect], indirect.user_id)?.user_id).toBe(
+    indirect.user_id,
+  );
+});
+
+it("preserves a preference through loss and recovery of its direct route", () => {
+  const direct = { ...peer("relay", true, false), directly_reachable: true };
+  const indirect = { ...direct, directly_reachable: false };
+  expect(selectablePostOffices([indirect])).toEqual([]);
+  expect(savedIndirectPostOffice([indirect], "relay")).toBe(indirect);
+  expect(selectablePostOffices([direct])).toEqual([direct]);
+  expect(savedIndirectPostOffice([direct], "relay")).toBeNull();
+  expect(selectablePostOffices([{ ...direct, post_office: false }])).toEqual(
+    [],
+  );
 });

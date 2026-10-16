@@ -68,6 +68,17 @@ pub struct PeerRecord {
 }
 
 impl PeerRecord {
+    /// A known application route without an intermediate Mesh Talk post office.
+    /// Discovery is a candidate; transport still verifies reachability and identity.
+    pub fn has_direct_route(&self) -> bool {
+        self.routes.iter().any(|route| {
+            matches!(
+                route.source,
+                RouteSource::Lan | RouteSource::RoutedQuery | RouteSource::Authenticated
+            )
+        })
+    }
+
     /// Whether this peer has a current, directly discovered LAN path.
     pub fn has_lan_route(&self) -> bool {
         self.routes
@@ -651,6 +662,37 @@ mod routed_tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn direct_route_capability_distinguishes_transport_from_relay_hints() {
+        let id = DeviceIdentity::generate();
+        let announce = Announce::new(&id, "Peer", 47475);
+        let mut roster = Roster::default();
+        roster.update_routed(&announce, "100.101.1.20".parse().unwrap(), "self");
+        let mut peer = roster.get(&id.user_id()).unwrap().clone();
+        for (source, direct) in [
+            (RouteSource::Lan, true),
+            (RouteSource::RoutedQuery, true),
+            (RouteSource::Authenticated, true),
+            (RouteSource::Gateway, false),
+            (RouteSource::PostOffice, false),
+        ] {
+            peer.routes[0].source = source;
+            assert_eq!(peer.has_direct_route(), direct, "{source:?}");
+        }
+        let mut direct = peer.routes[0].clone();
+        direct.source = RouteSource::RoutedQuery;
+        peer.routes.push(direct);
+        assert!(
+            peer.has_direct_route(),
+            "an indirect preferred route must not hide an alternative direct route"
+        );
+        peer.routes.clear();
+        assert!(
+            !peer.has_direct_route(),
+            "an address alone is not direct-route evidence"
+        );
+    }
 
     #[test]
     fn authorized_linked_binding_retires_old_beacons_and_historical_conflicts() {
