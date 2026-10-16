@@ -25,6 +25,10 @@ test.use({
 });
 
 const enabled = process.env.MESH_TALK_PHYSICAL_MEDIA === "1";
+test.skip(
+  !enabled,
+  "Set MESH_TALK_PHYSICAL_MEDIA=1 after building the network-acceptance example for native and Windows targets.",
+);
 const windowsHost = process.env.MESH_TALK_MEDIA_WINDOWS_SSH ?? "windows10";
 const localIp = process.env.MESH_TALK_MEDIA_LOCAL_IP ?? "100.113.196.110";
 const remoteIp = process.env.MESH_TALK_MEDIA_REMOTE_IP ?? "100.123.85.82";
@@ -98,10 +102,6 @@ test("physical Mac/Windows Tailscale media uses authenticated backend signaling"
   browser,
   baseURL,
 }, testInfo) => {
-  test.skip(
-    !enabled,
-    "Set MESH_TALK_PHYSICAL_MEDIA=1 after building the network-acceptance example for native and Windows targets.",
-  );
   test.setTimeout(240_000);
   const root = resolve(process.cwd(), "..");
   const windowsBinary =
