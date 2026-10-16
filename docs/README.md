@@ -63,24 +63,25 @@ belongs and how to keep the site, README, and guides aligned.
 These dated reports record what was tested and the limits of that evidence. Use
 the current guides above for commands and implementation behavior.
 
-| Doc                                                                                               | What it covers                                                               |
-| ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| [`docs/evals/architecture-score.md`](evals/architecture-score.md)                                 | Architecture review and the optimization series score.                       |
-| [`docs/evals/architecture-boundaries-2026-10-15.md`](evals/architecture-boundaries-2026-10-15.md) | Feature responsibility map, dependency risks, and ordered refactoring steps. |
-| [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md)                         | Delivery and AI validation contract.                                         |
-| [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md)                                           | Stable AI eval and smoke cases.                                              |
-| [`docs/evals/ai-eval-suite.json`](evals/ai-eval-suite.json)                                       | Machine-readable AI evaluation suite.                                        |
-| [`docs/evals/linked-device-sync-ai-eval-suite.json`](evals/linked-device-sync-ai-eval-suite.json) | Model-backed linked-device review cases.                                     |
-| [`docs/evals/module-coverage.json`](evals/module-coverage.json)                                   | Module coverage inventory used by the AI evaluation harness.                 |
-| [`docs/evals/prompts/agent-contract-evaluator.md`](evals/prompts/agent-contract-evaluator.md)     | Evaluator prompt for agent-contract verdicts.                                |
-| [`docs/evals/prompts/ui-ux-review.md`](evals/prompts/ui-ux-review.md)                             | UI review prompt used with screenshot evidence.                              |
-| [`docs/evals/quality-gates.md`](evals/quality-gates.md)                                           | Review, mutation, and release evidence requirements.                         |
-| [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md)                       | Backend, native, and browser evidence boundaries.                            |
-| [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md)                                       | Hidden-contact native evidence.                                              |
-| [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md)                                       | Screenshot-assisted UI review.                                               |
-| [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md)                     | File transfer audit and validation.                                          |
-| [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md)           | Screenshot interaction evaluation.                                           |
-| [`docs/evals/channel-lifecycle-worktree.md`](evals/channel-lifecycle-worktree.md)                 | Channel lifecycle E2E evidence from its development worktree.                |
+| Doc                                                                                               | What it covers                                                                                       |
+| ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [`docs/evals/settings-pane-review-2026-10-16.md`](evals/settings-pane-review-2026-10-16.md)       | Settings inventory, source/browser findings, proposed categories and redesign acceptance boundaries. |
+| [`docs/evals/architecture-score.md`](evals/architecture-score.md)                                 | Architecture review and the optimization series score.                                               |
+| [`docs/evals/architecture-boundaries-2026-10-15.md`](evals/architecture-boundaries-2026-10-15.md) | Feature responsibility map, dependency risks, and ordered refactoring steps.                         |
+| [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md)                         | Delivery and AI validation contract.                                                                 |
+| [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md)                                           | Stable AI eval and smoke cases.                                                                      |
+| [`docs/evals/ai-eval-suite.json`](evals/ai-eval-suite.json)                                       | Machine-readable AI evaluation suite.                                                                |
+| [`docs/evals/linked-device-sync-ai-eval-suite.json`](evals/linked-device-sync-ai-eval-suite.json) | Model-backed linked-device review cases.                                                             |
+| [`docs/evals/module-coverage.json`](evals/module-coverage.json)                                   | Module coverage inventory used by the AI evaluation harness.                                         |
+| [`docs/evals/prompts/agent-contract-evaluator.md`](evals/prompts/agent-contract-evaluator.md)     | Evaluator prompt for agent-contract verdicts.                                                        |
+| [`docs/evals/prompts/ui-ux-review.md`](evals/prompts/ui-ux-review.md)                             | UI review prompt used with screenshot evidence.                                                      |
+| [`docs/evals/quality-gates.md`](evals/quality-gates.md)                                           | Review, mutation, and release evidence requirements.                                                 |
+| [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md)                       | Backend, native, and browser evidence boundaries.                                                    |
+| [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md)                                       | Hidden-contact native evidence.                                                                      |
+| [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md)                                       | Screenshot-assisted UI review.                                                                       |
+| [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md)                     | File transfer audit and validation.                                                                  |
+| [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md)           | Screenshot interaction evaluation.                                                                   |
+| [`docs/evals/channel-lifecycle-worktree.md`](evals/channel-lifecycle-worktree.md)                 | Channel lifecycle E2E evidence from its development worktree.                                        |
 
 ## Operations and deployment
 
