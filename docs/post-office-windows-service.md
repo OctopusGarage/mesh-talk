@@ -48,9 +48,18 @@ Then run this in a PowerShell session on Windows (working directory D:):
   -FederationPeer @(
     'd2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478',
     'edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479',
+    'edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479',
     'e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
   )
 ```
+
+`-LanAnnouncePort 47474` also listens on the shared LAN discovery port. The
+second mac2015 seed uses its reachable LAN address because the two machines'
+Tailscale accounts cannot reach each other. Both seeds pin the same signed
+identity; the relay uses whichever endpoint responds. Keep the LAN seed even
+when multicast works, since Windows can deliver shared-port multicast to only
+one of the local processes. The dedicated port remains available for routed
+signed queries.
 
 Run those commands for a first install and for each update. The installer
 advertises the name `post-office` by default; pass `-Name <your-relay-name>`

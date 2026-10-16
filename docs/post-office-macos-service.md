@@ -22,9 +22,10 @@ phases:
 
 For a relay, use `--bridge` and a dedicated discovery port if another Mesh Talk
 process on the same host already owns UDP 47474. In that case, also set
-`--lan-announce-port 47474`: the relay keeps receiving on its dedicated port
-while advertising its signed identity to ordinary LAN clients directly. This
-lets clients use the relay even when another post office on the LAN is offline.
+`--lan-announce-port 47474`: the relay keeps receiving routed queries on its
+dedicated port and also listens and advertises on the shared LAN port. This
+lets it discover other local relays and lets clients use it when another post
+office on the LAN is offline.
 For a relay on another LAN, use
 `--bridge-peer <peer-IP>:<peer-discovery-port>` and the peer's exact signed
 32-character device fingerprint. Its proxy port must differ from its own TCP
@@ -43,6 +44,7 @@ ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos
   --bridge-peer-id e2bc2167aab97af10cb893de4ae2fb0c --bridge-proxy-port 47477 \
   --federation-peer d2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478 \
   --federation-peer edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479 \
+  --federation-peer edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479 \
   --federation-peer e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
 ssh -tt mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
@@ -62,6 +64,7 @@ ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post
   --bridge-proxy-port 47475 \
   --federation-peer d2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478 \
   --federation-peer edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479 \
+  --federation-peer edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479 \
   --federation-peer e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
@@ -72,6 +75,9 @@ keeps its own keystore,
 password file, name, and listener ports. Federation exchanges opted-in signed
 presence and version-3 encrypted mailboxes, while legacy gateways can remain
 during migration. A client that has not opted in remains a local-only peer.
+Multiple signed endpoints may name one relay identity, as above for mac2015.
+This lets each site use a reachable LAN or Tailscale route without giving that
+relay a special federation role.
 If the only physical route between two sites fails, the local relay retains
 encrypted outgoing mail until a route returns.
 

@@ -60,8 +60,8 @@ struct Args {
     /// UDP port for signed-announce discovery (must match across peers).
     #[arg(long, default_value_t = DEFAULT_DISCOVERY_PORT)]
     discovery_port: u16,
-    /// Also announce this relay on the LAN's shared discovery port when its
-    /// own receive port differs (for example, when a desktop app shares the host).
+    /// Also discover and announce on the LAN's shared port when the relay's
+    /// routed discovery port differs (for example, when a desktop app shares the host).
     #[arg(long, requires = "post_office", value_parser = clap::value_parser!(u16).range(1..))]
     lan_announce_port: Option<u16>,
     /// Run as a post office: a durable store-and-forward relay that advertises
@@ -618,6 +618,30 @@ fn read_password_file(path: &std::path::Path) -> std::io::Result<String> {
     Ok(password.to_string())
 }
 
+/// Receive signed LAN announcements as well as announcing on the shared port.
+/// The routed listener remains on its dedicated discovery port.
+fn spawn_relay_lan_discovery(
+    lan_port: u16,
+    routed_port: u16,
+    roster: Arc<Mutex<Roster>>,
+    announce: mesh_talk_core::discovery::service::SharedAnnounce,
+    user_id: String,
+) -> std::io::Result<()> {
+    if lan_port == routed_port {
+        return Ok(());
+    }
+    let shared_socket = Arc::new(discovery_socket(lan_port)?);
+    mesh_talk_core::discovery::service::spawn_discovery_with_trigger(
+        shared_socket,
+        roster,
+        announce,
+        user_id,
+        lan_port,
+        None,
+    );
+    Ok(())
+}
+
 /// Run as a post office: load the identity, advertise the post-office role,
 /// serve a durable `PostOffice` relay. No DM send/drain — a pure relay. Runs the
 /// accept loop forever (stop with Ctrl-C / kill).
@@ -705,27 +729,14 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             )),
         )),
     );
-    if let Some(port) = args
-        .lan_announce_port
-        .filter(|port| *port != args.discovery_port)
-    {
-        let target = SocketAddr::new(
-            mesh_talk_core::transport::net::DISCOVERY_MULTICAST_GROUP.into(),
+    if let Some(port) = args.lan_announce_port {
+        spawn_relay_lan_discovery(
             port,
-        );
-        tokio::spawn(mesh_talk_core::discovery::service::run_broadcast(
-            Arc::clone(&socket),
-            Arc::clone(&shared_announce),
-            target,
-            Duration::from_secs(2),
-            None,
-        ));
-        tokio::spawn(mesh_talk_core::discovery::service::run_scan(
-            socket,
+            args.discovery_port,
+            Arc::clone(&roster),
             shared_announce,
-            port,
-            None,
-        ));
+            user_id.clone(),
+        )?;
     }
 
     let gateway = if let (Some(remote), Some(peer_id)) = (args.bridge_peer, args.bridge_peer_id) {
@@ -1092,6 +1103,51 @@ fn handle_sendfile(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn relay_receives_signed_lan_peers_when_its_routed_port_differs() {
+        use mesh_talk_core::identity::account::Account;
+
+        let relay = DeviceIdentity::generate();
+        let other = DeviceIdentity::generate();
+        let account = Account::generate();
+        let reserved = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let lan_port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let routed = mesh_talk_core::node::discovery_socket(0).unwrap();
+        let routed_port = routed.local_addr().unwrap().port();
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        let relay_announce =
+            Announce::new_post_office_with_account(&relay, &account, "relay", 47475);
+        spawn_relay_lan_discovery(
+            lan_port,
+            routed_port,
+            Arc::clone(&roster),
+            mesh_talk_core::discovery::service::shared_announce(&relay_announce),
+            relay.user_id(),
+        )
+        .unwrap();
+        let other_announce =
+            Announce::new_post_office_with_account(&other, &account, "other", 47476);
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender
+            .send_to(
+                &mesh_talk_core::discovery::announce::encode(&other_announce),
+                ("127.0.0.1", lan_port),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if roster.lock().unwrap().get(&other.user_id()).is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn federation_seed_requires_full_identity_and_routed_endpoint() {
         let parsed: super::FederationSeed = "edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479"
@@ -1109,6 +1165,23 @@ mod tests {
                 .parse::<super::FederationSeed>()
                 .is_err()
         );
+        let args = Args::try_parse_from([
+            "mesh-talk-node",
+            "--keystore",
+            "relay.keystore",
+            "--password",
+            "pw",
+            "--name",
+            "relay",
+            "--post-office",
+            "--bridge",
+            "--federation-peer",
+            "edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479",
+            "--federation-peer",
+            "edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479",
+        ])
+        .unwrap();
+        assert_eq!(args.federation_peers.len(), 2);
     }
     use super::*;
     use mesh_talk_core::identity::device::DeviceIdentity;

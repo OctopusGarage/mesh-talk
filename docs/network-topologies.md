@@ -85,10 +85,11 @@ mesh-talk-node --keystore relay.keystore --password-file relay.pass \
   --name Relay --post-office --bridge --port 47475 \
   --federation-peer <C-id>@<C-tailnet-ip>:47474 \
   --federation-peer <D-id>@<D-tailnet-ip>:47479 \
+  --federation-peer <D-id>@<D-lan-ip>:47479 \
   --federation-peer <G-id>@<G-tailnet-ip>:47474
 ```
 
-Repeat the same `--federation-peer` entries on all relays; each skips its own entry. Keystore, password file, name, and local ports are naturally host-specific. LAN peers are contacted at their signed, discovered address even when their configured routed seed is unavailable.
+Repeat the same `--federation-peer` entries on all relays; each skips its own entries. More than one signed endpoint may name the same relay identity. This lets each site use its reachable LAN or routed path when multicast is unavailable, including hosts that share a discovery port with a desktop app. Keystore, password file, name, and local ports are host-specific.
 
 ### Required reachability and setup
 
