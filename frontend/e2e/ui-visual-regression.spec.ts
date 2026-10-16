@@ -109,8 +109,22 @@ for (const viewport of VIEWPORTS) {
 
         const shell = page.getByTestId("chat-shell");
         await expect(shell).toBeVisible();
+        const name = snapshotName(
+          "chat-shell",
+          theme,
+          viewport.width,
+          viewport.height,
+        );
+        // Compact OLED exposes native font metrics across enough pixels to need
+        // a Windows reference; keep the same strict comparison threshold.
+        const reference =
+          process.platform === "win32" &&
+          theme === "oled" &&
+          viewport.width === 760
+            ? name.replace(".png", "-win32.png")
+            : name;
         await expect(shell).toHaveScreenshot(
-          snapshotName("chat-shell", theme, viewport.width, viewport.height),
+          reference,
           // Detailed artwork rasterizes differently on Linux and macOS at compact size.
           ["argentina", "barcelona", "messi", "nature", "cat-acrylic"].includes(
             theme,
