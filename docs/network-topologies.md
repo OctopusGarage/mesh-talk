@@ -2,6 +2,8 @@
 
 **Status:** review baseline for `perf/optimization-series-20261015` on 2026-10-16. This describes the current implementation and separates code behavior from physical-network evidence. It is not a claim that every combination below passed an end-to-end test.
 
+For the scenario questions, proposed principles, and points to decide together, see the [network design Q&A](network-design-qa.md).
+
 Mesh Talk discovers **devices**, synchronizes signed events, and optionally stores recipient-encrypted events at post offices. Seeing a peer does not establish a direct route. A post office is an application relay, not an IP router, LAN multicast repeater, group member, or WebRTC media relay.
 
 ## Network and data planes

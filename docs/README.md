@@ -5,14 +5,14 @@ dated evidence. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information
 belongs and how to keep the site, README, and guides aligned.
 
-| I want to…                         | Start here                                          | Continue with                                                                                                           |
-| ---------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Install or try the desktop app     | [Project overview](../README.md)                    | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                        |
-| Connect peers across networks      | [Network topologies](network-topologies.md)         | [Routed discovery](routed-network-discovery.md) · [Relay privacy](post-office-metadata-privacy.md)                      |
-| Run a headless node or relay       | [Deployment](../specifications/deployment_guide.md) | [Relay releases](post-office-release.md)                                                                                |
-| Understand or change the protocol  | [Architecture](ARCHITECTURE.md)                     | [Domain model](../CONTEXT.md) · [Testing feedback loop](testing-feedback-loop.md)                                       |
-| Contribute to the desktop app      | [Contributing](../CONTRIBUTING.md)                  | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                  |
-| Review security or past validation | [Security policy](../SECURITY.md)                   | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Evaluation records](#evaluation-records) |
+| I want to…                         | Start here                                          | Continue with                                                                                                                             |
+| ---------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Install or try the desktop app     | [Project overview](../README.md)                    | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                                          |
+| Connect peers across networks      | [Network topologies](network-topologies.md)         | [Scenario Q&A](network-design-qa.md) · [Routed discovery](routed-network-discovery.md) · [Relay privacy](post-office-metadata-privacy.md) |
+| Run a headless node or relay       | [Deployment](../specifications/deployment_guide.md) | [Relay releases](post-office-release.md)                                                                                                  |
+| Understand or change the protocol  | [Architecture](ARCHITECTURE.md)                     | [Domain model](../CONTEXT.md) · [Testing feedback loop](testing-feedback-loop.md)                                                         |
+| Contribute to the desktop app      | [Contributing](../CONTRIBUTING.md)                  | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                    |
+| Review security or past validation | [Security policy](../SECURITY.md)                   | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Evaluation records](#evaluation-records)                   |
 
 ## Current product and architecture
 
@@ -24,7 +24,8 @@ belongs and how to keep the site, README, and guides aligned.
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)                                           | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI.                           |
 | [`docs/routed-network-discovery.md`](routed-network-discovery.md)                   | Optional routed discovery over existing Tailscale or manually supplied addresses, identity boundary, route selection, and release checks. |
 | [`docs/routed-network-discovery-research.md`](routed-network-discovery-research.md) | Historical cited research and design options behind routed discovery; see the implementation guide for current behavior.                  |
-| [`docs/network-topologies.md`](network-topologies.md)                               | Review baseline: network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.        |
+| [`docs/network-topologies.md`](network-topologies.md)                               | Review baseline: network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.       |
+| [`docs/network-design-qa.md`](network-design-qa.md)                                 | Scenario-by-scenario questions, current answers, proposed design principles, corrections, and review decisions.                           |
 | [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md)           | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility.                                                     |
 | [`docs/post-office-release.md`](post-office-release.md)                             | Signed headless relay release archives and Linux GHCR container deployment.                                                               |
 | [`docs/post-office-macos-service.md`](post-office-macos-service.md)                 | mac2015 relay service paths, Intel build, first install, update, and health commands.                                                     |

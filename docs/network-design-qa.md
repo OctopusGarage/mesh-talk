@@ -1,0 +1,162 @@
+# Network design: scenario questions and answers
+
+**Review draft · 2026-10-16.** This document restates the proposed behavior as questions, answers them against the current implementation, and marks decisions that are still open. **Current** means supported by code or the existing protocol; **Proposed** means a design goal, not a delivered guarantee; **Needs validation** means the behavior needs a targeted real-network test. The [topology baseline](network-topologies.md) is the companion map of switches, ports, and data flows.
+
+Here, a **client** runs the Mesh Talk app, a **post office** is a separate relay role, a **LAN** is a discovery scope with local UDP/TCP reachability, and a **Tailscale path** is routed IP connectivity between particular machines. A Tailscale path does not automatically forward LAN multicast or expose all machines on either LAN.
+
+## Q1. With three clients on one LAN and no post office, how do discovery, direct messages, and group messages work?
+
+```mermaid
+flowchart LR
+  subgraph X[One LAN]
+    A[Client A] <-- "signed UDP discovery; Noise/TCP sync" --> B[Client B]
+    A <-- "signed UDP discovery; Noise/TCP sync" --> C[Client C]
+    B <-- "signed UDP discovery; Noise/TCP sync" --> C
+  end
+```
+
+**Current.** Each visible device announces its own signed identity on the LAN's IPv4 multicast group (`224.0.0.167:47474`) roughly every two seconds. First-sight unicast replies and a bounded local `/24` unicast scan help when multicast is lost or blocked. These packets advertise presence and a listening port; they do **not** broadcast chat content. A recipient's signed identity is checked again by the Noise TCP connection.
+
+For a direct message, the sender durably records the encrypted event, tries the recipient's verified direct route, and retries when a route becomes available. A message is **Delivered** only after an authenticated receipt from the intended recipient; finding the peer or completing a TCP session is not enough. Without a post office, both devices need a later direct route for an offline recipient to catch up.
+
+A group is an authorized **conversation**, not a network multicast group. Its owner invites devices; a member must accept the invitation before its content is surfaced. Messages are encrypted with group sender keys and recorded as signed events. For a three-member group, the sender attempts direct delivery to the other members. A member that missed an event can later reconcile the channel log with another authorized member holding it, even if the original author is offline. Membership/key controls are distributed to every known routed member. Signed membership and event validation still apply during recovery.
+
+**Important conditions.** Devices must be visible, in the relevant multicast/unicast scope, and allowed through local firewalls; client isolation or blocked TCP can break discovery or delivery. A discovery proof is not a manually verified safety number. A device with channel **Share a copy** off keeps receiving its own messages but does not serve its local channel history to others. Calls use a separate media path; files require an offer/consent and encrypted chunk transfer.
+
+## Q2. What changes when the same LAN also has one post office?
+
+```mermaid
+flowchart LR
+  subgraph X[One LAN]
+    A[Client A] <-- "direct Noise/TCP first" --> B[Client B]
+    C[Client C]
+    P[Post office P]
+    A -. "recipient-encrypted mailbox copy" .-> P
+    P -. "later drain" .-> B
+    C -. "same choices" .-> P
+  end
+```
+
+**Current.** Client-to-client discovery and direct sync remain the normal live path. If client post-office use is enabled (the desktop default), the sender can also upload recipient-encrypted events to P. The current channel send path attempts direct fanout **and then** mailbox replication; relay upload is not limited to cases where a direct send failed. This is useful offline custody, but it costs an extra sync and P's finite storage. The recipient drains known relays periodically and validates/decrypts through its ordinary admission path.
+
+P can hold DMs, group events, invitations/controls, and file-related events in opaque pairwise mailboxes. It cannot decrypt the inner content, join a group, grant membership, or confirm receipt on behalf of a recipient. A mailbox copy can expire or be evicted: **30 days is a maximum, not a guaranteed delivery period**. Count and byte limits may evict whole mailboxes earlier.
+
+`--post-office` alone does not create a peer directory. Same-LAN clients already discover one another directly; `--bridge` plus each client's **Discover peers through a post office** opt-in becomes relevant for introducing otherwise disconnected clients. A user can disable **Use post offices** while retaining direct P2P communication.
+
+**Refinement:** say “prefer a direct path for live delivery and optionally add relay custody,” rather than “use the post office only after P2P fails.”
+
+## Q3. What changes with two or three post offices on that LAN? Are they identical, and how does failover work?
+
+```mermaid
+flowchart LR
+  subgraph X[One LAN]
+    A[Client A] --> P1[Preferred P1]
+    A -. "next reachable candidate" .-> P2[Relay P2]
+    A -. "next reachable candidate" .-> P3[Relay P3]
+    P1 <-. "federation if mutually trusted" .-> P2
+    P2 <-. "federation if mutually trusted" .-> P3
+  end
+```
+
+**Current.** The relays can run the same binary and the same **role and trust policy**. They cannot have literally identical host settings: each needs its own persistent key/identity, keystore, password file, listening ports as needed, and reachable addresses. Equal federation needs `--post-office --bridge` and the same trusted `--federation-peer` identity/endpoint set on each relay. Merely starting two `--post-office` processes does not replicate their mailboxes; without federation, each is an independent offline store.
+
+The app keeps direct client paths. For relay work, it orders verified candidates by an optional preferred relay, then LAN reachability and identity; for an introduced recipient, the relay that reported that recipient can take priority. A failed network attempt can move to another reachable candidate. This is **per operation**, not a permanent elected primary or an always-open connection. The recipient checks all known relays because a fallback copy can remain there after the preferred relay returns. With federation and client bridge opt-in, v3 encrypted mailboxes reconcile among trusted relays; legacy relay-bound mailboxes do not.
+
+**Needs validation.** A two-relay outage test should stop P1, confirm P2 accepts a new message and the intended recipient issues a receipt, then restart P1 and check deduplication. With all relays on one machine or one power/network segment, multiple processes do not provide failure independence.
+
+## Q4. With three isolated LANs and no post offices, what does one A–D Tailscale path expose?
+
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[A] --- B[B]
+    A --- C[C]
+  end
+  subgraph Y[LAN Y]
+    D[D] --- E[E]
+    D --- F[F]
+  end
+  subgraph Z[LAN Z]
+    G[G] --- H[H]
+    H --- I[I]
+  end
+  A <-- "Tailscale routed UDP/TCP path" --> D
+```
+
+**Current, if the routed discovery query and TCP ports are reachable:** A can discover **B, C, D**; D can discover **A, E, F**. The proposed “D sees C, E, F” contains a naming error: C is on A's LAN, and A does not proxy C's presence. B and C do not automatically discover D, E, or F. E and F do not automatically discover A, B, or C. G, H, and I remain isolated from the other LANs. A and D can send direct messages and share a group if the normal invitation/membership rules are satisfied; they do not act as transit relays for their neighbors.
+
+Desktop Tailscale candidate discovery is best effort, and the headless CLI needs an explicit probe/endpoint. A Tailscale peer may be in another account or hidden by ACL/firewall rules. A Tailscale IP is only a route candidate until a signed Mesh Talk response and Noise identity check succeed.
+
+## Q5. Should “same LAN” include a direct Tailscale connection?
+
+**Proposed wording:** “Two visible nodes with a permitted direct application route should be able to discover and communicate, whether that route is local Ethernet/Wi-Fi or Tailscale.” This is a useful **user-facing equivalence**, not a claim that the two networks are one broadcast domain.
+
+**Current.** Physical LAN discovery uses signed multicast plus local unicast fallback. Tailscale discovery uses candidate IPs and signed **unicast** queries; it does not carry the Mesh Talk LAN broadcast, automatically discover a remote peer's LAN neighbors, or make all application ports reachable. Both paths eventually use the same identity-pinned Noise/TCP data protocol.
+
+## Q6. Should two post offices on a LAN or Tailscale link broadcast all users and relay everything automatically?
+
+**Proposed wording:** “Trusted, reachable post offices exchange eligible opt-in presence and opaque encrypted mailbox events over authenticated federation sessions.” This gives them equal protocol roles without treating their LANs as a single subnet.
+
+**Current.** Relays advertise **their own** signed presence locally and probe pinned routed seeds. Their federation traffic is authenticated TCP exchange, **not** a LAN broadcast of all users or message contents. Only fresh, self-signed presence from clients that enabled bridge discovery is exported; relay identities and private LAN addresses are not substituted as client entries. The directory expires registrations after about 45 seconds. Federation copies only relay-independent v3 mailboxes, preserving original arrival times and retention limits. A physical or Tailscale relay-to-relay path is still required.
+
+**Decision:** whether federation trust seeds should stay explicitly pinned or gain a separate trusted auto-enrollment mechanism. Automatic contact with every visible relay would weaken the current authorization boundary.
+
+## Q7. Which post offices should an app be allowed to select?
+
+**Proposed:** Offer relays that this client can reach and authenticate directly over an application path (local LAN or an actual routed Tailscale path). Prefer a local relay automatically, allow a user preference, and fall back on failure. A relay that is visible only through another relay should not be presented as an ordinary directly reachable choice.
+
+**Current nuance.** Candidate ordering already prefers LAN routes and has fallback, but a user preference can put a directly reachable routed relay ahead of a LAN relay. The older `--bridge-peer` gateway can expose a remote relay through a local TCP proxy for compatibility. This is an exception to the proposed **direct-reachability-only UI rule** and should be marked as such if retained. The app can register with multiple reachable directories; it does not require every user to pin a global hub ID. The relay's ability to forward to another site depends on its own trusted route graph.
+
+## Q8. What visibility and relay switches should users have?
+
+**Proposed controls:** (a) public discovery scope, with “local/direct only” versus explicit cross-site directory opt-in; (b) permission to use post offices for opaque offline custody; (c) optional preferred local relay with automatic fallback. These are different choices and should remain separate.
+
+**Current.** **Use post offices** defaults on and gates mailbox upload/drain. **Discover peers through a post office** defaults off and shares public signed presence with eligible directories. **Invisible mode** suppresses public presence, including bridge participation, and uses separate private permission rules. Turning bridge discovery off does **not** limit ordinary signed routed discovery to the physical LAN: a directly Tailscale-connected public client can still find this device. Therefore a strict “visible only to physical LAN, but not direct Tailscale peers” switch is **not currently implemented**. Define the desired scope precisely before adding one; the user phrase “local LAN including direct Tailscale” is best modeled as **directly reachable peers only, without federation introductions**.
+
+## Q9. What layered architecture should express these principles?
+
+**Recommended model:**
+
+```mermaid
+flowchart TB
+  UX[Conversations: DMs, groups, files, calls] --> EVENTS[Signed events, membership, receipts and sync]
+  EVENTS --> ROUTES[Route choice: direct peer or optional opaque mailbox]
+  ROUTES --> TRUST[Signed discovery, identity binding and Noise sessions]
+  TRUST --> IP[IP reachability: physical LAN, routed network or Tailscale]
+  ROUTES --> FED[Trusted post-office federation]
+```
+
+This preserves your intent—local-first messaging with optional relays—while separating concerns. Tailscale belongs below Mesh Talk as one possible IP route. Discovery names/authenticates nodes; it does not transmit chat content. The route layer coordinates direct sessions and optional application mailbox copies. The post office stores and forwards **opaque events**, not arbitrary TCP/IP packets. Group membership, consent, and delivery receipts remain above the transport choice. Calls require a separate media path.
+
+**Proposed invariant:** prefer direct delivery when available; use encrypted relay custody when enabled; never report a message delivered until the recipient confirms it. Keep the preference/fallback policy behind one route-selection interface so app UI and protocol code do not implement different rules.
+
+## Q10. Can one local relay connection serve 100 remote users and cap a client at eight active connections?
+
+**Goal, not current guarantee.** One relay endpoint can avoid a client dialing every remote client just to fetch directory entries or upload opaque events. But the current protocol has **pairwise recipient mailboxes**, periodic directory/drain operations, direct P2P attempts, and group fanout/recovery. Operations can open independent Noise/TCP sessions; there is no global persistent connection pool or invariant of one socket per relay. Group membership/key controls contact every known routed member, while larger text groups seed a small number of members and recover through anti-entropy. Therefore “5 local users + 3 relays = at most 8 active connections” is **not correct today**, and it does not follow from federation alone.
+
+The directory is also bounded (currently 128 members per relay), so “the post office returns the full online list of 100 users” depends on who opted in, expiry, capacity and the federated relay graph. Client roster deduplication should use verified device identity; an account may legitimately have multiple devices. A useful future efficiency requirement is a **measured** cap on concurrent dials, bounded directory pages, backpressure, and optional connection reuse, without hiding group/control delivery costs.
+
+## Q11. What else must be specified before calling the design complete?
+
+| Concern            | Principle / question to settle                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Trust              | Who authorizes relay federation? Current full-identity pins prevent an arbitrary LAN relay from learning the opt-in directory or mailbox inventory.                       |
+| Failure domains    | A fallback relay only helps cross-site delivery if a route survives the failed relay. Test relay process, host, LAN, and inter-site link failure separately.              |
+| Delivery semantics | Distinguish locally queued, relay-held, recipient-delivered, and read states; deduplicate by signed event ID.                                                             |
+| Retention and cost | Relay mail is bounded by a 30-day maximum plus event/byte caps; directory presence is short-lived. Specify capacity and eviction behavior at larger scale.                |
+| Group security     | Federation must not create membership, bypass acceptance, or surface events after removal. Versioned replica controls affect mixed-client channel sync.                   |
+| Other data         | File offers/chunks need consent and integrity checks; calls need ICE media; sibling pairing/history needs its own authenticated path. Do not infer these from DM success. |
+| Privacy            | A cross-site directory is a deliberate metadata-sharing opt-in. Local-only discovery, invisible mode, and trusted private contacts must remain distinct.                  |
+| Operations         | “Same configuration” means same role/trust policy, with per-host identities, ports, addresses, and persistent keystores. Document service health and boot behavior.       |
+
+For a code-level review, the main seams are [LAN and routed discovery](../crates/mesh-talk-core/src/discovery/service.rs), [group send and recovery](../crates/mesh-talk-core/src/node/channels.rs), [client delivery and relay drain](../crates/mesh-talk-core/src/node/serving.rs), [relay candidate ordering](../crates/mesh-talk-core/src/node/postbox.rs), [bridge registration](../crates/mesh-talk-core/src/node/bridge_client.rs), [federated directory limits](../crates/mesh-talk-core/src/node/bridge_directory.rs), [relay federation](../crates/mesh-talk-core/src/postoffice/federation.rs), and [desktop settings](../src-tauri/src/settings.rs).
+
+## Review decisions, in order
+
+1. Confirm the **directly reachable peers** wording for physical LAN and Tailscale, while keeping multicast and routed unicast distinct.
+2. Confirm whether bridge opt-in remains mandatory before a client appears in another site's directory.
+3. Confirm whether post-office use is **extra custody after direct attempts** (current behavior) or should become conditional on direct failure. The latter changes offline reliability and network cost.
+4. Confirm the relay picker: local-first automatic choice, optional user preference, and fallback; decide how to label legacy gateway routes.
+5. Define measurable scale targets instead of a fixed eight-connection claim, then test group, file, and outage cases with independent hosts on each LAN.
+
+No code changes are implied by this review draft. After these decisions, update the [topology baseline](network-topologies.md) and compare each accepted rule with code and targeted cross-LAN tests.
