@@ -2,9 +2,11 @@
 
 **Status:** review baseline for `perf/optimization-series-20261015` on 2026-10-16. This describes the current implementation and separates code behavior from physical-network evidence. It is not a claim that every combination below passed an end-to-end test.
 
-For the scenario questions, proposed principles, and points to decide together, see the [network design Q&A](network-design-qa.md).
+For the scenario questions and proposed design rules, see the [network design Q&A](network-design-qa.md#recommended-design-baseline-for-review). Its recommendations are under review; this guide records current switches and data paths unless marked as a proposal.
 
 Mesh Talk discovers **devices**, synchronizes signed events, and optionally stores recipient-encrypted events at post offices. Seeing a peer does not establish a direct route. A post office is an application relay, not an IP router, LAN multicast repeater, group member, or WebRTC media relay.
+
+**Interpret the diagrams as application paths.** A solid local edge means directly reachable UDP/TCP; a Tailscale edge connects only the named machines and does not merge their LANs. Dotted relay edges require the client switches, direct reachability to that relay, and mutual relay trust where federation is shown. Relays synchronize eligible opted-in presence over authenticated sessions, not by broadcasting all LAN devices. A directory introduction gives an identity and possible relay path, never membership or a guaranteed direct TCP route.
 
 ## Network and data planes
 
@@ -151,7 +153,7 @@ flowchart LR
   G -. "only if physically reachable" .-> F
 ```
 
-All relays have equal protocol roles and share a trusted seed set; there is no elected global hub. If E fails, A can upload to online G. Immediate cross-site delivery needs an actual G→F link or another reachable relay chain. Otherwise ciphertext waits for reconciliation after a path returns. Preference is a hint: a relay that reported a recipient may take priority for that destination.
+All relays have equal protocol roles and share a trusted seed set; there is no elected global hub. A preferred relay is a soft choice among directly reachable authenticated candidates. If E fails, A can upload to online G. Immediate cross-site delivery needs an actual G→F link or another reachable relay chain. Otherwise ciphertext waits locally or at a reachable relay for reconciliation after a path returns, subject to expiry and capacity. Preference is a hint: a relay that reported a recipient may take priority for that destination. Relay custody is never a recipient delivery receipt. **Proposed policy:** return to E automatically once it is healthy; verify this behavior separately from the existing per-operation fallback.
 
 ### 9. Off switches and invisible devices
 
