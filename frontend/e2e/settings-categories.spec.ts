@@ -351,16 +351,16 @@ for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 760, height: 520 },
 ]) {
-  test(`settings layout supports light dark and long locale at ${viewport.width}x${viewport.height}`, async ({
-    page,
-  }, testInfo) => {
-    await page.setViewportSize(viewport);
-    await enterChat(page);
-    await openSidebarMenuAction(page, "sidebar-nav-settings");
-    for (const theme of ["light", "dark"]) {
-      await selectSettingsCategory(page, "appearance");
-      await page.getByTestId(`theme-${theme}`).click();
-      for (const language of ["en", "es"]) {
+  for (const theme of ["light", "dark"]) {
+    for (const language of ["en", "es"]) {
+      test(`settings layout supports ${theme} theme and ${language} locale at ${viewport.width}x${viewport.height}`, async ({
+        page,
+      }, testInfo) => {
+        await page.setViewportSize(viewport);
+        await enterChat(page);
+        await openSidebarMenuAction(page, "sidebar-nav-settings");
+        await selectSettingsCategory(page, "appearance");
+        await page.getByTestId(`theme-${theme}`).click();
         await selectSettingsCategory(page, "general");
         await page
           .getByTestId("settings-language-select")
@@ -393,7 +393,7 @@ for (const viewport of [
           ),
           animations: "disabled",
         });
-      }
+      });
     }
-  });
+  }
 }
