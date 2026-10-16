@@ -3,110 +3,11 @@
 use crate::{
     chat_commands::{HistoryItem, NodeState},
     commands::CommandError,
-    state::{AppState, SessionLease},
+    runtime_admission::RuntimeAdmission,
+    state::AppState,
 };
-use mesh_talk_core::{
-    eventlog::EventId,
-    node::{NodeError, NodeRuntime},
-};
+use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
-use std::{future::Future, pin::Pin};
-
-type OwnerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CommandError>> + Send + 'a>>;
-
-/// The owner captured at IPC entry, together with the only authority allowed to
-/// run synchronous producers against the installed runtime. Detached enqueues
-/// retain the lifecycle guard even if the caller cancels its IPC future.
-struct OwnerAdmission {
-    app: AppState,
-    node: NodeState,
-    lease: SessionLease,
-}
-
-impl OwnerAdmission {
-    fn capture(app: &AppState, node: &NodeState, owner: &str) -> Result<Self, CommandError> {
-        let lease = app
-            .session()
-            .capture()
-            .map_err(CommandError::Authorization)?;
-        if lease.owner() != owner {
-            return Err(CommandError::Authorization("session owner mismatch".into()));
-        }
-        if app.app_lock().is_locked() {
-            return Err(CommandError::Authorization("app locked".into()));
-        }
-        #[cfg(test)]
-        if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
-            let _ = entered.send("owner-entry");
-        }
-        Ok(Self {
-            app: app.clone(),
-            node: node.clone(),
-            lease,
-        })
-    }
-
-    fn authorized<T>(
-        &self,
-        runtime: &NodeRuntime,
-        operation: impl FnOnce() -> Result<T, CommandError>,
-    ) -> Result<T, CommandError> {
-        self.app
-            .session()
-            .matching(&self.lease, |_| {
-                if self.app.app_lock().is_locked() {
-                    return Err(CommandError::Authorization("app locked".into()));
-                }
-                if runtime.host_account_id() != Some(self.lease.owner()) {
-                    return Err(CommandError::Authorization("runtime owner mismatch".into()));
-                }
-                self.node.check_installation(&self.lease)?;
-                operation()
-            })
-            .map_err(CommandError::Authorization)?
-    }
-
-    async fn read<T>(
-        &self,
-        operation: impl FnOnce(&NodeRuntime) -> Result<T, CommandError>,
-    ) -> Result<T, CommandError> {
-        let guard = self.node.0.lock().await;
-        let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        self.authorized(runtime, || operation(runtime))
-    }
-
-    fn authorize_accept(
-        &self,
-        runtime: &NodeRuntime,
-        accept: &mut dyn FnMut() -> Result<(), NodeError>,
-    ) -> Result<(), NodeError> {
-        // The session guard encloses each synchronous producer (local grant and WAL),
-        // not just a preceding check. No session guard crosses an async policy wait.
-        let result = self
-            .authorized(runtime, || Ok(accept()))
-            .map_err(|error| NodeError::Authorization(error.to_string()))?;
-        #[cfg(test)]
-        if result.is_ok()
-            && let Some(entered) = self.app.owner_command_captured.lock().unwrap().as_ref()
-        {
-            let _ = entered.send("owner-authorized");
-        }
-        result
-    }
-
-    async fn detached<T: Send + 'static>(
-        self,
-        operation: impl for<'a> FnOnce(&'a NodeRuntime, &'a Self) -> OwnerFuture<'a, T> + Send + 'static,
-    ) -> Result<T, CommandError> {
-        let guard = self.node.0.clone().lock_owned().await;
-        tokio::spawn(async move {
-            let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-            operation(runtime, &self).await
-        })
-        .await
-        .map_err(|_| CommandError::Internal("enqueue operation terminated".into()))?
-    }
-}
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
     let bytes: [u8; 32] = hex::decode(input)
@@ -137,9 +38,9 @@ pub async fn owner_node_identity(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<NodeIdentity, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     admission
-        .read(|runtime| {
+        .with_runtime(|runtime| {
             Ok(NodeIdentity {
                 owner,
                 device_id: runtime.user_id().into(),
@@ -158,7 +59,7 @@ pub async fn owner_enqueue_text(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     let reply = reply_to.as_deref().map(parse_id).transpose()?;
     admission
@@ -186,7 +87,7 @@ pub async fn owner_enqueue_sticker(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     admission
         .detached(move |runtime, admission| {
@@ -225,7 +126,7 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<AcceptedFile, CommandError> {
-    let admission = match OwnerAdmission::capture(&app, &node, &owner) {
+    let admission = match RuntimeAdmission::capture(&app, &node, &owner) {
         Ok(admission) => admission,
         Err(error) => {
             crate::chat_commands::cleanup_pasted_file(&handle, &path);
@@ -242,6 +143,8 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
         progress_key.unwrap_or_else(|| account.clone()),
         "prepare",
     );
+    #[cfg(test)]
+    let progress_hook = app.owner_file_progress_hook.clone();
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
@@ -250,8 +153,6 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                 } else {
                     mesh_talk_core::file::FileKind::File
                 };
-                #[cfg(test)]
-                let progress_hook = admission.app.owner_file_progress_hook.clone();
                 let result = runtime
                     .handle()
                     .enqueue_file_to_account_progress_if(
@@ -291,10 +192,10 @@ pub async fn owner_account_history<R: tauri::Runtime>(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<Vec<HistoryItem>, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     let history = admission
-        .read(|runtime| {
+        .with_runtime(|runtime| {
             Ok(runtime
                 .account_history(&account, limit.min(500))
                 .into_iter()
@@ -331,7 +232,7 @@ pub async fn owner_delivery_statuses(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<Vec<MessageStatus>, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     if ids.len() > 256 {
         return Err(CommandError::InvalidInput(
@@ -343,7 +244,7 @@ pub async fn owner_delivery_statuses(
         .map(|id| parse_id(id))
         .collect::<Result<Vec<_>, _>>()?;
     admission
-        .read(|runtime| {
+        .with_runtime(|runtime| {
             Ok(runtime
                 .handle()
                 .account_delivery_statuses(&account, &ids)
@@ -491,6 +392,7 @@ mod tests {
             let node = NodeState::empty();
             let app = tauri::test::mock_builder()
                 .manage(app_state.clone())
+                .manage(app_state.app_lock().clone())
                 .manage(node.clone())
                 .manage(crate::settings::SettingsState::isolated(
                     root.path().join("settings.json"),
@@ -502,6 +404,11 @@ mod tests {
                     super::owner_enqueue_file,
                     super::owner_account_history,
                     super::owner_delivery_statuses,
+                    crate::chat_commands::get_device_sync_policy,
+                    crate::chat_commands::get_device_sync_status,
+                    crate::chat_commands::set_device_sync_category,
+                    crate::chat_commands::get_account_preferences,
+                    crate::chat_commands::set_account_preference,
                     crate::commands::logout
                 ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -562,6 +469,21 @@ mod tests {
                 1,
             ));
             account.account_id()
+        }
+
+        fn sync_documents(&self) -> [Vec<u8>; 2] {
+            let guard = self.node.0.blocking_lock();
+            let runtime = guard.as_ref().unwrap();
+            let directory = self
+                .root
+                .path()
+                .join("accounts")
+                .join(runtime.host_account_id().unwrap());
+            [
+                format!("account-sync-policy-{}.log", runtime.account_id()),
+                "account-preferences.log".into(),
+            ]
+            .map(|name| std::fs::read(directory.join(name)).unwrap())
         }
 
         fn announce_peer(&self, announce: mesh_talk_core::discovery::Announce) {
@@ -856,9 +778,60 @@ mod tests {
     }
 
     #[test]
+    fn registered_sync_mutations_reject_a_different_session_before_persisting() {
+        let fixture = Fixture::new();
+        let before = fixture.sync_documents();
+        fixture
+            .app_state
+            .session()
+            .set("b".into(), user("bob"), "pw".into());
+        for (command, body) in [
+            (
+                "set_device_sync_category",
+                serde_json::json!({"category":"history", "enabled":false}),
+            ),
+            (
+                "set_account_preference",
+                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+            ),
+        ] {
+            let result = fixture.invoke(command, body);
+            assert!(
+                result.is_err(),
+                "{command} accepted a mismatched runtime owner: {result:?}"
+            );
+            assert_eq!(result.unwrap_err()["kind"], "authorization");
+        }
+        let guard = fixture.node.0.blocking_lock();
+        let node = guard.as_ref().unwrap().handle();
+        assert!(node.device_sync_policy().history);
+        assert!(
+            node.account_preferences(mesh_talk_core::node::SyncCategory::Appearance)
+                .is_empty()
+        );
+        drop(guard);
+        assert_eq!(fixture.sync_documents(), before);
+    }
+
+    #[test]
     fn registered_commands_queued_behind_lifecycle_lock_reject_same_owner_new_generation() {
         let fixture = Fixture::new();
+        let before = fixture.sync_documents();
         let cases = [
+            ("get_device_sync_policy", serde_json::json!({})),
+            ("get_device_sync_status", serde_json::json!({})),
+            (
+                "set_device_sync_category",
+                serde_json::json!({"category":"history", "enabled":false}),
+            ),
+            (
+                "get_account_preferences",
+                serde_json::json!({"category":"appearance"}),
+            ),
+            (
+                "set_account_preference",
+                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+            ),
             ("owner_node_identity", serde_json::json!({"owner":"alice"})),
             (
                 "owner_account_history",
@@ -900,6 +873,76 @@ mod tests {
             assert_eq!(error["kind"], "authorization", "queued {command}");
             *fixture.app_state.owner_command_captured.lock().unwrap() = None;
         }
+        let guard = fixture.node.0.blocking_lock();
+        let node = guard.as_ref().unwrap().handle();
+        assert!(node.device_sync_policy().history);
+        assert!(
+            node.account_preferences(mesh_talk_core::node::SyncCategory::Appearance)
+                .is_empty()
+        );
+        drop(guard);
+        assert_eq!(fixture.sync_documents(), before);
+    }
+
+    #[test]
+    fn registered_sync_mutations_queued_before_logout_or_lock_do_not_write() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let before = fixture.sync_documents();
+        let commands = [
+            (
+                "set_device_sync_category",
+                serde_json::json!({"category":"history", "enabled":false}),
+            ),
+            (
+                "set_account_preference",
+                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+            ),
+        ];
+        for lock in [false, true] {
+            for (command, body) in &commands {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("a".into(), user("alice"), "pw".into());
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+                let lifecycle = fixture.node.0.blocking_lock();
+                let webview = fixture.webview.clone();
+                let command = *command;
+                let body = body.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                entered_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if lock {
+                    crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                } else {
+                    fixture.app_state.session().clear();
+                }
+                drop(lifecycle);
+                let error = pending.join().unwrap().unwrap_err();
+                assert_eq!(
+                    error["kind"], "authorization",
+                    "queued {command}, lock={lock}"
+                );
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
+        }
+        let guard = fixture.node.0.blocking_lock();
+        let node = guard.as_ref().unwrap().handle();
+        assert!(node.device_sync_policy().history);
+        assert!(
+            node.account_preferences(mesh_talk_core::node::SyncCategory::Appearance)
+                .is_empty()
+        );
+        drop(guard);
+        assert_eq!(fixture.sync_documents(), before);
     }
 
     fn registered_logout_during_local_grant_wait(command: &'static str) {
