@@ -1,9 +1,14 @@
 import { ESLint } from "eslint";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
+import { beforeAll, expect, it } from "vitest";
 
 const eslint = new ESLint({
   cwd: fileURLToPath(new URL("../..", import.meta.url)),
+});
+
+// Resolve the shared lint configuration during fixture setup, not the first assertion.
+beforeAll(async () => {
+  await eslint.calculateConfigForFile("src/lib/api/nested/adapter.ts");
 });
 
 it.each([
