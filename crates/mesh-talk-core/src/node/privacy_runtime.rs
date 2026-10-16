@@ -231,6 +231,24 @@ impl Node {
         invisible: bool,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        self.set_invisible_guarded(invisible, |commit| {
+            authorize()?;
+            commit()
+        })
+        .await
+    }
+
+    /// Await network/policy serialization, then let host authority enclose the
+    /// synchronous policy commit and invalidation. No state lock is held when
+    /// authority is acquired, and no host guard crosses a network await.
+    /// The callback must execute the supplied commit exactly once while its
+    /// authority is held and propagate the commit result; reject without calling
+    /// the commit when authority is absent.
+    pub async fn set_invisible_guarded(
+        &self,
+        invisible: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
         let _operation = self.privacy.gate.write().await;
         let (visibility, previous) = {
             let state = self.privacy.state.read().map_err(|_| denied())?;
@@ -238,31 +256,33 @@ impl Node {
             (state.visibility.clone(), state.policy.snapshot().invisible)
         };
         if previous == invisible {
-            return authorize();
+            return authorize(&mut || Ok(()));
         }
         if invisible {
             visibility.set_public(false).await;
         }
-        let result = {
-            let mut state = self.privacy.state.write().map_err(|_| denied())?;
-            authorize().and_then(|_| {
-                state
-                    .as_mut()
-                    .ok_or_else(denied)?
-                    .policy
-                    .set_invisible(invisible)
-            })
-        };
+        let result = authorize(&mut || {
+            self.privacy
+                .state
+                .write()
+                .map_err(|_| denied())?
+                .as_mut()
+                .ok_or_else(denied)?
+                .policy
+                .set_invisible(invisible)?;
+            self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            if invisible {
+                self.clear_bridge_introductions();
+            }
+            Ok(())
+        });
         if let Err(error) = result {
             if invisible {
                 visibility.set_public(!previous).await;
             }
             return Err(error);
         }
-        self.privacy.generation.fetch_add(1, Ordering::SeqCst);
-        if invisible {
-            self.clear_bridge_introductions();
-        } else {
+        if !invisible {
             visibility.set_public(true).await;
             self.bridge_notify.notify_one();
         }
@@ -280,8 +300,31 @@ impl Node {
         allowed: bool,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
-        self.change_allowed(account, allowed, PermissionSource::Manual, authorize)
-            .await?;
+        self.set_allowed_guarded(account, allowed, |commit| {
+            authorize()?;
+            commit()
+        })
+        .await
+    }
+
+    /// Enclose the complete durable grant/revocation after acquiring the policy
+    /// gate. Grant validation precedes authority, matching the legacy `_if` API.
+    /// The callback follows the commit contract of [`Self::set_invisible_guarded`].
+    pub async fn set_allowed_guarded(
+        &self,
+        account: &str,
+        allowed: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
+        {
+            let _operation = self.privacy.gate.write().await;
+            self.change_allowed_locked_guarded(
+                account,
+                allowed,
+                PermissionSource::Manual,
+                authorize,
+            )?;
+        }
         if allowed {
             self.publish_presence(account).await;
         }
@@ -318,8 +361,29 @@ impl Node {
         account: &str,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
-        self.change_allowed(account, true, PermissionSource::Initiated, authorize)
-            .await?;
+        self.initiate_contact_guarded(account, |commit| {
+            authorize()?;
+            commit()
+        })
+        .await
+    }
+
+    /// Enclose an initiated grant before best-effort private presence publication.
+    /// The callback follows the commit contract of [`Self::set_invisible_guarded`].
+    pub async fn initiate_contact_guarded(
+        &self,
+        account: &str,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
+        {
+            let _operation = self.privacy.gate.write().await;
+            self.change_allowed_locked_guarded(
+                account,
+                true,
+                PermissionSource::Initiated,
+                authorize,
+            )?;
+        }
         self.publish_presence(account).await;
         Ok(())
     }
@@ -342,6 +406,22 @@ impl Node {
         source: PermissionSource,
         authorize: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
+        self.change_allowed_locked_guarded(account, allowed, source, |commit| {
+            authorize()?;
+            commit()
+        })
+    }
+
+    /// Caller holds the policy gate. Validate with a short state read, release
+    /// it before host authorization, then acquire writes inside the commit.
+    /// This retains session -> privacy-state lock order used by local enqueue.
+    fn change_allowed_locked_guarded(
+        &self,
+        account: &str,
+        allowed: bool,
+        source: PermissionSource,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    ) -> io::Result<()> {
         let announcements = self
             .roster
             .lock()
@@ -352,56 +432,71 @@ impl Node {
             .lock()
             .expect("roster lock not poisoned")
             .peers();
-        let mut guard = self.privacy.state.write().map_err(|_| denied())?;
-        let Some(state) = guard.as_mut() else {
-            return authorize();
-        };
-        let before = state.policy.snapshot();
-        if allowed {
-            let matches: Vec<_> = announcements
-                .into_iter()
-                .filter(|a| a.account_id().as_deref() == Some(account) && a.verify())
-                .collect();
-            let cached = state
-                .proofs
-                .announcements()
-                .into_iter()
-                .find(|a| a.account_id().as_deref() == Some(account));
-            let name = matches
-                .first()
-                .or(cached.as_ref())
-                .map(|a| a.name.clone())
-                .or_else(|| {
-                    before
-                        .allowed_accounts
-                        .iter()
-                        .find(|a| a.id == account)
-                        .map(|a| a.name.clone())
+        let matches: Vec<_> = announcements
+            .into_iter()
+            .filter(|a| a.account_id().as_deref() == Some(account) && a.verify())
+            .collect();
+        let prepared = {
+            let guard = self.privacy.state.read().map_err(|_| denied())?;
+            guard
+                .as_ref()
+                .map(|state| {
+                    let before = state.policy.snapshot();
+                    let name = if allowed {
+                        let cached = state
+                            .proofs
+                            .announcements()
+                            .into_iter()
+                            .find(|a| a.account_id().as_deref() == Some(account));
+                        Some(
+                            matches
+                                .first()
+                                .or(cached.as_ref())
+                                .map(|a| a.name.clone())
+                                .or_else(|| {
+                                    before
+                                        .allowed_accounts
+                                        .iter()
+                                        .find(|a| a.id == account)
+                                        .map(|a| a.name.clone())
+                                })
+                                .ok_or_else(denied)?,
+                        )
+                    } else {
+                        None
+                    };
+                    Ok::<_, io::Error>((before, name))
                 })
-                .ok_or_else(denied)?;
-            authorize()?;
-            for proof in &matches {
-                let binding_changed =
-                    state.proofs.account_for(&proof.public()) != proof.account_id();
-                state.proofs.record_explicit_account(proof)?;
-                if binding_changed {
-                    // Invalidate even if a later policy save fails or the new
-                    // account already had an independent permission entry.
-                    self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+                .transpose()?
+        };
+        let Some((before, name)) = prepared else {
+            return authorize(&mut || Ok(()));
+        };
+        authorize(&mut || {
+            let mut guard = self.privacy.state.write().map_err(|_| denied())?;
+            let state = guard.as_mut().ok_or_else(denied)?;
+            if let Some(name) = name.as_ref() {
+                for proof in &matches {
+                    let binding_changed =
+                        state.proofs.account_for(&proof.public()) != proof.account_id();
+                    state.proofs.record_explicit_account(proof)?;
+                    if binding_changed {
+                        // Invalidate even when a later policy save fails.
+                        self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if let Some(endpoint) = endpoints.iter().find(|p| p.public == proof.public()) {
+                        state.routes.record(&endpoint.public, endpoint.addr.ip())?;
+                    }
                 }
-                if let Some(endpoint) = endpoints.iter().find(|p| p.public == proof.public()) {
-                    state.routes.record(&endpoint.public, endpoint.addr.ip())?;
-                }
+                state.policy.grant(account, name, source.clone())?;
+            } else {
+                state.policy.revoke(account)?;
             }
-            state.policy.grant(account, &name, source)?;
-        } else {
-            authorize()?;
-            state.policy.revoke(account)?;
-        }
-        if before != state.policy.snapshot() {
-            self.privacy.generation.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(())
+            if before != state.policy.snapshot() {
+                self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
     }
     async fn publish_presence(&self, account: &str) {
         if self

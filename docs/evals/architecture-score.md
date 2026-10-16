@@ -2,6 +2,9 @@
 
 ## Current architecture-health loop — 2026-10-16
 
+**Current maintained result: 95/100 (Round 3). The architecture goal is achieved;
+release/PR gates are separate and must pass before merge.**
+
 The current loop starts at **85/100** at `cc303ec`. It uses five equally weighted
 architecture dimensions for the whole repository's structure, with deeper
 inspection of recent lifecycle, UI, networking and delivery changes. The goal is
@@ -156,6 +159,63 @@ No extra delivery sequencing abstraction was added: `DeliveryStore` and
 file staging/quota and host authorization have distinct obligations; moving them
 behind a forwarding helper alone would not deepen the module. Next, characterize
 and consolidate the remaining privacy authority seam before reassessment.
+
+### Round 3: privacy commit authority — 95/100
+
+| Dimension                           |    Round 2 |    Round 3 | Evidence and remaining deduction                                                                                                                                                                       |
+| ----------------------------------- | ---------: | ---------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Module depth                        |      19/20 |      19/20 | Privacy waits and synchronous commits share one implementation; live settings still leaves callers coordinating later effects.                                                                         |
+| Locality and reuse                  |      19/20 |      19/20 | Privacy now reuses host admission rather than its own generation recipe; device/channel and live settings coordination remains separate.                                                               |
+| Dependency direction and ownership  |      18/20 |      19/20 | Actual privacy writes and invalidation are enclosed by session/installation authority; canceled IPC retains lifecycle ownership. Remaining device/channel/settings contracts prevent full consistency. |
+| Interface-level testability         |      19/20 |      19/20 | Registered IPC, persisted-byte, callback-scope and cancellation assertions cover corrected privacy lifetimes. Other asynchronous families remain less characterized.                                   |
+| Maintainability and AI navigability |      19/20 |      19/20 | Shared admission and documented lock ordering make privacy authority traceable; heterogeneous legacy paths remain.                                                                                     |
+| **Total**                           | **94/100** | **95/100** | Independent specification and quality reviews passed; same fixed rubric, medium confidence. Architecture goal achieved.                                                                                |
+
+The failing baseline allowed registered `get_privacy` while the app was locked.
+Privacy commands now capture shared admission before waiting and check observations
+and responses against the current session and runtime installation. Detached
+execution keeps the lifecycle barrier even if the IPC waiter is canceled.
+
+Core `set_invisible_guarded`, `set_allowed_guarded` and
+`initiate_contact_guarded` enter host authority after the async privacy gate and
+outside synchronous privacy-state locks. The supplied commit encloses actual
+policy/proof/route writes, generation updates and synchronous bridge invalidation.
+Network announcement drain/restore and private presence publication remain awaits
+outside session authority. Legacy `*_if` APIs delegate while retaining validation
+ordering, public formats and existing behavior. The commit callback contract
+requires exactly one invocation under authority and propagation of its result.
+
+Verification:
+
+```sh
+cargo test -p mesh-talk-core --lib node::privacy_runtime::tests --features fast-test-kdf -- --nocapture
+cargo test -p mesh-talk --lib owner_commands::tests -- --nocapture
+cargo test -p mesh-talk --lib privacy_commands::tests -- --nocapture
+cargo test -p mesh-talk --lib privacy -- --nocapture
+cargo test -p mesh-talk-core --lib guarded_privacy_commits -- --nocapture
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+The implementation checks passed **43 core + 20 owner + 2 privacy IPC tests**;
+independent parent checks passed **7 affected host tests + 1 core commit-scope
+test**. Real registered scenarios reject app lock, stale installation, queued
+same-owner replacement and logout during all three policy-gate waits without
+changing persisted privacy/proof/route bytes. Callback-scope coverage checks that
+writes/generation changes occur before authority exits and that authority is
+entered without holding a privacy-state lock. Cancellation coverage verifies
+that retirement cannot pass a still-running privacy operation.
+
+The independent reviewer supports raising ownership from 18 to 19 for removing
+this concrete check/commit and cancellation gap. No points are awarded merely
+for moving files or adding methods. The other four dimensions stay at 19, with
+explicit residual deductions. No extra delivery abstraction is justified by size
+alone: existing WAL/recovery ownership remains intact.
+
+**Stop condition:** the optimization loop ends at this checkpoint. The score is
+not a claim that all bugs are eliminated or that security, performance, native
+compatibility or remote CI is certified. PR preparation and full local/remote
+gates follow separately; failures in those gates must still be resolved.
 
 ## Optimization series — 2026-10-15
 

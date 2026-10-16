@@ -305,7 +305,8 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
 
   `owner_*` delivery IPC and legacy account text/sticker/file sends capture the
   lease before waiting for the runtime lock. `RuntimeAdmission` owns capture,
-  checked reads, guarded local acceptance and detached producer lifetime. Local text/sticker/file
+  checked reads, guarded local acceptance and detached producer lifetime.
+  Local text/sticker/file
   enqueue keeps that lifecycle admission through privacy updates and staging.
   Waiting for the privacy gate holds no session guard;
   once admitted, the matching session guard encloses the entire synchronous local
@@ -316,9 +317,16 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   cancelled. Legacy account sends retain immediate best-effort transfer and their
   original results. Their payloads lack an explicit frontend owner, so capture
   authorizes the host session at IPC entry; it cannot identify an intent created
-  in an earlier frontend session. Other legacy device/channel, privacy and settings
-  operations still require their own commit-seam authority; arbitrary SDK handles
-  are not session leases. Stable file results include the original card ID and file conversation.
+  in an earlier frontend session. Privacy commands use this same admission for
+  observations and synchronous commits after the async policy gate. Their guarded
+  core methods enclose policy, proof and route writes plus generation updates and
+  bridge invalidation; they enter host authority outside privacy-state locks.
+  Announcement drain/restore and presence publication remain awaits outside the
+  session guard. A canceled IPC waiter cannot release the lifecycle barrier while
+  its detached privacy operation still runs. Legacy device/channel commands and
+  live settings application retain separate commit-seam limitations; arbitrary
+  SDK handles are not session leases. Stable file results include the original
+  card ID and file conversation.
   Owner-sensitive identity queries atomically inspect session plus runtime; status
   queries accept at most 256 IDs and project only the exact account conversation.
   Own-device synchronization, device-addressed legacy history and incoming rows

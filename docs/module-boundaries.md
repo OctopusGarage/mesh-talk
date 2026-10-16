@@ -148,15 +148,23 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   transient feedback. Delayed paths cannot open/save/copy after that opening
   closes. Native effects already initiated cannot be undone.
 - `runtime_admission.rs` owns explicit-owner and current-session admission for
-  owner delivery commands, legacy account text/sticker/file sends and linked-device synchronization/preferences. Capture
+  owner delivery commands, legacy account text/sticker/file sends, privacy and
+  linked-device synchronization/preferences. Capture
   before waiting for the runtime; synchronous operations retain matching session
   authority through the operation. `NodeState::with_session_runtime` owns the
   shared session/installation decision; `node_for_owner` captures before waiting
   and returns only a snapshot, not authority for future mutations.
   Legacy payloads without an owner cannot
   identify a frontend intent created before IPC execution. Remaining legacy
-  asynchronous commands, privacy and settings still need individual commit-seam
+  device/channel commands and live settings application still need commit-seam
   characterization; a post-result authority check cannot prevent side effects.
+- Privacy commands reuse the same admission for checked observations and
+  operation-enclosing IO commits. Core `*_guarded` methods await the privacy gate
+  without host session authority, then enclose synchronous policy/proof/route
+  writes, generation updates and bridge invalidation in the supplied guard.
+  Public announcement drain/restore and best-effort presence publication stay
+  outside synchronous authority. Existing `*_if` APIs retain their legacy
+  validation/authorization ordering through the shared implementation.
 - CLI and `NodeRuntime` share `PreparedParticipant`/`ParticipantRuntime` for
   participant network startup and retirement. Preparation starts no producers;
   desktop launch remains inside session authorization. Hosts adopt extra tasks;

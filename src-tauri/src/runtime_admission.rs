@@ -15,7 +15,7 @@ use std::{future::Future, pin::Pin};
 type AdmissionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CommandError>> + Send + 'a>>;
 
 /// The owner captured at IPC entry, together with the only authority allowed to
-/// run synchronous producers against the installed runtime. Detached enqueues
+/// run synchronous producers against the installed runtime. Detached operations
 /// retain the lifecycle guard even if the caller cancels its IPC future.
 pub(crate) struct RuntimeAdmission {
     app: AppState,
@@ -65,7 +65,8 @@ impl RuntimeAdmission {
         })
     }
 
-    fn authorized<T>(
+    /// Enclose a synchronous operation in current installation and session authority.
+    pub(crate) fn checked<T>(
         &self,
         runtime: &NodeRuntime,
         operation: impl FnOnce() -> Result<T, CommandError>,
@@ -88,7 +89,7 @@ impl RuntimeAdmission {
     ) -> Result<T, CommandError> {
         let guard = self.node.0.lock().await;
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        self.authorized(runtime, || operation(runtime))
+        self.checked(runtime, || operation(runtime))
     }
 
     pub(crate) fn authorize_accept(
@@ -99,7 +100,7 @@ impl RuntimeAdmission {
         // The session guard encloses each synchronous producer (local grant and WAL),
         // not just a preceding check. No session guard crosses an async policy wait.
         let result = self
-            .authorized(runtime, || Ok(accept()))
+            .checked(runtime, || Ok(accept()))
             .map_err(|error| NodeError::Authorization(error.to_string()))?;
         #[cfg(test)]
         if result.is_ok()
@@ -108,6 +109,19 @@ impl RuntimeAdmission {
             let _ = entered.send("owner-authorized");
         }
         result
+    }
+
+    /// Enclose a synchronous privacy commit with the same session, installation
+    /// and app-lock authority as durable acceptance. Core calls this outside
+    /// its state lock after awaiting the policy gate.
+    pub(crate) fn authorize_io(
+        &self,
+        runtime: &NodeRuntime,
+        commit: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        self.checked(runtime, || Ok(commit())).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+        })?
     }
 
     pub(crate) async fn detached<T: Send + 'static>(

@@ -361,9 +361,9 @@ mod tests {
         }
 
         fn create(authenticated: bool) -> Self {
-            // These probes deliberately hold a synchronous privacy-state writer.
-            // Background readers can block indefinitely until the test releases it;
-            // isolate them so low-core runners can still execute registered logout.
+            // Isolate background producers from deliberately stalled legacy
+            // privacy callbacks, including regressions that retain a state writer,
+            // so low-core runners can still execute registered logout.
             let background = authenticated.then(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
@@ -421,7 +421,11 @@ mod tests {
                     crate::chat_commands::set_device_sync_category,
                     crate::chat_commands::get_account_preferences,
                     crate::chat_commands::set_account_preference,
-                    crate::commands::logout
+                    crate::commands::logout,
+                    crate::privacy_commands::get_privacy,
+                    crate::privacy_commands::set_invisible,
+                    crate::privacy_commands::set_privacy_allowed,
+                    crate::privacy_commands::initiate_privacy_contact
                 ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
                 .unwrap();
@@ -1050,10 +1054,125 @@ mod tests {
         assert_eq!(fixture.sync_documents(), before);
     }
 
+    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 4] {
+        [
+            ("get_privacy", serde_json::json!({"owner":"alice"})),
+            (
+                "set_invisible",
+                serde_json::json!({"owner":"alice","invisible":true}),
+            ),
+            (
+                "set_privacy_allowed",
+                serde_json::json!({"owner":"alice","account":account,"allowed":true}),
+            ),
+            (
+                "initiate_privacy_contact",
+                serde_json::json!({"owner":"alice","account":account}),
+            ),
+        ]
+    }
+
+    fn privacy_documents(fixture: &Fixture, owner: &str) -> [Vec<u8>; 3] {
+        ["privacy.policy", "peer-proofs", "peer-routes"].map(|name| {
+            std::fs::read(fixture.root.path().join("accounts").join(owner).join(name)).unwrap()
+        })
+    }
+
+    #[test]
+    fn registered_privacy_commands_reject_app_lock_and_stale_installation_without_writes() {
+        use tauri::Manager;
+        for locked in [true, false] {
+            let fixture = Fixture::new();
+            let account = fixture.offline_peer();
+            fixture
+                .node
+                .0
+                .blocking_lock()
+                .as_ref()
+                .unwrap()
+                .handle()
+                .cached_peer_snapshot()
+                .unwrap();
+            let before = privacy_documents(&fixture, "alice");
+            if locked {
+                crate::app_lock::lock_app(
+                    fixture.webview.state::<AppState>(),
+                    fixture.webview.state::<crate::app_lock::AppLock>(),
+                )
+                .unwrap();
+            } else {
+                fixture.node.next_lifecycle_ticket();
+            }
+            for (command, body) in privacy_requests(&account) {
+                assert!(
+                    fixture.invoke(command, body).is_err(),
+                    "{command} accepted locked={locked}"
+                );
+                assert_eq!(
+                    privacy_documents(&fixture, "alice"),
+                    before,
+                    "{command} wrote locked={locked}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn registered_privacy_commands_queued_before_same_owner_generation_change_do_not_write() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        fixture
+            .node
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .handle()
+            .cached_peer_snapshot()
+            .unwrap();
+        let before = privacy_documents(&fixture, "alice");
+        for (command, body) in privacy_requests(&account) {
+            let (entered, captured) = std::sync::mpsc::channel();
+            *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+            let lifecycle = fixture.node.0.blocking_lock();
+            let webview = fixture.webview.clone();
+            let pending = std::thread::spawn(move || invoke(&webview, command, body));
+            captured
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            fixture
+                .app_state
+                .session()
+                .set("replacement".into(), user("alice"), "pw".into());
+            drop(lifecycle);
+            assert!(
+                pending.join().unwrap().is_err(),
+                "{command} accepted old generation"
+            );
+            assert_eq!(
+                privacy_documents(&fixture, "alice"),
+                before,
+                "{command} wrote old generation"
+            );
+            *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+        }
+    }
+
+    #[test]
+    fn registered_privacy_mutations_reject_logout_while_waiting_for_policy_gate() {
+        for command in [
+            "set_invisible",
+            "set_privacy_allowed",
+            "initiate_privacy_contact",
+        ] {
+            registered_logout_during_local_grant_wait(command);
+        }
+    }
+
     fn registered_logout_during_local_grant_wait(command: &'static str) {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        // Routing also consults the held state synchronously. Keep only one
-        // deliberate blocker on Tauri's shared IPC pool, leaving logout runnable.
+        // Keep only one deliberately blocked legacy callback on Tauri's shared
+        // IPC pool, leaving registered logout runnable while the gate is held.
         // Ordinary tests and product work remain concurrent.
         static GRANT_WAIT_PROBES: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _probe = GRANT_WAIT_PROBES.lock().unwrap();
@@ -1093,7 +1212,7 @@ mod tests {
         *fixture.app_state.owner_file_progress_hook.lock().unwrap() = Some(Box::new(move || {
             produced.fetch_add(1, Ordering::SeqCst);
         }));
-        // Public legacy authorization owns the actual privacy gate and state lock.
+        // Public legacy authorization owns the actual serialized privacy gate.
         // Its own mutation is rejected when released, isolating the enqueue producer.
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -1119,6 +1238,11 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
         let body = match command {
+            "set_invisible" => serde_json::json!({"owner":owner,"invisible":true}),
+            "set_privacy_allowed" => {
+                serde_json::json!({"owner":owner,"account":account,"allowed":true})
+            }
+            "initiate_privacy_contact" => serde_json::json!({"owner":owner,"account":account}),
             "send_file_to_account" => {
                 serde_json::json!({"account":account,"path":path,"media":false})
             }
@@ -1148,7 +1272,27 @@ mod tests {
                 Err(_) => return false,
             }
         };
-        let authorized = wait_phase("owner-authorized");
+        let privacy = matches!(
+            command,
+            "set_invisible" | "set_privacy_allowed" | "initiate_privacy_contact"
+        );
+        let authorized = wait_phase(if privacy {
+            "owner-entry"
+        } else {
+            "owner-authorized"
+        });
+        if privacy {
+            // Capture precedes the runtime mutex. Wait until the detached IPC
+            // owns that mutex and is queued behind the actual core policy gate.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while fixture.node.0.try_lock().is_ok() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "privacy never retained lifecycle"
+                );
+                std::thread::yield_now();
+            }
+        }
         let webview = fixture.webview.clone();
         let logout = std::thread::spawn(move || invoke(&webview, "logout", serde_json::json!({})));
         let published = wait_phase("logout-published");
@@ -1204,7 +1348,12 @@ mod tests {
             std::io::ErrorKind::PermissionDenied
         );
         assert_eq!(logout_result.unwrap(), serde_json::json!({"success":true}));
-        assert_eq!(result.unwrap_err()["kind"], "authorization");
+        let error = result.unwrap_err();
+        if privacy {
+            assert_eq!(error, serde_json::json!("Could not update network privacy"));
+        } else {
+            assert_eq!(error["kind"], "authorization");
+        }
         assert!(history_empty);
         assert!(reopened_empty && reopened_policy == policy);
         assert!(

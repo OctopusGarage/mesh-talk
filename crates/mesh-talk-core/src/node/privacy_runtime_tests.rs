@@ -2714,3 +2714,73 @@ async fn physical_scope_tcp_presence_preserves_lan_roster_and_hides_overlay_pres
     alice.set_invisible(true).await.unwrap();
     assert!(!alice.publicly_visible_at(addr));
 }
+
+#[tokio::test]
+async fn guarded_privacy_commits_enclose_all_writes_without_holding_state_lock() {
+    for operation in ["mode", "allow", "initiate"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (node, _) = node(dir.path());
+        node.configure_privacy(
+            dir.path(),
+            "pw",
+            &node.signed_announce("Alice", 1234),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        let identity = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let proof = Announce::new_with_account(&identity, &account, "Bob", 9);
+        node.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+        let documents = || {
+            ["privacy.policy", "peer-proofs", "peer-routes"]
+                .map(|name| std::fs::read(dir.path().join(name)).unwrap())
+        };
+        let before = documents();
+        let generation = node.privacy.generation.load(Ordering::SeqCst);
+        let deny = |_: &mut dyn FnMut() -> io::Result<()>| Err(denied());
+        let rejected = match operation {
+            "mode" => node.set_invisible_guarded(true, deny).await,
+            "allow" => {
+                node.set_allowed_guarded(&account.account_id(), true, deny)
+                    .await
+            }
+            _ => {
+                node.initiate_contact_guarded(&account.account_id(), deny)
+                    .await
+            }
+        };
+        assert!(rejected.is_err());
+        assert_eq!(documents(), before);
+        assert_eq!(node.privacy.generation.load(Ordering::SeqCst), generation);
+        let enclosing = |commit: &mut dyn FnMut() -> io::Result<()>| {
+            // Hosts acquire their session authority here. No privacy-state lock
+            // may already be held when that authority is acquired.
+            assert!(node.privacy.state.try_write().is_ok());
+            assert_eq!(documents(), before);
+            commit()?;
+            assert_ne!(
+                documents(),
+                before,
+                "{operation} mutation escaped authority"
+            );
+            assert!(node.privacy.generation.load(Ordering::SeqCst) > generation);
+            Ok(())
+        };
+        match operation {
+            "mode" => node.set_invisible_guarded(true, enclosing).await,
+            "allow" => {
+                node.set_allowed_guarded(&account.account_id(), true, enclosing)
+                    .await
+            }
+            _ => {
+                node.initiate_contact_guarded(&account.account_id(), enclosing)
+                    .await
+            }
+        }
+        .unwrap();
+    }
+}
