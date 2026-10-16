@@ -92,7 +92,10 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   `shared_root = HKDF(DH(me,peer))`; init_alice/init_bob; DH ratchet on each inbound →
   forward secrecy + post-compromise recovery; bounded out-of-order (1000/2000); lower
   `user_id` is the canonical initiator (simultaneous-init tie-break); state encrypted on
-  disk (`node/ratchet_sessions.rs`). The `dm.rs` X3DH sealed-box (no FS) is now used only
+  disk (`node/ratchet_sessions.rs`). The tie-break may replace an initial sending
+  session only before an authenticated receiving chain exists; replayed ciphertext
+  must not reset an established session, including after reload.
+  The `dm.rs` X3DH sealed-box (no FS) is now used only
   to distribute channel keys, seal file manifests and encrypt delivery-control
   metadata (the latter has no forward secrecy and contains no message text).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
