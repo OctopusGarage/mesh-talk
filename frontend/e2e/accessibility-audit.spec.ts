@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
@@ -74,6 +75,7 @@ test("settings controls stay legible when privacy cannot load", async ({
   });
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "connection");
   const managePrivacy = page.getByTestId("manage-privacy");
   await expect(managePrivacy).toBeDisabled();
   expect(

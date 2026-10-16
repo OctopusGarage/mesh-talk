@@ -1,6 +1,6 @@
 # Settings: Information Architecture and Interaction Review
 
-Date: 2026-10-16. Status: **review and proposed direction, not an implemented redesign**.
+Date: 2026-10-16. Status: **historical pre-change review; recommendations implemented in the follow-up below**.
 Reviewed source baseline: `0702ead` on `perf/optimization-series-20261015`.
 
 ## Decision
@@ -32,7 +32,7 @@ Source: [SettingsDialog.tsx](../../frontend/src/features/chat/SettingsDialog.tsx
 [DataRecoverySettings.tsx](../../frontend/src/features/chat/DataRecoverySettings.tsx),
 [ThemePicker.tsx](../../frontend/src/features/chat/ThemePicker.tsx).
 The security and contact sections are deliberately mapped to the privacy
-navigation item by [settingsScroll.ts](../../frontend/src/features/chat/settingsScroll.ts).
+navigation item by the former `settingsScroll.ts` module (removed by the follow-up).
 
 ## What works
 
@@ -267,3 +267,17 @@ returns an invalid key. Temporary capture/test servers were stopped.
    invisible/physical-only combinations and reopen persistence.
 5. Run affected unit/integration and targeted browser cases. Full suites remain
    CI/pre-PR or explicit-request gates.
+
+## Implementation follow-up
+
+The approved recommendation is implemented by the seven pages in
+[`settings/`](../../frontend/src/features/chat/settings), the shared controller
+and pure availability/retention model, and the
+[maintained settings guide](../settings.md). The shell no longer tracks scroll
+anchors; category and displayed content use one state. Presets stage an explicit
+Apply action and read back canonical backend values. Retention tightening has
+confirmation/backup-first; file policy has unknown/retry; backup has independent
+status and guarded picker lifecycle; all six locales use correct interpolation.
+The preceding screenshots and 24/40 rubric describe the reviewed baseline, not
+the redesigned interface. Verification uses focused tests and targeted browser
+cases; no new heuristic score or native-platform certification is inferred.

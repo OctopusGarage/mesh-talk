@@ -96,7 +96,7 @@ Parameters:
 - `--post-office`: run in relay mode (stores-and-forwards recipient-encrypted
   opaque event wrappers for offline peers)
 
-Desktop users can turn off use of discovered relays in **Settings → Privacy & security →
+Desktop users can turn off use of discovered relays in **Settings → Connection & delivery →
 Use post-office relays**. The per-device preference is on by default and takes
 effect on the running node. Turning it off stops that device's relay uploads and
 downloads, so offline delivery may wait until a peer is reachable directly.
@@ -107,7 +107,7 @@ do not replicate automatically. Equal bridge relays can reconcile eligible opaqu
 mailboxes after explicit enrollment through a shared public trust manifest. See
 [the federation deployment workflow](../docs/post-office-federation.md).
 
-**Settings → Network privacy** also exposes independent relay sending/receiving,
+**Settings → Connection & delivery** also exposes independent relay sending/receiving,
 public bridge discovery and physical-LAN-only discovery. Master-off overrides relay
 data/directory participation without erasing saved preferences. See
 [the settings contract](../docs/network-design-reference.md#4-settings-and-deployment-configuration).

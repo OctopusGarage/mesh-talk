@@ -6,7 +6,7 @@ while you still have access to an unlocked device.
 
 ## Create a backup
 
-1. Open **Settings → Data and recovery → Create encrypted backup**.
+1. Open **Settings → History & backup → Create encrypted backup**.
 2. Read the included and excluded data list. Save the displayed recovery key
    somewhere separate from the backup file, then enter the requested key groups.
 3. Choose a new `.mtbackup` destination. Messaging pauses briefly while Mesh-Talk

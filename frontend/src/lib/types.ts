@@ -193,7 +193,7 @@ export interface AppSettings {
   physical_lan_only: boolean;
   /** Share public presence through an opt-in post-office bridge. */
   bridge_discovery_enabled: boolean;
-  /** Full fingerprint of the shared cross-site post-office hub (empty = normal election). */
+  /** Preferred directly reachable post-office fingerprint; empty selects automatically with eligible alternatives. */
   bridge_hub_id: string;
   /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */
   ringtone: string;

@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
@@ -103,6 +104,7 @@ test("capture current desktop surfaces for the site and README", async ({
 
   for (const theme of ["barcelona", "argentina"] as const) {
     await openSidebarMenuAction(page, "sidebar-nav-settings");
+    await selectSettingsCategory(page, "appearance");
     await page.getByTestId(`theme-${theme}`).click();
     await expect(page.locator("html")).toHaveAttribute("data-palette", theme);
     await waitForThemePaint(page);
@@ -114,6 +116,7 @@ test("capture current desktop surfaces for the site and README", async ({
   }
 
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-messi").click();
   await page.keyboard.press("Escape");
 
@@ -125,6 +128,7 @@ test("capture current desktop surfaces for the site and README", async ({
   await page.keyboard.press("Escape");
 
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("settings-dialog")).toBeVisible();
   await page.screenshot({ path: resolve(output, "settings.png") });
   await expect(page.getByTestId("theme-picker")).toBeVisible();

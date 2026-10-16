@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
@@ -624,6 +625,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.locator("html")).toHaveClass(/dark/);
 
     await openSidebarMenuAction(page, "sidebar-nav-settings");
+    await selectSettingsCategory(page, "appearance");
     await expect(page.getByTestId("theme-picker")).toBeVisible();
 
     await page.getByTestId("theme-light").click();

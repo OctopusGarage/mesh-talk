@@ -130,9 +130,12 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
 
 ## 6. Remaining opportunities and limits
 
-- `SettingsDialog.tsx` still combines many settings categories. Extract category
-  rendering around its existing session coordinator; do not duplicate queued save
-  or owner-change handling in every category.
+- Settings categories now live in `features/chat/settings/`, composed by
+  `SettingsDialog.tsx`. `useSettingsController.ts` shares acknowledged values and
+  delegates owner/view validity to `settingsDialogSession.ts`; `model.ts` owns
+  dependency reasons and retention tightening. See [settings](settings.md).
+  Future settings must extend the relevant category and shared rules rather than
+  adding another independent save coordinator.
 - `ConversationView.tsx` still composes attachment intake and message actions.
   Consolidate intake only after characterizing the differences between paste,
   drop, picker, screenshots and directory attachments.

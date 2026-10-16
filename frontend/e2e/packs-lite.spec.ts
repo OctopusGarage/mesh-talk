@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { resolve } from "node:path";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
@@ -10,6 +11,7 @@ test("lite starts without avatar and theme libraries but accepts ZIPs", async ({
 }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-dark")).toBeVisible();
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
   await page

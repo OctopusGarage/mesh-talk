@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
@@ -17,6 +18,7 @@ async function login(page: Page, username = "tester") {
 }
 async function manage(page: Page) {
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "privacy");
   await page.getByTestId("manage-hidden-contacts").click();
   await expect(page.getByTestId("hidden-contacts-dialog")).toBeVisible();
 }

@@ -35,6 +35,7 @@ belongs and how to keep the site, README, and guides aligned.
 | [`docs/backup-recovery.md`](backup-recovery.md)                                     | Manual encrypted backup, offline restore, recovery key handling, and coverage limits.                                                                       |
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md)                 | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks.                                                                |
 | [`docs/updates.md`](updates.md)                                                     | Manual release check, verified package download, and platform install steps.                                                                                |
+| [`docs/settings.md`](settings.md)                                                   | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
 | [`docs/privacy-controls.md`](privacy-controls.md)                                   | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
 | [`specifications/TODO.md`](../specifications/TODO.md)                               | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
 

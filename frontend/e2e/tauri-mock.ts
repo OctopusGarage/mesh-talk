@@ -1137,6 +1137,11 @@ export const test = base.extend({
           clear_saved_session: ok,
           media_migration_warning: () => false,
 
+          // Synthetic recovery fixture; never use this key outside browser tests.
+          prepare_backup_key: () =>
+            "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+          backup_status: () => null,
+
           // settings
           get_app_settings: () => appSettings,
           set_app_settings: (a) => {

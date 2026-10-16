@@ -1,6 +1,6 @@
 # Privacy controls
 
-Open **Settings → Privacy & security** to choose a privacy level. The presets
+Open **Settings → Privacy & security** to choose and apply a device privacy preset. The presets
 change notification previews, automatic locking, and sensitive copying:
 
 | Level              | Message previews | Automatic lock   | Lock when hidden | Copy confirmation | Clipboard clear  |
@@ -9,7 +9,10 @@ change notification previews, automatic locking, and sensitive copying:
 | Private            | Off              | After 10 minutes | Off              | Off               | After 60 seconds |
 | Strict             | Off              | After 1 minute   | On               | On                | After 30 seconds |
 
-Changing one of these controls individually switches the level to **Custom**.
+Choose **Apply preset** after selecting a preset. Notification preview has its
+editor in **Notifications & calls**; Privacy & security shows its current value
+and links to the same editor. Changing an individual protection switches the
+level to the derived **Custom** state. Network and relay permissions are unaffected.
 **Lock now** hides chats while background delivery continues. Unlock with the
 account password, or with Touch ID on supported macOS systems when **Stay signed
 in** has a saved credential. Clipboard clearing is best effort and only clears
@@ -17,7 +20,7 @@ text while the clipboard still holds this app's copy.
 
 ## Network privacy and contact lists
 
-**Settings → Network privacy → Invisible mode** stops public presence
+**Settings → Connection & delivery → Invisible mode** stops public presence
 announcements. Accounts you manually allow under **Reply permissions**, and
 accounts you contact first, can reach you while invisible. Existing joined
 groups keep group-only access. The permission list is saved for the signed-in
@@ -25,7 +28,7 @@ user on this device; it does not sync to other devices. Offline relay delivery
 requires a manually allowed trusted relay account. Invisible mode is not IP
 anonymity: old packets and a network port scan can still reveal the device.
 
-The same **Network privacy** section separates:
+The same **Connection & delivery** page separates:
 
 - **Use post offices**: master switch for relay data and directory participation.
 - **Send / Receive through post offices**: independent content directions. Sending
@@ -43,7 +46,7 @@ communication remains independent of relay direction settings. The full matrix
 and startup/live-change contract are in the
 [network baseline](network-design-reference.md#4-settings-and-deployment-configuration).
 
-**Settings → Contacts → Hidden contacts** removes selected accounts from your
+**Settings → Privacy & security → Hidden contacts** removes selected accounts from your
 local contact lists and direct-message search. It keeps their history and does
 not stop their messages or calls. Shared groups are unchanged. This is a local
 view setting, separate from invisible mode.

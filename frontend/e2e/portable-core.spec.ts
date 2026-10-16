@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/portable-evidence";
@@ -173,6 +174,7 @@ test("light theme persists across browser reload and sign in", async ({
 }) => {
   await enterChat(page);
   await settings(page);
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-light").click();
   await expect(page.locator("html")).not.toHaveClass(/dark/);
   expect(
@@ -185,6 +187,7 @@ test("light theme persists across browser reload and sign in", async ({
   await page.getByTestId("login-submit").click();
   await expect(page.getByTestId("chat-shell")).toBeVisible();
   await settings(page);
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-light")).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -341,8 +344,10 @@ for (const viewport of [
       await settings(page);
       await expectDialogFitsViewport(page, "settings-dialog");
       await dialogKeyboardContained(page, "settings-dialog");
+      await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-light").click();
       await expect(page.locator("html")).not.toHaveClass(/dark/);
+      await selectSettingsCategory(page, "general");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");
@@ -359,8 +364,10 @@ for (const viewport of [
       await expectDialogFitsViewport(page, "profile-dialog");
       await page.keyboard.press("Escape");
       await settings(page);
+      await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-dark").click();
       await expect(page.locator("html")).toHaveClass(/dark/);
+      await selectSettingsCategory(page, "general");
       await page.getByTestId("settings-language-select").selectOption("en");
       await expect(
         page.getByText("Direct messages", { exact: true }),
@@ -424,6 +431,7 @@ if (process.env.EVAL_TIER === "extended")
       "dark",
     ]) {
       await settings(page);
+      await selectSettingsCategory(page, "appearance");
       await page.getByTestId(`theme-${theme}`).click();
       await expect(page.getByTestId(`theme-${theme}`)).toHaveAttribute(
         "aria-pressed",
@@ -434,6 +442,7 @@ if (process.env.EVAL_TIER === "extended")
           page.evaluate(() => localStorage.getItem("mesh-talk-theme")),
         )
         .toBe(theme);
+      await selectSettingsCategory(page, "general");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");

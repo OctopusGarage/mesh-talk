@@ -17,7 +17,7 @@ export function createSettingsApi(currentOwner: () => string | null) {
   // changes from different controls cannot each write a stale copy of the other fields.
   let pendingUpdate: Promise<void> = Promise.resolve();
   return {
-    /** The two non-autostart toggles (minimize-to-tray, notifications). */
+    /** Owner-scoped desktop preferences; the host normalizes compound privacy presets. */
     get: () => readFor(currentOwner()),
     set: (value: AppSettings) => writeFor(currentOwner(), value),
     update: (patch: Partial<AppSettings>): Promise<void> => {
