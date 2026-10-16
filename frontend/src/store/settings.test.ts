@@ -68,3 +68,30 @@ describe("useSettings setters", () => {
     expect(useSettings.getState().ringtone).toBe("digital");
   });
 });
+
+it("loads every presentation privacy field and restores safe defaults on owner replacement", async () => {
+  const privacy = {
+    privacy_level: "custom" as const,
+    notification_preview: false,
+    auto_lock_seconds: 120,
+    lock_when_hidden: true,
+    confirm_sensitive_copy: true,
+    clipboard_clear_seconds: 45,
+  };
+  invoke.mockResolvedValue({
+    calls_enabled: false,
+    ringtone: "digital",
+    ...privacy,
+  });
+  await useSettings.getState().load();
+  expect(useSettings.getState().privacy).toEqual(privacy);
+  useSettings.getState().setOwner("bob");
+  expect(useSettings.getState().privacy).toEqual({
+    privacy_level: "balanced",
+    notification_preview: true,
+    auto_lock_seconds: 0,
+    lock_when_hidden: false,
+    confirm_sensitive_copy: false,
+    clipboard_clear_seconds: 0,
+  });
+});

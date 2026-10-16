@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { settings as settingsApi } from "@/lib/api";
+import { privacyFromSettings } from "@/lib/privacySettings";
 import { errorMessage } from "@/lib/error";
 import {
   selectablePostOffices,
@@ -126,17 +127,6 @@ function Row({
 
 const SELECT_CLASS =
   "h-9 rounded-md border border-input bg-background px-2 text-[13px] transition-[border-color,box-shadow] duration-150 hover:border-ring/40 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/25 [@media(hover:none)]:min-h-11";
-
-function privacyFromSettings(settings: AppSettings) {
-  return {
-    privacy_level: settings.privacy_level,
-    notification_preview: settings.notification_preview,
-    auto_lock_seconds: settings.auto_lock_seconds,
-    lock_when_hidden: settings.lock_when_hidden,
-    confirm_sensitive_copy: settings.confirm_sensitive_copy,
-    clipboard_clear_seconds: settings.clipboard_clear_seconds,
-  };
-}
 
 const LANGUAGE_LABELS: Record<Language, string> = {
   en: "English",

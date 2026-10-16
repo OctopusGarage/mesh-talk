@@ -40,22 +40,23 @@ belongs and how to keep the site, README, and guides aligned.
 
 ## Contributor workflow and design
 
-| Doc                                                                                           | What it covers                                                                                    |
-| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [`AGENTS.md`](../AGENTS.md)                                                                   | Repository guidelines for AI agents / contributors — structure, build/test commands, conventions. |
-| [`CONTRIBUTING.md`](../CONTRIBUTING.md)                                                       | How to set up, build, test, and submit changes.                                                   |
-| [`specifications/development_conventions.md`](../specifications/development_conventions.md)   | Coding standards, naming, error handling, performance, cross-platform conventions.                |
-| [`specifications/testing_guidelines.md`](../specifications/testing_guidelines.md)             | The three test layers — inline unit, multi-process backend E2E, Playwright UI E2E.                |
-| [`docs/testing-feedback-loop.md`](testing-feedback-loop.md)                                   | Focused local test commands, module boundaries, and full-gate triggers.                           |
-| [`specifications/git_standards.md`](../specifications/git_standards.md)                       | Conventional-commit format, scopes, and GPG signing / hook enforcement.                           |
-| [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements.                     |
-| [`scripts/README.md`](../scripts/README.md)                                                   | Script entry points, CI globs, manual real-machine rigs, and maintenance tools.                   |
-| [`docs/chat-ui-manual-test.md`](chat-ui-manual-test.md)                                       | Supplementary manual smoke checklist for the desktop chat UI.                                     |
-| [`fuzz/README.md`](../fuzz/README.md)                                                         | Current protocol fuzz targets, scope, and local commands.                                         |
-| [`frontend/DESIGN.md`](../frontend/DESIGN.md)                                                 | Current native-direction visual system and interaction rules.                                     |
-| [`docs/screenshots/README.md`](screenshots/README.md)                                         | How current demo screenshots are captured and shared with the site.                               |
-| [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md)                                       | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing.        |
-| [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.           |
+| Doc                                                                                           | What it covers                                                                                           |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| [`AGENTS.md`](../AGENTS.md)                                                                   | Repository guidelines for AI agents / contributors — structure, build/test commands, conventions.        |
+| [`CONTRIBUTING.md`](../CONTRIBUTING.md)                                                       | How to set up, build, test, and submit changes.                                                          |
+| [`docs/module-boundaries.md`](module-boundaries.md)                                           | Maintained feature owners, reuse seams, sidebar modules and coordination rules for parallel development. |
+| [`specifications/development_conventions.md`](../specifications/development_conventions.md)   | Coding standards, naming, error handling, performance, cross-platform conventions.                       |
+| [`specifications/testing_guidelines.md`](../specifications/testing_guidelines.md)             | The three test layers — inline unit, multi-process backend E2E, Playwright UI E2E.                       |
+| [`docs/testing-feedback-loop.md`](testing-feedback-loop.md)                                   | Focused local test commands, module boundaries, and full-gate triggers.                                  |
+| [`specifications/git_standards.md`](../specifications/git_standards.md)                       | Conventional-commit format, scopes, and GPG signing / hook enforcement.                                  |
+| [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements.                            |
+| [`scripts/README.md`](../scripts/README.md)                                                   | Script entry points, CI globs, manual real-machine rigs, and maintenance tools.                          |
+| [`docs/chat-ui-manual-test.md`](chat-ui-manual-test.md)                                       | Supplementary manual smoke checklist for the desktop chat UI.                                            |
+| [`fuzz/README.md`](../fuzz/README.md)                                                         | Current protocol fuzz targets, scope, and local commands.                                                |
+| [`frontend/DESIGN.md`](../frontend/DESIGN.md)                                                 | Current native-direction visual system and interaction rules.                                            |
+| [`docs/screenshots/README.md`](screenshots/README.md)                                         | How current demo screenshots are captured and shared with the site.                                      |
+| [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md)                                       | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing.               |
+| [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
 
 ## Evaluation records
 

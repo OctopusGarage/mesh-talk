@@ -22,6 +22,10 @@ for cross-module design contracts, illustrated scenarios and development guardra
 
 ## 1. Process & layers
 
+See the [module ownership and reuse guide](module-boundaries.md) before assigning
+parallel feature work or adding shared business logic. It maps current owners and
+feature-local interfaces across the core, desktop host and frontend.
+
 ```
 React UI ── lib/api/*.ts ──invoke()──▶ Tauri IPC (chat_commands/)
    ▲                                    │
