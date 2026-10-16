@@ -584,6 +584,14 @@ async fn download_and_verify_with_client(
 mod tests {
     use super::*;
 
+    fn next_release_tag() -> String {
+        let installed = current_version();
+        format!(
+            "v{}",
+            semver::Version::new(installed.major, installed.minor, installed.patch + 1)
+        )
+    }
+
     #[test]
     fn package_names_match_all_release_targets_and_editions() {
         assert_eq!(
@@ -604,14 +612,17 @@ mod tests {
 
     #[test]
     fn rejects_unverified_or_mismatched_release_assets() {
+        let tag = next_release_tag();
+        let name = format!("mesh-talk_{tag}_macos_arm64.zip");
         let mut release: Release = serde_json::from_value(serde_json::json!({
-            "tag_name": "v0.4.0", "body": "Changes", "draft": false, "prerelease": false,
+            "tag_name": tag, "body": "Changes", "draft": false, "prerelease": false,
             "assets": [{
-                "name": "mesh-talk_v0.4.0_macos_arm64.zip", "state": "uploaded", "size": 42,
-                "browser_download_url": "https://github.com/OctopusGarage/mesh-talk/releases/download/v0.4.0/mesh-talk_v0.4.0_macos_arm64.zip",
+                "name": name, "state": "uploaded", "size": 42,
+                "browser_download_url": format!("{RELEASES_URL}/download/{tag}/{name}"),
                 "digest": format!("sha256:{}", "a".repeat(64))
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(
             describe_release(&release, "macos", "aarch64", "default")
                 .unwrap()
@@ -821,18 +832,20 @@ mod tests {
 
     #[test]
     fn release_description_distinguishes_current_and_unavailable_packages() {
+        let installed = current_version();
         let mut release: Release = serde_json::from_value(serde_json::json!({
-            "tag_name": "v0.3.2", "body": "x".repeat(1300),
+            "tag_name": format!("v{installed}"), "body": "x".repeat(1300),
             "draft": false, "prerelease": false, "assets": []
         }))
         .unwrap();
         let current = describe_release(&release, "macos", "aarch64", "default").unwrap();
         assert!(!current.is_newer);
-        assert_eq!(current.latest_version, "0.3.2");
+        assert_eq!(current.current_version, installed.to_string());
+        assert_eq!(current.latest_version, installed.to_string());
         assert_eq!(current.notes.chars().count(), 1200);
         assert!(current.package_name.is_none());
 
-        release.tag_name = "v0.4.0".into();
+        release.tag_name = next_release_tag();
         let unavailable = describe_release(&release, "linux", "x86_64", "lite").unwrap();
         assert!(unavailable.is_newer);
         assert!(unavailable.package_name.is_none());

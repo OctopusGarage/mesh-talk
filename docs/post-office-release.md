@@ -60,7 +60,7 @@ docker run -d --name mesh-talk-post-office --restart unless-stopped \
   --name post-office --port 47475 --discovery-port 47474
 ```
 
-Replace `<tag>` with the release tag, for example `v0.3.2`. Back up the
+Replace `<tag>` with the release tag, for example `v0.4.0`. Back up the
 directory, including its password and keystore, if queued custody matters.
 Check startup with `docker logs mesh-talk-post-office` and confirm clients
 discover its signed post-office announcement. Allow LAN TCP 47475 and signed
