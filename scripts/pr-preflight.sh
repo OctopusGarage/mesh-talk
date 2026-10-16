@@ -6,10 +6,18 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Keep headless macOS Docker/SSH checks out of maintenance-sleep cycles.
+# caffeinate releases its assertions when this child exits; no settings change.
+if [ "$(uname -s)" = Darwin ] && [ "${MESH_PR_KEEP_AWAKE:-0}" != 1 ]; then
+    exec caffeinate -is env MESH_PR_KEEP_AWAKE=1 "$repo_root/scripts/pr-preflight.sh" "$@"
+fi
+
 if [ -n "$(git status --porcelain)" ]; then
     echo "Commit or stash changes before PR preflight so the diff matches the tested revision." >&2
     exit 1
 fi
+
+candidate="$(git rev-parse HEAD)"
 
 base_ref="$(node --input-type=module - "$@" <<'JS'
 import { parseFlags } from './scripts/pr-platform/plan.mjs';
@@ -33,9 +41,8 @@ while IFS= read -r spec; do
     if [ -n "$spec" ]; then ui_specs+=("$spec"); fi
 done <<< "$ui_specs_text"
 
-# Verify the same committed source on both platforms before spending time on
-# local coverage and portable browser evidence. Failures retain both logs.
-node scripts/pr-platform/run.mjs --base "$base_ref" "$@"
+# Validate selectors before local work, without starting either environment.
+node scripts/pr-platform/run.mjs --plan --base "$base_ref" "$@" >/dev/null
 
 node --test scripts/diagnostics/*.test.mjs
 typos
@@ -70,5 +77,14 @@ if printf '%s\n' "$changed_files" | rg -q '^(frontend/e2e/portable-core\.spec\.t
     )
     EVAL_BROWSER=chromium node scripts/evals/browser-report.mjs frontend/eval-results/portable/chromium/core/results.json
 fi
+
+if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ]; then
+    echo "The candidate changed during local checks. Verify the new revision before platform execution." >&2
+    exit 1
+fi
+
+# Catch local static, coverage and scenario failures before remote builds.
+# Both platforms still verify the same committed source before publication.
+node scripts/pr-platform/run.mjs --base "$base_ref" "$@"
 
 echo "PR preflight passed for $(git rev-parse --short HEAD). Run ./scripts/check-health.sh for the final full gate."

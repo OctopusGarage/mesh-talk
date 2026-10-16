@@ -53,12 +53,18 @@ change selection, coverage and `gh pr create --base release`. A local revision
 such as `HEAD` cannot stand in for a PR target branch.
 
 `scripts/pr-preflight.sh` automatically sends the same test plan to Linux
-Docker and Windows over SSH before its existing coverage and portable browser
-checks. Both platforms test an archive of committed HEAD. Workspaces are
+Docker and Windows over SSH after its existing local static, coverage and
+portable browser checks. Cheap local failures therefore block remote builds
+before they consume time. Both platforms test an archive of committed HEAD. Workspaces are
 isolated from installed applications and post-office services. Both results
 are collected even if one fails. Logs and revision-bound reports remain
 untracked under `target/pr-platform/`; dependency and build caches can be
 reused, but successful verdicts are never reused for another revision.
+On macOS the preflight holds a temporary `caffeinate -is` assertion until it
+exits, preventing idle/system sleep on AC without changing power settings or
+keeping the display lit. This avoids Docker timer failures during maintenance
+sleep. Only one local preflight should run at a time. Avoid overlapping Docker
+compilation and browser workloads with the timing-sensitive network fixtures.
 Windows reuses an installed Cargo home only when its resolved physical
 directory is on drive D, including a C: junction that points to D. This
 preserves that directory's registry and network configuration without logging
