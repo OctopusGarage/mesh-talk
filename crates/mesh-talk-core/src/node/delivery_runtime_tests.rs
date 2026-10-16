@@ -3830,7 +3830,6 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     );
     a.set_bridge_hub_id(Some(&offline_relay.user_id())).unwrap();
 
-    a.flush_file_delivery(card).await;
     assert!(
         b.read_file(file).is_err(),
         "recipient was offline during upload"
@@ -3849,21 +3848,32 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
         &proof.public(),
     )
     .unwrap();
+    let outer_final = mailbox
+        .wrap(a.log.lock().unwrap().get(&final_chunk).unwrap())
+        .unwrap()
+        .id;
+    // The immediate flush API is one bounded best-effort turn. Exercise the
+    // retained production worker until the live fallback actually owns the bytes.
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
+    let custody = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !relay.lock().unwrap().has(&outer_final) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
     assert!(
-        relay.lock().unwrap().has(
-            &mailbox
-                .wrap(
-                    a.log
-                        .lock()
-                        .unwrap()
-                        .events(&file)
-                        .into_iter()
-                        .find(|event| event.id == final_chunk)
-                        .unwrap(),
-                )
-                .unwrap()
-                .id
-        )
+        custody.is_ok(),
+        "live fallback must retain the exact encrypted final chunk"
+    );
+    assert!(
+        b.read_file(file).is_err(),
+        "recipient remains offline throughout upload"
+    );
+    assert!(
+        !a.outgoing_file_progress(card).unwrap().delivered,
+        "relay custody is not recipient completion"
     );
     assert!(!relay.lock().unwrap().has(&final_chunk));
 
@@ -5736,13 +5746,15 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     // admission, durable storage, and reconciliation implementation.
     struct ObservedRelay {
         inner: crate::postoffice::PostOffice,
-        final_chunks: Arc<Mutex<std::collections::HashSet<EventId>>>,
+        final_chunks: Arc<Mutex<std::collections::HashMap<EventId, ConversationId>>>,
+        confirmed_files: Arc<Mutex<std::collections::HashSet<ConversationId>>>,
         confirmations: Arc<AtomicUsize>,
     }
     impl SyncStore for ObservedRelay {
         fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
             let held = self.inner.durable_have(conversation, id);
-            if held && self.final_chunks.lock().unwrap().contains(id) {
+            if held && let Some(file) = self.final_chunks.lock().unwrap().get(id) {
+                self.confirmed_files.lock().unwrap().insert(*file);
                 self.confirmations.fetch_add(1, Ordering::SeqCst);
             }
             held
@@ -5764,7 +5776,8 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
             self.inner.ingest(event)
         }
     }
-    let final_chunks = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let final_chunks = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let confirmed_files = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let confirmations = Arc::new(AtomicUsize::new(0));
     let mut office =
         crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", relay_identity)
@@ -5773,10 +5786,12 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     let relay = Arc::new(Mutex::new(ObservedRelay {
         inner: office,
         final_chunks: final_chunks.clone(),
+        confirmed_files: confirmed_files.clone(),
         confirmations: confirmations.clone(),
     }));
     let delayed = Arc::new(AtomicBool::new(false));
     let exchanges = Arc::new(AtomicUsize::new(0));
+    let sender_identity = a.identity.public();
     let server = tokio::spawn({
         let relay = relay.clone();
         let delayed = delayed.clone();
@@ -5789,18 +5804,27 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
                 let relay = relay.clone();
                 let delayed = delayed.clone();
                 let exchanges = exchanges.clone();
+                let sender_identity = sender_identity.clone();
                 connections.spawn(async move {
                     let Ok(mut channel) = super::transport::secure_accept(stream, &identity).await
                     else {
                         return;
                     };
+                    let mut delayed_exchanges = 0;
                     while let Ok(bytes) = channel.recv().await {
                         if delayed.load(Ordering::SeqCst)
+                            && channel.peer_identity() == &sender_identity
                             && super::session::requests_response(&bytes)
+                            && delayed_exchanges < 5
                         {
+                            delayed_exchanges += 1;
                             exchanges.fetch_add(1, Ordering::SeqCst);
-                            // Each complete exchange fits the unchanged 400ms budget;
-                            // even four fingerprint exchanges exceed one whole-attempt budget.
+                            // Five exchanges on EACH new sender connection inject 750ms,
+                            // exceeding the unchanged 400ms whole-attempt budget.
+                            // A reconnect resets this count, so retries cannot consume
+                            // a global delay allowance and then pass without the delay.
+                            // Do not also delay recipient drains or every later chunk
+                            // round: those add load unrelated to retained progress.
                             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                         }
                         match super::session::serve_wire_bytes(&mut channel, &relay, &bytes).await {
@@ -5826,7 +5850,14 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     let mut files = Vec::new();
     for index in 0..count {
         let source = ad.path().join(format!("relay-{index}.bin"));
-        let bytes = vec![index + 63; crate::file::CHUNK_SIZE + 31];
+        // Fair scheduling needs more than eight destinations, not large files.
+        // The separate slow case keeps its two-chunk transfer coverage.
+        let size = if slow {
+            crate::file::CHUNK_SIZE + 31
+        } else {
+            31
+        };
+        let bytes = vec![index + 63; size];
         std::fs::write(&source, &bytes).unwrap();
         let (card, file) = a
             .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
@@ -5870,7 +5901,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
             final_chunks
                 .lock()
                 .unwrap()
-                .insert(mailbox.wrap(&final_chunk).unwrap().id);
+                .insert(mailbox.wrap(&final_chunk).unwrap().id, file);
         }
         files.push((card, file, bytes));
     }
@@ -5882,7 +5913,11 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             b.drain_from_post_office().await;
-            if files.iter().all(|(_, file, _)| b.file_ready_to_save(*file)) {
+            if files.iter().all(|(_, file, _)| b.file_ready_to_save(*file))
+                && files
+                    .iter()
+                    .all(|(_, file, _)| confirmed_files.lock().unwrap().contains(file))
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -5890,19 +5925,9 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     })
     .await;
     let cooldown = if slow && received.is_ok() {
-        let confirmed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while confirmations.load(Ordering::SeqCst) == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await;
         let before = confirmations.load(Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-        Some((
-            confirmed.is_ok(),
-            before,
-            confirmations.load(Ordering::SeqCst),
-        ))
+        Some((before > 0, before, confirmations.load(Ordering::SeqCst)))
     } else {
         None
     };
