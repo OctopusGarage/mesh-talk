@@ -9,7 +9,9 @@ When a peer is offline, a peer-operated **post office** node stores-and-forwards
 events. Existing routed networks can supply optional peer discovery; opted-in
 post-office bridges introduce registered peers across sites without merging
 their IP subnets. See [routed discovery](routed-network-discovery.md) and
-[network topologies](network-topologies.md).
+[Network Topology and Communication Architecture](network-design-reference.md)
+for cross-module design contracts, illustrated scenarios and development guardrails;
+[network topologies](network-topologies.md) provides the compact overview.
 
 > The earlier RSA-contact / plaintext-UDP / TCP-relay _legacy_ stack has been retired;
 > this serverless stack is the entire product and lives at `/`. The only retained

@@ -6,14 +6,15 @@ owns them. A feature does not need a new paragraph everywhere it is mentioned.
 
 ## Audience and ownership
 
-| Surface                            | Reader's question                                    | Owns                                                                                                    |
-| ---------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| [Project site](../site/index.html) | Is Mesh-Talk for me?                                 | Product model, trust boundaries in plain language, representative UI, download and documentation paths. |
-| [Root README](../README.md)        | What is it, how do I start, and where is the source? | Concise orientation, supported communication paths, first run, repository map.                          |
-| [Documentation hub](README.md)     | Which guide answers my question?                     | Task-based routes and a complete catalog of maintained guides and evidence.                             |
-| [Architecture](ARCHITECTURE.md)    | How does the system work?                            | Protocol, modules, data flow, crypto, wire compatibility, and technical limits.                         |
-| Feature and operations guides      | How do I configure or use this capability?           | Exact steps, options, examples, constraints, and troubleshooting for their topic.                       |
-| [Evaluations](evals/)              | What was verified at the time?                       | Dated test evidence and its limits; never a substitute for current behavior.                            |
+| Surface                                                      | Reader's question                                                     | Owns                                                                                                                                               |
+| ------------------------------------------------------------ | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Project site](../site/index.html)                           | Is Mesh-Talk for me?                                                  | Product model, trust boundaries in plain language, representative UI, download and documentation paths.                                            |
+| [Root README](../README.md)                                  | What is it, how do I start, and where is the source?                  | Concise orientation, supported communication paths, first run, repository map.                                                                     |
+| [Documentation hub](README.md)                               | Which guide answers my question?                                      | Task-based routes and a complete catalog of maintained guides and evidence.                                                                        |
+| [Architecture](ARCHITECTURE.md)                              | How does the system work?                                             | Protocol, modules, data flow, crypto, wire compatibility, and technical limits.                                                                    |
+| [Network architecture baseline](network-design-reference.md) | Which communication model and contracts must future changes preserve? | Network design principles, module ownership, topology scenarios, policy interactions, resource budgets and feature-specific acceptance boundaries. |
+| Feature and operations guides                                | How do I configure or use this capability?                            | Exact steps, options, examples, constraints, and troubleshooting for their topic.                                                                  |
+| [Evaluations](evals/)                                        | What was verified at the time?                                        | Dated test evidence and its limits; never a substitute for current behavior.                                                                       |
 
 The site and README may summarize a capability, but link to its owning guide
 for setup, flags, support matrices, and changing limits. Do not copy a CLI option
