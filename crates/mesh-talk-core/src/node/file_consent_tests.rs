@@ -19,13 +19,13 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     let alice_keys = alice.secret_bytes();
     let alice_account_key = aa.secret_bytes();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bob_keys = bob.secret_bytes();
     // Neither client has a listener. Only the two relay endpoints are reachable.
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 1);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
     let (a, mut messages, _) = node_with_files(ad.path(), alice, aa, &bp);
-    let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
     a.set_bridge_discovery_enabled(true);
     b.set_bridge_discovery_enabled(true);
     a.replace_verified_dm_pull_peers(vec![bp.user_id.clone()]);
@@ -345,12 +345,17 @@ async fn direct_file_approval_shares_signed_revision_with_relay_delivery() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
     let (a, _, _) = node_with_files(ad.path(), alice, aa, &bp);
-    let (b, _, mut offers) = node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
     let server = tokio::spawn(b.clone().run_accept_loop(listener));
     let source = ad.path().join("direct.bin");
     std::fs::write(&source, b"signed direct consent").unwrap();

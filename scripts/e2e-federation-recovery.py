@@ -167,7 +167,7 @@ def run():
             processes.append(a)
             aid, aa, _, _ = SIBLING.ready(a)
             b = remote(FOUR.MACMINI, s_dir, "B", [s_dir + "/network-acceptance", "--data", s_dir + "/B", "--name", "B", "--discovery-port", str(base + 21)])
-            bid, ba, _, _ = SIBLING.ready(b)
+            bid, recipient_account, _, _ = SIBLING.ready(b)
             def configure_a():
                 for command in ["relay on", "bridge on", "prefer " + ids[0]]:
                     setting(a, command)
@@ -181,7 +181,7 @@ def run():
             wait(b, "peers", lambda line: line.startswith(f"peer {aid} "))
             p.stop()
             first = f"alternate-three-relay-delivery-{base}"
-            a.send(f"enqueue {ba} {b64(first)}")
+            a.send(f"enqueue {recipient_account} {b64(first)}")
             message = a.expect(lambda line: line.startswith("queued ")).split()[1]
             SIBLING.history_has(b, aa, first)
             wait(a, f"delivery-status {message}", lambda line: line == "delivery-status Some(Delivered)")
@@ -189,7 +189,7 @@ def run():
             payload = os.urandom(130_000)
             fixture = data / "source.bin"
             fixture.write_bytes(payload)
-            a.send(f"enqueue-file {ba} {b64(fixture)}")
+            a.send(f"enqueue-file {recipient_account} {b64(fixture)}")
             _, card, file = a.expect(lambda line: line.startswith("queued-file ")).split()
             b.expect(lambda line: line.startswith(f"file-offer {file} "))
             a.send("restart")
@@ -205,7 +205,7 @@ def run():
             print("PASS: failover file consent, sender restart, full SHA-256 and recipient completion", flush=True)
             stop_remote(q, FOUR.MAC2015, q_dir, "Q")
             second = f"queued-during-federation-partition-{base}"
-            a.send(f"enqueue {ba} {b64(second)}")
+            a.send(f"enqueue {recipient_account} {b64(second)}")
             queued = a.expect(lambda line: line.startswith("queued ")).split()[1]
             wait(a, f"delivery-status {queued}", lambda line: line == "delivery-status Some(Awaiting)")
             # A first Awaiting state alone proves nothing: even a healthy graph
