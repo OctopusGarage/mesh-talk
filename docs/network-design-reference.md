@@ -266,19 +266,551 @@ flowchart LR
 
 ### Policy, privacy, group and other feature combinations
 
-| ID  | Topology and settings                                         | Discovery / broadcast                                                                                                                 | Data forwarding and outcome                                                                                                                                                                             |
-| --- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| S1  | A is public locally, relay use on, bridge discovery off.      | A announces directly but is absent from the public cross-site directory.                                                              | Known-peer legacy mail may still use a relay; v3 federated participation is gated by opt-in. **Current.**                                                                                               |
-| S2  | A turns **Use post offices** off while P/Q remain federated.  | Direct discovery is unchanged; UI disables the bridge switch. A previously saved bridge-on flag needs the separate audit noted above. | A stops ordinary mailbox upload/drain. The desired rule is also to stop directory participation; current core refresh does not check relay use. **Current gap.**                                        |
-| S3  | A enables bridge discovery; B on the same LAN does not.       | Trusted relays may introduce A across sites, not B.                                                                                   | Remote clients cannot infer B merely because it shares A's LAN or group. **Current privacy boundary.**                                                                                                  |
-| S4  | A is invisible or a private contact.                          | No public bridge registration; private authorization rules apply separately.                                                          | A relay has no automatic exemption to reveal A. A known contact still needs the relevant authorized route. **Current boundary.**                                                                        |
-| S5  | A sends to offline D through P/Q.                             | A directory entry may expire while ciphertext remains in a mailbox.                                                                   | D drains when online, if a copy and route survive. Thirty days is an upper bound, not guaranteed storage. Relay custody does not mark Delivered. **Current.**                                           |
-| S6  | A/B/D share a group; D offline; B has **Share a copy** on.    | Group membership is not advertised by UDP discovery.                                                                                  | D may recover authorized events from B or its own opaque mailbox. P/Q cannot become sync members. **Current model.**                                                                                    |
-| S7  | Same group, but B disables **Share a copy** and A is offline. | Discovery may still show B online.                                                                                                    | B does not serve its retained group history; D needs another authorized sharing member or relay copy. **Current.**                                                                                      |
-| S8  | A sends a file to D via federated P/Q.                        | A file offer can arrive as an encrypted event.                                                                                        | D must consent; manifest/chunk integrity and full byte completion need separate evidence. A card receipt is not file completion; current file failover is narrower than text. **Validate.**             |
-| S9  | A calls D across sites.                                       | Signaling may use available application paths.                                                                                        | Media requires an independent WebRTC ICE route. P/Q are not TURN; encrypted text delivery does not prove a call works. **Current boundary.**                                                            |
-| S10 | A has two devices, one on X and one on Y.                     | Each device has its own presence, settings and identity under one account.                                                            | Roster groups the devices by account; delivery and recipient receipts remain device-specific where required. Full sibling history/settings sync needs its own authenticated path. **Current boundary.** |
-| S11 | Two trusted relays hold duplicate copies of one event.        | Directory may contain multiple routes to one verified device.                                                                         | Recipient validates and deduplicates by event identity; the UI shows one person/device, not one entry per relay. **Recommended invariant; test under failover.**                                        |
+| ID  | Topology and settings                                                         | Discovery / broadcast                                                                                                                 | Data forwarding and outcome                                                                                                                                                                             |
+| --- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1  | A is public locally, relay use on, bridge discovery off.                      | A announces directly but is absent from the public cross-site directory.                                                              | Known-peer legacy mail may still use a relay; v3 federated participation is gated by opt-in. **Current.**                                                                                               |
+| S2  | A turns **Use post offices** off while P/Q remain federated.                  | Direct discovery is unchanged; UI disables the bridge switch. A previously saved bridge-on flag needs the separate audit noted above. | A stops ordinary mailbox upload/drain. The desired rule is also to stop directory participation; current core refresh does not check relay use. **Current gap.**                                        |
+| S3  | A enables bridge discovery; B on the same LAN does not.                       | Trusted relays may introduce A across sites, not B.                                                                                   | Remote clients cannot infer B merely because it shares A's LAN or group. **Current privacy boundary.**                                                                                                  |
+| S4  | A is invisible or a private contact.                                          | No public bridge registration; private authorization rules apply separately.                                                          | A relay has no automatic exemption to reveal A. A known contact still needs the relevant authorized route. **Current boundary.**                                                                        |
+| S5  | A sends to offline D through P/Q.                                             | A directory entry may expire while ciphertext remains in a mailbox.                                                                   | D drains when online, if a copy and route survive. Thirty days is an upper bound, not guaranteed storage. Relay custody does not mark Delivered. **Current.**                                           |
+| S6  | A/B/D share a group; D offline; B has **Share a copy** on.                    | Group membership is not advertised by UDP discovery.                                                                                  | D may recover authorized events from B or its own opaque mailbox. P/Q cannot become sync members. **Current model.**                                                                                    |
+| S7  | Same group, but B disables **Share a copy** and A is offline.                 | Discovery may still show B online.                                                                                                    | B does not serve its retained group history; D needs another authorized sharing member or relay copy. **Current.**                                                                                      |
+| S8  | A sends a file to D via federated P/Q.                                        | A file offer can arrive as an encrypted event.                                                                                        | D must consent; manifest/chunk integrity and full byte completion need separate evidence. A card receipt is not file completion; current file failover is narrower than text. **Validate.**             |
+| S9  | A calls D across sites.                                                       | Signaling may use available application paths.                                                                                        | Media requires an independent WebRTC ICE route. P/Q are not TURN; encrypted text delivery does not prove a call works. **Current boundary.**                                                            |
+| S10 | A has two devices, one on X and one on Y.                                     | Each device has its own presence, settings and identity under one account.                                                            | Roster groups the devices by account; delivery and recipient receipts remain device-specific where required. Full sibling history/settings sync needs its own authenticated path. **Current boundary.** |
+| S11 | Two trusted relays hold duplicate copies of one event.                        | Directory may contain multiple routes to one verified device.                                                                         | Recipient validates and deduplicates by event identity; the UI shows one person/device, not one entry per relay. **Recommended invariant; test under failover.**                                        |
+| S12 | Accepted group members span X, Y and Z; B↔C and D↔E use Tailscale; no relays. | Only directly connected member pairs discover each other; LAN rosters do not cross.                                                   | A→B→C→D→E→F can propagate by authorized group-log reconciliation while each bridge holds and shares its copy. This needs an end-to-end chain test. **Design model / Validate.**                         |
+
+### Illustrated walkthroughs for every catalog case
+
+The diagrams below show an **example operation**, not a permanent socket or an IP route for every drawn pair. Solid arrows are application discovery/sync or direct data as labeled; dotted arrows are optional or failed operations. A missing arrow means that operation cannot be inferred from the topology. Each example assumes accepted conversation permissions where a chat/group event is shown. The quick tables above remain the index; these walkthroughs explain the sequence.
+
+#### L1 — one LAN, no post office
+
+```mermaid
+sequenceDiagram
+  participant A as A / LAN X
+  participant B as B / LAN X
+  participant C as C / LAN X
+  A-->>B: Signed LAN presence; B verifies A
+  A-->>C: Signed LAN presence; C verifies A
+  A->>B: Direct Noise/TCP group event G1
+  Note over C: C was offline during A's send
+  C->>B: Later: reconcile accepted group log
+  B-->>C: Missing event G1
+```
+
+**Result:** C receives G1 from B if B retained it and **Share a copy** is on. For a direct A→B message, B's authenticated receipt—not the LAN announcement—marks delivery. Without a later reachable holder, C continues waiting.
+
+#### L2 — one mailbox-only relay on the LAN
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Relay P
+  participant B as B
+  A->>B: Attempt direct event M2
+  Note over B: Offline
+  A->>P: Upload B-encrypted opaque M2
+  B->>P: Later: drain mailbox
+  P-->>B: Copy M2
+  B-->>A: Authenticated receipt
+```
+
+**Discovery:** A/B still learn one another locally; P announces only its own relay identity. P has no bridge directory, so it does not introduce a client from another LAN. P's acceptance is bounded custody, not B's receipt.
+
+#### L3 — relay exists but sender disables relay use
+
+```mermaid
+sequenceDiagram
+  participant A as A / relay use OFF
+  participant P as Relay P
+  participant B as B
+  A-->>B: Signed local discovery
+  A->>B: Direct Noise/TCP message M3
+  Note over A,P: A does not upload or drain mailbox data
+```
+
+**Result:** B receives M3 directly when online. If B is offline, A waits and retries after a direct route returns; P's mere presence cannot override A's relay-use choice.
+
+#### L4 — three trusted, equal relays on one LAN
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Preferred P
+  participant Q as Relay Q
+  participant R as Relay R
+  participant B as B
+  A->>B: Try direct event M4
+  A->>P: Optional B-encrypted custody copy
+  P-->>Q: Trusted v3 mailbox reconciliation
+  Q-->>R: Trusted v3 mailbox reconciliation
+  B->>Q: Later: drain reachable copy
+```
+
+**Discovery:** each relay advertises its own identity; opted-in client presence may be exchanged through their authenticated directories. The relays are equal in role but have separate keys/endpoints. B still receives one validated event even if several relay copies arrive.
+
+#### L5 — three relays without mutual trust
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Relay P
+  participant Q as Relay Q
+  participant B as B
+  A->>P: Upload B-encrypted M5
+  Note over P,Q: No federation: P does not copy M5 to Q
+  B->>Q: Drain Q: M5 absent
+  B->>P: Drain P: M5 present
+```
+
+**Result:** Q can still be an alternate relay for a _new_ upload if A reaches it, but Q cannot serve the old P-held copy without federation. B must contact the holder or wait for A to retry elsewhere.
+
+#### L6 — local multicast is blocked
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant B as B
+  A--xB: Multicast announce blocked
+  A->>B: Bounded local unicast probe / manual candidate
+  B-->>A: Fresh signed response, if UDP allowed
+  A->>B: Identity-pinned Noise/TCP event, if TCP allowed
+```
+
+**Result:** unicast can recover discovery, but blocked application UDP or TCP still prevents the corresponding step. Two machines sharing a Wi-Fi name is insufficient evidence of reachability.
+
+#### L7 — three completely isolated LANs
+
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[A] --> B[B]
+  end
+  subgraph Y[LAN Y]
+    D[D] --> E[E]
+  end
+  subgraph Z[LAN Z]
+    G[G] --> H[H]
+  end
+```
+
+**Operation:** A, D and G announce signed presence only within their own permitted local scopes. A→B, D→E and G→H can use direct encrypted sync. There is no X↔Y↔Z edge, so neither an opt-in switch nor a group membership record can deliver an event across the sites.
+
+#### L8 — app and post office on one computer
+
+```mermaid
+sequenceDiagram
+  participant A as App A on host H
+  participant P as Relay P on host H
+  participant B as B on same LAN
+  A-->>B: Advertise A's app identity/address
+  P-->>B: Advertise P's relay identity/address
+  A->>B: Direct message M8
+  A->>P: Optional B-encrypted custody copy
+```
+
+**Result:** B sees A as a person and P as infrastructure. A and P may show different interface IPs or ports; their distinct identities and roles matter more than the shared host. P is excluded from B's group-member picker.
+
+#### T1 — one direct Tailscale client pair across LANs
+
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    B[B] --- A[A]
+    C[C] --- A
+  end
+  subgraph Y[LAN Y]
+    D[D] --- E[E]
+    D --- F[F]
+  end
+  A <-- "signed routed query; direct Noise/TCP event" --> D
+```
+
+**Operation:** A finds B/C locally and D through D's known Tailscale candidate. A sends D a direct encrypted message and D returns a receipt. B does not learn D/E/F through A; E does not learn A/B/C through D. A and D can sync an accepted group, but neither forwards all LAN discovery.
+
+#### T2 — Tailscale machine reachable but application port blocked
+
+```mermaid
+sequenceDiagram
+  participant A as A / LAN X
+  participant D as D / LAN Y
+  A--xD: UDP discovery query blocked
+  Note over A,D: Or: signed query succeeds but Noise/TCP dial is blocked
+  A->>D: Retry only after a valid route or relay path exists
+```
+
+**Result:** Tailscale status alone cannot place D in A's verified roster or deliver a message. A known identity does not manufacture a working application port; a separately reachable post office could provide a different route if configured.
+
+#### T3 — direct Tailscale link with bridge discovery off
+
+```mermaid
+sequenceDiagram
+  participant A as A / bridge OFF
+  participant D as D / direct Tailscale peer
+  participant P as Post office P
+  A->>D: Routed signed discovery query
+  D-->>A: Signed response
+  A->>D: Direct Noise/TCP event
+  Note over A,P: No A public directory registration
+```
+
+**Result:** A and D can communicate directly even though A is not publicly introduced by P. Turning bridge discovery off limits relay directory visibility; it is not a firewall against a directly reachable permitted peer.
+
+#### R1 — one relay reachable from two LANs
+
+```mermaid
+sequenceDiagram
+  participant A as A / LAN X
+  participant P as P / LAN X
+  participant D as D / LAN Y
+  A->>P: Opt-in signed directory registration
+  D->>P: Tailscale: opt-in signed registration
+  P-->>A: Introduce D's verified identity/relay path
+  A->>P: Upload D-encrypted event M1
+  D->>P: Drain M1 over its own Tailscale path
+```
+
+**Result:** D's LAN neighbors E/F do not register merely because D can reach P. P cannot create direct A↔D TCP reachability; it is the mailbox path here. If P disappears, this single-relay cross-site route stops until P or another independently reachable route returns.
+
+#### R2 — the remote client declines public bridge discovery
+
+```mermaid
+sequenceDiagram
+  participant A as A / LAN X
+  participant P as Bridge P
+  participant D as D / bridge OFF
+  A->>P: Query public directory
+  P-->>A: No public D entry
+  Note over A,D: A known, authorized D could use a separate valid route
+```
+
+**Result:** P does not advertise D's identity to A. A cannot infer D from D's LAN membership. A pre-existing contact/route is a separate question: opt-out of public listing does not itself delete an already authorized direct address or known-peer mailbox path.
+
+#### R3 — two mutually trusted relays across LANs
+
+```mermaid
+sequenceDiagram
+  participant A as A / LAN X
+  participant P as P / LAN X
+  participant Q as Q / LAN Y
+  participant D as D / LAN Y
+  D->>Q: Opt-in signed registration
+  Q-->>P: Trusted Noise federation: D presence
+  P-->>A: Introduce D via relay route
+  A->>P: Upload D-encrypted M3
+  P-->>Q: Reconcile opaque v3 mailbox copy
+  D->>Q: Drain M3; validate and store
+  D-->>A: Recipient receipt by an available route
+```
+
+**Result:** No LAN multicast or plaintext crosses P↔Q. A knows D as an introduced Mesh Talk identity, not as a fabricated LAN neighbor. A's delivered status requires D's validated receipt.
+
+#### R4 — relays can see one another but are not trusted
+
+```mermaid
+sequenceDiagram
+  participant P as P / LAN X
+  participant Q as Q / LAN Y
+  participant A as A / LAN X
+  participant D as D / LAN Y
+  P-->>Q: Discover relay candidate identity
+  Note over P,Q: No mutual federation enrollment
+  A->>P: Upload D-addressed event if D is already known
+  Note over P,Q: No authorized directory/mailbox exchange
+```
+
+**Result:** A Tailscale link and matching relay software are insufficient. P and Q remain independent stores, so P's copy does not appear at Q. **Recommended:** automatic candidate discovery may simplify setup, but must not silently grant federation trust.
+
+#### R5 — relays trust one another but the routed link is blocked
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as P / LAN X
+  participant Q as Q / LAN Y
+  participant D as D
+  A->>P: Upload D-encrypted M5
+  P--xQ: Federation UDP/TCP blocked
+  Note over P,D: M5 remains at P within retention/capacity limits
+  P->>Q: Retry when permitted route returns
+```
+
+**Result:** Identity pins authorize exchange but do not provide IP reachability. Q cannot serve D's new mail or presence while the link is down; stale directory entries must expire rather than pretend D is freshly reachable.
+
+#### R6 — preferred relay fails; fallback has no onward route
+
+```mermaid
+flowchart LR
+  A[A] -. "preferred P failed" .-> P[P offline]
+  A -->|upload M6| R[R reachable]
+  Q[Remote Q] --> D[D]
+```
+
+**Result:** before the outage P had the only route to Q; after P stops, the diagram has **no R→Q edge**. A can hand encrypted M6 to R, but R cannot reach Q. D does not receive M6 now, and no recipient receipt exists. R holds it only within capacity/age limits; A must retain retry work. This is **local relay failover without cross-site continuity**.
+
+#### R7 — preferred relay fails; fallback has its own remote route
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Preferred P / offline
+  participant R as Alternate R
+  participant Q as Remote Q
+  participant D as D
+  A--xP: Upload M7 fails
+  A->>R: Upload same D-encrypted M7
+  R-->>Q: Trusted federation over R-Q link
+  D->>Q: Drain M7
+  D-->>A: Validated receipt
+```
+
+**Result:** R is directly reachable from A **and** has a surviving R↔Q route. This is the topology that makes cross-site automatic fallback possible. Returning to preferred P and avoiding duplicate delivery after it restarts are **recommended behaviors needing an outage test**.
+
+#### R8 — three-site relay chain
+
+```mermaid
+flowchart LR
+  A[A / X] --> P[P / X]
+  P <-- "trusted routed edge" --> Q[Q / Y]
+  Q <-- "trusted routed edge" --> S[S / Z]
+  S --> G[G / Z]
+```
+
+**Operation:** opted-in G registers with S; eligible presence must travel S→Q→P before A learns G through this chain. A's G-encrypted event travels P→Q→S as opaque mailbox reconciliation, and G drains S. If Q fails, X and Z lose their only relay chain. **Design model:** confirm multi-hop presence/mail convergence on real independent sites before promising it.
+
+#### R9 — three-site fully connected relay graph
+
+```mermaid
+flowchart LR
+  A[A / X] --> P[P / X]
+  P <-- "trusted" --> Q[Q / Y]
+  Q <-- "trusted" --> S[S / Z]
+  P <-- "trusted alternate" --> S
+  S --> G[G / Z]
+```
+
+**Operation:** when P↔Q fails, P can still exchange with S directly; when P↔S fails, P→Q→S may remain. Multiple paths can carry duplicate ciphertext, which G must deduplicate by event identity. More relay links improve route diversity but increase authentication and inventory work; a full mesh is **not** an unbounded scaling promise.
+
+#### R10 — client can reach both a local and a remote relay directly
+
+```mermaid
+sequenceDiagram
+  participant A as A / LAN X
+  participant P as Local P
+  participant Q as Q / LAN Y via Tailscale
+  A-->>P: Signed local relay discovery
+  A->>Q: Routed signed relay discovery
+  Q-->>A: Verified Q identity and endpoint
+  A->>P: Automatic local-first upload for M10
+  Note over A,Q: Explicit healthy Q preference may reorder candidates
+```
+
+**Result:** Q can be a valid direct choice for A because A itself has a permitted Tailscale path to Q; B on A's LAN does not inherit it. A relay visible _only through P_ should be labeled as a gateway route, not offered as directly reachable.
+
+#### R11 — equal binary and flags, but missing trust configuration
+
+```mermaid
+sequenceDiagram
+  participant P as P / LAN X
+  participant Q as Q / LAN Y
+  P-->>Q: Signed candidate discovery, if a route exists
+  Note over P,Q: Unique identities; no mutual federation pins
+  P--xQ: Directory/mailbox exchange refused
+```
+
+**Result:** two `--post-office --bridge` deployments are not automatically one federation. Give each host its own persistent identity and reachable endpoint, then enroll trusted identities on both sides. Identical keys would be a deployment error, not equality.
+
+#### S1 — relay custody on, public bridge discovery off
+
+```mermaid
+sequenceDiagram
+  participant A as A / LAN X
+  participant P as Post office P
+  participant D as Known D
+  A-->>P: Discover P as infrastructure
+  Note over A,P: No A public bridge registration
+  A->>P: Known-peer D-encrypted legacy mailbox copy, if eligible
+  D->>P: Drain a known mailbox, if reachable
+```
+
+**Result:** A can remain absent from cross-site public introductions while still using eligible known-peer mailbox paths. D cannot discover A merely by asking P's public directory. Direct LAN or Tailscale discovery remains independent.
+
+#### S2 — relay use off with a saved bridge-on setting
+
+```mermaid
+sequenceDiagram
+  participant A as A / relay use OFF
+  participant P as Relay P
+  participant B as B
+  A->>B: Direct encrypted event M2
+  Note over A,P: Ordinary mailbox upload/drain disabled
+  A->>P: Saved bridge-on flag may still trigger directory refresh
+```
+
+**Result:** the intended rule is **no** relay directory participation while relay use is off. The UI disables the bridge switch, but the core refresh path currently checks that saved flag separately. This is a concrete implementation gap to fix after the design is approved; do not treat the UI disabled state as proof of backend privacy behavior.
+
+#### S3 — only one of two LAN neighbors opts into cross-site presence
+
+```mermaid
+sequenceDiagram
+  participant A as A / bridge ON
+  participant B as B / bridge OFF
+  participant P as P / LAN X
+  participant Q as Q / LAN Y
+  participant D as D / LAN Y
+  A->>P: Register A's signed presence
+  P-->>Q: Trusted exchange of eligible A proof
+  D->>Q: Query directory; receive A, not B
+```
+
+**Result:** B may still chat locally with A, but B's location beside A cannot enroll B in the remote directory. If D is also a member of a group with B, group membership does not make B publicly discoverable.
+
+#### S4 — invisible device and authorized private contact
+
+```mermaid
+sequenceDiagram
+  participant A as Invisible A
+  participant P as Relay P
+  participant B as Authorized B
+  Note over A,P: No public A bridge registration
+  B->>A: Private/direct contact only if explicit policy and route allow
+  A-->>B: Signed encrypted response if admitted
+```
+
+**Result:** P has no automatic exemption to publish A's presence. B's knowledge of A's identity is not enough by itself; the relevant private authorization and reachable data path are still required.
+
+#### S5 — remote recipient is offline
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Local P
+  participant Q as Remote Q
+  participant D as D / offline
+  A->>P: Upload D-encrypted M5
+  P-->>Q: Copy opaque M5 with original arrival time
+  Note over A,D: Status remains awaiting D; directory presence can expire
+  D->>Q: Later: drain if copy survived retention/capacity
+  D-->>A: Exact validated receipt
+```
+
+**Result:** D may receive M5 after coming online; the post-office maximum is 30 days and capacity can evict earlier. If every copy expires, A needs its own retained retry work and a new route. P/Q custody does not mean D read or received the message.
+
+#### S6 — offline group member recovers from a sharing member
+
+```mermaid
+sequenceDiagram
+  participant A as A / group member
+  participant B as B / Share a copy ON
+  participant D as D / offline member
+  A->>B: Signed encrypted group event G6
+  Note over A,D: A goes offline; D returns
+  D->>B: Reconcile accepted group log
+  B-->>D: Missing G6 and required ancestry
+```
+
+**Result:** D can recover without A or a post office because B has an authorized retained copy and a direct route to D. A relay copy, if separately enabled, would be another possible source; it never becomes a group member.
+
+#### S7 — the only reachable group holder stops sharing
+
+```mermaid
+sequenceDiagram
+  participant A as A / offline
+  participant B as B / Share a copy OFF
+  participant D as D / missing G7
+  D->>B: Ask for missing group history
+  B--xD: B does not serve its retained copy
+  Note over A,D: Need another sharing member or surviving mailbox copy
+```
+
+**Result:** B may be online and may have read G7, yet D cannot recover from B under this setting. When A comes back or another authorized holder becomes reachable, D can try that source.
+
+#### S8 — cross-site file offer and bytes
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Local P
+  participant Q as Remote Q
+  participant D as D
+  A->>P: Encrypted file offer/manifest event
+  P-->>Q: Opaque federation copy
+  D->>Q: Drain offer; inspect and consent
+  A->>P: Encrypted chunk events after consent
+  P-->>Q: Eligible chunks, if route/storage permit
+  D->>D: Verify dense chunk chain and final hash
+```
+
+**Result:** an offer or card reaching D is not proof that the file bytes arrived. Consent, size limits, exact chunk confirmation and integrity determine completion. Current file-chunk retry uses a narrower relay-candidate policy than ordinary messages; full cross-relay bytes and outage failover remain **validation gaps**.
+
+#### S9 — cross-site call request
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Post office P
+  participant D as D
+  A->>P: Application call signaling, if eligible
+  P-->>D: Signal reaches D by an available path
+  A-->>D: Separate WebRTC ICE media negotiation
+  Note over A,D: Media requires its own working route
+```
+
+**Result:** P may help application signaling, but it is not a TURN or media relay. A text message or call invitation crossing sites says nothing about whether audio/video packets can flow.
+
+#### S10 — two devices under one account
+
+```mermaid
+sequenceDiagram
+  participant A1 as A1 / LAN X
+  participant P as Local P
+  participant Q as Remote Q
+  participant A2 as A2 / LAN Y
+  A1-->>P: Signed presence for device A1
+  A2-->>Q: Signed presence for device A2
+  P-->>Q: Eligible per-device introductions
+  A1->>A2: Authenticated sibling sync, only with a valid path
+```
+
+**Result:** the roster may group A1/A2 under one account, but they retain distinct device identities, settings, routes and receipt targets. Ordinary relay visibility does not substitute for full sibling history/settings catch-up.
+
+#### S11 — duplicate relay copies of one logical event
+
+```mermaid
+sequenceDiagram
+  participant A as A
+  participant P as Relay P
+  participant Q as Relay Q
+  participant D as D
+  A->>P: Upload event ID E11
+  A->>Q: Retry same event ID E11
+  D->>P: Drain E11
+  D->>Q: Drain E11 again
+  Note over D: Validate and retain one logical event
+```
+
+**Result:** the UI should show one message and one verified device, not a row per mailbox or route. This deduplication invariant needs an explicit fallback/restart test; different outer relay envelopes must not cause duplicate conversation content.
+
+#### S12 — group-member chain across three LANs, no post office
+
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[A sends G12] --> B[B holds G12]
+  end
+  subgraph Y[LAN Y]
+    C[C holds G12] --> D[D holds G12]
+  end
+  subgraph Z[LAN Z]
+    E[E holds G12] --> F[F receives G12]
+  end
+  B <-- "direct Tailscale group sync" --> C
+  D <-- "direct Tailscale group sync" --> E
+```
+
+**Operation:** all six have accepted group membership and the needed keys. A→B is a local signed-event sync; C later pulls G12 from B over their Tailscale edge; D gets it locally from C; E gets it from D over the second Tailscale edge; F gets it locally from E. Each intermediate member must retain and **Share a copy**, and each adjacent pair must discover/authenticate a real route. These intermediaries are actual group members who can read group content, unlike opaque post offices. A need not know every machine on Y/Z, and no LAN multicast or general IP routing crosses sites. If the sole bridge holder goes offline before the next hop copies G12, propagation waits or fails without another holder. **Design model; test the complete chain before promising eventual delivery.**
 
 ### Worked example: current Mac, Windows, mac2015 and mac-mini
 

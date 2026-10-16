@@ -1,6 +1,6 @@
 # Network design: scenario questions and answers
 
-**Review draft · 2026-10-16.** This document restates the proposed behavior as questions, answers them against the current implementation, and marks decisions that are still open. **Current** means supported by code or the existing protocol; **Proposed** means a design goal, not a delivered guarantee; **Needs validation** means the behavior needs a targeted real-network test. The [network design reference](network-design-reference.md) is the comprehensive review document; the [topology baseline](network-topologies.md) maps current switches, ports, and data flows.
+**Review draft · 2026-10-16.** This document restates the proposed behavior as questions, answers them against the current implementation, and marks decisions that are still open. **Current** means supported by code or the existing protocol; **Proposed** means a design goal, not a delivered guarantee; **Needs validation** means the behavior needs a targeted real-network test. The [illustrated scenario walkthroughs](network-design-reference.md#illustrated-walkthroughs-for-every-catalog-case) cover every catalog case step by step; the [topology baseline](network-topologies.md) maps current switches, ports, and data flows.
 
 ## Recommended design baseline for review
 
@@ -40,6 +40,27 @@ flowchart LR
   end
 ```
 
+**Concrete example — Alice (A), Bob (B), Carol (C):**
+
+```mermaid
+sequenceDiagram
+  participant A as Alice / A
+  participant B as Bob / B
+  participant C as Carol / C
+  A-->>B: LAN multicast: A's signed presence
+  A-->>C: LAN multicast: A's signed presence
+  A->>B: Noise/TCP: encrypted direct message M1
+  B-->>A: Authenticated recipient receipt for M1
+  A->>B: Group event G1 for accepted members
+  Note over A,C: C is temporarily offline; no UDP chat broadcast
+  C->>B: Later: authenticated group log reconciliation
+  B-->>C: Missing signed event G1
+```
+
+1. A, B and C learn one another's **own** identities from local discovery. A's direct message M1 goes only to B; the multicast packets contain no M1 text.
+2. In a group of A/B/C, A records G1 and attempts member delivery. If C misses it, C can later pull G1 from B while B is online and **Share a copy** is on. A need not remain online after B has the event.
+3. If B also goes offline before C can reach a holder, C waits. With no post office, the LAN provides no separate mailbox. A visible peer icon is not proof that G1 or M1 reached its recipient.
+
 **Current.** Each visible device announces its own signed identity on the LAN's IPv4 multicast group (`224.0.0.167:47474`) roughly every two seconds. First-sight unicast replies and a bounded local `/24` unicast scan help when multicast is lost or blocked. These packets advertise presence and a listening port; they do **not** broadcast chat content. A recipient's signed identity is checked again by the Noise TCP connection.
 
 For a direct message, the sender durably records the encrypted event, tries the recipient's verified direct route, and retries when a route becomes available. A message is **Delivered** only after an authenticated receipt from the intended recipient; finding the peer or completing a TCP session is not enough. Without a post office, both devices need a later direct route for an offline recipient to catch up.
@@ -62,6 +83,27 @@ flowchart LR
   end
 ```
 
+**Concrete example — B goes offline before A sends M2:**
+
+```mermaid
+sequenceDiagram
+  participant A as Alice / A
+  participant P as Post office P
+  participant B as Bob / B
+  A->>B: Try direct Noise/TCP for M2
+  Note over B: Offline: no recipient receipt
+  A->>P: Upload B-encrypted opaque copy of M2
+  P-->>A: Copy accepted for bounded custody
+  Note over A: M2 remains awaiting B
+  B->>P: Later: drain B's mailbox
+  P-->>B: Opaque copy of M2
+  B-->>A: Validated recipient receipt via available path
+```
+
+1. A and B still discover each other locally when online. P announces **its relay role**, not B's identity on B's behalf. P need not be a group member.
+2. A's failed direct attempt leads to relay custody if **Use post offices** is on. The current group-send path can also add a relay copy after a successful direct attempt; strict fallback-only custody is an **open design decision**.
+3. P cannot decrypt M2 or claim it was delivered. If P expires or evicts the copy before B drains it, A must retry from its own retained work when a route is available.
+
 **Current.** Client-to-client discovery and direct sync remain the normal live path. If client post-office use is enabled (the desktop default), the sender can also upload recipient-encrypted events to P. The current channel send path attempts direct fanout **and then** mailbox replication; relay upload is not limited to cases where a direct send failed. This is useful offline custody, but it costs an extra sync and P's finite storage. The recipient drains known relays periodically and validates/decrypts through its ordinary admission path.
 
 P has two application-level functions: **temporary encrypted storage** and **store-and-forward routing** to the recipient, including through trusted relay federation when configured. It can hold DMs, group events, invitations/controls, and file-related events in opaque pairwise mailboxes. It cannot decrypt the inner content, join a group, grant membership, or confirm receipt on behalf of a recipient. It is not a general IP router or an arbitrary TCP proxy. A mailbox copy can expire or be evicted: **30 days is a maximum, not a guaranteed delivery period**. Count and byte limits may evict whole mailboxes earlier.
@@ -82,6 +124,27 @@ flowchart LR
     P2 <-. "federation if mutually trusted" .-> P3
   end
 ```
+
+**Concrete example — P1 is preferred and then stops:**
+
+```mermaid
+sequenceDiagram
+  participant A as Alice / A
+  participant P1 as Preferred P1
+  participant P2 as Reachable P2
+  participant B as Bob / B
+  A->>P1: Upload B-encrypted event M3
+  Note over P1: Offline: upload fails
+  A->>P2: Retry same event M3
+  P2-->>A: Bounded custody only
+  B->>P2: Drain after coming online
+  P2-->>B: Event M3
+  B-->>A: Validated recipient receipt
+```
+
+1. A can choose P2 only because A can authenticate and reach P2 directly. P1/P2 use distinct identities even if they have the same relay role and policy.
+2. On one LAN, P2 can serve B directly when B knows and drains it. For a remote B, P2 also needs a surviving route to a trusted remote relay; otherwise M3 waits at P2 or A. P1 returning later must not create a duplicate chat row.
+3. If P1 and P2 are mutually trusted bridge relays, eligible v3 opaque mailboxes can reconcile. If they are merely two mailbox-only processes, accepting M3 at P2 does **not** copy it to P1 automatically.
 
 **Current.** The relays can run the same binary and the same **role and trust policy**. They cannot have literally identical host settings: each needs its own persistent key/identity, keystore, password file, listening ports as needed, and reachable addresses. Equal federation needs `--post-office --bridge` and the same trusted `--federation-peer` identity/endpoint set on each relay. Merely starting two `--post-office` processes does not replicate their mailboxes; without federation, each is an independent offline store.
 
@@ -107,6 +170,27 @@ flowchart LR
   end
   A <-- "Tailscale routed UDP/TCP path" --> D
 ```
+
+**Concrete example — A knows D's Tailscale candidate address:**
+
+```mermaid
+sequenceDiagram
+  participant B as B on LAN X
+  participant A as A on LAN X
+  participant D as D on LAN Y
+  participant E as E on LAN Y
+  A-->>B: A's local signed presence
+  D-->>E: D's local signed presence
+  A->>D: Tailscale IP: routed UDP discovery query
+  D-->>A: Fresh signed identity and TCP endpoint
+  A->>D: Direct Noise/TCP message M4
+  D-->>A: Recipient receipt for M4
+  Note over B,E: No A/D forwarding of the other LAN's roster
+```
+
+1. A sees B, C and D; D sees A, E and F. B does not see D merely because B sees A. E does not see A merely because E sees D. Z remains isolated.
+2. A and D may share an accepted group and sync directly across the Tailscale edge. B/C and E/F need their **own** permitted route or an authorized group-member sync chain to exchange that group's events; A and D do not proxy arbitrary LAN traffic.
+3. If A never obtains D's candidate IP, or UDP/TCP is blocked, the Tailscale installation alone does not establish Mesh Talk discovery and delivery.
 
 **Current, if the routed discovery query and TCP ports are reachable:** A can discover **B, C, D**; D can discover **A, E, F**. The proposed “D sees C, E, F” contains a naming error: C is on A's LAN, and A does not proxy C's presence. B and C do not automatically discover D, E, or F. E and F do not automatically discover A, B, or C. G, H, and I remain isolated from the other LANs. A and D can send direct messages and share a group if the normal invitation/membership rules are satisfied; they do not act as transit relays for their neighbors.
 
@@ -201,6 +285,32 @@ The directory is also bounded (currently 128 members per relay), so “the post 
 These are different kinds of work: the file path is a concrete implementation inconsistency, the limits are explicit capacity choices, and the cross-site cases are validation gaps. Keep those categories separate when planning fixes.
 
 For a code-level review, the main seams are [LAN and routed discovery](../crates/mesh-talk-core/src/discovery/service.rs), [group send and recovery](../crates/mesh-talk-core/src/node/channels.rs), [client delivery and relay drain](../crates/mesh-talk-core/src/node/serving.rs), [relay candidate ordering](../crates/mesh-talk-core/src/node/postbox.rs), [bridge registration](../crates/mesh-talk-core/src/node/bridge_client.rs), [federated directory limits](../crates/mesh-talk-core/src/node/bridge_directory.rs), [relay federation](../crates/mesh-talk-core/src/postoffice/federation.rs), and [desktop settings](../src-tauri/src/settings.rs).
+
+## Q15. Can accepted group members themselves bridge several LANs without post offices?
+
+**Yes, in principle, through member-to-member event synchronization.** Suppose A/B are on LAN X, C/D on LAN Y, and E/F on LAN Z. B↔C and D↔E each have their own permitted Tailscale path. All six have accepted the same group and every bridge member serves its retained copy.
+
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[A sends G2] --> B[B stores G2]
+  end
+  subgraph Y[LAN Y]
+    C[C stores G2] --> D[D stores G2]
+  end
+  subgraph Z[LAN Z]
+    E[E stores G2] --> F[F receives G2]
+  end
+  B <-- "direct Tailscale + group sync" --> C
+  D <-- "direct Tailscale + group sync" --> E
+```
+
+1. A sends signed, encrypted G2 to B while A and B have a direct local route. No chat content goes into LAN discovery packets.
+2. C discovers B's actual Tailscale endpoint, authenticates B, and reconciles the authorized group log; C gets G2 from B. D later gets it from C over LAN Y. E gets it from D across their separate Tailscale edge; F gets it from E on LAN Z.
+3. Each intermediary is an **accepted member holding a legitimate group copy**, not a general-purpose router or post office. Unlike a post office, that member can read content addressed to the group; choose bridge members accordingly. Members do not need to discover every other site's entire roster, but each required neighbor edge needs a verified route. A group invitation/key update must also reach each member and pass normal admission checks.
+4. Delivery is **eventual and conditional**, not a synchronous broadcast guarantee. If B goes offline before C obtains G2 and never returns, the chain stops unless another holder or relay copy supplies G2. A non-sharing member at the only cross-site cut, missing history/keys, blocked application ports, or non-overlapping online periods can likewise stop propagation.
+
+**Current evidence:** the channel recovery loop pulls missing events from known, reachable members; an existing test proves recovery from another member after the author goes offline. The complete three-LAN, two-Tailscale-edge chain above remains a **targeted end-to-end validation case**, not a measured delivery guarantee. See the [illustrated scenario catalog](network-design-reference.md#6-scenario-catalog).
 
 ## Decisions and acceptance criteria before implementation
 
