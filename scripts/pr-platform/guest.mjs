@@ -135,7 +135,7 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
       result = remaining > 0 ? await run(step.program === "node" ? process.execPath : step.program,
         step.args.map(arg => arg === "{evidence}/playwright" ? path.join(reportDir || path.join(cwd, "target"), "playwright") : arg), {
         cwd: step.frontend ? path.join(cwd, "frontend") : cwd,
-        env: { ...env, CI: "1", RUST_TEST_THREADS: "4", CARGO_INCREMENTAL: "0", ...(step.kind === "ui" ? { PLAYWRIGHT_JSON_OUTPUT_FILE: uiReport } : {}) }, shell: false, timeoutMs: remaining,
+        env: { ...env, CI: "1", EVAL_SOURCE_SHA: plan.sourceSha, RUST_TEST_THREADS: "4", CARGO_INCREMENTAL: "0", ...(step.kind === "ui" ? { PLAYWRIGHT_JSON_OUTPUT_FILE: uiReport } : {}) }, shell: false, timeoutMs: remaining,
         logPath: reportDir ? path.join(reportDir, `step-${index}.log`) : undefined,
       }) : { code: null, timedOut: true, output: "", error: "Platform deadline exhausted" };
     } catch (error) { result = { code: null, output: "", error: error.message }; }

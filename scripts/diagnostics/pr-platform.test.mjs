@@ -13,15 +13,16 @@ test("one explicit test plan preserves selectors as argv data on both platforms"
   assert.deepEqual(plan.uiSpecs, ["e2e/privacy.spec.ts"]);
   assert.equal(plan.frontendBuild, true);
   const executions = [];
-  for (const environment of [{ CARGO_HOME: "/cache/cargo" }, { USERPROFILE: "D:/cache/profile" }]) {
+  for (const environment of [{ CARGO_HOME: "/cache/cargo" }, { USERPROFILE: "D:/cache/profile", EVAL_SOURCE_SHA: "inherited-stale-sha" }]) {
     const commands = [];
-    await executePlan({ ...plan, sourceSha: sha }, { env: environment, run: async (program, args) => {
-      commands.push([program, args]);
+    await executePlan({ ...plan, sourceSha: sha }, { env: environment, run: async (program, args, options) => {
+      commands.push([program, args, options.env.EVAL_SOURCE_SHA]);
       return { code: 0, output: "test result: ok. 1 passed; 0 failed; 0 ignored;" };
     } });
     executions.push(commands);
   }
   assert.deepEqual(executions[0], executions[1]);
+  assert(executions.every(commands => commands.every(([, , source]) => source === sha)), "both platform guests must pass the pinned source identity");
   assert(executions[0].some(([program, args]) => program === "cargo" && args.includes("name;$(touch sentinel)")));
   assert(!executions[0].some(([program, args]) => program === "npm" && args[0] === "test"), "platform guests must not repeat the full frontend unit suite");
   assert(!Object.hasOwn(plan, "frontendUnit"));
