@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   LogOut,
+  Info,
   LockKeyhole,
   MoreHorizontal,
   Moon,
@@ -9,6 +10,7 @@ import {
   Sun,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -31,6 +33,28 @@ export function SidebarUtilities() {
   const [open, setOpen] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("tray-navigate", ({ payload }) => {
+      if (!active || !["diagnostics", "settings", "about"].includes(payload))
+        return;
+      setOpen(false);
+      setConnectionOpen(payload === "diagnostics");
+      setSettingsOpen(payload === "settings");
+      setAboutOpen(payload === "about");
+    })
+      .then((stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
   const theme = useTheme((s) => s.theme);
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useAuth((s) => s.logout);
@@ -87,7 +111,20 @@ export function SidebarUtilities() {
               {t("settings.title")}
             </Button>
             {callsEnabled && <WebRtcTestDialog menuItem />}
-            <AboutDialog menuItem />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 px-2"
+              data-testid="sidebar-action-about"
+              title={t("about.title")}
+              onClick={() => {
+                setOpen(false);
+                setAboutOpen(true);
+              }}
+            >
+              <Info className="h-4 w-4" />
+              {t("about.title")}
+            </Button>
             <div className="my-1 h-px bg-border" />
             <button
               type="button"
@@ -135,6 +172,7 @@ export function SidebarUtilities() {
         onOpenChange={setConnectionOpen}
       />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} hideTrigger />
     </>
   );
 }

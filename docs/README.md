@@ -66,6 +66,8 @@ the current guides above for commands and implementation behavior.
 
 | Doc                                                                                               | What it covers                                                                                       |
 | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [`docs/evals/tray-menu.md`](evals/tray-menu.md)                                                   | Tray navigation regressions, native menu evidence and validation limits.                             |
+| [`docs/evals/tray-menu-ai-eval-suite.json`](evals/tray-menu-ai-eval-suite.json)                   | Source evaluation cases for native tray and utility dialog ownership.                                |
 | [`docs/evals/settings-pane-review-2026-10-16.md`](evals/settings-pane-review-2026-10-16.md)       | Settings inventory, source/browser findings, proposed categories and redesign acceptance boundaries. |
 | [`docs/evals/architecture-score.md`](evals/architecture-score.md)                                 | Current fixed-rubric architecture health loop and historical assessments.                            |
 | [`docs/evals/architecture-boundaries-2026-10-15.md`](evals/architecture-boundaries-2026-10-15.md) | Feature responsibility map, dependency risks, and ordered refactoring steps.                         |

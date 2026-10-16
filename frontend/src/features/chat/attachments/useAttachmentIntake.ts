@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { TFunction } from "i18next";
@@ -16,6 +16,11 @@ import { AttachmentBatchError } from "./attachmentBatch";
 
 type Current = () => boolean;
 const BYTE_LIMIT = 64 * 1024 * 1024;
+
+interface AttachmentSendOptions {
+  expiresAtSend?: () => number | null;
+  onHandoff?: () => void;
+}
 
 function writable() {
   const { active, channels } = useChat.getState();
@@ -36,7 +41,14 @@ function writable() {
 }
 
 /** Owns acquisition and staging only; the chat store owns the outgoing intent after handoff. */
-export function useAttachmentIntake(t: TFunction) {
+export function useAttachmentIntake(
+  t: TFunction,
+  sendOptions: AttachmentSendOptions = {},
+) {
+  const options = useRef(sendOptions);
+  useLayoutEffect(() => {
+    options.current = sendOptions;
+  }, [sendOptions]);
   const mounted = useRef(false);
   const conversationEpoch = useRef(0);
   const [dragOver, setDragOver] = useState(false);
@@ -68,12 +80,26 @@ export function useAttachmentIntake(t: TFunction) {
           t("composer.couldntOpenFile", { error: errorMessage(error) }),
         );
   }
+  async function handoff(
+    path: string,
+    media: boolean,
+    current: Current,
+    policy: AttachmentSendOptions,
+  ) {
+    if (!current()) return;
+    const sendFile = useChat.getState().sendFile;
+    if (policy.expiresAtSend)
+      await sendFile(path, media, policy.expiresAtSend());
+    else await sendFile(path, media);
+    if (current()) policy.onHandoff?.();
+  }
   async function stage(
     bytes: Uint8Array,
     ext: string,
     name: string | undefined,
     media: boolean,
     current: Current,
+    policy: AttachmentSendOptions,
   ) {
     if (!current()) return false;
     if (bytes.byteLength > BYTE_LIMIT)
@@ -84,11 +110,12 @@ export function useAttachmentIntake(t: TFunction) {
       return false;
     }
     // The intent retains this path for its own retry lifecycle after handoff.
-    await useChat.getState().sendFile(path, media);
+    await handoff(path, media, current, policy);
     return true;
   }
   async function pick(kind: "file" | "directory" | "media") {
     const current = capture();
+    const policy = options.current;
     if (!current()) return;
     try {
       const path = await openFileDialog({
@@ -106,13 +133,14 @@ export function useAttachmentIntake(t: TFunction) {
           : {}),
       });
       if (current() && typeof path === "string")
-        await useChat.getState().sendFile(path, kind === "media");
+        await handoff(path, kind === "media", current, policy);
     } catch (error) {
       report(error, current);
     }
   }
   async function pasteFiles(files: File[]) {
     const current = capture();
+    const policy = options.current;
     let handedOffCount = 0;
     for (const file of files) {
       if (!current()) return;
@@ -132,6 +160,7 @@ export function useAttachmentIntake(t: TFunction) {
               isImage(file.name) ||
               isVideo(file.name),
             current,
+            policy,
           )
         ) {
           handedOffCount++;
@@ -164,7 +193,14 @@ export function useAttachmentIntake(t: TFunction) {
     const origin = screenshot;
     if (!origin?.current()) return;
     try {
-      await stage(bytes, "png", undefined, true, origin.current);
+      await stage(
+        bytes,
+        "png",
+        undefined,
+        true,
+        origin.current,
+        options.current,
+      );
       setScreenshot((value) => (value === origin ? null : value));
     } catch (error) {
       report(error, origin.current);
@@ -214,13 +250,17 @@ export function useAttachmentIntake(t: TFunction) {
       else if (payload.type === "drop") {
         setDragOver(false);
         const current = capture();
+        const policy = options.current;
         void (async () => {
           for (const path of payload.paths) {
             if (!current()) return;
             try {
-              await useChat
-                .getState()
-                .sendFile(path, isImage(path) || isVideo(path));
+              await handoff(
+                path,
+                isImage(path) || isVideo(path),
+                current,
+                policy,
+              );
             } catch (error) {
               report(error, current);
             }

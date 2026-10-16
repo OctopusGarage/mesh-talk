@@ -688,8 +688,23 @@ impl Node {
                 })?;
             }
         }
+        let own_devices: std::collections::HashSet<_> = self
+            .linked_devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .collect();
         for conversation in received_conversations {
             for entry in received.entries_ref(&conversation) {
+                let envelope = super::DmEnvelope::decode(&entry.plaintext);
+                let inner = envelope
+                    .as_ref()
+                    .map_or(entry.plaintext.as_slice(), |env| env.body.as_slice());
+                if entry.from != self.account_id()
+                    && !own_devices.contains(&entry.from)
+                    && self.recipient_expired(inner, entry.event_id, entry.wall_clock)
+                {
+                    continue;
+                }
                 writer.push(&SnapshotRecordV1::ReceivedDm {
                     conversation: *conversation.as_bytes(),
                     event_id: *entry.event_id.as_bytes(),
@@ -713,6 +728,13 @@ impl Node {
             for entry in received_files.entries_ref(&conversation) {
                 if delivery.file_erased(entry.conversation, entry.event_id)
                     || delivery.manifest_event_erased(entry.event_id)
+                    || (entry.from != self.account_id()
+                        && !own_devices.contains(&entry.from)
+                        && self.recipient_expired(
+                            &entry.plaintext,
+                            entry.event_id,
+                            entry.wall_clock,
+                        ))
                 {
                     continue;
                 }

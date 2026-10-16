@@ -393,6 +393,11 @@ impl Node {
             {
                 continue;
             }
+            if envelope.route.sender_account != own
+                && self.recipient_expired(&envelope.body, EventId::new(r.event_id), r.wall_clock)
+            {
+                continue;
+            }
             let conversation = ConversationId::new(r.conv);
             if self
                 .account_suppression

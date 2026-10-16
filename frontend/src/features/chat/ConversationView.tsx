@@ -75,6 +75,11 @@ export function ConversationView() {
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
   const retry = useChat((s) => s.retry);
+  const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(
+    300_000,
+  );
+  const expiresAtSend = () =>
+    expiryDurationMs === null ? null : Date.now() + expiryDurationMs;
   const toggleReaction = useChat((s) => s.toggleReaction);
   const openConversation = useChat((s) => s.open);
   const deleteMessage = useChat((s) => s.deleteMessage);
@@ -86,7 +91,10 @@ export function ConversationView() {
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
   useEffect(() => setMemberProfile(null), [active?.id]);
-  const attachments = useAttachmentIntake(t);
+  const attachments = useAttachmentIntake(t, {
+    expiresAtSend,
+    onHandoff: () => setExpiryDurationMs(300_000),
+  });
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
   const myId = useChat((s) => s.myId);
@@ -582,6 +590,8 @@ export function ConversationView() {
         </div>
       ) : (
         <Composer
+          expiryDurationMs={expiryDurationMs}
+          onExpiryDurationChange={setExpiryDurationMs}
           screenshotAvailable={attachments.screenshotAvailable}
           key={key}
           initialDraft={drafts.current.get(key) ?? ""}
@@ -598,14 +608,18 @@ export function ConversationView() {
           myName={myName}
           replyTo={replyTo}
           prefill={prefill?.key === key ? prefill : null}
-          onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
+          onSendSticker={(id, fallback) => {
+            void sendSticker(id, fallback, expiresAtSend());
+            setExpiryDurationMs(300_000);
+          }}
           onCancelReply={() => setReply(null)}
           onAttach={attachments.attachFile}
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
           onSend={(t) => {
-            const accepted = admitText(t, replyTo?.id ?? null);
+            const accepted = admitText(t, replyTo?.id ?? null, expiresAtSend());
             if (accepted) {
+              setExpiryDurationMs(300_000);
               setReply(null);
               setPrefill(null);
             }

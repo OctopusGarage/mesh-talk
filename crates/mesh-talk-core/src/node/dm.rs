@@ -77,9 +77,26 @@ impl Node {
         reply_to: Option<EventId>,
         authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
+        self.enqueue_to_account_expiring_if(target, text, reply_to, None, authorize)
+            .await
+    }
+
+    /// Durably accept an account message with one absolute UTC deadline.
+    pub async fn enqueue_to_account_expiring_if(
+        &self,
+        target: &str,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         self.enqueue_account_inner(
             target,
-            MessageBody::new(text.to_vec(), reply_to).encode(),
+            crate::expiry::wrap(
+                &MessageBody::new(text.to_vec(), reply_to).encode(),
+                expires_at_ms,
+            ),
             authorize,
         )
         .await
@@ -106,9 +123,25 @@ impl Node {
         fallback: &[u8],
         authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
+        self.enqueue_sticker_to_account_expiring_if(target, sticker_id, fallback, None, authorize)
+            .await
+    }
+
+    pub async fn enqueue_sticker_to_account_expiring_if(
+        &self,
+        target: &str,
+        sticker_id: &str,
+        fallback: &[u8],
+        expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         self.enqueue_account_inner(
             target,
-            MessageBody::sticker(sticker_id.to_owned(), fallback.to_vec()).encode(),
+            crate::expiry::wrap(
+                &MessageBody::sticker(sticker_id.to_owned(), fallback.to_vec()).encode(),
+                expires_at_ms,
+            ),
             authorize,
         )
         .await

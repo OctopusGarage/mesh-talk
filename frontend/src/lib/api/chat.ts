@@ -80,18 +80,28 @@ export const chat = {
     account: string,
     text: string,
     replyTo: string | null,
-  ) => invoke<string>("owner_enqueue_text", { owner, account, text, replyTo }),
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<string>("owner_enqueue_text", {
+      owner,
+      account,
+      text,
+      replyTo,
+      expiresAtMs,
+    }),
   enqueueSticker: (
     owner: string,
     account: string,
     stickerId: string,
     fallback: string,
+    expiresAtMs?: number | null,
   ) =>
     invoke<string>("owner_enqueue_sticker", {
       owner,
       account,
       stickerId,
       fallback,
+      expiresAtMs,
     }),
   enqueueFile: (
     owner: string,
@@ -99,12 +109,14 @@ export const chat = {
     path: string,
     media: boolean,
     progressKey?: string,
+    expiresAtMs?: number | null,
   ) =>
     invoke<{ id: string; fileConv: string }>("owner_enqueue_file", {
       owner,
       account,
       path,
       media,
+      expiresAtMs,
       ...(progressKey ? { progressKey } : {}),
     }),
   ownerHistory: (owner: string, account: string, limit: number) =>
@@ -155,7 +167,15 @@ export const chat = {
     stickerId: string,
     fallback: string,
     isChannel: boolean,
-  ) => invoke<void>("send_sticker", { convId, stickerId, fallback, isChannel }),
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<void>("send_sticker", {
+      convId,
+      stickerId,
+      fallback,
+      isChannel,
+      expiresAtMs,
+    }),
 
   // Direct messages (device-addressed)
   sendDm: (recipient: string, text: string, replyTo: string | null = null) =>
@@ -226,7 +246,14 @@ export const chat = {
     channelId: string,
     text: string,
     replyTo: string | null = null,
-  ) => invoke<void>("send_channel_message", { channelId, text, replyTo }),
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<void>("send_channel_message", {
+      channelId,
+      text,
+      replyTo,
+      expiresAtMs,
+    }),
   channelHistory: (channelId: string, limit: number) =>
     invoke<HistoryItem[]>("channel_history", { channelId, limit }),
   channelReactions: (channelId: string) =>
@@ -242,11 +269,13 @@ export const chat = {
     path: string,
     media: boolean,
     progressKey?: string,
+    expiresAtMs?: number | null,
   ) =>
     invoke<string>("send_file_channel", {
       channelId,
       path,
       media,
+      expiresAtMs,
       ...(progressKey ? { progressKey } : {}),
     }),
 

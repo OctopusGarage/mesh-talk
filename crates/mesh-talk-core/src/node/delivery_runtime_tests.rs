@@ -2823,6 +2823,75 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
     }
 }
 
+#[tokio::test]
+async fn accepted_account_file_card_carries_fixed_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 1);
+    let (node, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let path = dir.path().join("secret.txt");
+    std::fs::write(&path, b"secret").unwrap();
+    let deadline = super::node::now_millis() + 300_000;
+    let (id, _) = node
+        .enqueue_file_to_account_progress_expiring_if(
+            &remote.account_id(),
+            &path,
+            crate::file::FileKind::File,
+            |_| {},
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let row = node
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(id)
+        .unwrap()
+        .clone();
+    assert_eq!(crate::expiry::deadline(&row.plaintext), Some(deadline));
+    assert!(crate::file::decode_manifest(&row.plaintext).is_some());
+}
+
+#[tokio::test]
+async fn accepted_account_message_carries_fixed_deadline_inside_encrypted_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 1);
+    let (node, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let deadline = super::node::now_millis() + 300_000;
+    let id = node
+        .enqueue_to_account_expiring_if(
+            &remote.account_id(),
+            b"secret",
+            None,
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let conv =
+        super::conversation::account_conversation_id(&node.account_id(), &remote.account_id());
+    let sent = node.sentlog.lock().unwrap().entries(&conv);
+    let env = super::dm_envelope::DmEnvelope::decode(&sent[0].plaintext).unwrap();
+    assert_eq!(crate::expiry::deadline(&env.body), Some(deadline));
+    assert_eq!(
+        super::queries::decode_account_entry(&sent[0].plaintext).0,
+        id
+    );
+}
+
 fn node(
     dir: &Path,
     identity: DeviceIdentity,

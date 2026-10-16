@@ -742,8 +742,26 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
     ) -> Result<(), NodeError> {
-        self.send_channel_body(channel, MessageBody::new(text.to_vec(), reply_to).encode())
+        self.send_channel_message_reply_expiring(channel, text, reply_to, None)
             .await
+    }
+
+    pub async fn send_channel_message_reply_expiring(
+        &self,
+        channel: ConversationId,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<(), NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.send_channel_body(
+            channel,
+            crate::expiry::wrap(
+                &MessageBody::new(text.to_vec(), reply_to).encode(),
+                expires_at_ms,
+            ),
+        )
+        .await
     }
 
     /// Send an animated sticker to a channel: `sticker_id` is the bundled sticker's
@@ -754,9 +772,24 @@ impl Node {
         sticker_id: &str,
         fallback: &[u8],
     ) -> Result<(), NodeError> {
+        self.send_sticker_channel_expiring(channel, sticker_id, fallback, None)
+            .await
+    }
+
+    pub async fn send_sticker_channel_expiring(
+        &self,
+        channel: ConversationId,
+        sticker_id: &str,
+        fallback: &[u8],
+        expires_at_ms: Option<u64>,
+    ) -> Result<(), NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         self.send_channel_body(
             channel,
-            MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
+            crate::expiry::wrap(
+                &MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
+                expires_at_ms,
+            ),
         )
         .await
     }

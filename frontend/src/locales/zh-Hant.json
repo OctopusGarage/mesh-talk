@@ -285,6 +285,12 @@
     "saving": "正在儲存檔案…"
   },
   "composer": {
+    "expireAfterSend": "傳送後到期",
+    "keep": "保留",
+    "oneMinute": "1 分鐘",
+    "fiveMinutes": "5 分鐘",
+    "oneHour": "1 小時",
+    "oneDay": "1 天",
     "replyingTo": "正在回覆",
     "message": "訊息",
     "send": "傳送",

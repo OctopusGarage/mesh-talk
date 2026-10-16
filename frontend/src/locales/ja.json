@@ -285,6 +285,12 @@
     "receivingProgress": "ファイルを受信中: {{percent}}%"
   },
   "composer": {
+    "expireAfterSend": "送信後に削除",
+    "keep": "保存",
+    "oneMinute": "1分",
+    "fiveMinutes": "5分",
+    "oneHour": "1時間",
+    "oneDay": "1日",
     "replyingTo": "返信先",
     "message": "メッセージ",
     "send": "送信",

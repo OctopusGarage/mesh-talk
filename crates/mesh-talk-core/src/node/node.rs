@@ -254,6 +254,8 @@ type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
     pub(in crate::node) sessions: super::session_pool::SessionPool,
+    pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
+    pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
@@ -710,6 +712,8 @@ impl Node {
             password,
         )?;
         let node = Arc::new(Self {
+            expiry_clock_start: (std::time::Instant::now(), now_millis()),
+            expiry_first_seen: Mutex::new(HashMap::new()),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
@@ -794,6 +798,8 @@ impl Node {
             recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(HashMap::new()),
         });
+        node.prune_expired_received_on_open()
+            .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         node.queue_approved_incomplete_files();
         Ok(node)
     }
