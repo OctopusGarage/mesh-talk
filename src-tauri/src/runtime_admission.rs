@@ -70,19 +70,13 @@ impl RuntimeAdmission {
         runtime: &NodeRuntime,
         operation: impl FnOnce() -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
-        self.app
-            .session()
-            .matching(&self.lease, |_| {
+        self.node
+            .with_session_runtime(self.app.session(), &self.lease, runtime, || {
                 if self.app.app_lock().is_locked() {
                     return Err(CommandError::Authorization("app locked".into()));
                 }
-                if runtime.host_account_id() != Some(self.lease.owner()) {
-                    return Err(CommandError::Authorization("runtime owner mismatch".into()));
-                }
-                self.node.check_installation(&self.lease)?;
                 operation()
             })
-            .map_err(CommandError::Authorization)?
     }
 
     /// Run a synchronous observation or mutation while both runtime and session
