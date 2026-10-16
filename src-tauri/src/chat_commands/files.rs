@@ -1,5 +1,5 @@
 use super::{NodeState, parse_channel_id};
-use crate::commands::CommandError;
+use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use tauri::Manager;
 
 fn file_kind(media: bool) -> mesh_talk_core::file::FileKind {
@@ -152,26 +152,49 @@ pub async fn send_file_dm(
 }
 
 #[tauri::command]
-pub async fn send_file_to_account(
-    app: tauri::AppHandle,
+pub async fn send_file_to_account<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     account: String,
     path: String,
     media: bool,
 ) -> Result<String, CommandError> {
-    let node = state.node_handle().await?;
+    let admission = match RuntimeAdmission::capture_current(&session, &state) {
+        Ok(admission) => admission,
+        Err(error) => {
+            cleanup_pasted_file(&app, &path);
+            return Err(error);
+        }
+    };
     let mut prog = crate::events::ProgressThrottle::new(app.clone(), account.clone(), "prepare");
-    let result = node
-        .send_file_to_account_progress(
-            &account,
-            std::path::Path::new(&path),
-            file_kind(media),
-            move |p| prog.emit(p.done, p.total),
-        )
+    let cleanup_app = app.clone();
+    let cleanup_path = path.clone();
+    let result = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let result = runtime
+                    .handle()
+                    .send_file_to_account_progress_if(
+                        &account,
+                        std::path::Path::new(&path),
+                        file_kind(media),
+                        move |p| prog.emit(p.done, p.total),
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .await;
+                cleanup_pasted_file(&cleanup_app, &path);
+                result
+                    .map(|id| hex::encode(id.as_bytes()))
+                    .map_err(CommandError::from)
+            })
+        })
         .await;
-    cleanup_pasted_file(&app, &path);
-    let id = result.map_err(CommandError::from)?;
-    Ok(hex::encode(id.as_bytes()))
+    // Also cover refusal before the detached operation obtains a runtime.
+    if result.is_err() {
+        cleanup_pasted_file(&app, &cleanup_path);
+    }
+    result
 }
 
 #[tauri::command]

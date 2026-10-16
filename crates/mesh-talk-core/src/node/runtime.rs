@@ -3,32 +3,22 @@
 //! holds the handles. Tauri-agnostic — inbound DMs are delivered via an injected
 //! `on_dm` callback, so this is unit-testable without a GUI.
 
+use super::{ParticipantConfig, ParticipantRuntime, PreparedParticipant};
 use crate::discovery::candidates::CandidateSource;
-use crate::discovery::service::{
-    RoutedDiscovery, SharedAnnounce, shared_announce, spawn_discovery_with_routed,
-    spawn_routed_listener, swap_announce,
-};
-use crate::discovery::{Announce, PeerRecord, Roster};
+use crate::discovery::{PeerRecord, Roster};
 use crate::eventlog::LogError;
 use crate::identity::account_keystore;
 use crate::identity::device::PublicIdentity;
 use crate::identity::keystore;
 use crate::node::name_directory::NameDirectory;
 use crate::node::{HistoryEntry, Node, NodeError, ReceivedDm};
-use crate::transport::net::{discovery_socket, routed_ipv6_socket};
+#[cfg(test)]
+use crate::transport::net::routed_ipv6_socket;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
-/// How often the desktop node drains held DMs from the elected post office.
-const DRAIN_INTERVAL_SECS: u64 = 3;
-
-/// How often the node tries to pull chunks for files it has a manifest for but hasn't
-/// fully received yet — directly from peers (covers PO-less LANs where the sender's
-/// one-shot push is the only other delivery). A no-op when nothing is pending.
-const FILE_PULL_INTERVAL_SECS: u64 = 3;
 
 /// How often the node checks for freshly-discovered peers and re-publishes its current
 /// avatar to them (so a new contact sees the photo without waiting for the next change).
@@ -154,26 +144,12 @@ pub struct NodeRuntime {
     account_id: String,
     /// The display name this node advertises (for the diagnostics page).
     display_name: String,
-    /// The encoded announce the discovery loops broadcast, shared so a display-name
-    /// change can re-sign and swap it in live (no discovery restart).
-    announce: SharedAnnounce,
-    /// The OS-assigned TCP port the accept loop listens on (also needed to re-sign the
-    /// announce on a rename).
-    tcp_port: u16,
-    discovery_port: u16,
-    discovery_socket_v4: Arc<tokio::net::UdpSocket>,
-    discovery_socket_v6: Option<Arc<tokio::net::UdpSocket>>,
-    routed_discovery: Arc<RoutedDiscovery>,
-    visibility: Arc<crate::discovery::DiscoveryVisibility>,
+    participant: ParticipantRuntime,
     /// Where the account keystore lives, so a successful device link can persist the
     /// adopted account secret (effective on next login).
     account_path: std::path::PathBuf,
     /// The session password, to re-encrypt the keystore when adopting a linked account.
     password: String,
-    /// Notify shared with the discovery broadcast + scan loops; firing it forces an
-    /// immediate re-announce and a /24 sweep (the manual "announce now / rescan").
-    discovery_trigger: Arc<Notify>,
-    tasks: Vec<JoinHandle<()>>,
 }
 
 impl NodeRuntime {
@@ -183,15 +159,8 @@ impl NodeRuntime {
     ///
     /// This does not cancel arbitrary SDK calls through externally held Node
     /// references; hosts must also serialize their own profile operations.
-    pub async fn stop(mut self) {
-        self.node.runtime_work.close();
-        for task in &self.tasks {
-            task.abort();
-        }
-        for task in std::mem::take(&mut self.tasks) {
-            let _ = task.await;
-        }
-        self.node.runtime_work.drain().await;
+    pub async fn stop(self) {
+        self.participant.stop().await;
     }
     /// Compatibility constructor with positional startup arguments.
     /// New hosts should use [`Self::start_configured`] or
@@ -348,12 +317,6 @@ impl NodeRuntime {
         let listener = super::privacy_routes::stable_listener(&dir).await?;
         let tcp_port = listener.local_addr()?.port();
 
-        // Build the announce BEFORE the identity is moved into the node, and wrap it in a
-        // shared cell so a runtime rename can swap in a freshly re-signed announce.
-        let announce =
-            Announce::new_with_account(&identity, &account, display_name.to_string(), tcp_port);
-        let announce = shared_announce(&announce);
-
         let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
         let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
         let (channel_tx, mut channel_rx) =
@@ -436,121 +399,19 @@ impl NodeRuntime {
             .set_public(!node.privacy_snapshot().invisible)
             .await;
 
-        let socket = Arc::new(discovery_socket(discovery_port)?);
-        let socket_v6 = routed_ipv6_socket(discovery_port).ok().map(Arc::new);
-        let routed = Arc::new(RoutedDiscovery::new({
-            let node = Arc::clone(&node);
-            Arc::new(move |nonce, announce| node.signed_discovery_response(nonce, announce))
-        }));
-        let mut candidate_source = candidate_source;
+        let prepared = PreparedParticipant::prepare(
+            Arc::clone(&node),
+            listener,
+            visibility,
+            ParticipantConfig {
+                discovery_port,
+                candidate_source,
+            },
+        )?;
 
         let mut launch = Some(move |current_name: &str| {
-            let current_announce = node.signed_announce(current_name, tcp_port);
-            let _ = node.update_presence(&current_announce);
-            swap_announce(&announce, &current_announce);
-            let discovery_trigger = Arc::new(Notify::new());
+            let mut participant = prepared.launch(current_name);
             let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-            tasks.extend(spawn_discovery_with_routed(
-                Arc::clone(&socket),
-                Arc::clone(&roster),
-                Arc::clone(&announce),
-                self_uid.clone(),
-                discovery_port,
-                Some(Arc::clone(&discovery_trigger)),
-                Arc::clone(&visibility),
-                Some(Arc::clone(&routed)),
-            ));
-            if let Some(socket_v6) = socket_v6.as_ref() {
-                tasks.push(spawn_routed_listener(
-                    Arc::clone(socket_v6),
-                    Arc::clone(&roster),
-                    Arc::clone(&announce),
-                    self_uid.clone(),
-                    discovery_port,
-                    Arc::clone(&visibility),
-                    Arc::clone(&routed),
-                ));
-            }
-            if let Some(source) = candidate_source.take() {
-                let socket = Arc::clone(&socket);
-                let socket_v6 = socket_v6.clone();
-                let visibility = Arc::clone(&visibility);
-                let routed = Arc::clone(&routed);
-                let trigger = Arc::clone(&discovery_trigger);
-                tasks.push(tokio::spawn(async move {
-                    let mut tick = tokio::time::interval(Duration::from_secs(25));
-                    loop {
-                        tokio::select! {
-                            _ = tick.tick() => {},
-                            _ = trigger.notified() => {},
-                        }
-                        if visibility.routed_allowed().await
-                            && let Ok(candidates) =
-                                tokio::time::timeout(Duration::from_secs(3), source.snapshot())
-                                    .await
-                        {
-                            let mut unique = std::collections::HashSet::new();
-                            for endpoint in candidates
-                                .into_iter()
-                                .filter(|addr| unique.insert(*addr))
-                                .take(256)
-                            {
-                                if !visibility.routed_allowed().await {
-                                    break;
-                                }
-                                if let Some(sender) = match endpoint {
-                                    std::net::SocketAddr::V4(_) => Some(&socket),
-                                    std::net::SocketAddr::V6(_) => socket_v6.as_ref(),
-                                } && let Some(_guard) = visibility.routed_send_guard().await
-                                {
-                                    let _ = routed.probe(sender, endpoint).await;
-                                }
-                                tokio::time::sleep(Duration::from_millis(63)).await;
-                            }
-                        }
-                    }
-                }));
-            }
-            tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
-            {
-                let node = Arc::clone(&node);
-                tasks.push(tokio::spawn(async move {
-                    loop {
-                        node.probe_private_routes().await;
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                    }
-                }));
-            }
-            {
-                let node = Arc::clone(&node);
-                tasks.push(tokio::spawn(async move {
-                    loop {
-                        node.drain_from_post_office().await;
-                        tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)).await;
-                    }
-                }));
-            }
-            {
-                let node = Arc::clone(&node);
-                tasks.push(tokio::spawn(async move {
-                    loop {
-                        node.refresh_bridge_directory().await;
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(10)) => {},
-                            _ = node.bridge_notify.notified() => {},
-                        }
-                    }
-                }));
-            }
-            {
-                let node = Arc::clone(&node);
-                tasks.push(tokio::spawn(async move {
-                    loop {
-                        node.pull_pending_files().await;
-                        tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
-                    }
-                }));
-            }
             tasks.push(tokio::spawn(async move {
                 while let Some(dm) = incoming_rx.recv().await {
                     on_dm(dm);
@@ -622,6 +483,10 @@ impl NodeRuntime {
                 }));
             }
 
+            for task in tasks {
+                participant.register_host_task(task);
+            }
+
             NodeRuntime {
                 node,
                 roster,
@@ -629,17 +494,9 @@ impl NodeRuntime {
                 user_id: self_uid,
                 account_id,
                 display_name: current_name.to_string(),
-                announce,
-                tcp_port,
-                discovery_port,
-                discovery_socket_v4: Arc::clone(&socket),
-                discovery_socket_v6: socket_v6.clone(),
-                routed_discovery: Arc::clone(&routed),
-                visibility,
+                participant,
                 account_path: dir.join("account.keystore"),
                 password: password.to_string(),
-                discovery_trigger,
-                tasks,
             }
         });
         authorize_launch(&mut |name| launch.take().expect("runtime launch is single-use")(name))
@@ -651,38 +508,13 @@ impl NodeRuntime {
     }
 
     pub fn discovery_port(&self) -> u16 {
-        self.discovery_port
+        self.participant.discovery_port()
     }
 
     /// Probe a user-supplied address without revealing this device's identity
     /// until the other end returns a fresh, signed Mesh Talk response.
     pub async fn probe_endpoint(&self, endpoint: std::net::SocketAddr) -> std::io::Result<()> {
-        if !self.visibility.routed_allowed().await {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "public discovery is disabled",
-            ));
-        }
-        let socket = match endpoint {
-            std::net::SocketAddr::V4(_) => &self.discovery_socket_v4,
-            std::net::SocketAddr::V6(_) => self.discovery_socket_v6.as_ref().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "IPv6 unavailable")
-            })?,
-        };
-        let _guard = self.visibility.routed_send_guard().await.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "routed discovery is disabled",
-            )
-        })?;
-        if self.routed_discovery.probe(socket, endpoint).await? {
-            Ok(())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "too many pending discovery queries",
-            ))
-        }
+        self.participant.probe_endpoint(endpoint).await
     }
 
     /// The display name this node advertises to peers.
@@ -696,12 +528,10 @@ impl NodeRuntime {
     /// so it resolves consistently. Fires an immediate re-announce so peers converge fast.
     /// `account_id`/`user_id` are unchanged — only the human-readable name moves.
     pub fn set_display_name(&mut self, display_name: &str) {
-        let announce = self.node.signed_announce(display_name, self.tcp_port);
-        if self.node.update_presence(&announce).is_err() {
+        if self.participant.set_display_name(display_name).is_err() {
             log::warn!("Unable to update node presence");
             return;
         }
-        swap_announce(&self.announce, &announce);
         self.display_name = display_name.to_string();
         // Keep our own name in the durable directory too (it otherwise only tracks peers),
         // so `display_name_for(own_id)` stays consistent. A no-op when unchanged.
@@ -710,12 +540,11 @@ impl NodeRuntime {
             .lock()
             .expect("names mutex not poisoned")
             .record(&self.user_id, display_name);
-        self.discovery_trigger.notify_waiters();
     }
 
     /// The local TCP port the node's accept loop is listening on.
     pub fn listen_tcp_port(&self) -> u16 {
-        self.tcp_port
+        self.participant.listen_tcp_port()
     }
 
     /// This node's cryptographic account id (stable across devices once linking
@@ -769,7 +598,7 @@ impl NodeRuntime {
     /// the user can press "announce now" to converge without waiting for the next
     /// tick. Idempotent and harmless — peers self-filter duplicate announces.
     pub fn trigger_discovery(&self) {
-        self.discovery_trigger.notify_waiters();
+        self.participant.trigger_discovery();
     }
 
     /// A snapshot of currently-known peers.
@@ -1110,15 +939,6 @@ impl NodeRuntime {
     /// and release the `NodeState` lock before an async send.
     pub fn handle(&self) -> Arc<Node> {
         Arc::clone(&self.node)
-    }
-}
-
-impl Drop for NodeRuntime {
-    fn drop(&mut self) {
-        self.node.runtime_work.close();
-        for task in &self.tasks {
-            task.abort();
-        }
     }
 }
 

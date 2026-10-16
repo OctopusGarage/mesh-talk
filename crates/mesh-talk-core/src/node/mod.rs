@@ -49,6 +49,9 @@ pub(crate) mod name_directory;
 pub(crate) mod node;
 mod opaque_relay;
 pub(crate) mod pairing;
+mod participant_runtime;
+#[cfg(test)]
+mod participant_runtime_tests;
 pub(crate) mod peer_directory;
 pub(crate) mod postbox;
 pub(crate) mod privacy;
@@ -103,6 +106,9 @@ pub use node::{
     SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
+pub use participant_runtime::{
+    ParticipantConfig, ParticipantRuntime, ParticipantWork, PreparedParticipant,
+};
 pub use postbox::{
     elected_post_office, run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
     run_federated_relay_accept_loop_with_directory, run_relay_accept_loop,

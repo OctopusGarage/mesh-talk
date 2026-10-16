@@ -407,6 +407,9 @@ mod tests {
                     root.path().join("settings.json"),
                 ))
                 .invoke_handler(tauri::generate_handler![
+                    crate::chat_commands::send_file_to_account,
+                    crate::chat_commands::send_to_account,
+                    crate::chat_commands::send_sticker,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_sticker,
@@ -823,6 +826,87 @@ mod tests {
     }
 
     #[test]
+    fn legacy_account_sends_preserve_null_results_and_durable_history() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        for (command, body) in [
+            (
+                "send_to_account",
+                serde_json::json!({"account":account,"text":"legacy text","replyTo":null}),
+            ),
+            (
+                "send_sticker",
+                serde_json::json!({"convId":account,"stickerId":"wave","fallback":"hello","isChannel":false}),
+            ),
+        ] {
+            assert_eq!(
+                fixture.invoke(command, body).unwrap(),
+                serde_json::Value::Null
+            );
+        }
+        let path = fixture.root.path().join("legacy-file.txt");
+        std::fs::write(&path, b"legacy file content").unwrap();
+        let file_conv = fixture
+            .invoke(
+                "send_file_to_account",
+                serde_json::json!({"account":account,"path":path,"media":false}),
+            )
+            .unwrap();
+        let bytes = hex::decode(file_conv.as_str().unwrap()).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert!(
+            path.exists(),
+            "ordinary user source files must remain intact"
+        );
+        let runtime = fixture.node.0.blocking_lock();
+        assert_eq!(
+            runtime
+                .as_ref()
+                .unwrap()
+                .account_history(&account, 10)
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn legacy_account_sends_reject_a_runtime_from_another_session() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let path = fixture.root.path().join("must-not-stage.txt");
+        std::fs::write(&path, b"old runtime must not stage this file").unwrap();
+        fixture
+            .app_state
+            .session()
+            .set("bob-token".into(), user("bob"), "pw".into());
+        for (command, body) in [
+            (
+                "send_file_to_account",
+                serde_json::json!({"account":account,"path":path,"media":false}),
+            ),
+            (
+                "send_to_account",
+                serde_json::json!({"account":account,"text":"must not send","replyTo":null}),
+            ),
+            (
+                "send_sticker",
+                serde_json::json!({"convId":account,"stickerId":"wave","fallback":"hello","isChannel":false}),
+            ),
+        ] {
+            let result = fixture.invoke(command, body);
+            assert_eq!(result.unwrap_err()["kind"], "authorization", "{command}");
+        }
+        let runtime = fixture.node.0.blocking_lock();
+        assert!(
+            runtime
+                .as_ref()
+                .unwrap()
+                .account_history(&account, 10)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn registered_commands_queued_behind_lifecycle_lock_reject_same_owner_new_generation() {
         let fixture = Fixture::new();
         let before = fixture.sync_documents();
@@ -840,6 +924,18 @@ mod tests {
             (
                 "set_account_preference",
                 serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+            ),
+            (
+                "send_file_to_account",
+                serde_json::json!({"account":"11".repeat(16),"path":"unused","media":false}),
+            ),
+            (
+                "send_to_account",
+                serde_json::json!({"account":"11".repeat(16),"text":"queued","replyTo":null}),
+            ),
+            (
+                "send_sticker",
+                serde_json::json!({"convId":"11".repeat(16),"stickerId":"wave","fallback":"hello","isChannel":false}),
             ),
             ("owner_node_identity", serde_json::json!({"owner":"alice"})),
             (
@@ -1023,6 +1119,15 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
         let body = match command {
+            "send_file_to_account" => {
+                serde_json::json!({"account":account,"path":path,"media":false})
+            }
+            "send_to_account" => {
+                serde_json::json!({"account":account,"text":"pending grant","replyTo":null})
+            }
+            "send_sticker" => {
+                serde_json::json!({"convId":account,"stickerId":"wave","fallback":"hello","isChannel":false})
+            }
             "owner_enqueue_text" => {
                 serde_json::json!({"owner":owner,"account":account,"text":"pending grant","replyTo":null})
             }
@@ -1112,6 +1217,20 @@ mod tests {
         );
         assert_eq!(staged, 0);
         assert!(log_unchanged);
+    }
+
+    #[test]
+    fn registered_legacy_file_logout_while_grant_waits_rejects_without_side_effects() {
+        registered_logout_during_local_grant_wait("send_file_to_account");
+    }
+
+    #[test]
+    fn registered_legacy_text_logout_while_grant_waits_rejects_without_side_effects() {
+        registered_logout_during_local_grant_wait("send_to_account");
+    }
+    #[test]
+    fn registered_legacy_sticker_logout_while_grant_waits_rejects_without_side_effects() {
+        registered_logout_during_local_grant_wait("send_sticker");
     }
 
     #[test]

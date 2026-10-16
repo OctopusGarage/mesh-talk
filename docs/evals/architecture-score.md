@@ -104,6 +104,59 @@ retirement guarantees; then characterize remaining asynchronous host commit
 seams and conditional delivery acceptance consolidation. The goal stays active
 until the fixed rubric supports at least 95/100.
 
+### Round 2: shared participant ownership and legacy account acceptance — 94/100
+
+| Dimension                           |    Round 1 |    Round 2 | Evidence and remaining deduction                                                                                                                                                 |
+| ----------------------------------- | ---------: | ---------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Module depth                        |      19/20 |      19/20 | The participant owner absorbs common producer assembly and retirement from desktop and CLI; acceptance still coordinates distinct crypto, transaction and authority owners.      |
+| Locality and reuse                  |      18/20 |      19/20 | One network lifetime owns discovery, accept, private routes, mailbox drain, bridge refresh and file pulls. Remaining host command families retain separate authority sequencing. |
+| Dependency direction and ownership  |      18/20 |      18/20 | Legacy account text/sticker/file sends now use the actual guarded grant/WAL seam. Device/channel sends, privacy and settings need further authority characterization.            |
+| Interface-level testability         |      18/20 |      19/20 | Public enqueue cancellation, real registered IPC and CLI process tests cover producer lifetimes and session changes; remaining asynchronous seams remain open.                   |
+| Maintainability and AI navigability |      19/20 |      19/20 | Shared participant ownership and host-specific responsibilities are documented; large delivery/channel paths still require tracing distinct owners.                              |
+| **Total**                           | **92/100** | **94/100** | Independent specification and quality reviews passed; same fixed rubric, medium confidence. Goal remains active.                                                                 |
+
+`PreparedParticipant` binds resources without launching work; desktop launch stays
+inside its authorization callback. `ParticipantRuntime` owns common producers and
+adopted host tasks. Explicit stop closes work admission, aborts/joins tasks and
+drains blocking work. Drop requests cancellation only. CLI profile paths, fixed
+ports, REPL behavior and post-office mode remain host policy.
+
+A specification review found that adopted CLI file sends could leave blocking
+staging running after stop returned. A public enqueue regression reproduced this
+failure. Staging now holds its retirement permit inside the actual writer, as do
+CLI autosaves. Retirement waits even after its async caller is canceled and
+subsequent staging admission is rejected.
+
+Legacy account text/sticker/file sends capture the entry session and reuse
+`RuntimeAdmission` at local grants and durable acceptance. Failing registered IPC
+regressions demonstrated mismatched-session text and file sends succeeding before
+the fix. Tests also cover same-owner replacement, real logout during a privacy
+grant wait, original results/history and preservation of ordinary source files.
+Immediate best-effort flush behavior and persisted/wire formats are unchanged.
+Legacy payloads still cannot identify an intent created before IPC entry.
+
+Parent verification:
+
+```sh
+cargo test -p mesh-talk --lib owner_commands::tests -- --nocapture
+cargo test -p mesh-talk-core --lib participant_runtime_tests -- --nocapture
+cargo test -p mesh-talk-core --lib node::runtime -- --nocapture
+cargo test -p mesh-talk-core --test two_node_cli participant_cli -- --test-threads=1
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+These passed **17 host + 4 participant + 31 runtime + 2 CLI process tests**.
+The implementation worker also passed 25 CLI binary tests and focused routed-DM
+and file process assertions. Documentation formatting and diff checks passed.
+No full gate or remote CI claim is made at this checkpoint.
+
+No extra delivery sequencing abstraction was added: `DeliveryStore` and
+`accept_outgoing_transaction` already own durable begin/recovery. DM sealing,
+file staging/quota and host authorization have distinct obligations; moving them
+behind a forwarding helper alone would not deepen the module. Next, characterize
+and consolidate the remaining privacy authority seam before reassessment.
+
 ## Optimization series — 2026-10-15
 
 The repository-wide starting assessment was **90/100**: module depth 22/25,

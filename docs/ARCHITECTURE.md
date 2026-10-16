@@ -71,7 +71,6 @@ modify the client, so remote deletion cannot be guaranteed. Older clients do
 not understand the `MTEX1` frame and may keep its decrypted bytes; only updated
 recipient devices enforce expiry.
 
-
 - **DeviceIdentity** — per device: Ed25519 (sign) + X25519 (DH). `user_id =
 SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
 - **Account** (multi-device) — cross-device Ed25519. `account_id =
@@ -267,11 +266,19 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   Dropping the accept-loop future stops scheduling maintenance; an already-running
   blocking rewrite finishes atomically. The log mutex serializes rewrites with appends
   within one Node, but is not shared with a replacement Node opening the same files.
-  Hosts must await consuming `NodeRuntime::stop` before reopening a runtime profile:
+  CLI and desktop share `PreparedParticipant`/`ParticipantRuntime` for discovery,
+  accept, private-route probes, mailbox drain, bridge refresh and pending-file pulls.
+  Preparation binds resources without launching producers; desktop launch remains
+  inside its final session authorization. Profile paths, event callbacks and REPL
+  behavior stay with their host. Extra host tasks are adopted by the shared owner;
+  CLI autosave blocking closures carry retirement permits.
+  Hosts must await consuming `NodeRuntime::stop` (or `ParticipantRuntime::stop`
+  for direct core hosts) before reopening a runtime profile:
   it closes producer admission, aborts and joins the runtime tasks, cancels owned
   accepted connections and private-route probe children and waits for their actual
   termination, and waits for admitted
-  blocking profile rewrites, delivery recovery and peer-cache writes to finish.
+  blocking profile rewrites, delivery recovery, peer-cache writes and file staging
+  to finish.
   Runtime Drop only requests cancellation and cannot provide that retirement barrier.
   This is in-process runtime ownership; external SDK operations and host file staging
   require the host's own lifecycle serialization, and no cross-process lease is implied.
@@ -296,9 +303,9 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   works. Sign-out removes both item types. Windows and
   Linux continue using their OS credential stores for remembered sessions.
 
-  New `owner_*` delivery IPC captures the lease before waiting for the runtime
-  lock. `OwnerAdmission` owns capture, checked reads, guarded local acceptance,
-  and detached enqueue lifetime for these commands. Local text/sticker/file
+  `owner_*` delivery IPC and legacy account text/sticker/file sends capture the
+  lease before waiting for the runtime lock. `RuntimeAdmission` owns capture,
+  checked reads, guarded local acceptance and detached producer lifetime. Local text/sticker/file
   enqueue keeps that lifecycle admission through privacy updates and staging.
   Waiting for the privacy gate holds no session guard;
   once admitted, the matching session guard encloses the entire synchronous local
@@ -306,8 +313,12 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   append. The grant and later staging/WAL are not one rollback transaction: a
   legitimately admitted grant can remain if the owner changes during staging.
   Admitted host enqueue tasks retain the lifecycle lock even if their IPC caller is
-  cancelled; this does not extend that guarantee to legacy IPC or arbitrary SDK
-  operations. Stable file results include the original card ID and file conversation.
+  cancelled. Legacy account sends retain immediate best-effort transfer and their
+  original results. Their payloads lack an explicit frontend owner, so capture
+  authorizes the host session at IPC entry; it cannot identify an intent created
+  in an earlier frontend session. Other legacy device/channel, privacy and settings
+  operations still require their own commit-seam authority; arbitrary SDK handles
+  are not session leases. Stable file results include the original card ID and file conversation.
   Owner-sensitive identity queries atomically inspect session plus runtime; status
   queries accept at most 256 IDs and project only the exact account conversation.
   Own-device synchronization, device-addressed legacy history and incoming rows

@@ -211,10 +211,10 @@ async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants
     bob.set_invisible(true).await.unwrap();
     // Isolate this explicit probe from discovery, accept/delivery, and periodic
     // probes. Join producers and admitted children without closing admission.
-    for task in &alice.tasks {
+    for task in &alice.participant.tasks {
         task.abort();
     }
-    for task in std::mem::take(&mut alice.tasks) {
+    for task in std::mem::take(&mut alice.participant.tasks) {
         let _ = task.await;
     }
     alice.node.runtime_work.drain().await;

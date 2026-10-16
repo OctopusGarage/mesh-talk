@@ -467,7 +467,7 @@ async fn startup_network_options_precede_discovery_and_delivery_launch() {
     .await
     .unwrap();
     assert!(
-        !runtime.visibility.routed_allowed().await,
+        !runtime.participant.visibility.routed_allowed().await,
         "persisted scope initializes shared discovery gate before background probes"
     );
     runtime.stop().await;

@@ -427,8 +427,34 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
+        self.send_file_to_account_progress_if(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            |accept| accept(),
+        )
+        .await
+    }
+
+    /// Legacy immediate-send policy with authorization at the same grant and
+    /// durable-acceptance seams used by queued account delivery.
+    pub async fn send_file_to_account_progress_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<ConversationId, NodeError> {
         let (id, file) = self
-            .enqueue_file_to_account_progress(target_account_id, path, kind, on_progress)
+            .enqueue_file_to_account_progress_if(
+                target_account_id,
+                path,
+                kind,
+                on_progress,
+                authorize,
+            )
             .await?;
         self.flush_delivery(id).await;
         self.flush_file_delivery(id).await;
@@ -712,11 +738,20 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        let permit = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| NodeError::File("participant runtime is stopping".into()))?;
         let node = Arc::clone(self);
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || node.stage_file(&path, kind, on_progress))
-            .await
-            .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
+        // The async sender may be aborted during retirement. Keep admission in
+        // the actual writer, whose blocking operation cannot be canceled.
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            node.stage_file(&path, kind, on_progress)
+        })
+        .await
+        .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
     }
 
     /// Stream `path` from disk, sealing each `CHUNK_SIZE` piece (deterministic-nonce v2

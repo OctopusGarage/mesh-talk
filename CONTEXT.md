@@ -24,16 +24,17 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 
 ## Entities
 
-| Entity               | Description                                                                                                                                                  |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Device**           | A running instance: Ed25519 (sign) + X25519 (DH) identity; `user_id` = hash of its key.                                                                      |
-| **Account**          | A user's cross-device handle (Ed25519); devices are bound to it by a certificate.                                                                            |
-| **Peer**             | Another device learned through verified LAN/routed discovery or eligible relay introduction; tracked by device identity and grouped by account.              |
-| **Event**            | Content-addressed, signed log entry (Message / React / FileManifest / MembershipChange / KeyRotation / …) in a per-conversation hash-linked DAG.             |
-| **Conversation**     | A 1:1 DM (device-pair or account-pair) or a channel; history is the event log.                                                                               |
-| **Outgoing intent**  | A user's attempt to send text, a sticker, or a file to a Conversation. It can be pending or failed before acceptance assigns a stable Event ID.              |
-| **Post office**      | An equal relay that temporarily holds opaque recipient-encrypted events; bridge mode adds opted-in presence and explicitly trusted federation.               |
-| **Recovery archive** | A user-created encrypted snapshot (`.mtbackup`) unlocked with a separate recovery key; restore keeps the account identity but creates a new device identity. |
+| Entity                  | Description                                                                                                                                                                                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Device**              | A running instance: Ed25519 (sign) + X25519 (DH) identity; `user_id` = hash of its key.                                                                                                                                                                              |
+| **Account**             | A user's cross-device handle (Ed25519); devices are bound to it by a certificate.                                                                                                                                                                                    |
+| **Participant runtime** | The shared lifetime of one initialized Node’s discovery, accept, relay-drain, bridge-refresh and file-pull producers. Hosts own profile bootstrap and adopt their extra tasks; explicit stop joins producers and drains admitted blocking work before profile reuse. |
+| **Peer**                | Another device learned through verified LAN/routed discovery or eligible relay introduction; tracked by device identity and grouped by account.                                                                                                                      |
+| **Event**               | Content-addressed, signed log entry (Message / React / FileManifest / MembershipChange / KeyRotation / …) in a per-conversation hash-linked DAG.                                                                                                                     |
+| **Conversation**        | A 1:1 DM (device-pair or account-pair) or a channel; history is the event log.                                                                                                                                                                                       |
+| **Outgoing intent**     | A user's attempt to send text, a sticker, or a file to a Conversation. It can be pending or failed before acceptance assigns a stable Event ID.                                                                                                                      |
+| **Post office**         | An equal relay that temporarily holds opaque recipient-encrypted events; bridge mode adds opted-in presence and explicitly trusted federation.                                                                                                                       |
+| **Recovery archive**    | A user-created encrypted snapshot (`.mtbackup`) unlocked with a separate recovery key; restore keeps the account identity but creates a new device identity.                                                                                                         |
 
 The [network architecture baseline](docs/network-design-reference.md) defines route
 provenance, direct reachability, per-device relay permissions, custody and exact
