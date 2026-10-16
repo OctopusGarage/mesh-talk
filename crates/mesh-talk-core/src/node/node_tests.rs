@@ -1606,6 +1606,150 @@ async fn preferred_post_office_fails_over_and_fallback_mailbox_is_drained_after_
 }
 
 #[tokio::test]
+async fn alternate_federated_relay_delivers_when_preferred_is_offline() {
+    use crate::postoffice::federation::FederationDirectory;
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let preferred = DeviceIdentity::generate();
+    let fallback = DeviceIdentity::generate();
+    let remote = DeviceIdentity::generate();
+    let alice_id = alice.user_id();
+    let bob_id = bob.user_id();
+    let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let preferred_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let fallback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fallback_addr = fallback_listener.local_addr().unwrap();
+    let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = remote_listener.local_addr().unwrap();
+    let duplicate = |identity: &DeviceIdentity| {
+        let (ed, x) = identity.secret_bytes();
+        DeviceIdentity::from_secret_bytes(ed, x)
+    };
+    let fallback_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("fallback.log"), "pw", duplicate(&fallback)).unwrap(),
+    ));
+    let remote_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("remote.log"), "pw", duplicate(&remote)).unwrap(),
+    ));
+    let fallback_directory = FederationDirectory::new();
+    let fallback_task = tokio::spawn(
+        crate::node::postbox::run_federated_relay_accept_loop_with_directory(
+            duplicate(&fallback),
+            fallback_listener,
+            Arc::clone(&fallback_store),
+            Arc::new(HashSet::from([remote.user_id()])),
+            fallback_directory.clone(),
+        ),
+    );
+    let remote_task = tokio::spawn(
+        crate::node::postbox::run_federated_relay_accept_loop_with_directory(
+            duplicate(&remote),
+            remote_listener,
+            Arc::clone(&remote_store),
+            Arc::new(HashSet::from([fallback.user_id()])),
+            FederationDirectory::new(),
+        ),
+    );
+
+    let mut alice_roster = Roster::default();
+    for (proof, addr) in [
+        (Announce::new(&bob, "Bob", bob_addr.port()), bob_addr),
+        (
+            Announce::new_post_office(&preferred, "preferred", preferred_addr.port()),
+            preferred_addr,
+        ),
+        (
+            Announce::new_post_office(&fallback, "fallback", fallback_addr.port()),
+            fallback_addr,
+        ),
+    ] {
+        alice_roster.update(&proof, addr.ip(), &alice_id);
+    }
+    let mut bob_roster = Roster::default();
+    bob_roster.update(
+        &Announce::new(&alice, "Alice", bob_addr.port()),
+        bob_addr.ip(),
+        &bob_id,
+    );
+    bob_roster.update(
+        &Announce::new_post_office(&remote, "remote", remote_addr.port()),
+        remote_addr.ip(),
+        &bob_id,
+    );
+    let open = |name: &str, identity, roster| {
+        let (dm, rx) = mpsc::unbounded_channel();
+        let (channels, _) = mpsc::unbounded_channel();
+        let (files, _) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            Arc::new(Mutex::new(roster)),
+            dm,
+            channels,
+            files,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, rx)
+    };
+    let (alice_node, _) = open("alice", alice, alice_roster);
+    let (bob_node, mut bob_rx) = open("bob", bob, bob_roster);
+    alice_node.set_bridge_discovery_enabled(true);
+    bob_node.set_bridge_discovery_enabled(true);
+    alice_node
+        .set_bridge_hub_id(Some(&preferred.user_id()))
+        .unwrap();
+    bob_node.replace_verified_dm_pull_peers(vec![alice_id]);
+
+    alice_node
+        .send_dm(&bob_id, b"remote-failover")
+        .await
+        .unwrap();
+    assert!(
+        !fallback_store
+            .lock()
+            .unwrap()
+            .federated_inventory()
+            .is_empty()
+    );
+    assert!(
+        remote_store
+            .lock()
+            .unwrap()
+            .federated_inventory()
+            .is_empty()
+    );
+    bob_node.drain_from_post_office().await;
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "no cross-site route has run yet"
+    );
+    fallback_directory
+        .sync_with_relay(remote_addr, &fallback, &remote.public(), &fallback_store)
+        .await
+        .unwrap();
+    assert!(
+        !remote_store
+            .lock()
+            .unwrap()
+            .federated_inventory()
+            .is_empty()
+    );
+    bob_node.drain_from_post_office().await;
+    assert_eq!(bob_rx.try_recv().unwrap().text, b"remote-failover");
+
+    fallback_task.abort();
+    remote_task.abort();
+}
+
+#[tokio::test]
 async fn history_merges_sent_and_received_in_time_order() {
     let dir = tempfile::tempdir().unwrap();
     let me = DeviceIdentity::generate();

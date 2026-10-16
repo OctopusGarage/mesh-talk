@@ -573,6 +573,106 @@ mod tests {
         assert!(!second.has(&event.id));
     }
 
+    #[tokio::test]
+    async fn trusted_three_relay_chain_carries_presence_and_opaque_mail() {
+        use crate::discovery::Announce;
+        use crate::identity::account::Account;
+        use crate::node::postbox::run_federated_relay_accept_loop_with_directory;
+        use std::net::Ipv4Addr;
+        use std::sync::{Arc, Mutex};
+        use tokio::net::TcpListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let p = DeviceIdentity::generate();
+        let q = DeviceIdentity::generate();
+        let s = DeviceIdentity::generate();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let duplicate = |identity: &DeviceIdentity| {
+            let (ed, x) = identity.secret_bytes();
+            DeviceIdentity::from_secret_bytes(ed, x)
+        };
+        let directory_p = federation::FederationDirectory::new();
+        let directory_q = federation::FederationDirectory::new();
+        let directory_s = federation::FederationDirectory::new();
+        let store_p = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("p"), "pw", duplicate(&p)).unwrap(),
+        ));
+        let store_q = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("q"), "pw", duplicate(&q)).unwrap(),
+        ));
+        let store_s = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("s"), "pw", duplicate(&s)).unwrap(),
+        ));
+        let outer = opaque::RelayMailbox::federated(&alice, &bob.public())
+            .unwrap()
+            .wrap(&message(&alice, 1, vec![], 1, b"only-bob-can-open"))
+            .unwrap();
+        store_p.lock().unwrap().accept(outer.clone()).unwrap();
+
+        let bob_presence = Announce::new_with_account(&bob, &Account::generate(), "Bob", 47475);
+        directory_s
+            .shared()
+            .lock()
+            .unwrap()
+            .register(
+                &bob.public(),
+                Some(&bob_presence),
+                true,
+                std::time::Instant::now(),
+            )
+            .unwrap();
+
+        let q_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let q_addr = q_listener.local_addr().unwrap();
+        let s_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let s_addr = s_listener.local_addr().unwrap();
+        let q_task = tokio::spawn(run_federated_relay_accept_loop_with_directory(
+            duplicate(&q),
+            q_listener,
+            Arc::clone(&store_q),
+            Arc::new(HashSet::from([p.user_id(), s.user_id()])),
+            directory_q.clone(),
+        ));
+        let s_task = tokio::spawn(run_federated_relay_accept_loop_with_directory(
+            duplicate(&s),
+            s_listener,
+            Arc::clone(&store_s),
+            Arc::new(HashSet::from([q.user_id()])),
+            directory_s.clone(),
+        ));
+
+        directory_p
+            .sync_with_relay(q_addr, &p, &q.public(), &store_p)
+            .await
+            .unwrap();
+        assert!(store_q.lock().unwrap().has(&outer.id));
+        directory_q
+            .sync_with_relay(s_addr, &q, &s.public(), &store_q)
+            .await
+            .unwrap();
+        assert!(store_s.lock().unwrap().has(&outer.id));
+        directory_p
+            .sync_with_relay(q_addr, &p, &q.public(), &store_p)
+            .await
+            .unwrap();
+        let introduced = directory_p.shared().lock().unwrap().export_federated(
+            std::time::Instant::now(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+        assert!(
+            introduced
+                .iter()
+                .any(|proof| proof.announce.user_id == bob.user_id())
+        );
+
+        q_task.abort();
+        s_task.abort();
+    }
+
     #[test]
     fn existing_relay_log_starts_its_age_clock_on_upgrade() {
         let dir = tempfile::tempdir().unwrap();

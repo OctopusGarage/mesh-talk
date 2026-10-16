@@ -8,7 +8,6 @@ use crate::identity::device::PublicIdentity;
 use crate::postoffice::opaque::RelayMailbox;
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// `seen` avoids pulling the same retained blobs every three seconds. The
@@ -57,9 +56,7 @@ impl Node {
         let mut uploaded = self
             .opaque_mailbox_round(channel, recipient, conversation, legacy)
             .await?;
-        if self.bridge_discovery_enabled.load(Ordering::Acquire)
-            && !self.privacy_snapshot().invisible
-        {
+        if self.bridge_directory_allowed() {
             let federated = RelayMailbox::federated(&self.identity, recipient)
                 .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
             uploaded.extend(
