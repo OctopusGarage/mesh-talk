@@ -277,12 +277,12 @@ The directory is also bounded (currently 128 members per relay), so “the post 
 
 **Current review findings:**
 
-- **Feature-consistent failover:** ordinary message uploads iterate relay candidates, but the file-chunk retry path selects one relay per attempt. A historical cross-relay file diagnostic delivered the offer but did not complete the saved file within 120 seconds. That test used the older gateway topology, so current federation file behavior still needs an independent test; do not infer full file delivery from DM success.
+- **Feature-consistent failover:** ordinary message uploads and consented file-chunk retries now iterate the same recipient-aware relay candidates. A focused test proves custody at a live alternative when the preferred relay is offline. A historical cross-relay file diagnostic delivered the offer but did not complete the saved file within 120 seconds. That test used the older gateway topology, so current federation still needs an independent complete-byte and recipient-confirmation test; do not infer full file delivery from DM success.
 - **Federation work:** each relay probes every configured peer and attempts synchronization with every reachable route about every five seconds. Inventory generation hashes every retained event ID in each v3 mailbox. This is reasonable for a few relays, but a larger trust set can create repeated handshakes and inventory work; there is no measured large-mesh throughput guarantee.
 - **Directory and connection bounds:** a relay directory is capped at 128 members, and a client queries at most eight relay directories per refresh. The client has no global persistent TCP connection pool, so a visible roster size cannot be converted into a fixed concurrent-connection count.
 - **Deployment proof:** existing live tests do not establish delivery to an independent client host on mac-mini's LAN during a preferred-relay outage. Group, file, call, and linked-device flows require separate evidence.
 
-These are different kinds of work: the file path is a concrete implementation inconsistency, the limits are explicit capacity choices, and the cross-site cases are validation gaps. Keep those categories separate when planning fixes.
+These are different kinds of work: the file candidate inconsistency has a focused fix, the limits are explicit capacity choices, and complete cross-site file delivery remains a validation gap. Keep those categories separate when planning further work.
 
 For a code-level review, the main seams are [LAN and routed discovery](../crates/mesh-talk-core/src/discovery/service.rs), [group send and recovery](../crates/mesh-talk-core/src/node/channels.rs), [client delivery and relay drain](../crates/mesh-talk-core/src/node/serving.rs), [relay candidate ordering](../crates/mesh-talk-core/src/node/postbox.rs), [bridge registration](../crates/mesh-talk-core/src/node/bridge_client.rs), [federated directory limits](../crates/mesh-talk-core/src/node/bridge_directory.rs), [relay federation](../crates/mesh-talk-core/src/postoffice/federation.rs), and [desktop settings](../src-tauri/src/settings.rs).
 
@@ -325,4 +325,4 @@ flowchart LR
 
 These are proposed rules, not claims that the implementation already meets them. Once the decisions are accepted, compare each rule with code and targeted physical-network tests before declaring the design delivered.
 
-No code changes are implied by this review draft. Once these decisions are settled, update both this Q&A and the [topology baseline](network-topologies.md) with the agreed behavior, then compare it with code and targeted cross-LAN tests.
+The focused implementation changes recorded above do not resolve the remaining design decisions. Use this Q&A and the [topology baseline](network-topologies.md) to compare each agreed rule with code and targeted cross-LAN evidence.

@@ -215,6 +215,52 @@ fn post_office_use_can_be_disabled_and_reenabled() {
     assert!(node.relay_allowed(&relay));
 }
 
+#[test]
+fn disabling_post_office_use_clears_bridge_introductions() {
+    let dir = tempfile::tempdir().unwrap();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::clone(&roster),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(
+        &remote,
+        &crate::identity::account::Account::generate(),
+        "Remote",
+        47475,
+    );
+    node.set_bridge_discovery_enabled(true);
+    roster.lock().unwrap().update_relayed(
+        &proof,
+        "127.0.0.1:47500".parse().unwrap(),
+        &node.user_id(),
+    );
+    node.bridge_dm_pull_peers
+        .lock()
+        .unwrap()
+        .insert(proof.user_id.clone(), std::time::Instant::now());
+    assert!(node.bridge_directory_allowed());
+    assert!(node.verified_dm_pull_peer(&proof.user_id));
+
+    node.set_post_office_enabled(false);
+
+    assert!(!node.bridge_directory_allowed());
+    assert!(!node.verified_dm_pull_peer(&proof.user_id));
+    assert!(roster.lock().unwrap().get(&proof.user_id).is_none());
+    assert!(node.bridge_dm_pull_peers.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn invisible_mode_clears_bridge_presence_and_recovery_permission() {
     let dir = tempfile::tempdir().unwrap();

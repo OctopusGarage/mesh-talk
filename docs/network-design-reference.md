@@ -1,12 +1,14 @@
 # Mesh Talk network design reference
 
-**Design review draft · 2026-10-16.** This is the consolidated reference for deciding what Mesh Talk's network behavior **should** be. It includes implementation facts so that a desired behavior is not mistaken for an existing guarantee. No code change is implied by this document.
+**Design review and implementation baseline · 2026-10-16.** This is the consolidated reference for deciding what Mesh Talk's network behavior **should** be. It includes implementation facts so that a desired behavior is not mistaken for an existing guarantee. The implementation tracker below records subsequent focused changes separately from unverified topology claims.
 
 **Reading key:** **Current** describes the repository today; **Recommended** is the proposed product rule; **Open** needs a decision; **Validate** requires a targeted test before claiming support. The [topology guide](network-topologies.md) owns the current switch/port matrix and diagrams; the [scenario Q&A](network-design-qa.md) gives shorter answers. [Architecture](ARCHITECTURE.md) owns protocol detail, and [relay metadata privacy](post-office-metadata-privacy.md) owns the exact encryption boundary.
 
 ## 1. Purpose and boundary
 
 Mesh Talk is a local-first, end-to-end encrypted conversation system. Devices should communicate directly when they have an authenticated application route. A peer-operated **post office** can temporarily hold recipient-encrypted events and exchange eligible information with other trusted post offices. Tailscale can supply IP reachability, but Mesh Talk neither creates a VPN nor merges LANs into one broadcast domain.
+
+Here, **direct** means a Mesh Talk client contacts another named application endpoint without a Mesh Talk post office. It does not assert that the underlying Tailscale connection is physically peer-to-peer; Tailscale can use its own network relays. Routed discovery also needs a candidate endpoint: the desktop can obtain online peer IPs from the local Tailscale client, while manual/CLI probing supplies other known endpoints. A tailnet IP alone does not guarantee automatic discovery.
 
 The intended result is **similar user experience across reachable sites**, not identical network behavior. Same-LAN multicast, routed unicast discovery, direct encrypted sync, directory introductions, relay custody, and relay federation are separate operations. The distinction determines what can be discovered, who can deliver a message, and what survives an outage.
 
@@ -56,7 +58,7 @@ Each boundary should have one owner. The UI presents policy and status; it does 
 | Local storage              | `crates/mesh-talk-core/src/storage/`                                      | Keep identities, accepted events and local history durable.                                                                                       | Claim post-office retention is the same as the user's local history retention.          |
 | Existing network/Tailscale | Outside Mesh Talk                                                         | Provide permitted IP connectivity between endpoints.                                                                                              | Supply Mesh Talk authorization or automatically bridge physical LANs.                   |
 
-**Recommended modular seam:** one core route-policy interface should order directly reachable, authenticated relays and apply preference/failover. UI, DM, group and file paths should consume that policy instead of recreating candidate rules. The delivery-state model should likewise have one definition across backend and UI. This is a design boundary, not a claim that every current path already shares one implementation.
+**Recommended modular seam:** one core route-policy interface should order directly reachable, authenticated relays and apply preference/failover. Ordinary message uploads and consented file chunks now consume the same `post_office_candidates_for` ordering; directory refresh uses the shared bridge-eligibility gate. UI and any remaining feature paths should consume core policy instead of recreating candidate rules. The delivery-state model should likewise have one definition across backend and UI.
 
 ### Feature summary and routing ownership
 
@@ -116,14 +118,14 @@ These settings apply **per client device**, not to the whole LAN or account by i
 | Relay use | Bridge discovery     | Invisible | Effective behavior                                                                                                                                                                                                                       |
 | --------- | -------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Off       | Off                  | Off       | Public direct discovery and direct data only; no relay upload/drain.                                                                                                                                                                     |
-| Off       | On in saved settings | Off       | **Recommended:** no directory participation. **Current gap:** the UI disables the bridge switch, but the core directory refresh checks its saved bridge flag separately; this combination needs a targeted behavior test and policy fix. |
+| Off       | On in saved settings | Off       | **Implemented on this branch:** the core rejects directory refresh and clears relayed introductions when relay use is disabled. The saved bridge choice can take effect again after relay use is re-enabled. |
 | On        | Off                  | Off       | Direct discovery plus opaque mailbox use for known peers; no new public cross-site directory introductions.                                                                                                                              |
 | On        | On                   | Off       | Direct paths remain; public presence is eligible for a reachable bridge relay's directory and trusted federation.                                                                                                                        |
 | On        | On                   | On        | No public bridge registration; invisible/private-contact authorization governs any permitted communication.                                                                                                                              |
 
 For the fourth row, the relay also needs `--bridge` and a permitted client↔relay path. A user preference changes candidate order, not these visibility rules. A group member's **Share a copy** setting independently controls whether that member serves history to other accepted members.
 
-The saved-flag gap is visible in [settings application](../src-tauri/src/settings.rs) and [directory refresh](../crates/mesh-talk-core/src/node/bridge_client.rs): the latter checks bridge opt-in and invisibility without checking the separate relay-use flag. The table records the **desired** switch interaction and flags the present implementation for later review; this document does not silently treat a disabled UI control as a backend security gate.
+The saved-flag interaction spans [settings application](../src-tauri/src/settings.rs) and [directory refresh](../crates/mesh-talk-core/src/node/bridge_client.rs). The core now checks relay use as well as bridge opt-in and invisibility, and clears earlier relay introductions when relay use is disabled. Existing proofs already copied to a remote relay still expire on their original short TTL; a disabled UI control alone is not a remote deletion request.
 
 ### Post-office modes
 
@@ -269,13 +271,13 @@ flowchart LR
 | ID  | Topology and settings                                                         | Discovery / broadcast                                                                                                                 | Data forwarding and outcome                                                                                                                                                                             |
 | --- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S1  | A is public locally, relay use on, bridge discovery off.                      | A announces directly but is absent from the public cross-site directory.                                                              | Known-peer legacy mail may still use a relay; v3 federated participation is gated by opt-in. **Current.**                                                                                               |
-| S2  | A turns **Use post offices** off while P/Q remain federated.                  | Direct discovery is unchanged; UI disables the bridge switch. A previously saved bridge-on flag needs the separate audit noted above. | A stops ordinary mailbox upload/drain. The desired rule is also to stop directory participation; current core refresh does not check relay use. **Current gap.**                                        |
+| S2  | A turns **Use post offices** off while P/Q remain federated.                  | Direct discovery is unchanged; UI disables the bridge switch. The core now clears prior relay introductions and gates directory participation even if bridge-on remains saved. | A stops ordinary mailbox upload/drain and public directory participation. **Focused regression test passes; remote registration expires on its existing TTL.**                                        |
 | S3  | A enables bridge discovery; B on the same LAN does not.                       | Trusted relays may introduce A across sites, not B.                                                                                   | Remote clients cannot infer B merely because it shares A's LAN or group. **Current privacy boundary.**                                                                                                  |
 | S4  | A is invisible or a private contact.                                          | No public bridge registration; private authorization rules apply separately.                                                          | A relay has no automatic exemption to reveal A. A known contact still needs the relevant authorized route. **Current boundary.**                                                                        |
 | S5  | A sends to offline D through P/Q.                                             | A directory entry may expire while ciphertext remains in a mailbox.                                                                   | D drains when online, if a copy and route survive. Thirty days is an upper bound, not guaranteed storage. Relay custody does not mark Delivered. **Current.**                                           |
 | S6  | A/B/D share a group; D offline; B has **Share a copy** on.                    | Group membership is not advertised by UDP discovery.                                                                                  | D may recover authorized events from B or its own opaque mailbox. P/Q cannot become sync members. **Current model.**                                                                                    |
 | S7  | Same group, but B disables **Share a copy** and A is offline.                 | Discovery may still show B online.                                                                                                    | B does not serve its retained group history; D needs another authorized sharing member or relay copy. **Current.**                                                                                      |
-| S8  | A sends a file to D via federated P/Q.                                        | A file offer can arrive as an encrypted event.                                                                                        | D must consent; manifest/chunk integrity and full byte completion need separate evidence. A card receipt is not file completion; current file failover is narrower than text. **Validate.**             |
+| S8  | A sends a file to D via federated P/Q.                                        | A file offer can arrive as an encrypted event.                                                                                        | D must consent; manifest/chunk integrity and full byte completion need separate evidence. A card receipt is not file completion. File retry now tries the ordinary ordered relay candidates, but cross-site complete bytes remain **Validate**.             |
 | S9  | A calls D across sites.                                                       | Signaling may use available application paths.                                                                                        | Media requires an independent WebRTC ICE route. P/Q are not TURN; encrypted text delivery does not prove a call works. **Current boundary.**                                                            |
 | S10 | A has two devices, one on X and one on Y.                                     | Each device has its own presence, settings and identity under one account.                                                            | Roster groups the devices by account; delivery and recipient receipts remain device-specific where required. Full sibling history/settings sync needs its own authenticated path. **Current boundary.** |
 | S11 | Two trusted relays hold duplicate copies of one event.                        | Directory may contain multiple routes to one verified device.                                                                         | Recipient validates and deduplicates by event identity; the UI shows one person/device, not one entry per relay. **Recommended invariant; test under failover.**                                        |
@@ -646,10 +648,10 @@ sequenceDiagram
   participant B as B
   A->>B: Direct encrypted event M2
   Note over A,P: Ordinary mailbox upload/drain disabled
-  A->>P: Saved bridge-on flag may still trigger directory refresh
+  Note over A,P: Saved bridge-on flag remains, but core rejects directory refresh
 ```
 
-**Result:** the intended rule is **no** relay directory participation while relay use is off. The UI disables the bridge switch, but the core refresh path currently checks that saved flag separately. This is a concrete implementation gap to fix after the design is approved; do not treat the UI disabled state as proof of backend privacy behavior.
+**Result:** the core now blocks relay directory participation while relay use is off and clears prior introductions immediately, even when the saved bridge switch remains on. Existing remote registrations can remain visible until their bounded expiry; disabling one client cannot erase proofs already copied by a relay. The focused regression test covers local authorization and clearing, not a remote revocation round-trip.
 
 #### S3 — only one of two LAN neighbors opts into cross-site presence
 
@@ -743,7 +745,7 @@ sequenceDiagram
   D->>D: Verify dense chunk chain and final hash
 ```
 
-**Result:** an offer or card reaching D is not proof that the file bytes arrived. Consent, size limits, exact chunk confirmation and integrity determine completion. Current file-chunk retry uses a narrower relay-candidate policy than ordinary messages; full cross-relay bytes and outage failover remain **validation gaps**.
+**Result:** an offer or card reaching D is not proof that the file bytes arrived. Consent, size limits, exact chunk confirmation and integrity determine completion. File-chunk retry now walks the same recipient-aware relay candidate list as ordinary messages; a focused test covers offline preferred-relay fallback to another accepting relay. Complete cross-site bytes and recovery from a relay outage remain **validation gaps**.
 
 #### S9 — cross-site call request
 
@@ -837,14 +839,27 @@ Federation should also converge after duplicate paths and partitions: use event 
 
 | Desired rule                                                                    | Present evidence or gap                                                                                                                                                                                                                                    |
 | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Disabling relay use also disables directory participation.                      | The desktop disables the bridge switch, but [core directory refresh](../crates/mesh-talk-core/src/node/bridge_client.rs) checks the saved bridge and invisibility flags separately from `post_office_enabled`. Verify and align the backend policy.        |
-| Relay preference and fallback apply consistently to all eligible data.          | Ordinary message uploads iterate relay candidates; file-chunk retry selects one per attempt. A complete cross-relay file byte transfer still needs separate evidence.                                                                                      |
+| Disabling relay use also disables directory participation.                      | [Core directory refresh](../crates/mesh-talk-core/src/node/bridge_client.rs) now checks relay use, bridge opt-in and invisibility through one predicate; disabling clears introduced peers. A focused regression test passes. Remote expiry remains TTL-bound. |
+| Relay preference and fallback apply consistently to all eligible data.          | Ordinary message uploads and consented file chunks now iterate recipient-aware relay candidates. A complete cross-relay file byte transfer and recipient receipt still need separate evidence.                                                                                      |
 | Equal relays work at the intended scale.                                        | Current directory membership is capped at 128 per relay, clients query at most eight directories per refresh, and configured relays periodically reconcile inventories. No global one-socket-per-relay pool or large-federation performance target exists. |
 | A preferred-relay outage still reaches an independent client on mac-mini's LAN. | Existing tests do not establish this entire physical topology with an alternate onward route, exact recipient receipt and independent client host.                                                                                                         |
 
 These are implementation comparison points, not changes authorized by this design document.
 
 ## 9. Decisions for the design review
+
+### Implementation and evidence tracker
+
+| Requirement | Status on this branch | Acceptance evidence still needed |
+| --- | --- | --- |
+| Relay use off stops public directory participation | Implemented: one core eligibility check gates registration, in-flight result publication and bridge-derived recovery; disabling clears local introductions. | Confirm remote registrations disappear after their existing TTL on an independent relay. |
+| Preferred relay failure falls back for consented file chunks | Implemented: file retry walks the same recipient-aware ordered candidates as ordinary uploads; a focused test stops the preferred relay and verifies custody at another. | Complete file bytes, final hash, recipient confirmation and sender recovery in a federated two-site outage. |
+| Alternate relay preserves cross-site delivery | Conditional on a surviving alternate-to-destination path; R6 demonstrates the failure case. | Stop the preferred relay in a three-relay physical topology and obtain the exact recipient receipt through the alternate. |
+| Multi-hop federation and group-member chains | Protocol mechanisms exist, but R8 and S12 remain design models. | Independent three-site end-to-end tests, including a partition, late join and duplicate-path convergence. |
+| Visibility, retention and scaling | Current bounds are 45-second directory presence, 128 members per relay, eight queried relays per refresh, and 30-day maximum mail age subject to event/byte eviction. | Product limits, backpressure and performance measurements at agreed client, relay and group sizes. |
+| Calls, linked devices and file completion | Separate feature paths; text-message success does not establish them. | Feature-specific end-to-end evidence for media, sibling catch-up and complete file bytes. |
+
+**Evidence labels:** a focused unit/integration test proves its stated local behavior; it does not prove an independent host, a physical link, or a full feature path. Keep a requirement marked conditional until the corresponding topology and recipient-side outcome have been observed.
 
 1. **Trust enrollment:** retain explicit identity pins as the authority boundary and design a simpler mutual enrollment workflow? **Recommended: yes.** Candidate detection may be automatic; trust should not be.
 2. **Relay custody policy:** upload after every direct attempt, or only while a recipient receipt is outstanding? **Open.** Define cost, offline resilience and per-member group behavior before implementation.

@@ -3625,7 +3625,7 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
 }
 
 #[tokio::test]
-async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects() {
+async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -3703,6 +3703,23 @@ async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects
     drop(channel);
     recipient_task.abort();
     let _ = recipient_task.await;
+
+    // A stale preferred relay must not strand consented chunks while another
+    // authenticated relay on this LAN is accepting mailbox rounds.
+    let offline_relay = DeviceIdentity::generate();
+    let offline_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let offline_proof = Announce::new_post_office(
+        &offline_relay,
+        "Offline preferred",
+        offline_listener.local_addr().unwrap().port(),
+    );
+    drop(offline_listener);
+    a.roster.lock().unwrap().update(
+        &offline_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &a.user_id(),
+    );
+    a.set_bridge_hub_id(Some(&offline_relay.user_id())).unwrap();
 
     a.flush_file_delivery(card).await;
     assert!(

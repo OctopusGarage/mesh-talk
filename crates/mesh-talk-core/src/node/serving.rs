@@ -25,6 +25,11 @@ impl Node {
     pub fn set_post_office_enabled(&self, enabled: bool) {
         self.post_office_enabled
             .store(enabled, std::sync::atomic::Ordering::Release);
+        if !enabled {
+            self.clear_bridge_introductions();
+        }
+        self.bridge_notify.notify_one();
+        self.delivery_notify.notify_one();
     }
 
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the

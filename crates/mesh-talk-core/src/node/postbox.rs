@@ -48,8 +48,8 @@ pub fn post_office_candidates(roster: &Roster, preferred_id: Option<&str>) -> Ve
     candidates
 }
 
-/// The first known post office in preference order. Callers performing network
-/// I/O should try subsequent candidates if this relay is unreachable.
+/// Test the first candidate while keeping production I/O on the full ordered list.
+#[cfg(test)]
 pub fn selected_post_office(roster: &Roster, hub_id: Option<&str>) -> Option<PeerRecord> {
     post_office_candidates(roster, hub_id).into_iter().next()
 }
@@ -103,14 +103,6 @@ impl super::Node {
         self.bridge_notify.notify_one();
         self.delivery_notify.notify_one();
         Ok(())
-    }
-
-    pub(in crate::node) fn selected_post_office(&self, roster: &Roster) -> Option<PeerRecord> {
-        let hub = self
-            .bridge_hub_id
-            .lock()
-            .expect("bridge hub lock not poisoned");
-        selected_post_office(roster, hub.as_deref())
     }
 
     pub(in crate::node) fn post_office_candidates(&self, roster: &Roster) -> Vec<PeerRecord> {

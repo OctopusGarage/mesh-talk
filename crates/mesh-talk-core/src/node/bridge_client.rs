@@ -14,6 +14,12 @@ const MAX_DIRECTORY_RELAYS_PER_REFRESH: usize = 8;
 const DIRECTORY_MEMBERSHIP_TTL: Duration = Duration::from_secs(45);
 
 impl Node {
+    pub(in crate::node) fn bridge_directory_allowed(&self) -> bool {
+        self.post_office_enabled.load(Ordering::Acquire)
+            && self.bridge_discovery_enabled.load(Ordering::Acquire)
+            && !self.privacy_snapshot().invisible
+    }
+
     /// Explicitly share this device's public presence with a discovered relay
     /// directory. Disabling immediately revokes introduced-peer recovery.
     pub fn set_bridge_discovery_enabled(&self, enabled: bool) {
@@ -45,9 +51,7 @@ impl Node {
     /// relays are peers: clients use their local relay first, while registrations
     /// on both sides make cross-site introductions and mailbox drains possible.
     pub async fn refresh_bridge_directory(&self) -> usize {
-        if !self.bridge_discovery_enabled.load(Ordering::Acquire)
-            || self.privacy_snapshot().invisible
-        {
+        if !self.bridge_directory_allowed() {
             return 0;
         }
         let preference = self
@@ -76,8 +80,7 @@ impl Node {
                 continue;
             };
             // A policy change during an awaited query must not publish its results.
-            if !self.bridge_discovery_enabled.load(Ordering::Acquire)
-                || self.privacy_snapshot().invisible
+            if !self.bridge_directory_allowed()
                 || !self.relay_allowed(&relay.public)
                 || *self
                     .bridge_hub_id
@@ -121,8 +124,7 @@ impl Node {
             .bridge_dm_pull_peers
             .lock()
             .expect("bridge peers lock not poisoned");
-        if !self.bridge_discovery_enabled.load(Ordering::Acquire)
-            || self.privacy_snapshot().invisible
+        if !self.bridge_directory_allowed()
             || *self
                 .bridge_hub_id
                 .lock()
@@ -170,10 +172,7 @@ impl Node {
             self.query_bridge_relay_once(relay, bridge_directory::legacy_request())
                 .await?
         };
-        if !self.bridge_discovery_enabled.load(Ordering::Acquire)
-            || self.privacy_snapshot().invisible
-            || !self.relay_allowed(&relay.public)
-        {
+        if !self.bridge_directory_allowed() || !self.relay_allowed(&relay.public) {
             return None;
         }
         Some(response)

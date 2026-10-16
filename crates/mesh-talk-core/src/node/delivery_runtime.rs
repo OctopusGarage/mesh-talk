@@ -309,10 +309,7 @@ impl Node {
             .lock()
             .expect("verified DM pull mutex not poisoned")
             .contains(fingerprint)
-            || (self
-                .bridge_discovery_enabled
-                .load(std::sync::atomic::Ordering::Acquire)
-                && !self.privacy_snapshot().invisible
+            || (self.bridge_directory_allowed()
                 && self
                     .bridge_dm_pull_peers
                     .lock()
@@ -1919,26 +1916,25 @@ impl Node {
         }
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);
-        for relay in [false, true].into_iter().filter(|relay| *relay || direct) {
-            if relay
-                && self
-                    .outgoing_file_consents
-                    .lock()
-                    .expect("outgoing consent lock not poisoned")
-                    .get(&(file.id, binding.event_id))
-                    != Some(&crate::eventlog::sync::FileConsentStatus::Accepted)
-            {
-                continue;
-            }
-            let peer = if relay {
-                let roster = self.roster.lock().expect("roster lock not poisoned");
-                self.selected_post_office(&roster)
-            } else {
-                self.routing_peer(&binding.device.user_id())
-            };
-            let Some(peer) = peer else {
-                continue;
-            };
+        let mut candidates = Vec::new();
+        if direct && let Some(peer) = self.routing_peer(&binding.device.user_id()) {
+            candidates.push((false, peer));
+        }
+        let consented = self
+            .outgoing_file_consents
+            .lock()
+            .expect("outgoing consent lock not poisoned")
+            .get(&(file.id, binding.event_id))
+            == Some(&crate::eventlog::sync::FileConsentStatus::Accepted);
+        if consented {
+            let roster = self.roster.lock().expect("roster lock not poisoned");
+            candidates.extend(
+                self.post_office_candidates_for(&roster, &binding.device)
+                    .into_iter()
+                    .map(|peer| (true, peer)),
+            );
+        }
+        for (relay, peer) in candidates {
             if (relay && !self.relay_allowed(&peer.public))
                 || (!relay && (peer.public != binding.device || peer.account_id != binding.account))
             {
@@ -2127,8 +2123,8 @@ impl Node {
                 );
             }
             let held = outcome.unwrap_or(false);
-            if held && !relay {
-                return true;
+            if held {
+                return !relay;
             }
         }
         false
