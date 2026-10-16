@@ -112,8 +112,8 @@ test("committed archive includes export-ignored harness without changing reposit
   } }), committed);
   const listing = await runCommand("tar", ["-tf", "source.tar"], { cwd: directory, timeoutMs: 10_000 });
   assert.equal(listing.code, 0, listing.output);
-  assert(listing.output.split("\n").includes("scripts/pr-platform/guest.mjs"), "export-ignore must not remove the guest runner");
-  assert(listing.output.split("\n").includes("hidden.txt"));
+  assert(listing.output.split(/\r?\n/u).includes("scripts/pr-platform/guest.mjs"), "export-ignore must not remove the guest runner");
+  assert(listing.output.split(/\r?\n/u).includes("hidden.txt"));
   const archivedGuest = await runCommand("tar", ["-xOf", "source.tar", "scripts/pr-platform/guest.mjs"], { cwd: directory });
   assert.equal(archivedGuest.output, guest);
   const tracked = await runCommand("tar", ["-xOf", "source.tar", "tracked.txt"], { cwd: directory });
