@@ -16,8 +16,8 @@ Set `MESH_TALK_E2E_INSTALLED_RELAYS=1` to test the installed mac2015 and
 mac-mini services. Their pinned IDs can be overridden with
 `MESH_TALK_E2E_MAC2015_RELAY_ID` and `MESH_TALK_E2E_MACMINI_RELAY_ID`.
 `MESH_TALK_E2E_MAC2015_SSH` overrides the SSH alias when `.local` DNS fails.
-`MESH_TALK_E2E_BRIDGE_FILE=1` additionally runs the currently unsupported
-cross-relay file-byte diagnostic and fails if it cannot complete.
+Federation modes always verify consented cross-relay file bytes and SHA-256.
+`MESH_TALK_E2E_BRIDGE_FILE=1` also enables that check in legacy gateway mode.
 """
 
 import base64
@@ -293,8 +293,8 @@ def run():
             fixture = Path(local_dir) / "bridge-file.bin"
             fixture.write_bytes(payload)
             bridge_file_error = None
-            if os.environ.get("MESH_TALK_E2E_BRIDGE_FILE") != "1":
-                print("SKIP: cross-relay file bytes require a direct recipient consent path",
+            if not federated and os.environ.get("MESH_TALK_E2E_BRIDGE_FILE") != "1":
+                print("SKIP: optional legacy gateway file check; set MESH_TALK_E2E_BRIDGE_FILE=1",
                       flush=True)
             else:
                 try:

@@ -872,18 +872,16 @@ impl Node {
             .outgoing_file_acks
             .lock()
             .expect("outgoing file progress lock not poisoned");
-        let consent_answers = self
-            .outgoing_file_consents
-            .lock()
-            .expect("outgoing consent lock not poisoned");
         let consent = if recipients.iter().any(|destination| {
-            consent_answers.get(&(id, destination.binding.event_id))
-                == Some(&crate::eventlog::sync::FileConsentStatus::Declined)
+            destination.active
+                && self.outgoing_file_consent_status(id, destination.binding.event_id)
+                    == Some(crate::eventlog::sync::FileConsentStatus::Declined)
         }) {
             Some(super::ReceiveDecision::Declined)
         } else if recipients.iter().any(|destination| {
-            consent_answers.get(&(id, destination.binding.event_id))
-                == Some(&crate::eventlog::sync::FileConsentStatus::Pending)
+            destination.active
+                && self.outgoing_file_consent_status(id, destination.binding.event_id)
+                    == Some(crate::eventlog::sync::FileConsentStatus::Pending)
         }) {
             Some(super::ReceiveDecision::Pending)
         } else {
@@ -1615,6 +1613,10 @@ impl Node {
             transfers.remove(&key);
             return false;
         }
+        if self.recipient_completed_file(file, destination) {
+            transfers.remove(&key);
+            return true;
+        }
         if !transfers.contains_key(&key) {
             if transfers.len() == MAX_FILE_TRANSFERS {
                 // Existing destinations retain their progress; new destinations
@@ -1806,18 +1808,17 @@ impl Node {
                 };
             }
             FilePhase::Consent => {
-                match super::session::request_file_consent(
-                    channel,
-                    file.file_conversation,
-                    binding.event_id,
-                )
-                .await
+                match self
+                    .query_file_consent(
+                        channel,
+                        &binding.device,
+                        file.id,
+                        file.file_conversation,
+                        binding.event_id,
+                    )
+                    .await
                 {
                     Ok(status) => {
-                        self.outgoing_file_consents
-                            .lock()
-                            .expect("outgoing consent lock not poisoned")
-                            .insert((file.id, binding.event_id), status);
                         if status == crate::eventlog::sync::FileConsentStatus::Accepted {
                             transfer.phase = FilePhase::InitialCustody;
                         }
@@ -1914,18 +1915,17 @@ impl Node {
         if !current() {
             return false;
         }
+        if self.recipient_completed_file(file, destination) {
+            return true;
+        }
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);
         let mut candidates = Vec::new();
         if direct && let Some(peer) = self.routing_peer(&binding.device.user_id()) {
             candidates.push((false, peer));
         }
-        let consented = self
-            .outgoing_file_consents
-            .lock()
-            .expect("outgoing consent lock not poisoned")
-            .get(&(file.id, binding.event_id))
-            == Some(&crate::eventlog::sync::FileConsentStatus::Accepted);
+        let consented = self.outgoing_file_consent_status(file.id, binding.event_id)
+            == Some(crate::eventlog::sync::FileConsentStatus::Accepted);
         if consented {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             candidates.extend(
@@ -2012,18 +2012,17 @@ impl Node {
                     return false;
                 }
                 if !relay {
-                    match super::session::request_file_consent(
-                        &mut channel,
-                        file.file_conversation,
-                        binding.event_id,
-                    )
-                    .await
+                    match self
+                        .query_file_consent(
+                            &mut channel,
+                            &peer.public,
+                            file.id,
+                            file.file_conversation,
+                            binding.event_id,
+                        )
+                        .await
                     {
                         Ok(status) => {
-                            self.outgoing_file_consents
-                                .lock()
-                                .expect("outgoing consent lock not poisoned")
-                                .insert((file.id, binding.event_id), status);
                             if status != crate::eventlog::sync::FileConsentStatus::Accepted {
                                 return false;
                             }

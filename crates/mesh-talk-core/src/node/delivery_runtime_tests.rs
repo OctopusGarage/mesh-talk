@@ -1,5 +1,5 @@
 use super::*;
-use crate::discovery::{Announce, roster::Roster};
+use crate::discovery::Announce;
 use crate::eventlog::{ConversationId, EventId};
 use crate::identity::{account::Account, device::DeviceIdentity};
 use std::{
@@ -2845,27 +2845,7 @@ fn node_with_files(
     mpsc::UnboundedReceiver<ReceivedDm>,
     mpsc::UnboundedReceiver<ReceivedFile>,
 ) {
-    let roster = Arc::new(Mutex::new(Roster::default()));
-    roster.lock().unwrap().update(
-        proof,
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        &identity.public().user_id(),
-    );
-    let (tx, rx) = mpsc::unbounded_channel();
-    let (ch, _) = mpsc::unbounded_channel();
-    let (file, files) = mpsc::unbounded_channel();
-    let node = Node::open_with_account(
-        identity,
-        account,
-        roster,
-        tx,
-        ch,
-        file,
-        &dir.join("events.log"),
-        &dir.join("sent.log"),
-        "pw",
-    )
-    .unwrap();
+    let (node, rx, files) = super::test_support::node_with_files(dir, identity, account, proof);
     // Legacy delivery tests exercise the previous automatic-transfer contract.
     // The consent-specific loopback test keeps the new manual default.
     node.set_attachment_global_auto(true).unwrap();

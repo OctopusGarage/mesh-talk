@@ -89,6 +89,7 @@ impl Node {
             seen,
         });
         let mut uploaded = Vec::new();
+        let mut outgoing = Vec::new();
         if let Some(conv) = conversation {
             let events = {
                 let store = self.sync_store(recipient);
@@ -97,18 +98,25 @@ impl Node {
                     .expect("projection lock not poisoned")
                     .events_excluding(&conv, &HashSet::new())
             };
-            for event in events {
-                let outer = mailbox
-                    .wrap(&event)
-                    .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
+            outgoing.extend(events.into_iter().map(|event| (event, true)));
+        }
+        match self.file_consent_events(recipient) {
+            Ok(controls) => outgoing.extend(controls.into_iter().map(|event| (event, false))),
+            Err(error) => log::debug!("file consent publication deferred: {error}"),
+        }
+        for (event, requested) in outgoing {
+            let outer = mailbox
+                .wrap(&event)
+                .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
+            if requested {
                 uploaded.push((event.id, outer.id));
-                outer_store
-                    .lock()
-                    .expect("opaque store lock not poisoned")
-                    .log
-                    .append(outer)
-                    .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
             }
+            outer_store
+                .lock()
+                .expect("opaque store lock not poisoned")
+                .log
+                .append(outer)
+                .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
         }
         super::session::request_round(channel, &outer_store, mailbox.id()).await?;
         let wrappers: Vec<Event> = outer_store
@@ -138,6 +146,19 @@ impl Node {
         });
         let store = self.sync_store(channel.peer_identity());
         for (outer_id, event) in inner {
+            match self.accept_file_consent_event(&event, recipient) {
+                Ok(true) => {
+                    processed.push(outer_id);
+                    continue;
+                }
+                Err(error) => {
+                    // Retry this control after local storage recovers, while
+                    // allowing unrelated messages in the same mailbox through.
+                    log::debug!("file consent persistence deferred: {error}");
+                    continue;
+                }
+                Ok(false) => {}
+            }
             if self
                 .log
                 .lock()

@@ -11,7 +11,7 @@ post-office bridges introduce registered peers across sites without merging
 their IP subnets. See [routed discovery](routed-network-discovery.md) and
 [network topologies](network-topologies.md).
 
-> The earlier RSA-contact / plaintext-UDP / TCP-relay *legacy* stack has been retired;
+> The earlier RSA-contact / plaintext-UDP / TCP-relay _legacy_ stack has been retired;
 > this serverless stack is the entire product and lives at `/`. The only retained
 > piece outside the node is the auth/session layer (`services/auth_service.rs` + `state.rs`),
 > which `login` uses before starting the node.
@@ -48,16 +48,16 @@ command names for Tauri registration. Commands clone a node handle from
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
 - **DeviceIdentity** — per device: Ed25519 (sign) + X25519 (DH). `user_id =
-  SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
+SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
 - **Account** (multi-device) — cross-device Ed25519. `account_id =
-  SHA-256("mesh-talk-account-v1" ‖ pub)[:16]`. A **DeviceCertificate** is the account
+SHA-256("mesh-talk-account-v1" ‖ pub)[:16]`. A **DeviceCertificate** is the account
   key's signature over a device key (domain `mesh-talk-device-cert-v1`), binding device→account.
 - **At rest** (`storage/encryption.rs`) — `salt(16) ‖ nonce(12) ‖ AES-256-GCM(secret)`,
   key via **PBKDF2-HMAC-SHA256, 600k rounds**. Used by every store (device/account
   keystore, event log, sent/received logs, ratchet sessions, channel senders, post office).
 - **Transport** (`transport/`, snow) — **Noise_XX_25519_ChaChaPoly_BLAKE2s** with a
   post-handshake identity exchange: each side signs `"mesh-talk-transport-auth-v1" ‖
-  handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
+handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
   → binds the Ed25519 identity to the channel. 4-byte length framing, MAX_FRAME 65535.
   Pinned connections check the responder's Noise static key after message two,
   before disclosing the initiator's static key and identity auth; the complete
@@ -112,7 +112,7 @@ command names for Tauri registration. Commands clone a node handle from
   must create a fresh channel or a future protocol revision must carry a compact
   invitation proof ahead of the backlog.
 - **Multi-device** — `DmEnvelope{route, msg_id, body}` (magic `MTDE1`) carries
-  sender/recipient *account* routing inside the ciphertext; `send_to_account` fans a
+  sender/recipient _account_ routing inside the ciphertext; `send_to_account` fans a
   per-device ratcheted copy to every device of the target account + self-syncs to own
   devices; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
@@ -146,8 +146,8 @@ command names for Tauri registration. Commands clone a node handle from
 ## 3. Event log & sync (`eventlog/`)
 
 - **Event** — content-addressed: `id = SHA-256(domain ‖ content)`; fields `conversation,
-  author (Ed25519 pub, self-certifying), seq, parents (→ hash-linked DAG), lamport,
-  wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadMarker/
+author (Ed25519 pub, self-certifying), seq, parents (→ hash-linked DAG), lamport,
+wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadMarker/
   MembershipChange/KeyRotation/FileManifest (indices frozen for wire stability).
 - **EventLog** (in-memory, `store.rs`) — per-conversation DAG; tracks `heads` (frontier),
   `version` (per-author max seq → equivocation/fork detection), `max_lamport`. `events()`
@@ -278,18 +278,18 @@ command names for Tauri registration. Commands clone a node handle from
   224.0.0.167, `DEFAULT_DISCOVERY_PORT` 47474 in `transport/net.rs`) joined on every IPv4
   interface, plus a unicast announce/response reply, a /24 unicast scan fallback, a startup
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
-  + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
-  Startup burst and scan times are measured from launch; a manual trigger works during
-  startup. The fallback scan visits each LAN /24 once, omits every local interface address,
-  and excludes Tailscale's 100.64.0.0/10 overlay range.
-  Desktop builds can additionally obtain candidate IPs from an already-running local
-  Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
-  query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
-  these endpoints remain separate from device identity and from Noise authorization.
-  The roster and encrypted route cache retain multiple addresses per device and
-  a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
-  for the protocol, limitations, and cross-network release checks; see
-  [network topologies](network-topologies.md) for the A–F deployment scenarios.
+  - updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
+    Startup burst and scan times are measured from launch; a manual trigger works during
+    startup. The fallback scan visits each LAN /24 once, omits every local interface address,
+    and excludes Tailscale's 100.64.0.0/10 overlay range.
+    Desktop builds can additionally obtain candidate IPs from an already-running local
+    Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
+    query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
+    these endpoints remain separate from device identity and from Noise authorization.
+    The roster and encrypted route cache retain multiple addresses per device and
+    a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
+    for the protocol, limitations, and cross-network release checks; see
+    [network topologies](network-topologies.md) for the A–F deployment scenarios.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
@@ -432,11 +432,33 @@ automatic up to 16 MiB; SVG and larger images require approval. The recipient ch
 the first decrypted chunk against the claimed raster signature before durably ingesting it,
 while text and stickers remain ordinary message events. A current sender publishes the
 manifest first, then asks the exact authenticated recipient device for consent before
-synchronizing chunk events. The receiver independently rejects unsolicited chunks at its
+synchronizing chunk events. When the clients cannot connect directly, the recipient
+returns a signed decision through the existing recipient-encrypted pairwise mailbox;
+trusted relay federation carries it without opening it. The decision binds the original
+manifest event, file conversation, complete device identities and known accounts.
+Direct sessions query the same signed control as mailbox delivery using appended,
+optional sync frames; existing frame discriminants remain unchanged. Monotonic
+recipient revisions prevent a delayed acceptance from replacing a newer decline or
+pending decision. Every successful receive-policy write invalidates cached publication,
+even if a decline and reapproval occur between mailbox rounds; reopening refreshes the
+revision. Legacy direct replies have no ordering token: their pending/declined answers
+remain authoritative until a fresh direct answer, rather than allowing an unseen delayed
+mailbox approval to override them. Invalid controls or failed consent persistence fail
+closed without entering the legacy automatic-transfer path. Verified durable saves add the exact final chunk to a
+completion control, allowing the sender to finish delivery through the same path.
+Relay custody remains pending. The receiver independently rejects unsolicited chunks at its
 durable sync gate, including chunk-first delivery from older senders. A channel sender
 publishes the manifest and members pull chunks only after their own consent; automatic
 images retain eager distribution. Decisions bind the signed manifest event and survive
-restart. Identical signed manifests that share the same file conversation are aliases
+restart. Local receive policy remains in `attachment-consent.log`; signed protocol
+controls and authenticated direct observations use the separate encrypted
+`file-consent-controls.log`. `file_consent` owns control validation and exchange,
+`file_consent_store` owns durable revision and replay state, and `FileBook` indexes
+offers by author. Exact manifest lookup avoids sorting all aliases for each offer;
+publication resolves alias policy once per file and excludes channel manifests. Saved
+completion controls require the current owner account, original sender and matching
+sender certificate. A failed control write is retried without blocking unrelated mailbox
+messages. Identical signed manifests that share the same file conversation are aliases
 of one immutable byte stream; one explicit decision covers those aliases while each
 sender's automatic policy is evaluated separately. Exact decisions are retained
 for the account lifetime, so later offers or policy changes cannot silently
@@ -618,7 +640,7 @@ owns cache eviction, deletion protection, exact-ID send completion, and history/
 state transitions. A late accepted ID after intent removal becomes a deletion tombstone;
 completion never recreates an evicted conversation cache.
 `store/chat.ts` exposes the UI-facing state and routes incoming DMs to the sender's
-*account* (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
+_account_ (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
 message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,
 search, and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
 `features/chat/useConversationViewport.ts` owns the virtual list's reading position,
@@ -759,17 +781,17 @@ the UI sends users who suspect compromise to new identity creation.
   `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (Dependabot PRs to `dev`, gated by required checks),
   `glib-0.20-watch.yml` (monthly dep watcher).
 - **Automated bug-finding** (defence in depth — surfaces issues without anyone looking):
-  - *Coverage-guided fuzzing* (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
+  - _Coverage-guided fuzzing_ (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
     untrusted wire and opened-payload decoders; the `decoder_smoke` test is the always-on
     stable complement. See [`fuzz/README.md`](../fuzz/README.md) for the current targets.
-  - *Mutation testing* (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
-  - *Coverage* (Codecov), *clippy `-D warnings`*, *cargo-deny*, *cargo-machete*, *CodeQL*, *gitleaks*.
-  - *Delivery / AI regression smoke* (`make eval-smoke`) keeps core smoke examples,
+  - _Mutation testing_ (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
+  - _Coverage_ (Codecov), _clippy `-D warnings`_, _cargo-deny_, _cargo-machete_, _CodeQL_, _gitleaks_.
+  - _Delivery / AI regression smoke_ (`make eval-smoke`) keeps core smoke examples,
     prompt/agent contracts, local hooks, PR validation, and CI wiring from drifting.
-    *Real model-backed AI eval* (`make ai-eval`, with `AI_EVAL_COMMAND`) scores the stable
-    prompt/workflow cases. *Full real smoke* (`make smoke-full`) runs unit/integration plus
+    _Real model-backed AI eval_ (`make ai-eval`, with `AI_EVAL_COMMAND`) scores the stable
+    prompt/workflow cases. _Full real smoke_ (`make smoke-full`) runs unit/integration plus
     backend and frontend E2E.
-  - *Claude operations* (`.claude/`): `/bug-hunt` fans out read-only `bug-hunter` subagents
+  - _Claude operations_ (`.claude/`): `/bug-hunt` fans out read-only `bug-hunter` subagents
     (adversarial audit, verified findings only) over the core; `code-reviewer` reviews a diff;
     `/e2e` runs the `e2e-runner` over the real multi-process integration suite.
 - **Crypto primitives**: ed25519-dalek and x25519-dalek use `rand_core` 0.6

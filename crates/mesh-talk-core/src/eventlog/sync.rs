@@ -140,6 +140,11 @@ pub trait SyncStore {
     fn file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> FileConsentStatus {
         FileConsentStatus::Pending
     }
+    /// Optional ordered consent for modern endpoints. The signed answer shares
+    /// the mailbox revision space; legacy stores can retain their existing query.
+    fn signed_file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> Option<Event> {
+        None
+    }
     /// Optional custody qualification. Memory/legacy stores cannot promise
     /// durability; durable hosts synchronize and check current visibility.
     fn durable_have(&self, _conversation: &ConversationId, _id: &EventId) -> bool {

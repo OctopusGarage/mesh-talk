@@ -330,6 +330,8 @@ pub struct Node {
     pub(in crate::node) pending_files: Mutex<HashSet<ConversationId>>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
     pub(in crate::node) attachment_consent: Mutex<super::attachment_consent::AttachmentConsent>,
+    /// Durable pairwise file-consent controls, separate from local receive policy.
+    pub(in crate::node) file_consent: Mutex<super::file_consent_store::FileConsentStore>,
     /// Durable chat-media store under `<account_dir>/media`: the plaintext bytes of
     /// image/screenshot/video messages, copied here on send + receive-complete so the
     /// inline preview loads from a durable source that survives chunk prune + restart.
@@ -470,6 +472,7 @@ impl Node {
             profiles_res,
             recalls_res,
             consent_res,
+            consent_controls_res,
             origin_res,
             contacts_res,
             recovered_ids_res,
@@ -502,6 +505,12 @@ impl Node {
                     password,
                 )
             });
+            let h_consent_controls = s.spawn(|| {
+                super::file_consent_store::FileConsentStore::open(
+                    &dir.join("file-consent-controls.log"),
+                    password,
+                )
+            });
             let h_origin = s.spawn(|| {
                 super::recovery::load_recovery_origins(&dir.join("recovery-origin.log"), password)
             });
@@ -530,6 +539,7 @@ impl Node {
                 h_profiles.join(),
                 h_recalls.join(),
                 h_consent.join(),
+                h_consent_controls.join(),
                 h_origin.join(),
                 h_contacts.join(),
                 h_recovered_ids.join(),
@@ -554,6 +564,7 @@ impl Node {
             });
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
             .unwrap_or_else(|e| std::panic::resume_unwind(e))?
             .into_iter()
@@ -739,6 +750,7 @@ impl Node {
             files: Mutex::new(files),
             pending_files: Mutex::new(HashSet::new()),
             attachment_consent: Mutex::new(attachment_consent),
+            file_consent: Mutex::new(file_consent),
             media,
             dm_ratchet: Mutex::new(dm_ratchet),
             delivery: Mutex::new(delivery),

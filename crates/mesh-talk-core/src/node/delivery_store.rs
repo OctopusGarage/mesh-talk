@@ -1008,7 +1008,11 @@ impl DeliveryStore {
     }
 
     pub(crate) fn file_completed(&self, id: EventId) -> bool {
-        self.file_completions.contains_key(&id)
+        self.file_completion(id).is_some()
+    }
+
+    pub(crate) fn file_completion(&self, id: EventId) -> Option<EventId> {
+        self.file_completions.get(&id).copied()
     }
 
     pub(crate) fn cards_for_file(&self, conversation: ConversationId) -> Vec<FileCard> {

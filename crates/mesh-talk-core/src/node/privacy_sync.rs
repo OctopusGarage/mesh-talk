@@ -866,6 +866,16 @@ impl SyncStore for GuardedSyncStore<'_> {
             super::attachment_consent::ReceiveDecision::Declined => FileConsentStatus::Declined,
         }
     }
+    fn signed_file_consent(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Option<crate::eventlog::Event> {
+        self.node
+            .direct_file_consent_control(&self.peer, *file, *manifest)
+            .ok()
+            .flatten()
+    }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
         if !self.visible(conversation).iter().any(|e| e.id == *id) {
             return !self.denied

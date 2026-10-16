@@ -31,6 +31,10 @@ pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
 mod file_completion;
+mod file_consent;
+mod file_consent_store;
+#[cfg(test)]
+mod file_consent_tests;
 pub(crate) mod filebook;
 pub(crate) mod files;
 pub(crate) mod lifecycle;
@@ -65,6 +69,8 @@ mod search;
 pub(crate) mod sentlog;
 pub(crate) mod serving;
 pub(crate) mod session;
+#[cfg(test)]
+mod test_support;
 pub(crate) mod transport;
 pub(crate) mod wire;
 

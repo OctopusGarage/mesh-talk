@@ -51,12 +51,12 @@ the inner event. The legacy format remains relay-specific.
 
 ## What remains visible
 
-| Relay observation | Why it remains visible |
-| --- | --- |
-| Authenticated connecting device and IP address | Noise identity authentication and TCP routing |
-| Pairwise opaque mailbox ID | Selecting the stored queue for sync; version 3 uses the same pseudonym across trusted relays |
-| Pseudonymous outer author and opaque event ID | Relay event-log integrity and deduplication |
-| Size bucket, count, upload/pull time | Storage, traffic, and retrieval behavior |
+| Relay observation                              | Why it remains visible                                                                       |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Authenticated connecting device and IP address | Noise identity authentication and TCP routing                                                |
+| Pairwise opaque mailbox ID                     | Selecting the stored queue for sync; version 3 uses the same pseudonym across trusted relays |
+| Pseudonymous outer author and opaque event ID  | Relay event-log integrity and deduplication                                                  |
+| Size bucket, count, upload/pull time           | Storage, traffic, and retrieval behavior                                                     |
 
 The relay can correlate uploads and pulls to infer who communicates with
 whom, even though the mailbox ID has no readable identity or conversation
@@ -84,7 +84,12 @@ expire without delivery if its sender never reconnects.
 DM and delivery-control conversations are wrapped only for their addressed
 device pair. A channel is wrapped only for current members; a removed member
 does not get later events. File chunks are wrapped for the explicit file
-destination after recipient consent. The recipient pulls its mailboxes with
+destination after recipient consent. A recipient with no direct sender route can
+return its signed, exact-offer consent and verified-save completion through the
+same encrypted pairwise mailbox. These controls are wrapped before transmission;
+the relay cannot read the decision, manifest binding, or completion proof. They
+remain outside the ordinary chat event projection and are stored locally in an
+encrypted protocol sidecar. The recipient pulls its mailboxes with
 historically verified peers, decrypts, and runs ordinary local event admission.
 This permits an offline sender, channel invitation, receipt, or file to arrive
 through the relay while the original sender is stopped. The relay remains a
