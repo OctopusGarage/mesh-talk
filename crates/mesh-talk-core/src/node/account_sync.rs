@@ -147,10 +147,15 @@ impl Node {
     }
 
     pub fn device_sync_policy(&self) -> DeviceSyncPolicy {
-        self.account_sync_policy
+        self.device_sync_policy_snapshot().0
+    }
+
+    fn device_sync_policy_snapshot(&self) -> (DeviceSyncPolicy, u64) {
+        let store = self
+            .account_sync_policy
             .lock()
-            .expect("account sync policy mutex not poisoned")
-            .current()
+            .expect("account sync policy mutex not poisoned");
+        (store.current(), store.revision())
     }
 
     pub fn set_device_sync_category(
@@ -1106,7 +1111,7 @@ impl Node {
         cursor: Option<HistoryCursor>,
         known_digest: [u8; 32],
     ) -> Result<(Option<HistoryCursor>, [u8; 32]), NodeError> {
-        let wanted = self.device_sync_policy();
+        let (wanted, revision) = self.device_sync_policy_snapshot();
         if !wanted.history && !wanted.attachments && !wanted.appearance && !wanted.contacts {
             return Ok((None, [0; 32]));
         }
@@ -1204,6 +1209,12 @@ impl Node {
                         started_records = true;
                     }
                     if let Some(complete) = page.accept(other, &own)? {
+                        // A disabled category may have skipped frames above. Never
+                        // acknowledge their digest or retain a continuation cursor,
+                        // even if off/on changes restored the original bools (ABA).
+                        if self.device_sync_policy_snapshot().1 != revision {
+                            return Ok((None, [0; 32]));
+                        }
                         self.apply_account_history_page(&complete.records)?;
                         return Ok((complete.next_cursor, complete.digest));
                     }
@@ -1216,12 +1227,19 @@ impl Node {
         let mut tick = tokio::time::interval(RETRY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
+        let mut revision = self.device_sync_policy_snapshot().1;
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
                 _ = self.account_sync_notify.notified() => {}
             }
-            let policy = self.device_sync_policy();
+            let (policy, current_revision) = self.device_sync_policy_snapshot();
+            if revision != current_revision {
+                // Cursors/digests describe an applied category selection, not
+                // merely a remote log. Category changes require a fresh sweep.
+                cursors.clear();
+                revision = current_revision;
+            }
             if !policy.history && !policy.attachments && !policy.appearance && !policy.contacts {
                 cursors.clear();
                 continue;
@@ -1351,6 +1369,175 @@ impl Node {
 mod tests {
     use super::*;
     use crate::identity::account::Account;
+
+    #[tokio::test]
+    async fn category_toggle_during_sibling_page_restarts_catch_up_including_off_on_aba() {
+        use crate::{discovery::Roster, identity::device::DeviceIdentity};
+        use std::sync::Mutex;
+        use tokio::{net::TcpListener, sync::mpsc};
+
+        for aba in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let account = Account::generate();
+            let open = |name: &str| {
+                let (dm, _) = mpsc::unbounded_channel();
+                let (channel, _) = mpsc::unbounded_channel();
+                let (file, _) = mpsc::unbounded_channel();
+                Node::open_with_account(
+                    DeviceIdentity::generate(),
+                    Account::from_secret_bytes(account.secret_bytes()),
+                    Arc::new(Mutex::new(Roster::default())),
+                    dm,
+                    channel,
+                    file,
+                    &directory.path().join(format!("{name}-events.log")),
+                    &directory.path().join(format!("{name}-sent.log")),
+                    "pw",
+                )
+                .unwrap()
+            };
+            let local = open("local");
+            let remote = open("remote");
+            for (owner, sibling) in [(&local, &remote), (&remote, &local)] {
+                owner
+                    .account_devices
+                    .lock()
+                    .unwrap()
+                    .insert(super::super::account_devices::AccountDevice {
+                        public: sibling.identity.public(),
+                        certificate: account.certify(&sibling.identity.public().ed25519_pub),
+                    })
+                    .unwrap();
+                owner
+                    .set_device_sync_category(SyncCategory::Appearance, true)
+                    .unwrap();
+            }
+            remote
+                .set_account_preference(
+                    SyncCategory::Appearance,
+                    "theme".into(),
+                    Some("dark".into()),
+                )
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            local.roster.lock().unwrap().update(
+                &crate::discovery::Announce::new_with_account(
+                    &remote.identity,
+                    &account,
+                    "Remote",
+                    address.port(),
+                ),
+                address.ip(),
+                &local.user_id(),
+            );
+            let (request_seen, first_request) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let (second_seen, second_request) = tokio::sync::oneshot::channel();
+            let server_remote = remote.clone();
+            let server = tokio::spawn(async move {
+                let mut first = Some((request_seen, released));
+                let mut second_seen = Some(second_seen);
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut channel = server_remote.privacy_accept(stream).await.unwrap();
+                    let bytes = channel.recv().await.unwrap();
+                    let Some(AccountHistoryFrame::Request {
+                        account_id,
+                        cursor,
+                        known_digest,
+                        wanted,
+                        ..
+                    }) = AccountHistoryFrame::decode(&bytes)
+                    else {
+                        panic!("expected authenticated account-history request");
+                    };
+                    if let Some((request_seen, released)) = first.take() {
+                        assert!(wanted.appearance);
+                        request_seen.send(()).unwrap();
+                        released.await.unwrap();
+                    } else {
+                        assert_eq!(
+                            known_digest, [0; 32],
+                            "changed category policy must not reuse an in-flight page digest (ABA={aba})"
+                        );
+                        assert!(
+                            cursor.is_none(),
+                            "changed policy restarts at the first page"
+                        );
+                        if let Some(second_seen) = second_seen.take() {
+                            let _ = second_seen.send(());
+                        }
+                    }
+                    server_remote
+                        .serve_account_history(
+                            &mut channel,
+                            &account_id,
+                            cursor,
+                            known_digest,
+                            wanted,
+                        )
+                        .await;
+                }
+            });
+            let worker = tokio::spawn(local.clone().run_account_history_loop());
+            let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+                first_request.await.unwrap();
+                local
+                    .set_device_sync_category(SyncCategory::Appearance, false)
+                    .unwrap();
+                if aba {
+                    local
+                        .set_device_sync_category(SyncCategory::Appearance, true)
+                        .unwrap();
+                }
+                release.send(()).unwrap();
+                loop {
+                    if local
+                        .device_sync_status()
+                        .iter()
+                        .any(|status| status.phase == SyncPhase::UpToDate)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                if !aba {
+                    assert!(
+                        local
+                            .account_preferences(SyncCategory::Appearance)
+                            .is_empty(),
+                        "disabled category must not import the in-flight preference"
+                    );
+                    local
+                        .set_device_sync_category(SyncCategory::Appearance, true)
+                        .unwrap();
+                }
+                loop {
+                    if local
+                        .account_preferences(SyncCategory::Appearance)
+                        .iter()
+                        .any(|record| record.value.as_deref() == Some("dark"))
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                // The ABA case can merge its first page; still require the
+                // queued follow-up request to discard the stale page digest.
+                second_request
+                    .await
+                    .expect("server observes an invalidated follow-up request");
+            })
+            .await;
+            worker.abort();
+            let _ = worker.await;
+            server.abort();
+            let error = server.await.unwrap_err();
+            assert!(error.is_cancelled(), "{error}");
+            outcome.expect("re-enabled appearance catches up after an interrupted category page");
+        }
+    }
 
     #[test]
     fn history_page_assembler_accepts_only_complete_bounded_records() {

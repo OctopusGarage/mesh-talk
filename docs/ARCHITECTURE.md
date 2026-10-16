@@ -157,6 +157,11 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   Appearance and contact records use a versioned, encrypted local store with a
   deterministic revision/device tie-break and clear tombstones. Only certified
   sibling devices exchange these records over the Noise account-sync channel.
+  Successful device-local switch changes invalidate account-history cursors and
+  cached digests through a process-local policy revision. A page interrupted by
+  a switch change, including an off/on toggle, cannot acknowledge skipped data
+  as synchronized; the next pull starts a fresh sweep. Policy revisions do not
+  change the persisted policy or wire format.
   Profile updates use the existing per-peer
   event delivery path; a device with avatar sync disabled defers sibling updates
   until it is re-enabled. The received-profile store retains clear tombstones,

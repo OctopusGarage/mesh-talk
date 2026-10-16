@@ -63,6 +63,8 @@ impl DeviceSyncPolicy {
 pub(super) struct DeviceSyncPolicyStore {
     file: EncryptedRecordLog<DeviceSyncPolicy>,
     current: DeviceSyncPolicy,
+    // Process-local invalidation only; persisted rows and wire policy stay unchanged.
+    revision: u64,
 }
 
 impl DeviceSyncPolicyStore {
@@ -71,11 +73,16 @@ impl DeviceSyncPolicyStore {
         Ok(Self {
             file,
             current: rows.last().copied().unwrap_or_default(),
+            revision: 0,
         })
     }
 
     pub(super) fn current(&self) -> DeviceSyncPolicy {
         self.current
+    }
+
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub(super) fn set(&mut self, category: SyncCategory, enabled: bool) -> Result<(), LogError> {
@@ -84,6 +91,7 @@ impl DeviceSyncPolicyStore {
         if next != self.current {
             self.file.append_durable(&next)?;
             self.current = next;
+            self.revision = self.revision.wrapping_add(1);
         }
         Ok(())
     }
@@ -92,6 +100,29 @@ impl DeviceSyncPolicyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_successful_policy_changes_invalidate_in_flight_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = DeviceSyncPolicyStore::open(&dir.path().join("policy"), "pw").unwrap();
+        let original = store.current();
+        let revision = store.revision();
+        store.file.fail_appends_for_test(true).unwrap();
+        assert!(store.set(SyncCategory::Appearance, true).is_err());
+        assert_eq!(store.current(), original);
+        assert_eq!(store.revision(), revision);
+        store.file.fail_appends_for_test(false).unwrap();
+        store.set(SyncCategory::Appearance, false).unwrap();
+        assert_eq!(store.revision(), revision, "unchanged category is a no-op");
+        store.set(SyncCategory::Appearance, true).unwrap();
+        store.set(SyncCategory::Appearance, false).unwrap();
+        assert_eq!(store.current(), original);
+        assert_ne!(
+            store.revision(),
+            revision,
+            "off/on ABA still invalidates sync"
+        );
+    }
 
     #[test]
     fn policy_is_local_and_persists_across_reopen() {
