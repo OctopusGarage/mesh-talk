@@ -1,6 +1,6 @@
 # Network design: scenario questions and answers
 
-**Review draft · 2026-10-16.** This document restates the proposed behavior as questions, answers them against the current implementation, and marks decisions that are still open. **Current** means supported by code or the existing protocol; **Proposed** means a design goal, not a delivered guarantee; **Needs validation** means the behavior needs a targeted real-network test. The [topology baseline](network-topologies.md) is the companion map of switches, ports, and data flows.
+**Review draft · 2026-10-16.** This document restates the proposed behavior as questions, answers them against the current implementation, and marks decisions that are still open. **Current** means supported by code or the existing protocol; **Proposed** means a design goal, not a delivered guarantee; **Needs validation** means the behavior needs a targeted real-network test. The [network design reference](network-design-reference.md) is the comprehensive review document; the [topology baseline](network-topologies.md) maps current switches, ports, and data flows.
 
 ## Recommended design baseline for review
 
