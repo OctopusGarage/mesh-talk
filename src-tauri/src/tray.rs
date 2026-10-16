@@ -1,11 +1,19 @@
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MENU_SHOW: &str = "show";
 const MENU_HIDE: &str = "hide";
 const MENU_QUIT: &str = "quit";
+const MENU_UNREAD: &str = "unread";
+const MENU_DIAGNOSTICS: &str = "diagnostics";
+const MENU_SETTINGS: &str = "settings";
+const MENU_ABOUT: &str = "about";
 pub const TRAY_ID: &str = "mesh-talk-tray";
+
+struct TrayMenuState<R: tauri::Runtime> {
+    unread: MenuItem<R>,
+}
 
 fn unread_tray_labels(count: u32) -> (String, String) {
     if count == 0 {
@@ -20,6 +28,14 @@ fn unread_tray_labels(count: u32) -> (String, String) {
     (title, format!("Mesh-Talk — {count} unread {noun}"))
 }
 
+fn unread_menu_label(count: u32) -> String {
+    match count {
+        0 => "No unread messages".to_string(),
+        1 => "1 unread message".to_string(),
+        _ => format!("{count} unread messages"),
+    }
+}
+
 /// Keep the menu bar count in sync with the dock/launcher badge. macOS displays the
 /// title immediately beside the tray icon; its template icon stays legible in both themes.
 pub fn set_unread_count<R: tauri::Runtime>(app: &AppHandle<R>, count: u32) {
@@ -29,17 +45,42 @@ pub fn set_unread_count<R: tauri::Runtime>(app: &AppHandle<R>, count: u32) {
         // An explicit empty string clears a previously painted unread count.
         let _ = tray.set_title(Some(title.as_str()));
         let _ = tray.set_tooltip(Some(tooltip));
+        if let Some(menu) = app.try_state::<TrayMenuState<R>>() {
+            let _ = menu.unread.set_text(unread_menu_label(count));
+        }
     }
 }
 
-/// Create the main tray icon and menu (Show / Hide / Quit).
+/// Create the main tray icon and its native, keyboard-accessible menu.
 pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, MENU_SHOW, "Show", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, MENU_SHOW, "Open Mesh-Talk", true, None::<&str>)?;
+    let unread = MenuItem::with_id(app, MENU_UNREAD, unread_menu_label(0), false, None::<&str>)?;
+    let diagnostics = MenuItem::with_id(
+        app,
+        MENU_DIAGNOSTICS,
+        "Connection Diagnostics…",
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(app, MENU_SETTINGS, "Settings…", true, None::<&str>)?;
+    let about = MenuItem::with_id(app, MENU_ABOUT, "About Mesh-Talk", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, MENU_HIDE, "Hide", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, MENU_QUIT, "Quit", true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, MENU_QUIT, "Quit Mesh-Talk", true, None::<&str>)?;
 
-    let tray_menu = Menu::with_items(app, &[&show, &hide, &separator, &quit])?;
+    let tray_menu = Menu::with_items(
+        app,
+        &[
+            &show,
+            &unread,
+            &PredefinedMenuItem::separator(app)?,
+            &diagnostics,
+            &settings,
+            &about,
+            &PredefinedMenuItem::separator(app)?,
+            &hide,
+            &quit,
+        ],
+    )?;
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&tray_menu)
@@ -56,6 +97,13 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
                 if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
                     let _ = crate::window_visibility::show(&window);
                     let _ = window.set_focus();
+                }
+            }
+            MENU_DIAGNOSTICS | MENU_SETTINGS | MENU_ABOUT => {
+                if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
+                    let _ = crate::window_visibility::show(&window);
+                    let _ = window.set_focus();
+                    let _ = app.emit("tray-navigate", event.id.as_ref());
                 }
             }
             _ => {}
@@ -76,6 +124,7 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
     }
 
     builder.tooltip("Mesh-Talk").build(app)?;
+    app.manage(TrayMenuState { unread });
     Ok(())
 }
 
@@ -96,7 +145,14 @@ fn toggle_window_visibility(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::unread_tray_labels;
+    use super::{unread_menu_label, unread_tray_labels};
+
+    #[test]
+    fn unread_menu_has_a_clear_empty_state_and_singular_count() {
+        assert_eq!(unread_menu_label(0), "No unread messages");
+        assert_eq!(unread_menu_label(1), "1 unread message");
+        assert_eq!(unread_menu_label(120), "120 unread messages");
+    }
 
     #[test]
     fn unread_count_is_visible_beside_the_menu_bar_icon() {

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Code2, ExternalLink, Info, Scale } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { listen } from "@tauri-apps/api/event";
 import {
   Dialog,
   DialogContent,
@@ -25,6 +26,23 @@ export function AboutDialog({ menuItem = false }: { menuItem?: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("tray-navigate", ({ payload }) => {
+      if (payload === "about") setOpen(true);
+    })
+      .then((stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
