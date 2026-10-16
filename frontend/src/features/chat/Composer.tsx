@@ -21,6 +21,10 @@ import { usePacks } from "@/store/packs";
 import { PackManager } from "@/components/PackManager";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
+import {
+  AttachmentBatchError,
+  removeHandedOffFiles,
+} from "./attachments/attachmentBatch";
 
 // A small curated palette — enough for everyday chat without pulling in a heavy emoji library.
 const EMOJIS = [
@@ -360,8 +364,24 @@ export function Composer({
       setSendingFiles(true);
       void onPasteFiles(pendingFiles)
         .then(
-          () => setPendingFiles([]),
-          () => setSendRejected(true),
+          () => {
+            setPendingFiles((current) =>
+              removeHandedOffFiles(current, pendingFiles, pendingFiles.length),
+            );
+            setSendRejected(false);
+          },
+          (error: unknown) => {
+            if (error instanceof AttachmentBatchError) {
+              setPendingFiles((current) =>
+                removeHandedOffFiles(
+                  current,
+                  pendingFiles,
+                  error.handedOffCount,
+                ),
+              );
+            }
+            setSendRejected(true);
+          },
         )
         .finally(() => setSendingFiles(false));
       return;
