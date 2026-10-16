@@ -5716,24 +5716,47 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     // port can consume the full connect budget on Windows, making this batch
     // measure SYN/refusal timing instead of retained relay scheduling.
     let rejecting_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp = Announce::new_with_account(
-        &bob,
-        &bob_account,
-        "Bob",
-        rejecting_listener.local_addr().unwrap().port(),
-    );
+    let rejecting_listener_port = rejecting_listener.local_addr().unwrap().port();
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", rejecting_listener_port);
     let rejecting = tokio::spawn(async move {
         while let Ok((stream, _)) = rejecting_listener.accept().await {
             drop(stream);
         }
     });
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
-    a.replace_verified_dm_pull_peers(vec![bp.user_id.clone()]);
-    b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
-    b.set_attachment_global_auto(false).unwrap();
+    let (b, _, offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+    let mut recipients = vec![(b, offers, bp)];
+    // Slot fairness needs ten destinations, independently of shared-mailbox
+    // history size. Keep the slow single-file case on its original mailbox.
+    for index in 1..count {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof =
+            Announce::new_with_account(&identity, &account, "Recipient", rejecting_listener_port);
+        let (recipient, _, offers) = node_with_files(
+            &bd.path().join(format!("recipient-{index}")),
+            identity,
+            account,
+            &ap,
+        );
+        a.roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+        recipients.push((recipient, offers, proof));
+    }
+    a.replace_verified_dm_pull_peers(
+        recipients
+            .iter()
+            .map(|(_, _, proof)| proof.user_id.clone())
+            .collect(),
+    );
+    for (recipient, _, _) in &recipients {
+        recipient.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+        recipient.set_attachment_global_auto(false).unwrap();
+        recipient.set_bridge_discovery_enabled(true);
+    }
     a.set_bridge_discovery_enabled(true);
-    b.set_bridge_discovery_enabled(true);
     let relay_identity = DeviceIdentity::generate();
     let keys = relay_identity.secret_bytes();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5840,7 +5863,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
             }
         }
     });
-    for peer in [&a, &b] {
+    for peer in std::iter::once(&a).chain(recipients.iter().map(|(peer, _, _)| peer)) {
         peer.roster.lock().unwrap().update(
             &proof,
             IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -5849,6 +5872,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     }
     let mut files = Vec::new();
     for index in 0..count {
+        let (b, offers, bp) = &mut recipients[usize::from(index)];
         let source = ad.path().join(format!("relay-{index}.bin"));
         // Fair scheduling needs more than eight destinations, not large files.
         // The separate slow case keeps its two-chunk transfer coverage.
@@ -5903,7 +5927,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
                 .unwrap()
                 .insert(mailbox.wrap(&final_chunk).unwrap().id, file);
         }
-        files.push((card, file, bytes));
+        files.push((card, file, bytes, b.clone()));
     }
     // All offers/consent were reconciled above. Observe only file-worker
     // connections here, without unrelated proactive history-recovery pulls.
@@ -5911,30 +5935,40 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     delayed.store(slow, Ordering::SeqCst);
     let worker = tokio::spawn(a.clone().run_delivery_loop());
     let mut recipient_drains = 0;
+    let custody_started = std::time::Instant::now();
     let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         // First require every sender slot to reach qualified relay custody while
-        // Bob stays offline. Repeatedly decrypting his growing mailbox during
-        // this phase adds competing quadratic work unrelated to slot release.
+        // recipients stay offline. Recipient polling must not release sender
+        // slots or hide a relay-custody scheduling failure.
         while !files
             .iter()
-            .all(|(_, file, _)| confirmed_files.lock().unwrap().contains(file))
+            .all(|(_, file, _, _)| confirmed_files.lock().unwrap().contains(file))
         {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        eprintln!(
+            "retained relay qualified custody for {count} files after {:?}",
+            custody_started.elapsed()
+        );
         assert_eq!(
             recipient_drains, 0,
             "custody must not need recipient polling"
         );
         assert!(
-            files.iter().all(|(_, file, _)| {
+            files.iter().all(|(_, file, _, b)| {
                 !b.file_ready_to_save(*file) && b.log.lock().unwrap().events(file).is_empty()
             }),
             "recipient must remain without chunks until all relay custody is confirmed"
         );
         loop {
             recipient_drains += 1;
-            b.drain_from_post_office().await;
-            if files.iter().all(|(_, file, _)| b.file_ready_to_save(*file)) {
+            for (recipient, _, _) in &recipients {
+                recipient.drain_from_post_office().await;
+            }
+            if files
+                .iter()
+                .all(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -5961,7 +5995,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
         files.len(),
         files
             .iter()
-            .filter(|(_, file, _)| b.file_ready_to_save(*file))
+            .filter(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
             .count(),
         files.len(),
         recipient_drains,
@@ -5978,7 +6012,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
         assert!(exchanges.load(Ordering::SeqCst) >= 5);
     }
     assert!(a.file_transfer_peak.load(Ordering::SeqCst) <= 8);
-    for (card, file, bytes) in files {
+    for (card, file, bytes, b) in files {
         assert_eq!(b.read_file(file).unwrap(), bytes);
         assert!(
             !a.outgoing_file_progress(card).unwrap().delivered,
