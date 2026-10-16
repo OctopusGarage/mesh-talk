@@ -9,13 +9,13 @@ review. CI also runs the comprehensive suites. Run backend or full UI E2E sooner
 when explicitly requested or when the changed behavior needs process/browser
 evidence.
 
-| Changed boundary | Fast local command | Broader trigger |
-|---|---|---|
-| Core unit module | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` | `make test` before PR |
-| Host settings/session | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle` | `make test` before PR |
-| One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke` | `make e2e` when requested or for release validation |
-| Frontend state/controller | `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts` | `npm run test:coverage` in PR preflight |
-| Frontend rendering | Run the affected component test, for example `cd frontend && npm test -- src/features/chat/Sidebar.test.ts` | Pass relevant Playwright specs to `scripts/pr-preflight.sh` |
+| Changed boundary            | Fast local command                                                                                          | Broader trigger                                             |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` before PR                                       |
+| Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` before PR                                       |
+| One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke`                                   | `make e2e` when requested or for release validation         |
+| Frontend state/controller   | `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`                                | `npm run test:coverage` in PR preflight                     |
+| Frontend rendering          | Run the affected component test, for example `cd frontend && npm test -- src/features/chat/Sidebar.test.ts` | Pass relevant Playwright specs to `scripts/pr-preflight.sh` |
 
 Use `cargo test -p <package> --lib <module_or_test_name>` directly when a
 filter is easier to spell than a Make variable. `make test-focused` requires a
@@ -23,6 +23,76 @@ package plus either a filter or an integration target, so an omitted selector
 cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
+
+## Automatic platform checks before PR creation
+
+Commit the candidate and use the repository's PR entry point:
+
+```bash
+./scripts/create-pr.sh \
+  --core-filter node::delivery_runtime_tests \
+  --host-filter owner_scoped_node_handle \
+  e2e/ui-visual-regression.spec.ts \
+  -- --draft --fill
+```
+
+Arguments before `--` select tests; arguments after it go to `gh pr create`.
+Use filters and browser specs relevant to your change. Core and host filters
+can be repeated; a changed Rust crate requires at least one corresponding
+filter. Use `--core-test decoder_smoke` to select a nonignored core integration
+target instead of a library filter. A selector matching zero tests fails rather than producing misleading
+evidence. This selects unit tests and explicitly named browser scenarios; it
+does not automatically launch the full workspace, ignored process rigs, or
+the full browser suite.
+
+Frontend changes require affected browser specs. Frontend unit coverage runs
+once in the existing local preflight; the two platform guests do not repeat
+the whole frontend unit suite. To target another PR base, pass
+`--base origin/release` before `--`; the wrapper uses that same base for
+change selection, coverage and `gh pr create --base release`. A local revision
+such as `HEAD` cannot stand in for a PR target branch.
+
+`scripts/pr-preflight.sh` automatically sends the same test plan to Linux
+Docker and Windows over SSH before its existing coverage and portable browser
+checks. Both platforms test an archive of committed HEAD. Workspaces are
+isolated from installed applications and post-office services. Both results
+are collected even if one fails. Logs and revision-bound reports remain
+untracked under `target/pr-platform/`; dependency and build caches can be
+reused, but successful verdicts are never reused for another revision.
+
+For an existing PR, run `scripts/pr-preflight.sh` directly with the same
+selectors before pushing the candidate. Preview the plan without starting
+Docker or SSH:
+
+```bash
+node scripts/pr-platform/run.mjs --plan \
+  --core-filter node::delivery_runtime_tests \
+  --host-filter owner_scoped_node_handle \
+  e2e/ui-visual-regression.spec.ts
+```
+
+| Setting                            | Default / purpose                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                      |
+| `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D |
+| `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`           |
+| `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                     |
+| `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                 |
+
+Required environments being unavailable blocks preparation; it is not a pass.
+Fix the environment or report the blocker. Documentation-only changes without
+explicit selectors report platform tests as not applicable. Container reports state the actual
+architecture: Linux ARM64 on an Apple Silicon Mac does not replace Linux
+x86-64 sanitizer coverage. Browser checks exercise the real frontend with its
+test IPC fixture. Native webview, desktop input, multicast across real hosts,
+and ASan remain separate CI or explicitly requested acceptance gates.
+
+The PR creation wrapper also checks that HEAD and the working tree did not
+change during verification. Alternate head/repository options and `GH_REPO`
+overrides are rejected. Use it instead of invoking `gh pr create` directly
+so the platform checks are part of the normal workflow. GitHub branch
+protection remains the final enforcement for CI; a local script cannot
+intercept arbitrary GitHub CLI or website actions.
 
 The current two-crate Rust workspace already separates protocol logic from
 the Tauri host. Within the core, `node/node.rs` still coordinates many domain

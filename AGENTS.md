@@ -74,9 +74,16 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
   `specifications/git_standards.md`. Squash WIP; link issues.
-- Before opening a PR, commit the branch and run `./scripts/pr-preflight.sh` with only the
+- Create PRs through `./scripts/create-pr.sh <preflight selectors/specs> -- <gh pr create options>`.
+  It runs preflight first and refuses to publish if verification fails or the candidate changes.
+  Before opening a PR, commit the branch and run `./scripts/pr-preflight.sh` with only the
   Playwright specs relevant to changed frontend behavior (for example,
   `./scripts/pr-preflight.sh e2e/avatar-gallery.spec.ts e2e/theme-picker.spec.ts`).
+  Preflight automatically runs the same selected tests in Linux Docker and through SSH to
+  `windows10`; Windows workspaces, caches and temporary data stay on drive D. For changed
+  Rust crates, pass repeated `--core-filter <test filter>` / `--host-filter <test filter>`
+  selectors. Missing environments or empty Rust selections fail the gate; do not silently
+  skip them. See `docs/testing-feedback-loop.md` for configuration and plan preview.
   Include `e2e/ui-visual-regression.spec.ts` when a change affects theme layout or snapshots.
   It checks the changed-line coverage estimate and portable scenario evidence; add focused
   tests or specs named by its uncovered-line report before broadening the run. Fetch

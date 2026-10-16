@@ -11,10 +11,31 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
-base_ref="${PATCH_COVERAGE_BASE:-origin/main}"
+base_ref="$(node --input-type=module - "$@" <<'JS'
+import { parseFlags } from './scripts/pr-platform/plan.mjs';
+console.log(parseFlags(['--base', process.env.PATCH_COVERAGE_BASE ?? 'origin/main', ...process.argv.slice(2)]).base);
+JS
+)"
 git rev-parse --verify "$base_ref" >/dev/null
 merge_base="$(git merge-base HEAD "$base_ref")"
 changed_files="$(git diff --name-only "$merge_base" HEAD)"
+
+# One parser owns both platform selectors and the existing positional UI specs.
+ui_specs_text="$(node --input-type=module - "$@" <<'JS'
+import { parseFlags } from './scripts/pr-platform/plan.mjs';
+const flags = parseFlags(process.argv.slice(2));
+if (flags.planOnly) throw new Error('Preview with node scripts/pr-platform/run.mjs --plan; PR preflight requires execution.');
+console.log(flags.uiSpecs.join('\n'));
+JS
+)"
+ui_specs=()
+while IFS= read -r spec; do
+    if [ -n "$spec" ]; then ui_specs+=("$spec"); fi
+done <<< "$ui_specs_text"
+
+# Verify the same committed source on both platforms before spending time on
+# local coverage and portable browser evidence. Failures retain both logs.
+node scripts/pr-platform/run.mjs --base "$base_ref" "$@"
 
 node --test scripts/diagnostics/*.test.mjs
 typos
@@ -28,13 +49,13 @@ if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
     )
 
     coverage_reports=(frontend/coverage/lcov.info)
-    if [ "$#" -gt 0 ]; then
+    if [ "${#ui_specs[@]}" -gt 0 ]; then
         # JavaScript template literals belong to Node.
         # shellcheck disable=SC2016
         node --input-type=module -e 'import { readdir, unlink } from "node:fs/promises"; const dir="frontend/coverage/e2e-parts"; for (const name of await readdir(dir).catch(() => [])) if (name.endsWith(".json")) await unlink(`${dir}/${name}`);'
         (
             cd frontend
-            MESH_TALK_E2E_COVERAGE=1 npx playwright test --project=chromium --workers=1 --retries=0 "$@"
+            MESH_TALK_E2E_COVERAGE=1 npx playwright test --project=chromium --workers=1 --retries=0 "${ui_specs[@]}"
             node scripts/merge-e2e-coverage.mjs
         )
         coverage_reports+=(frontend/coverage/e2e.lcov)
