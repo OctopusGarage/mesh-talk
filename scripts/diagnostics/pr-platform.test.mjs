@@ -75,16 +75,51 @@ test("guest rejects zero Rust tests and collects later failures using shell-free
   assert(seen.every(r => r.options.env.CARGO_INCREMENTAL === "0"));
 });
 
-test("source archive pins the resolved committed SHA, never a mutable HEAD selector", async () => {
+test("committed archive includes export-ignored harness without changing repository attributes", async t => {
+  const { mkdtemp, mkdir, readFile, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-committed-archive-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const repo = join(directory, "repo");
+  await mkdir(join(repo, "scripts/pr-platform"), { recursive: true });
+  const attributes = "/scripts export-ignore\n/hidden.txt export-ignore\n*.txt export-subst\n";
+  const guest = "export const committed = true;\n";
+  await writeFile(join(repo, ".gitattributes"), attributes);
+  await writeFile(join(repo, "scripts/pr-platform/guest.mjs"), guest);
+  await writeFile(join(repo, "hidden.txt"), "included in verification snapshot\n");
+  await writeFile(join(repo, "tracked.txt"), "$Format:%H$\n");
+  const git = async args => {
+    const result = await runCommand("git", args, { cwd: repo, timeoutMs: 10_000 });
+    assert.equal(result.code, 0, result.output);
+    return result.output.trim();
+  };
+  await git(["init", "--quiet"]);
+  const infoAttributes = "keep -text\n";
+  await writeFile(join(repo, ".git/info/attributes"), infoAttributes);
+  await git(["add", "."]);
+  await git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"]);
+  const committed = await git(["rev-parse", "HEAD"]);
+  const archive = join(directory, "source.tar");
   const calls = [];
-  await createArchive("/repo", "/evidence/source.tar", { run: async (program, args) => {
-    calls.push([program, args]);
-    if (args[0] === "status") return { code: 0, output: "" };
-    if (args[0] === "rev-parse") return { code: 0, output: sha };
-    return { code: 0, output: "" };
-  } });
-  assert(calls.some(([, args]) => args[0] === "archive" && args.at(-1) === sha));
-  await assert.rejects(createArchive("/repo", "/x", { run: async () => ({ code: 0, output: " M file" }) }), /clean committed/);
+  assert.equal(await createArchive(repo, archive, { expectedSha: committed, run: async (program, args, options) => {
+    calls.push(args);
+    return runCommand(program, args, options);
+  } }), committed);
+  const listing = await runCommand("tar", ["-tf", archive], { timeoutMs: 10_000 });
+  assert.equal(listing.code, 0, listing.output);
+  assert(listing.output.split("\n").includes("scripts/pr-platform/guest.mjs"), "export-ignore must not remove the guest runner");
+  assert(listing.output.split("\n").includes("hidden.txt"));
+  const archivedGuest = await runCommand("tar", ["-xOf", archive, "scripts/pr-platform/guest.mjs"]);
+  assert.equal(archivedGuest.output, guest);
+  const tracked = await runCommand("tar", ["-xOf", archive, "tracked.txt"]);
+  assert.equal(tracked.output, "$Format:%H$\n", "verification source must not apply export-subst");
+  assert(calls.some(args => args.includes("archive") && args.at(-1) === committed));
+  assert.equal(await readFile(join(repo, ".gitattributes"), "utf8"), attributes);
+  assert.equal(await readFile(join(repo, ".git/info/attributes"), "utf8"), infoAttributes);
+  assert.equal(await git(["status", "--porcelain"]), "");
+  await writeFile(join(repo, "tracked.txt"), "uncommitted\n");
+  await assert.rejects(createArchive(repo, join(directory, "dirty.tar")), /clean committed/);
 });
 
 test("bounded child execution reports timeout rather than a successful empty run", async () => {

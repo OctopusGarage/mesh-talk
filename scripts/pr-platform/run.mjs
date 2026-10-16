@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Archive committed source once, run the same plan on both required platforms. */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPlan, hasSelectedTests, parseFlags, validateWindowsRoot } from "./plan.mjs";
@@ -19,7 +19,19 @@ export async function createArchive(cwd, filename, { run = runCommand, expectedS
   const sha = await checked("git", ["rev-parse", "HEAD"], options, run);
   if (!/^[a-f0-9]{40,64}$/u.test(sha)) throw Error("Invalid committed HEAD SHA");
   if (expectedSha && sha !== expectedSha) throw Error("Source revision changed after test selection");
-  await checked("git", ["archive", "--format=tar", `--output=${filename}`, sha], options, run);
+  // Verification needs every committed file, including release export-ignored
+  // harnesses. Override archive attributes in private metadata, never in the
+  // shared repository's info/attributes or working tree.
+  const objects = await checked("git", ["rev-parse", "--path-format=absolute", "--git-path", "objects"], options, run);
+  const format = await checked("git", ["rev-parse", "--show-object-format"], options, run);
+  if (!["sha1", "sha256"].includes(format)) throw Error("Unsupported Git object format");
+  const metadata = await mkdtemp(path.join(path.dirname(filename), "archive-git-"));
+  try {
+    await checked("git", ["init", "--bare", "--quiet", `--object-format=${format}`, metadata], options, run);
+    await writeFile(path.join(metadata, "objects/info/alternates"), `${objects}\n`);
+    await writeFile(path.join(metadata, "info/attributes"), "* -export-ignore -export-subst\n");
+    await checked("git", [`--git-dir=${metadata}`, "archive", "--format=tar", `--output=${filename}`, sha], options, run);
+  } finally { await rm(metadata, { recursive: true, force: true }); }
   if (await checked("git", ["rev-parse", "HEAD"], options, run) !== sha || await checked("git", ["status", "--porcelain"], options, run)) throw Error("Source changed while creating the committed archive");
   return sha;
 }
