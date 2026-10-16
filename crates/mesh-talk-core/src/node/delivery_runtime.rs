@@ -8,9 +8,13 @@ use super::*;
 use crate::eventlog::{ConversationId, Event, EventId, LogError};
 
 // Owned by the delivery loop: cancellation drops every retained channel. Keep
-// fewer sockets than the accept limit, and discard idle or unauthorized state.
+// eight scheduling slots, at most six retained sockets (one outbound permit
+// reserved for controls), and discard idle or unauthorized state.
 const MAX_FILE_TRANSFERS: usize = 8;
+const MAX_FILE_SOCKETS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS - 1;
+const MAX_RELAY_CUSTODY_HINTS: usize = 256;
 const FILE_TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 // Test-only timing: a dropped span records cancellation/early return, not success.
 #[cfg(test)]
@@ -116,6 +120,12 @@ enum FilePhase {
     InitialCustody,
     Chunks,
     FinalCustody,
+    RelayManifestLegacy,
+    RelayManifestFederated,
+    RelayChunksLegacy,
+    RelayChunksFederated,
+    RelayCustody,
+    RelayHeld,
 }
 
 pub(in crate::node) struct FileTransfer {
@@ -126,6 +136,11 @@ pub(in crate::node) struct FileTransfer {
     sync: super::session::SyncProgress,
     legacy: bool,
     last_used: std::time::Instant,
+    candidate_cursor: usize,
+    candidate_count: usize,
+    route: Option<(bool, crate::discovery::roster::PeerRecord)>,
+    opaque: Option<super::opaque_relay::OpaqueMailboxProgress>,
+    relay_custody: Option<(ConversationId, EventId)>,
 }
 
 impl FileTransfer {
@@ -141,6 +156,11 @@ impl FileTransfer {
             sync: super::session::SyncProgress::default(),
             legacy: false,
             last_used: std::time::Instant::now(),
+            candidate_cursor: 0,
+            candidate_count: 0,
+            route: None,
+            opaque: None,
+            relay_custody: None,
         }
     }
 }
@@ -159,6 +179,9 @@ struct FileDeliveryScheduler {
     pending_cursor: Option<FileKey>,
     active_cursor: Option<FileKey>,
     transfers: std::collections::HashMap<FileKey, FileTransfer>,
+    // Bounded scheduling hints, not custody/delivery truth. Eviction merely
+    // permits an earlier retry after other destinations have had their turn.
+    relay_cooldowns: std::collections::VecDeque<(FileKey, std::time::Instant)>,
 }
 
 #[derive(Clone, Copy)]
@@ -191,6 +214,8 @@ impl FileScan {
 impl FileDeliveryScheduler {
     fn scan(&mut self, node: &Node) -> FileScan {
         node.prune_file_transfers(&mut self.transfers);
+        self.relay_cooldowns
+            .retain(|(_, until)| *until > std::time::Instant::now());
         node.prune_outgoing_file_acks();
         FileScan {
             cursor: self.pending_cursor,
@@ -204,18 +229,20 @@ impl FileDeliveryScheduler {
         for (file, destination) in files {
             let key = (file.id, destination.binding.event_id);
             if self.transfers.len() < MAX_FILE_TRANSFERS
+                && !self.relay_cooldowns.iter().any(|(held, _)| *held == key)
                 && node.file_destination_current(&file, &destination)
+                && !self.transfers.contains_key(&key)
             {
                 self.transfers
-                    .entry(key)
-                    .or_insert_with(|| FileTransfer::new(file, destination));
+                    .insert(key, FileTransfer::new(file, destination));
             }
         }
     }
 
     async fn advance(&mut self, node: &Node, diagnostic: &mut DeliveryDiagnosticThrottle) {
         // Bound each pass to eight complete exchanges, round-robin across
-        // active slots. A failed attempt drops retained state and never self-wakes.
+        // active slots. Failed exchanges discard sockets/protocol progress;
+        // ordered candidate metadata survives only until candidates are exhausted.
         let mut progress = std::collections::HashSet::new();
         for _ in 0..MAX_FILE_TRANSFERS {
             let mut keys = self.transfers.keys().copied().collect::<Vec<_>>();
@@ -251,7 +278,18 @@ impl FileDeliveryScheduler {
                         .remove(&key);
                 }
             }
-            if self.transfers.contains_key(&key) {
+            if self
+                .transfers
+                .get(&key)
+                .is_some_and(|transfer| matches!(transfer.phase, FilePhase::RelayHeld))
+            {
+                self.transfers.remove(&key);
+                if self.relay_cooldowns.len() == MAX_RELAY_CUSTODY_HINTS {
+                    self.relay_cooldowns.pop_front();
+                }
+                self.relay_cooldowns
+                    .push_back((key, std::time::Instant::now() + FILE_RELAY_RETRY));
+            } else if self.transfers.contains_key(&key) {
                 progress.insert(key);
             }
         }
@@ -1653,15 +1691,29 @@ impl Node {
         }
         if !transfers.contains_key(&key) {
             if transfers.len() == MAX_FILE_TRANSFERS {
-                // Existing destinations retain their progress; new destinations
-                // still get the original bounded best-effort attempt this turn.
-                return self.retry_file_destination(file, destination).await;
+                // The worker admits only available slots; standalone callers
+                // leave excess work durable for the next scheduled turn.
+                return false;
             }
             transfers.insert(key, FileTransfer::new(file.clone(), destination.clone()));
         }
         #[cfg(test)]
         self.file_transfer_peak
             .fetch_max(transfers.len(), std::sync::atomic::Ordering::SeqCst);
+        // Retained file sockets share the node's outbound admission pool with
+        // receipts, privacy refresh, and mailbox reconciliation. Leave one
+        // directional slot available instead of timing out a Dial every pass.
+        if transfers
+            .get(&key)
+            .is_some_and(|transfer| matches!(transfer.phase, FilePhase::Dial))
+            && transfers
+                .values()
+                .filter(|transfer| transfer.channel.is_some())
+                .count()
+                >= MAX_FILE_SOCKETS
+        {
+            return false;
+        }
         let transfer = transfers.get_mut(&key).unwrap();
         transfer.last_used = std::time::Instant::now();
         #[cfg(test)]
@@ -1673,6 +1725,12 @@ impl Node {
             FilePhase::InitialCustody => "file-initial-custody",
             FilePhase::Chunks => "file-chunk-exchange",
             FilePhase::FinalCustody => "file-final-custody",
+            FilePhase::RelayManifestLegacy => "file-relay-legacy-manifest",
+            FilePhase::RelayManifestFederated => "file-relay-federated-manifest",
+            FilePhase::RelayChunksLegacy => "file-relay-legacy-chunks",
+            FilePhase::RelayChunksFederated => "file-relay-federated-chunks",
+            FilePhase::RelayCustody => "file-relay-custody",
+            FilePhase::RelayHeld => "file-relay-held",
         });
         let outcome = tokio::time::timeout(
             std::time::Duration::from_millis(400),
@@ -1705,9 +1763,18 @@ impl Node {
                 );
                 // A cancelled read/write may have consumed part of a frame.
                 // Close the socket and restart from the remote's durable Have.
-                transfers.remove(&key);
-                self.retry_file_destination_inner(file, destination, false)
-                    .await
+                let transfer = transfers.get_mut(&key).unwrap();
+                transfer.channel = None;
+                transfer.sync = super::session::SyncProgress::default();
+                transfer.opaque = None;
+                transfer.route = None;
+                transfer.relay_custody = None;
+                transfer.phase = FilePhase::Dial;
+                transfer.candidate_cursor += 1;
+                if transfer.candidate_cursor >= transfer.candidate_count {
+                    transfers.remove(&key);
+                }
+                false
             }
         }
     }
@@ -1761,21 +1828,56 @@ impl Node {
             return Err(SessionError::UnexpectedMessage);
         }
         if matches!(transfer.phase, FilePhase::Dial) {
-            let peer = self
+            let mut candidates = Vec::new();
+            if let Some(peer) = self
                 .routing_peer(&binding.device.user_id())
                 .filter(|peer| peer.public == binding.device && peer.account_id == binding.account)
-                .ok_or(SessionError::UnexpectedMessage)?;
+            {
+                candidates.push((false, peer));
+            }
+            if self.outgoing_file_consent_status(file.id, binding.event_id)
+                == Some(crate::eventlog::sync::FileConsentStatus::Accepted)
+            {
+                let relays = {
+                    let roster = self.roster.lock().expect("roster lock not poisoned");
+                    self.post_office_candidates_for(&roster, &binding.device)
+                };
+                candidates.extend(
+                    relays
+                        .into_iter()
+                        .filter(|peer| self.relay_send_allowed(&peer.public))
+                        .map(|peer| (true, peer)),
+                );
+            }
+            if candidates.is_empty() {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            transfer.candidate_count = candidates.len();
+            let index = transfer.candidate_cursor;
+            if index >= candidates.len() {
+                return Err(SessionError::NoProgress);
+            }
+            let (relay, peer) = candidates.swap_remove(index);
             let channel = self.privacy_dial(peer.addr, &peer.public).await?;
             if !self.file_destination_current(file, destination)
+                || channel.peer_identity() != &peer.public
                 || channel
                     .peer_announcement()
-                    .is_some_and(|proof| proof.account_id() != binding.account)
+                    .is_some_and(|proof| proof.account_id() != peer.account_id)
             {
                 return Err(SessionError::UnexpectedMessage);
             }
+            transfer.route = Some((relay, peer));
             transfer.channel = Some(channel);
-            transfer.phase = FilePhase::Manifest;
+            transfer.phase = if relay {
+                FilePhase::RelayManifestLegacy
+            } else {
+                FilePhase::Manifest
+            };
             return Ok(false);
+        }
+        if transfer.route.as_ref().is_some_and(|(relay, _)| *relay) {
+            return self.advance_relay_file_transfer(transfer).await;
         }
         let channel = transfer
             .channel
@@ -1914,7 +2016,140 @@ impl Node {
                 }
                 return Err(SessionError::NoProgress);
             }
-            FilePhase::Dial => unreachable!(),
+            FilePhase::Dial
+            | FilePhase::RelayManifestLegacy
+            | FilePhase::RelayManifestFederated
+            | FilePhase::RelayChunksLegacy
+            | FilePhase::RelayChunksFederated
+            | FilePhase::RelayCustody
+            | FilePhase::RelayHeld => unreachable!(),
+        }
+        Ok(false)
+    }
+
+    async fn advance_relay_file_transfer(
+        &self,
+        transfer: &mut FileTransfer,
+    ) -> Result<bool, SessionError> {
+        use crate::postoffice::opaque::RelayMailbox;
+        let file = &transfer.file;
+        let destination = &transfer.destination;
+        let binding = &destination.binding;
+        let (_, relay) = transfer
+            .route
+            .as_ref()
+            .ok_or(SessionError::UnexpectedMessage)?;
+        let current = || {
+            self.file_destination_current(file, destination)
+                && self.relay_send_allowed(&relay.public)
+                && self.outgoing_file_consent_status(file.id, binding.event_id)
+                    == Some(crate::eventlog::sync::FileConsentStatus::Accepted)
+                && self
+                    .roster
+                    .lock()
+                    .expect("roster lock not poisoned")
+                    .get(&relay.public.user_id())
+                    .is_some_and(|peer| {
+                        peer.post_office
+                            && peer.public == relay.public
+                            && peer.account_id == relay.account_id
+                    })
+        };
+        let channel = transfer
+            .channel
+            .as_mut()
+            .ok_or(SessionError::UnexpectedMessage)?;
+        if !current() || !channel.io_admitted() || channel.peer_identity() != &relay.public {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        if matches!(transfer.phase, FilePhase::RelayHeld) {
+            return Ok(false);
+        }
+        if matches!(transfer.phase, FilePhase::RelayCustody) {
+            let (mailbox, final_chunk) = transfer
+                .relay_custody
+                .ok_or(SessionError::UnexpectedMessage)?;
+            if !super::session::request_durable_have(channel, mailbox, final_chunk).await?
+                || !current()
+            {
+                return Err(SessionError::NoProgress);
+            }
+            // Release this socket/slot without claiming recipient completion.
+            transfer.phase = FilePhase::RelayHeld;
+            return Ok(false);
+        }
+        let federated = matches!(
+            transfer.phase,
+            FilePhase::RelayManifestFederated | FilePhase::RelayChunksFederated
+        );
+        if federated && !self.bridge_directory_allowed() {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        let chunks = matches!(
+            transfer.phase,
+            FilePhase::RelayChunksLegacy | FilePhase::RelayChunksFederated
+        );
+        if transfer.opaque.is_none() {
+            let mailbox = if federated {
+                RelayMailbox::federated(&self.identity, &binding.device)
+            } else {
+                RelayMailbox::new(&self.identity, &binding.device, &relay.public)
+            }
+            .map_err(|error| SessionError::Serialization(error.to_string()))?;
+            let conversation = if chunks {
+                file.file_conversation
+            } else {
+                super::conversation::dm_conversation_id(&self.identity.public(), &binding.device)
+            };
+            transfer.opaque = Some(super::opaque_relay::OpaqueMailboxProgress::new(
+                &relay.public,
+                &binding.device,
+                Some(conversation),
+                mailbox,
+            ));
+        }
+        let opaque = transfer.opaque.as_mut().unwrap();
+        let complete = self
+            .advance_opaque_mailbox_if(channel, opaque, &|| {
+                current() && (!federated || self.bridge_directory_allowed())
+            })
+            .await?;
+        if !current() || (federated && !self.bridge_directory_allowed()) {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        if complete {
+            if chunks {
+                let final_chunk = file.final_chunk.ok_or(SessionError::UnexpectedMessage)?;
+                let outer = opaque
+                    .uploaded()
+                    .iter()
+                    .find(|(inner, _)| *inner == final_chunk)
+                    .map(|(_, outer)| *outer)
+                    .ok_or(SessionError::NoProgress)?;
+                let mailbox = if federated {
+                    RelayMailbox::federated(&self.identity, &binding.device)
+                } else {
+                    RelayMailbox::new(&self.identity, &binding.device, &relay.public)
+                }
+                .map_err(|error| SessionError::Serialization(error.to_string()))?;
+                transfer.relay_custody = Some((mailbox.id(), outer));
+            }
+            transfer.opaque = None;
+            transfer.phase = match transfer.phase {
+                FilePhase::RelayManifestLegacy if self.bridge_directory_allowed() => {
+                    FilePhase::RelayManifestFederated
+                }
+                FilePhase::RelayManifestLegacy | FilePhase::RelayManifestFederated => {
+                    FilePhase::RelayChunksLegacy
+                }
+                FilePhase::RelayChunksLegacy if self.bridge_directory_allowed() => {
+                    FilePhase::RelayChunksFederated
+                }
+                FilePhase::RelayChunksLegacy | FilePhase::RelayChunksFederated => {
+                    FilePhase::RelayCustody
+                }
+                _ => return Err(SessionError::UnexpectedMessage),
+            };
         }
         Ok(false)
     }
@@ -1926,26 +2161,7 @@ impl Node {
         direct: bool,
     ) -> bool {
         let binding = &destination.binding;
-        let current = || {
-            self.delivery
-                .lock()
-                .expect("delivery lock not poisoned")
-                .contains_file_destination(
-                    file.id,
-                    binding.event_id,
-                    &binding.device,
-                    &binding.account,
-                )
-                && !self
-                    .delivery_suspended
-                    .load(std::sync::atomic::Ordering::Acquire)
-                && self
-                    .historical_author(&binding.device.ed25519_pub)
-                    .is_some_and(|proof| {
-                        proof.public() == binding.device && proof.account_id() == binding.account
-                    })
-                && self.known_account_allowed(&binding.device)
-        };
+        let current = || self.file_destination_current(file, destination);
         if !current() {
             return false;
         }
@@ -1998,6 +2214,8 @@ impl Node {
                     {
                         return false;
                     }
+                    #[cfg(test)]
+                    phase.store(6, std::sync::atomic::Ordering::Relaxed);
                     let Ok(uploaded) = self
                         .opaque_relay_round(
                             &mut channel,
@@ -2024,6 +2242,8 @@ impl Node {
                     ) else {
                         return false;
                     };
+                    #[cfg(test)]
+                    phase.store(7, std::sync::atomic::Ordering::Relaxed);
                     return super::session::request_durable_have(
                         &mut channel,
                         mailbox.id(),
@@ -2149,6 +2369,8 @@ impl Node {
                     "legacy-reconnect",
                     "chunks",
                     "final-custody",
+                    "relay-chunks",
+                    "relay-custody",
                 ][phase.load(std::sync::atomic::Ordering::Relaxed) as usize];
                 eprintln!(
                     "file-attempt failure stage={stage} timeout={} relay={relay}",

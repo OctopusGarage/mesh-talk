@@ -5680,3 +5680,362 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     let _ = bt.await;
     case.finish();
 }
+
+#[tokio::test]
+async fn relay_file_worker_preserves_progress_across_slow_mailbox_exchanges() {
+    retained_relay_file_worker(true, 1).await;
+}
+
+#[tokio::test]
+async fn relay_custody_releases_slots_for_more_than_eight_pending_files() {
+    retained_relay_file_worker(false, 10).await;
+}
+
+async fn retained_relay_file_worker(slow: bool, count: u8) {
+    use crate::eventlog::sync::SyncStore;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    // A stale direct endpoint rejects Noise immediately on every OS. A closed
+    // port can consume the full connect budget on Windows, making this batch
+    // measure SYN/refusal timing instead of retained relay scheduling.
+    let rejecting_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        rejecting_listener.local_addr().unwrap().port(),
+    );
+    let rejecting = tokio::spawn(async move {
+        while let Ok((stream, _)) = rejecting_listener.accept().await {
+            drop(stream);
+        }
+    });
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+    a.replace_verified_dm_pull_peers(vec![bp.user_id.clone()]);
+    b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+    b.set_attachment_global_auto(false).unwrap();
+    a.set_bridge_discovery_enabled(true);
+    b.set_bridge_discovery_enabled(true);
+    let relay_identity = DeviceIdentity::generate();
+    let keys = relay_identity.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(
+        &relay_identity,
+        "Relay",
+        listener.local_addr().unwrap().port(),
+    );
+    // Observe qualified final-chunk custody while retaining the real relay
+    // admission, durable storage, and reconciliation implementation.
+    struct ObservedRelay {
+        inner: crate::postoffice::PostOffice,
+        final_chunks: Arc<Mutex<std::collections::HashSet<EventId>>>,
+        confirmations: Arc<AtomicUsize>,
+    }
+    impl SyncStore for ObservedRelay {
+        fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+            let held = self.inner.durable_have(conversation, id);
+            if held && self.final_chunks.lock().unwrap().contains(id) {
+                self.confirmations.fetch_add(1, Ordering::SeqCst);
+            }
+            held
+        }
+        fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+            self.inner.event_ids(conversation)
+        }
+        fn events_excluding(
+            &self,
+            conversation: &ConversationId,
+            have: &std::collections::HashSet<EventId>,
+        ) -> Vec<crate::eventlog::Event> {
+            self.inner.events_excluding(conversation, have)
+        }
+        fn ingest(
+            &mut self,
+            event: crate::eventlog::Event,
+        ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+            self.inner.ingest(event)
+        }
+    }
+    let final_chunks = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let confirmations = Arc::new(AtomicUsize::new(0));
+    let mut office =
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", relay_identity)
+            .unwrap();
+    office.require_opaque_envelopes();
+    let relay = Arc::new(Mutex::new(ObservedRelay {
+        inner: office,
+        final_chunks: final_chunks.clone(),
+        confirmations: confirmations.clone(),
+    }));
+    let delayed = Arc::new(AtomicBool::new(false));
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn({
+        let relay = relay.clone();
+        let delayed = delayed.clone();
+        let exchanges = exchanges.clone();
+        async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                let relay = relay.clone();
+                let delayed = delayed.clone();
+                let exchanges = exchanges.clone();
+                connections.spawn(async move {
+                    let Ok(mut channel) = super::transport::secure_accept(stream, &identity).await
+                    else {
+                        return;
+                    };
+                    while let Ok(bytes) = channel.recv().await {
+                        if delayed.load(Ordering::SeqCst)
+                            && super::session::requests_response(&bytes)
+                        {
+                            exchanges.fetch_add(1, Ordering::SeqCst);
+                            // Each complete exchange fits the unchanged 400ms budget;
+                            // even four fingerprint exchanges exceed one whole-attempt budget.
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        }
+                        match super::session::serve_wire_bytes(&mut channel, &relay, &bytes).await {
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!("delayed relay error: {error}");
+                                break;
+                            }
+                        }
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        }
+    });
+    for peer in [&a, &b] {
+        peer.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &peer.user_id(),
+        );
+    }
+    let mut files = Vec::new();
+    for index in 0..count {
+        let source = ad.path().join(format!("relay-{index}.bin"));
+        let bytes = vec![index + 63; crate::file::CHUNK_SIZE + 31];
+        std::fs::write(&source, &bytes).unwrap();
+        let (card, file) = a
+            .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let offer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                a.flush_delivery(card).await;
+                b.drain_from_post_office().await;
+                if let Ok(offer) = offers.try_recv() {
+                    break offer;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(offer.file_conv, file);
+        b.decide_attachment(file, true).unwrap();
+        b.drain_from_post_office().await;
+        a.drain_from_post_office().await;
+        let final_chunk = {
+            let id = a
+                .delivery
+                .lock()
+                .unwrap()
+                .file_card(card)
+                .unwrap()
+                .final_chunk
+                .unwrap();
+            a.log.lock().unwrap().get(&id).unwrap().clone()
+        };
+        for mailbox in [
+            crate::postoffice::opaque::RelayMailbox::new(
+                &a.identity,
+                &bp.public(),
+                &proof.public(),
+            )
+            .unwrap(),
+            crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap(),
+        ] {
+            final_chunks
+                .lock()
+                .unwrap()
+                .insert(mailbox.wrap(&final_chunk).unwrap().id);
+        }
+        files.push((card, file, bytes));
+    }
+    // All offers/consent were reconciled above. Observe only file-worker
+    // connections here, without unrelated proactive history-recovery pulls.
+    a.replace_verified_dm_pull_peers(Vec::new());
+    delayed.store(slow, Ordering::SeqCst);
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
+    let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            b.drain_from_post_office().await;
+            if files.iter().all(|(_, file, _)| b.file_ready_to_save(*file)) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    let cooldown = if slow && received.is_ok() {
+        let confirmed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while confirmations.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let before = confirmations.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        Some((
+            confirmed.is_ok(),
+            before,
+            confirmations.load(Ordering::SeqCst),
+        ))
+    } else {
+        None
+    };
+    worker.abort();
+    server.abort();
+    rejecting.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    let _ = rejecting.await;
+    assert!(received.is_ok(), "retained relay worker stranded bytes");
+    if let Some((quiet, before, after)) = cooldown {
+        assert!(quiet, "relay must confirm exact final-chunk custody");
+        assert_eq!(
+            after, before,
+            "held relay custody must cool down across normal worker ticks"
+        );
+    }
+    if slow {
+        assert!(exchanges.load(Ordering::SeqCst) >= 5);
+    }
+    assert!(a.file_transfer_peak.load(Ordering::SeqCst) <= 8);
+    for (card, file, bytes) in files {
+        assert_eq!(b.read_file(file).unwrap(), bytes);
+        assert!(
+            !a.outgoing_file_progress(card).unwrap().delivered,
+            "relay custody is not recipient completion"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retained_relay_file_exchange_rechecks_signed_consent_and_relay_role() {
+    for revoke_consent in [true, false] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let pd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let bob_account = Account::generate();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
+        let (a, _) = node(ad.path(), alice, aa, &bp);
+        let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+        b.set_attachment_global_auto(false).unwrap();
+        b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+        let identity = DeviceIdentity::generate();
+        let keys = identity.secret_bytes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof =
+            Announce::new_post_office(&identity, "Relay", listener.local_addr().unwrap().port());
+        let relay = Arc::new(Mutex::new(
+            crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", identity).unwrap(),
+        ));
+        let server = tokio::spawn(super::postbox::run_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            listener,
+            relay.clone(),
+        ));
+        for node in [&a, &b] {
+            node.roster.lock().unwrap().update(
+                &proof,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &node.user_id(),
+            );
+        }
+        let source = ad.path().join("revocable.bin");
+        std::fs::write(&source, [91; 64]).unwrap();
+        let (card, file) = a
+            .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        a.flush_delivery(card).await;
+        b.drain_from_post_office().await;
+        assert_eq!(offers.try_recv().unwrap().file_conv, file);
+        b.decide_attachment(file, true).unwrap();
+        for control in b.file_consent_events(&ap.public()).unwrap() {
+            a.accept_file_consent_event(&control, &bp.public()).unwrap();
+        }
+        let card = a.delivery.lock().unwrap().file_card(card).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let mut transfers = std::collections::HashMap::new();
+        // Failed direct dial, authenticated relay dial, then a complete mailbox
+        // fingerprint exchange. The next retained step must recheck authority.
+        for _ in 0..3 {
+            assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        }
+        assert_eq!(transfers.len(), 1);
+        let final_chunk = a
+            .log
+            .lock()
+            .unwrap()
+            .get(&card.final_chunk.unwrap())
+            .unwrap()
+            .clone();
+        let outer = crate::postoffice::opaque::RelayMailbox::new(
+            &a.identity,
+            &bp.public(),
+            &proof.public(),
+        )
+        .unwrap()
+        .wrap(&final_chunk)
+        .unwrap()
+        .id;
+        assert!(!relay.lock().unwrap().has(&outer));
+        if revoke_consent {
+            b.decide_attachment(file, false).unwrap();
+            for control in b.file_consent_events(&ap.public()).unwrap() {
+                a.accept_file_consent_event(&control, &bp.public()).unwrap();
+            }
+        } else {
+            let ordinary = Announce::new(
+                &DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                "No longer a relay",
+                proof.tcp_port,
+            );
+            a.roster.lock().unwrap().update(
+                &ordinary,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &a.user_id(),
+            );
+        }
+        assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        assert!(
+            transfers.is_empty(),
+            "invalid retained relay socket must be discarded"
+        );
+        assert!(
+            !relay.lock().unwrap().has(&outer),
+            "authority ended before any chunk upload"
+        );
+        assert!(!a.outgoing_file_progress(card.id).unwrap().delivered);
+        server.abort();
+        let _ = server.await;
+    }
+}

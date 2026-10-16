@@ -261,9 +261,9 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         !a.outgoing_file_progress(card).unwrap().delivered,
         "relay custody cannot claim that the recipient received the file"
     );
-    // flush_file_delivery is one 400ms best-effort turn, not a delivery
-    // barrier. Drive the same durable retry/federation/drain stages until the
-    // recipient has all verified bytes, including after an interrupted turn.
+    // Immediate flush is best effort. Exercise the production worker's retained
+    // exchanges while the fixture drives the independent federation/drain stages.
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
     let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             directory
@@ -274,11 +274,12 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             if b.file_ready_to_save(file) {
                 break;
             }
-            a.flush_file_delivery(card).await;
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     })
     .await;
+    worker.abort();
+    let _ = worker.await;
     assert!(
         received.is_ok(),
         "federated bytes did not converge: recipient={:?}, sender={:?}",

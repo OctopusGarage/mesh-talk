@@ -18,6 +18,7 @@ struct OpaqueRoundStore<'a> {
     relay: PublicIdentity,
     log: EventLog,
     seen: HashSet<EventId>,
+    authorize_upload: &'a (dyn Fn() -> bool + Sync),
 }
 
 impl SyncStore for OpaqueRoundStore<'_> {
@@ -32,7 +33,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
-        if !self.node.relay_send_allowed(&self.relay) {
+        if !self.node.relay_send_allowed(&self.relay) || !(self.authorize_upload)() {
             return Vec::new();
         }
         SyncStore::events_excluding(&self.log, conversation, have)
@@ -45,6 +46,42 @@ impl SyncStore for OpaqueRoundStore<'_> {
             return Ok(AppendOutcome::Duplicate);
         }
         self.log.append(event)
+    }
+}
+
+/// One mailbox projection retained only between complete protocol exchanges.
+/// Cancellation requires discarding this state together with its channel.
+/// Payload projections stay ephemeral: eight active files must not retain eight
+/// full ciphertext logs. Rebuilding deterministic wrappers costs CPU per step,
+/// but retains only identities, IDs, and protocol progress between exchanges.
+pub(in crate::node) struct OpaqueMailboxProgress {
+    mailbox: RelayMailbox,
+    recipient: PublicIdentity,
+    relay: PublicIdentity,
+    conversation: Option<ConversationId>,
+    sync: super::session::SyncProgress,
+    uploaded: Vec<(EventId, EventId)>,
+}
+
+impl OpaqueMailboxProgress {
+    pub(in crate::node) fn new(
+        relay: &PublicIdentity,
+        recipient: &PublicIdentity,
+        conversation: Option<ConversationId>,
+        mailbox: RelayMailbox,
+    ) -> Self {
+        Self {
+            mailbox,
+            recipient: recipient.clone(),
+            relay: relay.clone(),
+            conversation,
+            sync: super::session::SyncProgress::default(),
+            uploaded: Vec::new(),
+        }
+    }
+
+    pub(in crate::node) fn uploaded(&self) -> &[(EventId, EventId)] {
+        &self.uploaded
     }
 }
 
@@ -92,26 +129,53 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        let mut progress =
+            OpaqueMailboxProgress::new(channel.peer_identity(), recipient, conversation, mailbox);
+        while !self.advance_opaque_mailbox(channel, &mut progress).await? {}
+        Ok(progress.uploaded)
+    }
+
+    pub(in crate::node) async fn advance_opaque_mailbox<IO>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        progress: &mut OpaqueMailboxProgress,
+    ) -> Result<bool, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.advance_opaque_mailbox_if(channel, progress, &|| true)
+            .await
+    }
+
+    pub(in crate::node) async fn advance_opaque_mailbox_if<IO, F>(
+        &self,
+        channel: &mut crate::transport::SecureChannel<IO>,
+        progress: &mut OpaqueMailboxProgress,
+        authorize_upload: &F,
+    ) -> Result<bool, super::session::SessionError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: Fn() -> bool + Sync,
+    {
+        if channel.peer_identity() != &progress.relay {
+            return Err(super::session::SessionError::UnexpectedMessage);
+        }
         let seen = self
             .opaque_seen
             .lock()
             .expect("opaque seen lock not poisoned")
-            .get(&mailbox.id())
+            .get(&progress.mailbox.id())
             .cloned()
             .unwrap_or_default();
-        let outer_store = Mutex::new(OpaqueRoundStore {
-            node: self,
-            relay: channel.peer_identity().clone(),
-            log: EventLog::default(),
-            seen,
-        });
+        let mut log = EventLog::default();
         let mut uploaded = Vec::new();
         let mut outgoing = Vec::new();
-        if let Some(conv) =
-            conversation.filter(|_| self.relay_send_allowed(channel.peer_identity()))
+        if let Some(conv) = progress
+            .conversation
+            .filter(|_| self.relay_send_allowed(&progress.relay))
         {
             let events = {
-                let store = self.sync_store(recipient);
+                let store = self.sync_store(&progress.recipient);
                 store
                     .lock()
                     .expect("projection lock not poisoned")
@@ -119,39 +183,47 @@ impl Node {
             };
             outgoing.extend(events.into_iter().map(|event| (event, true)));
         }
-        if self.relay_send_allowed(channel.peer_identity()) {
-            match self.file_consent_events(recipient) {
+        if self.relay_send_allowed(&progress.relay) {
+            match self.file_consent_events(&progress.recipient) {
                 Ok(controls) => outgoing.extend(controls.into_iter().map(|event| (event, false))),
                 Err(error) => log::debug!("file consent publication deferred: {error}"),
             }
         }
         for (event, requested) in outgoing {
-            let outer = mailbox
+            let outer = progress
+                .mailbox
                 .wrap(&event)
                 .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
             if requested {
                 uploaded.push((event.id, outer.id));
             }
-            outer_store
-                .lock()
-                .expect("opaque store lock not poisoned")
-                .log
-                .append(outer)
+            log.append(outer)
                 .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
         }
-        super::session::request_round(channel, &outer_store, mailbox.id()).await?;
+        progress.uploaded = uploaded;
+        let outer_store = Mutex::new(OpaqueRoundStore {
+            node: self,
+            relay: progress.relay.clone(),
+            log,
+            seen,
+            authorize_upload,
+        });
+        let complete = progress
+            .sync
+            .step(channel, &outer_store, progress.mailbox.id())
+            .await?;
         let wrappers: Vec<Event> = outer_store
             .lock()
             .expect("opaque store lock not poisoned")
             .log
-            .events(&mailbox.id())
+            .events(&progress.mailbox.id())
             .into_iter()
             .cloned()
             .collect();
         let mut inner: Vec<(EventId, Event)> = Vec::new();
         let mut processed = Vec::new();
         for outer in wrappers {
-            match mailbox.open(&outer) {
+            match progress.mailbox.open(&outer) {
                 Ok(event) => inner.push((outer.id, event)),
                 Err(_) => processed.push(outer.id),
             }
@@ -170,7 +242,7 @@ impl Node {
             if !self.relay_receive_allowed(channel.peer_identity()) {
                 break;
             }
-            match self.accept_file_consent_event(&event, recipient) {
+            match self.accept_file_consent_event(&event, &progress.recipient) {
                 Ok(true) => {
                     processed.push(outer_id);
                     continue;
@@ -215,12 +287,15 @@ impl Node {
             if cache.values().map(HashSet::len).sum::<usize>() > 250_000 {
                 cache.clear();
             }
-            cache.entry(mailbox.id()).or_default().extend(processed);
+            cache
+                .entry(progress.mailbox.id())
+                .or_default()
+                .extend(processed);
         }
         if !self.relay_send_allowed(channel.peer_identity()) {
-            uploaded.clear();
+            progress.uploaded.clear();
         }
-        Ok(uploaded)
+        Ok(complete)
     }
 }
 

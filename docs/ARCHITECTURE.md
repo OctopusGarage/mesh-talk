@@ -620,18 +620,38 @@ receive-only reconciliation projection; DM bodies prefer the direct sender
 route and fall back to the relay, while controls can be pulled directly or
 through the relay when the original sender is offline.
 
-Immutable file retries retain at most eight authenticated connections across
-complete protocol exchanges, with a ten-second idle limit. A rotating admission
+Immutable file retries use eight scheduling slots and retain at most six
+authenticated connections across complete protocol exchanges, with a ten-second
+idle limit. One outbound connection permit remains available for control work. A rotating admission
 cursor fills available slots; each worker pass runs at most eight round-robin
 file steps before continuing ordinary control work. Clean progress still retained
-at pass end schedules another pass; failed attempts free slots without self-waking.
+at pass end schedules another pass. Fresh work tries the direct recipient first;
+failed routes discard their wire state before advancing to another eligible
+candidate. Exhausted candidates free the slot rather than busy retrying.
 Dialing, fingerprinting, reconciliation and custody checking each have their
 own clean exchange boundary under the same 400 ms operation budget. Each step
 rechecks the current private authorization and exact destination binding; a
 timeout discards the connection and any partial frame, resuming from durable
 remote state on a fresh connection. Only final, target-qualified chunk custody
-retires source file work. The SDK's immediate best-effort flush remains a
-disposable, bounded attempt rather than retaining worker-owned state.
+retires source file work.
+
+Relay file transfers use the same retained scheduler. Legacy and federated
+manifest/chunk mailboxes advance through separate clean exchanges, reusing
+`opaque_relay.rs` for encryption, projection and received-event admission.
+Every upload step rechecks the exact offer consent, destination binding and the
+selected relay's current role, identity/account and send policy. Interrupted
+streams and their partial synchronization state are discarded together.
+Only identifiers and protocol progress survive an exchange; ciphertext payload
+projections are rebuilt temporarily, trading repeated local wrapping work for
+bounded retained memory. Do not combine these exchanges into one whole-file
+deadline: repeated cancellation before the first chunk can starve delivery.
+
+Relay custody releases the connection and active slot but never retires the
+recipient's file destination or confirms delivery. At most 256 volatile,
+ten-second scheduling hints defer redundant relay uploads; eviction permits an
+earlier retry and carries no custody guarantee. The SDK's immediate best-effort
+flush remains a disposable, bounded attempt rather than retaining worker-owned
+state. SDK hosts run the accept loop's delivery worker for eventual retries.
 
 An optional, fixed-size exact-event storage probe follows ordinary reconciliation
 on its disposable connection. New durable nodes and post offices synchronize
