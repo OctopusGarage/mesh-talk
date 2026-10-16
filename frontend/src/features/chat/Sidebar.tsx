@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LogOut,
+  Info,
   LockKeyhole,
   Loader2,
   MoreHorizontal,
@@ -394,12 +395,16 @@ function UtilityMenu() {
   const [open, setOpen] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
     void listen<string>("tray-navigate", ({ payload }) => {
-      if (payload === "diagnostics") setConnectionOpen(true);
-      if (payload === "settings") setSettingsOpen(true);
+      if (!["diagnostics", "settings", "about"].includes(payload)) return;
+      setOpen(false);
+      setConnectionOpen(payload === "diagnostics");
+      setSettingsOpen(payload === "settings");
+      setAboutOpen(payload === "about");
     })
       .then((stop) => {
         if (active) unlisten = stop;
@@ -467,7 +472,20 @@ function UtilityMenu() {
               {t("settings.title")}
             </Button>
             {callsEnabled && <WebRtcTestDialog menuItem />}
-            <AboutDialog menuItem />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 px-2"
+              data-testid="sidebar-action-about"
+              title={t("about.title")}
+              onClick={() => {
+                setOpen(false);
+                setAboutOpen(true);
+              }}
+            >
+              <Info className="h-4 w-4" />
+              {t("about.title")}
+            </Button>
             <div className="my-1 h-px bg-border" />
             <button
               type="button"
@@ -515,6 +533,7 @@ function UtilityMenu() {
         onOpenChange={setConnectionOpen}
       />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} hideTrigger />
     </>
   );
 }

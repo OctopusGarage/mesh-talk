@@ -59,6 +59,9 @@ belongs and how to keep the site, README, and guides aligned.
 These dated reports record what was tested and the limits of that evidence. Use
 the current guides above for commands and implementation behavior.
 
+- [Tray menu validation](evals/tray-menu.md): tray navigation regressions, source
+  evaluation commands, and native-test limits.
+
 | Doc                                                                                               | What it covers                                                               |
 | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | [`docs/evals/architecture-score.md`](evals/architecture-score.md)                                 | Architecture review and the optimization series score.                       |

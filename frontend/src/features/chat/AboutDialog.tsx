@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Code2, ExternalLink, Info, Scale } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { listen } from "@tauri-apps/api/event";
 import {
   Dialog,
   DialogContent,
@@ -22,27 +21,22 @@ const LICENSE_URL =
 
 /** A minimal About surface: app name + version, one-line description, source/license
  * links, and a shortcut into the Diagnostics dialog. Version comes from `env_info`. */
-export function AboutDialog({ menuItem = false }: { menuItem?: boolean }) {
+export function AboutDialog({
+  menuItem = false,
+  open: controlledOpen,
+  onOpenChange,
+  hideTrigger = false,
+}: {
+  menuItem?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  hideTrigger?: boolean;
+}) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = controlledOpen ?? localOpen;
+  const setOpen = onOpenChange ?? setLocalOpen;
   const [version, setVersion] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    void listen<string>("tray-navigate", ({ payload }) => {
-      if (payload === "about") setOpen(true);
-    })
-      .then((stop) => {
-        if (active) unlisten = stop;
-        else stop();
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -62,18 +56,22 @@ export function AboutDialog({ menuItem = false }: { menuItem?: boolean }) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size={menuItem ? "sm" : "icon"}
-          className={menuItem ? "w-full justify-start gap-2.5 px-2" : undefined}
-          data-testid="sidebar-action-about"
-          title={t("about.title")}
-        >
-          <Info className="h-4 w-4" />
-          {menuItem && <span>{t("about.title")}</span>}
-        </Button>
-      </DialogTrigger>
+      {!hideTrigger && (
+        <DialogTrigger asChild>
+          <Button
+            variant="ghost"
+            size={menuItem ? "sm" : "icon"}
+            className={
+              menuItem ? "w-full justify-start gap-2.5 px-2" : undefined
+            }
+            data-testid="sidebar-action-about"
+            title={t("about.title")}
+          >
+            <Info className="h-4 w-4" />
+            {menuItem && <span>{t("about.title")}</span>}
+          </Button>
+        </DialogTrigger>
+      )}
       <DialogContent className="max-w-lg" data-testid="about-dialog">
         <DialogHeader>
           <DialogTitle>{t("about.title")}</DialogTitle>

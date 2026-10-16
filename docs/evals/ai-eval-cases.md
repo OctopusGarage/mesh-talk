@@ -27,6 +27,14 @@ AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --sui
 
 The linked-device suite reviews source against a security rubric. It supplements the Rust unit tests and real-process E2E runs; model scores alone do not verify runtime behavior.
 
+The [tray menu suite](tray-menu-ai-eval-suite.json) reviews native menu actions,
+frontend navigation, and the controlled About dialog. Its
+[validation guide](tray-menu.md) records the regression coverage and native-test limits.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/tray-menu-ai-eval-suite.json --report target/ai-eval/tray-menu-report.json
+```
+
 ## Core Smoke Examples
 
 | Case | Stable example | Expected guard |
