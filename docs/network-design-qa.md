@@ -60,7 +60,7 @@ flowchart LR
 
 **Current.** The relays can run the same binary and the same **role and trust policy**. They cannot have literally identical host settings: each needs its own persistent key/identity, keystore, password file, listening ports as needed, and reachable addresses. Equal federation needs `--post-office --bridge` and the same trusted `--federation-peer` identity/endpoint set on each relay. Merely starting two `--post-office` processes does not replicate their mailboxes; without federation, each is an independent offline store.
 
-The app keeps direct client paths. For relay work, it orders verified candidates by an optional preferred relay, then LAN reachability and identity; for an introduced recipient, the relay that reported that recipient can take priority. A failed network attempt can move to another reachable candidate. This is **per operation**, not a permanent elected primary or an always-open connection. The recipient checks all known relays because a fallback copy can remain there after the preferred relay returns. With federation and client bridge opt-in, v3 encrypted mailboxes reconcile among trusted relays; legacy relay-bound mailboxes do not.
+The app keeps direct client paths. For ordinary message relay work, it orders verified candidates by an optional preferred relay, then LAN reachability and identity; for an introduced recipient, the relay that reported that recipient can take priority. A failed message upload can move to another reachable candidate. This is **per operation**, not a permanent elected primary or an always-open connection. The recipient checks all known relays because a fallback copy can remain there after the preferred relay returns. With federation and client bridge opt-in, v3 encrypted mailboxes reconcile among trusted relays; legacy relay-bound mailboxes do not. **File-chunk retry is narrower:** it selects one post office per attempt rather than iterating the candidate list, so the same immediate failover promise does not yet apply to files.
 
 **Needs validation.** A two-relay outage test should stop P1, confirm P2 accepts a new message and the intended recipient issues a receipt, then restart P1 and check deduplication. With all relays on one machine or one power/network segment, multiple processes do not provide failure independence.
 
@@ -163,6 +163,17 @@ The directory is also bounded (currently 128 members per relay), so “the post 
 
 **Open product decision.** Separate outgoing and incoming mailbox controls are possible, but a send-only device may miss receipts/replies and a receive-only device may fail to provide offline custody for its own messages. If these are added, the UI should explain those consequences and preserve direct P2P behavior. Group recovery from other online peers is already configurable **per accepted member** through **Share a copy**; there is no unrestricted third-party sync-node role.
 
+## Q14. Which implementation limits prevent a blanket elegance or high-performance claim today?
+
+**Current review findings:**
+
+- **Feature-consistent failover:** ordinary message uploads iterate relay candidates, but the file-chunk retry path selects one relay per attempt. A historical cross-relay file diagnostic delivered the offer but did not complete the saved file within 120 seconds. That test used the older gateway topology, so current federation file behavior still needs an independent test; do not infer full file delivery from DM success.
+- **Federation work:** each relay probes every configured peer and attempts synchronization with every reachable route about every five seconds. Inventory generation hashes every retained event ID in each v3 mailbox. This is reasonable for a few relays, but a larger trust set can create repeated handshakes and inventory work; there is no measured large-mesh throughput guarantee.
+- **Directory and connection bounds:** a relay directory is capped at 128 members, and a client queries at most eight relay directories per refresh. The client has no global persistent TCP connection pool, so a visible roster size cannot be converted into a fixed concurrent-connection count.
+- **Deployment proof:** existing live tests do not establish delivery to an independent client host on mac-mini's LAN during a preferred-relay outage. Group, file, call, and linked-device flows require separate evidence.
+
+These are different kinds of work: the file path is a concrete implementation inconsistency, the limits are explicit capacity choices, and the cross-site cases are validation gaps. Keep those categories separate when planning fixes.
+
 For a code-level review, the main seams are [LAN and routed discovery](../crates/mesh-talk-core/src/discovery/service.rs), [group send and recovery](../crates/mesh-talk-core/src/node/channels.rs), [client delivery and relay drain](../crates/mesh-talk-core/src/node/serving.rs), [relay candidate ordering](../crates/mesh-talk-core/src/node/postbox.rs), [bridge registration](../crates/mesh-talk-core/src/node/bridge_client.rs), [federated directory limits](../crates/mesh-talk-core/src/node/bridge_directory.rs), [relay federation](../crates/mesh-talk-core/src/postoffice/federation.rs), and [desktop settings](../src-tauri/src/settings.rs).
 
 ## Review decisions, in order
@@ -173,5 +184,6 @@ For a code-level review, the main seams are [LAN and routed discovery](../crates
 4. Confirm the relay picker: local-first automatic choice, optional user preference, and fallback; decide how to label legacy gateway routes.
 5. Define measurable scale targets instead of a fixed eight-connection claim, then test group, file, and outage cases with independent hosts on each LAN.
 6. Decide whether mailbox sending and receiving need separate switches, or whether the current combined **Use post offices** control communicates the intended choice more clearly.
+7. Bring file retry onto the same relay-candidate/failover policy as messages, then validate consented file bytes across two relays and a preferred-relay outage before promising that behavior.
 
 No code changes are implied by this review draft. After these decisions, update the [topology baseline](network-topologies.md) and compare each accepted rule with code and targeted cross-LAN tests.
