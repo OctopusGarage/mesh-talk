@@ -9,7 +9,7 @@ This document provides guidelines for writing and organizing tests in the Mesh-T
 For small, focused tests of individual functions or methods, place tests directly in the same file as the code they're testing, using the `#[cfg(test)]` attribute:
 
 ```rust
-// crates/mesh-talk-core/src/identity/keys.rs
+// crates/mesh-talk-core/src/identity/device.rs
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,7 +52,7 @@ cargo test --workspace        # or: make test
 ```
 
 The multi-process backend E2E rigs spawn real `mesh-talk-node` processes over UDP
-discovery + TCP and are `#[ignore]`d by default (slow cold starts); run them with:
+discovery + TCP and are `#[ignore]`d by default (shared-port/process isolation); run them explicitly with:
 
 ```bash
 make e2e        # CI: .github/workflows/e2e-backend.yml
@@ -63,6 +63,7 @@ make e2e        # CI: .github/workflows/e2e-backend.yml
 React frontend tests should use Vitest + Testing Library and can be organized in two ways:
 
 1. Place tests alongside the components/modules they test:
+
    ```
    frontend/src/components/UserForm.spec.ts
    frontend/src/store/user.spec.ts

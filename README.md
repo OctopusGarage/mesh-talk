@@ -26,16 +26,16 @@ establish an authenticated Noise-encrypted connection, and sync conversation eve
 messages use a Double Ratchet; channels use sender-key ratchets. You can compare a contact's
 safety number to verify their identity.
 
-| Situation                   | Path                                                                                                                                                  | What to know                                                                                                                          |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Peers share a LAN           | Automatic local discovery and direct connection                                                                                                       | Works on an isolated LAN; firewall rules and multicast support still matter.                                                          |
+| Situation                   | Path                                                                                                                                                      | What to know                                                                                                                                       |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Peers share a LAN           | Automatic local discovery and direct connection                                                                                                           | Works on an isolated LAN; firewall rules and multicast support still matter.                                                                       |
 | Peers are on different LANs | Optional [routed discovery](docs/routed-network-discovery.md) over an existing network, or an opt-in [post-office federation](docs/network-topologies.md) | Equal relays exchange signed presence and encrypted mailboxes over reachable, pinned paths; Mesh-Talk does not configure a VPN or join IP subnets. |
-| A recipient is offline      | A peer-operated post office stores recipient-encrypted events for later delivery                                                                      | Mailboxes have capacity limits and a maximum age of 30 days; the relay sees [routing metadata](docs/post-office-metadata-privacy.md). |
+| A recipient is offline      | A peer-operated post office stores recipient-encrypted events for later delivery                                                                          | Mailboxes have capacity limits and a maximum age of 30 days; the relay sees [routing metadata](docs/post-office-metadata-privacy.md).              |
 
-The [architecture reference](docs/ARCHITECTURE.md) explains the protocol, trust boundaries,
-and sync model. The [network topology guide](docs/network-topologies.md) distinguishes tested
-message paths from unsupported assumptions about cross-network calls, file transfer, or
-mailbox replication.
+The [network architecture baseline](docs/network-design-reference.md) explains the
+communication model, module responsibilities, settings and illustrated scenarios.
+The [protocol architecture](docs/ARCHITECTURE.md) details crypto and sync; feature-specific
+acceptance evidence distinguishes implemented paths from platform/topology assumptions.
 
 ## What you can do
 

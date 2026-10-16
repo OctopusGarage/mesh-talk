@@ -3,11 +3,11 @@
 Open **Settings → Privacy & security** to choose a privacy level. The presets
 change notification previews, automatic locking, and sensitive copying:
 
-| Level | Message previews | Automatic lock | Lock when hidden | Copy confirmation | Clipboard clear |
-|-------|------------------|----------------|------------------|-------------------|-----------------|
-| Balanced (default) | On | Off | Off | Off | Off |
-| Private | Off | After 10 minutes | Off | Off | After 60 seconds |
-| Strict | Off | After 1 minute | On | On | After 30 seconds |
+| Level              | Message previews | Automatic lock   | Lock when hidden | Copy confirmation | Clipboard clear  |
+| ------------------ | ---------------- | ---------------- | ---------------- | ----------------- | ---------------- |
+| Balanced (default) | On               | Off              | Off              | Off               | Off              |
+| Private            | Off              | After 10 minutes | Off              | Off               | After 60 seconds |
+| Strict             | Off              | After 1 minute   | On               | On                | After 30 seconds |
 
 Changing one of these controls individually switches the level to **Custom**.
 **Lock now** hides chats while background delivery continues. Unlock with the
@@ -24,6 +24,24 @@ groups keep group-only access. The permission list is saved for the signed-in
 user on this device; it does not sync to other devices. Offline relay delivery
 requires a manually allowed trusted relay account. Invisible mode is not IP
 anonymity: old packets and a network port scan can still reveal the device.
+
+The same **Network privacy** section separates:
+
+- **Use post offices**: master switch for relay data and directory participation.
+- **Send / Receive through post offices**: independent content directions. Sending
+  off also withholds relay receipts and file decisions; receiving off prevents
+  content admission but is not a zero-wire-byte guarantee.
+- **Discover peers through a post office**: opt into public participant introductions.
+- **Physical LAN discovery only**: exclude routed/Tailscale public discovery and
+  bridge directories, while retaining permitted physical-interface disclosure.
+- **Preferred post office**: select a known direct LAN/Tailscale candidate and
+  retain alternatives. A known candidate is rechecked when actually connected.
+
+These are device-local choices. Directory opt-out and physical-only discovery do
+not revoke an explicit authorized contact or create an IP firewall. Direct peer
+communication remains independent of relay direction settings. The full matrix
+and startup/live-change contract are in the
+[network baseline](network-design-reference.md#4-settings-and-deployment-configuration).
 
 **Settings → Contacts → Hidden contacts** removes selected accounts from your
 local contact lists and direct-message search. It keeps their history and does

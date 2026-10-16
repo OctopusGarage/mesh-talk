@@ -29,8 +29,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-post-office-wi
 
 The installer registers a boot-time Scheduled Task, preserves existing relay
 data during updates, and checks the TCP listener. On macOS, copy the verified
-binary to a persistent path and configure a LaunchAgent as described in the
-macOS runbook. The release ZIP is a native binary package, not a desktop app.
+binary to a persistent path, prepare the boot-service configuration, and activate
+the root-owned LaunchDaemon interactively as described in the macOS runbook.
+A LaunchAgent starts only after login and does not provide unattended boot. The release ZIP is a native binary package, not a desktop app.
 
 ## Linux container image
 

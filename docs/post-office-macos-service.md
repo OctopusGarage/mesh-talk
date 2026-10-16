@@ -120,5 +120,8 @@ cross-relay file bytes and SHA-256 separately.
 
 The multi-relay variant starts a disposable second post office on the test Mac,
 checks that both peers discover it and mac2015, and confirms that an offline DM
-is stored and drained through the lowest-fingerprint elected relay. It removes
-the disposable relay when done; queued events do not replicate to the standby.
+is stored and drained through the automatically ordered eligible relay. This
+legacy mailbox-only variant removes its disposable relay and does not configure
+federation, so its result does not establish replicated custody. Current equal
+bridge relays use the shared trust manifest described in
+[the federation guide](post-office-federation.md).

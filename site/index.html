@@ -713,18 +713,17 @@
             <div class="bridge__site">
               <span class="bridge__label">LAN Y</span>
               <strong>Local peers and post office</strong>
-              <p>
-                Either relay can hold and forward encrypted messages.
-              </p>
+              <p>Either relay can hold and forward encrypted messages.</p>
             </div>
           </div>
           <p class="bridge__note">
             Relays synchronize encrypted mailboxes while a path exists and
-            queue messages when it fails. They do not join IP subnets or
-            establish cross-network calls or direct file transfers.
+            retain bounded copies when it fails. Message and file payloads stay
+            encrypted; calls need their own live signaling and media paths.
+            Relays do not join IP subnets.
             <a
-              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/network-topologies.md"
-              >See supported topologies</a
+              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/network-design-reference.md"
+              >Read the communication architecture</a
             >
             and
             <a

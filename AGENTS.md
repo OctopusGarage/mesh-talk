@@ -1,12 +1,13 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
+
 - Two-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
   `mesh_talk_core` + the `mesh-talk-node` CLI bin in `src/bin/`): feature modules `node/`,
   `identity/`, `transport/`, `discovery/`, `eventlog/`, `ratchet/`, `channel/`, `dm.rs`,
   `file/`, `postoffice/`, `storage/`. `src-tauri/` is the Tauri desktop app: entry
-  `src/main.rs` → `lib.rs`, IPC glue in `commands.rs` (auth) + `chat_commands.rs` (messaging)
-  + `events.rs`, plus `state.rs`, `tray.rs`, `services/` (auth only).
+  `src/main.rs` → `lib.rs`, IPC glue in `commands.rs` (auth) + `chat_commands/` (messaging)
+  - `events.rs`, plus `state.rs`, `tray.rs`, `services/` (auth only).
 - Integration/e2e suites live in `crates/mesh-talk-core/tests/` (`two_node_cli`,
   `persistent_history`, `post_office_offline`, `decoder_smoke`); keep unit tests inline via
   `mod tests` (e.g. `node/node_tests.rs`).
@@ -18,10 +19,11 @@
   across the README, guides, and project site.
 
 ## Build, Test, and Development Commands
+
 - `make dev` primes Rust + Node deps and installs git hooks.
 - `make build` / `make frontend-build` — release build / Vite production build.
 - During feature development, run affected tests only: `make test-focused
-  TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
+TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.
   `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`
   selects a frontend unit file. `make test` runs the full workspace suite
@@ -31,9 +33,10 @@
   feature), and `.cargo/config.toml` caps test/compile parallelism.
 - UI / node spot checks: `make tauri-dev`, `make frontend-dev`,
   `cargo run -p mesh-talk-core --bin mesh-talk-node -- --keystore /tmp/a.keystore
-  --password pw --name alice` (add `--post-office` for relay mode).
+--password pw --name alice` (add `--post-office` for relay mode).
 
 ## Coding Style & Naming Conventions
+
 - Rust: `cargo fmt` (4-space, `snake_case` modules, `UpperCamelCase` types) +
   **`cargo clippy --all-targets -- -D warnings`** (must match CI — `--all-targets` covers
   tests/benches).
@@ -42,17 +45,21 @@
 - Reference `specifications/development_conventions.md` for naming nuances.
 
 ## Architecture & Components
+
 - Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
 - The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
   (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
   low-level socket in `transport/net.rs`) + the content-addressed event log + DM/channel/
   file crypto. Messages are events synced as a bounded append-only log, account-addressed
-  across a user's devices; offline delivery via an elected post office. Optional
-  routed discovery and opt-in post-office bridges connect reachable sites without
+  across a user's devices; optional offline custody via equal eligible post offices.
+  Routed discovery and opt-in post-office federation connect reachable sites without
   joining their IP subnets. Wire formats are versioned bincode.
-- See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport.
+- See **`docs/ARCHITECTURE.md`** before changing crypto, sync, or transport;
+  **`docs/network-design-reference.md`** owns the communication invariants,
+  module contracts, resource budgets and topology acceptance boundaries.
 
 ## Testing Guidelines
+
 - Integration coverage in `crates/mesh-talk-core/tests/` and `node/node_tests.rs`; embed
   unit tests near the code. Networking/crypto changes ship a loopback integration assertion.
 - Backend multi-process E2E via `make e2e` (CI: `e2e-backend.yml`); Playwright UI E2E via
@@ -64,6 +71,7 @@
 - Document executed validation commands in every PR (minimum `make test`).
 
 ## Commit & Pull Request Guidelines
+
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
   `specifications/git_standards.md`. Squash WIP; link issues.
 - Before opening a PR, commit the branch and run `./scripts/pr-preflight.sh` with only the
@@ -76,6 +84,7 @@
 - Request review only after `./scripts/check-health.sh` passes (it mirrors CI exactly).
 
 ## Security & Adjustments
+
 - `./scripts/check-health.sh` chains fmt, Clippy `--all-targets`, ESLint, tests, typos,
   cargo-deny, cargo-machete, gitleaks, shellcheck, audits, and both builds.
 - Triage vulnerabilities immediately or document mitigation in the PR.

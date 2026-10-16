@@ -36,7 +36,7 @@ belongs and how to keep the site, README, and guides aligned.
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md)                 | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks.                                                                |
 | [`docs/updates.md`](updates.md)                                                     | Manual release check, verified package download, and platform install steps.                                                                                |
 | [`docs/privacy-controls.md`](privacy-controls.md)                                   | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
-| [`specifications/TODO.md`](../specifications/TODO.md)                               | Implementation status (feature-complete) + deliberate design notes / external constraints.                                                                  |
+| [`specifications/TODO.md`](../specifications/TODO.md)                               | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
 
 ## Contributor workflow and design
 
