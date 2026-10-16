@@ -32,10 +32,15 @@ poll long-running commands while providing progress updates.
    product bug.
 2. Deadline exceeded: inspect machine load and readiness. Repeat only the failing
    scenario to distinguish contention from a reproducible timeout.
-3. Discovery failure: distinguish blocked UDP/interface/ACL conditions from a
+3. Discovery failure: distinguish blocked UDP/interface/ACL conditions and
+   unavailable or restricted multicast (including hosted-runner routes) from a
    verified regression. Signed discovery success does not establish TCP access.
 4. Delivery/consent/history/integrity failure: report the exact assertion and
    feature path. Relay custody is not recipient completion.
+
+For every failure category, classify a result as a flake only after a focused
+rerun or clear supporting evidence establishes the transient cause. A later
+passing run alone does not erase the original failure; preserve both results.
 
 Do not edit product code or alter installed services as part of this runner.
 Report each selected test's command, result/duration and evidence limits. For a

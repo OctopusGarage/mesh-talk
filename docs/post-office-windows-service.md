@@ -120,12 +120,27 @@ channel event after the sender stops and the relay restarts. The second checks
 an offline file offer, then an exact byte roundtrip after the sender returns.
 The ignored Rust test separately proves that encrypted file chunks themselves
 survive on the installed Windows relay while both peers are offline, then
-arrive intact after a relay restart with the sender stopped. Recipient consent
-still needs a brief direct connection to the sender before those chunks are
-uploaded. The third command checks election against a disposable second relay.
+arrive intact after a relay restart with the sender stopped. These older
+harnesses obtain consent during a brief direct sender-recipient connection;
+that overlap is their test sequence, not a current protocol requirement. The
+third command checks election against a disposable second relay.
+
+Current bridge clients return signed, exact-offer consent and verified-save
+completion through version-3 encrypted federated opaque mailboxes. Those
+controls need no direct sender-recipient route or simultaneous online overlap.
+Each client must eventually reach an eligible relay, and file chunks are
+uploaded only after the sender learns authenticated consent. Reachable trusted
+federation and retained bytes remain necessary. Installed-federation mode in
+`scripts/e2e-four-machine-tailnet.py` separately checks cross-relay bytes and
+SHA-256.
 
 Routing metadata remains exposed to the relay, including authenticated device
 connections, mailbox activity, timing, and size buckets. See
 [relay metadata privacy](post-office-metadata-privacy.md) for the exact fields.
-Other relays do not replicate custody; only the elected relay has its queued
-events.
+Legacy relay-specific mailboxes do not replicate. Version-3 federation can
+copy opaque events among reachable trusted relays, but this opportunistic
+reconciliation does not guarantee replicated custody. Federation extends
+mailbox correlation to those trusted peers; unreachable paths, retention,
+eviction, or relay withholding/deletion can still prevent delivery. The privacy
+guide also explains why clients cannot guarantee remote removal from every
+relay queue.

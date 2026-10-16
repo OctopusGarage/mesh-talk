@@ -107,9 +107,21 @@ without an arrival record start their 30-day clock on the first upgrade startup
 so the upgrade does not discard queued messages immediately. A sender that
 still holds an event may upload it again after expiry, starting a new mailbox.
 Legacy relay-specific mailboxes do not replicate. Version-3 copies reconcile
-among reachable trusted relays; if no route remains to another site, the
-local copy stays queued until a relay path returns. A sender can also retry
-through another reachable local relay.
+opportunistically among reachable trusted relays. This can copy events to
+several relays, but using several relays does **not guarantee replicated
+custody**: there is no guaranteed replica count or custody quorum. An
+unreachable relay cannot receive a new copy; eviction, expiry, or relay
+withholding or deletion can remove the only available copy before another
+relay receives it. If a route fails, an existing local copy remains queued
+only within its retention and capacity limits. A sender that retains the
+original event can retry through another reachable eligible relay.
+
+Clients have no remote operation that guarantees deletion from all relay
+queues. Local deletion or recall does not prove that every opaque copy was
+removed, especially at an unreachable or malicious relay. Honest relays apply
+their own expiry and eviction rules; a malicious operator can retain ciphertext
+beyond them. Recipient validation and duplicate handling protect accepted
+content, but neither establish replicated custody nor force remote erasure.
 
 ## Acceptance and operational limits
 
