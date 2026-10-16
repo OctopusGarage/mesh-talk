@@ -29,7 +29,7 @@ export async function createArchive(cwd, filename, { run = runCommand, expectedS
   try {
     await checked("git", ["init", "--bare", "--quiet", `--object-format=${format}`, metadata], options, run);
     await writeFile(path.join(metadata, "objects/info/alternates"), `${objects}\n`);
-    await writeFile(path.join(metadata, "info/attributes"), "* -export-ignore -export-subst\n");
+    await writeFile(path.join(metadata, "info/attributes"), "* -export-ignore -export-subst -text -filter -ident -working-tree-encoding\n");
     await checked("git", [`--git-dir=${metadata}`, "archive", "--format=tar", `--output=${filename}`, sha], options, run);
   } finally { await rm(metadata, { recursive: true, force: true }); }
   if (await checked("git", ["rev-parse", "HEAD"], options, run) !== sha || await checked("git", ["status", "--porcelain"], options, run)) throw Error("Source changed while creating the committed archive");

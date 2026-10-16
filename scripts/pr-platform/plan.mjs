@@ -24,6 +24,13 @@ export function parseFlags(argv) {
   return flags;
 }
 
+const workflowDiagnostics = [
+  "scripts/diagnostics/pr-platform.test.mjs",
+  "scripts/diagnostics/create-pr.test.mjs",
+  "scripts/diagnostics/pr-preflight-awake.test.mjs",
+  "scripts/diagnostics/source-identity.test.mjs",
+];
+
 export function buildPlan(flags, changedFiles) {
   const sharedRust = changedFiles.some(file => /^(Cargo\.(toml|lock)|\.cargo\/)/u.test(file));
   if ((sharedRust || changedFiles.some(file => /^crates\/mesh-talk-core\/(?:src\/|tests\/|Cargo\.toml$|build\.rs$)/u.test(file))) && !flags.coreFilters.length && !flags.coreTests.length) throw Error("Backend changes require explicit --core-filter or --core-test selectors; no full-suite fallback is allowed.");
@@ -36,11 +43,14 @@ export function buildPlan(flags, changedFiles) {
     hostFilters: flags.hostFilters,
     uiSpecs: flags.uiSpecs,
     frontendBuild: flags.hostFilters.length > 0,
+    nodeDiagnostics: changedFiles.some(file => file.startsWith("scripts/pr-platform/") ||
+      ["scripts/pr-preflight.sh", "scripts/create-pr.sh", "scripts/evals/source-identity.mjs", ...workflowDiagnostics].includes(file))
+      ? [...workflowDiagnostics] : [],
   };
 }
 
 export function hasSelectedTests(plan) {
-  return !!(plan.frontendBuild || plan.coreFilters.length || plan.coreTests.length || plan.uiSpecs.length);
+  return !!(plan.frontendBuild || plan.coreFilters.length || plan.coreTests.length || plan.uiSpecs.length || plan.nodeDiagnostics.length);
 }
 
 export function validateWindowsRoot(value) {
@@ -51,8 +61,9 @@ export function validateWindowsRoot(value) {
 
 export function validatePlan(plan) {
   if (plan.schema !== 1 || !/^[a-f0-9]{40,64}$/u.test(plan.sourceSha)) throw Error("Invalid committed source SHA in platform plan");
-  for (const key of ["coreFilters", "coreTests", "hostFilters", "uiSpecs"]) if (!Array.isArray(plan[key])) throw Error(`Invalid plan field: ${key}`);
+  for (const key of ["coreFilters", "coreTests", "hostFilters", "uiSpecs", "nodeDiagnostics"]) if (!Array.isArray(plan[key])) throw Error(`Invalid plan field: ${key}`);
   for (const key of ["frontendBuild"]) if (typeof plan[key] !== "boolean") throw Error(`Invalid plan field: ${key}`);
+  if (plan.nodeDiagnostics.length && JSON.stringify(plan.nodeDiagnostics) !== JSON.stringify(workflowDiagnostics)) throw Error("Invalid workflow diagnostic selection: expected the four fixed test files");
   // Validate guest input again: archive/JSON transport must not broaden selection.
   parseFlags([
     ...plan.coreFilters.flatMap(filter => ["--core-filter", filter]),

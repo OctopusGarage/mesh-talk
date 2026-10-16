@@ -104,6 +104,7 @@ export function validatePlaywrightEvidence(evidence, selected) {
 
 export function expectedSteps(plan) {
   const steps = [{ name: "rust-version", program: "rustc", args: ["--version"] }, { name: "cargo-version", program: "cargo", args: ["--version"] }, { name: "node-version", program: "node", args: ["--version"] }];
+  if (plan.nodeDiagnostics.length) steps.push({ name: "workflow-diagnostics", program: "node", args: ["--test", ...plan.nodeDiagnostics] });
   const needsNpm = plan.frontendBuild || plan.uiSpecs.length;
   if (needsNpm) steps.push({ name: "npm-ci", program: "npm", args: ["ci", "--no-audit", "--no-fund"], frontend: true });
   if (plan.frontendBuild) steps.push({ name: "frontend-build", program: "npm", args: ["run", "build"], frontend: true });
@@ -147,7 +148,7 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
     const error = result.error || uiError || (result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
     results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
   }
-  return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), scope: "Affected core/host unit tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };
+  return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), scope: "Affected workflow diagnostics, core/host tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };
 }
 
 async function main() {

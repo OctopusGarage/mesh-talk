@@ -45,6 +45,13 @@ evidence. This selects unit tests and explicitly named browser scenarios; it
 does not automatically launch the full workspace, ignored process rigs, or
 the full browser suite.
 
+Changes to the platform runner, PR entry point or source-evidence helpers also
+select four fixed Node workflow regression files on both guests. This catches
+Git, shell and path compatibility independently of application tests; a
+workflow-only diagnostic plan does not install frontend dependencies.
+Verification archives suppress export substitutions and text/filter conversions
+in private Git metadata so the archived bytes match the committed source.
+
 Frontend changes require affected browser specs. Frontend unit coverage runs
 once in the existing local preflight; the two platform guests do not repeat
 the whole frontend unit suite. To target another PR base, pass

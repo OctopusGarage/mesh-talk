@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPlan, hasSelectedTests, parseFlags, selectWindowsCargoHome, validateWindowsRoot } from "../pr-platform/plan.mjs";
-import { executePlan, rustTestCount, runCommand } from "../pr-platform/guest.mjs";
+import { buildPlan, hasSelectedTests, parseFlags, selectWindowsCargoHome, validatePlan, validateWindowsRoot } from "../pr-platform/plan.mjs";
+import { executePlan, expectedSteps, rustTestCount, runCommand } from "../pr-platform/guest.mjs";
 import { collectPlatforms, createArchive, validateGuestReport, windowsBootstrap } from "../pr-platform/run.mjs";
 
 const sha = "a".repeat(40);
@@ -87,7 +87,7 @@ test("committed archive includes export-ignored harness without changing reposit
   t.after(() => rm(directory, { recursive: true, force: true }));
   const repo = join(directory, "repo");
   await mkdir(join(repo, "scripts/pr-platform"), { recursive: true });
-  const attributes = "/scripts export-ignore\n/hidden.txt export-ignore\n*.txt export-subst\n";
+  const attributes = "/scripts export-ignore\n/hidden.txt export-ignore\n*.txt export-subst text eol=crlf\n*.mjs text eol=crlf\n";
   const guest = "export const committed = true;\n";
   await writeFile(join(repo, ".gitattributes"), attributes);
   await writeFile(join(repo, "scripts/pr-platform/guest.mjs"), guest);
@@ -110,13 +110,13 @@ test("committed archive includes export-ignored harness without changing reposit
     calls.push(args);
     return runCommand(program, args, options);
   } }), committed);
-  const listing = await runCommand("tar", ["-tf", archive], { timeoutMs: 10_000 });
+  const listing = await runCommand("tar", ["-tf", "source.tar"], { cwd: directory, timeoutMs: 10_000 });
   assert.equal(listing.code, 0, listing.output);
   assert(listing.output.split("\n").includes("scripts/pr-platform/guest.mjs"), "export-ignore must not remove the guest runner");
   assert(listing.output.split("\n").includes("hidden.txt"));
-  const archivedGuest = await runCommand("tar", ["-xOf", archive, "scripts/pr-platform/guest.mjs"]);
+  const archivedGuest = await runCommand("tar", ["-xOf", "source.tar", "scripts/pr-platform/guest.mjs"], { cwd: directory });
   assert.equal(archivedGuest.output, guest);
-  const tracked = await runCommand("tar", ["-xOf", archive, "tracked.txt"]);
+  const tracked = await runCommand("tar", ["-xOf", "source.tar", "tracked.txt"], { cwd: directory });
   assert.equal(tracked.output, "$Format:%H$\n", "verification source must not apply export-subst");
   assert(calls.some(args => args.includes("archive") && args.at(-1) === committed));
   assert.equal(await readFile(join(repo, ".gitattributes"), "utf8"), attributes);
@@ -202,4 +202,42 @@ test("Cargo home reuses canonical D registry configuration but never a physical 
   assert.equal(selectWindowsCargoHome("//server/cargo", fallback), fallback);
   assert.equal(selectWindowsCargoHome("D:/../escape", fallback), fallback);
   assert.throws(() => selectWindowsCargoHome("C:/cargo", "C:/new-cache"), /D:/);
+});
+
+
+test("related workflow changes select the same bounded Node diagnostics without npm on both guests", async () => {
+  const files = [
+    "scripts/diagnostics/pr-platform.test.mjs",
+    "scripts/diagnostics/create-pr.test.mjs",
+    "scripts/diagnostics/pr-preflight-awake.test.mjs",
+    "scripts/diagnostics/source-identity.test.mjs",
+  ];
+  for (const changed of ["scripts/pr-platform/guest.mjs", "scripts/pr-preflight.sh", "scripts/create-pr.sh", "scripts/evals/source-identity.mjs", ...files]) {
+    const plan = { ...buildPlan(parseFlags([]), [changed]), sourceSha: sha, archiveSha: "b".repeat(64) };
+    assert.deepEqual(plan.nodeDiagnostics, files, changed);
+    assert.equal(hasSelectedTests(plan), true);
+    const step = expectedSteps(plan).find(row => row.name === "workflow-diagnostics");
+    assert.deepEqual(step, { name: "workflow-diagnostics", program: "node", args: ["--test", ...files] });
+    assert(!expectedSteps(plan).some(row => row.program === "npm"));
+    const executions = [];
+    for (const env of [{ CARGO_HOME: "/cache/cargo" }, { USERPROFILE: "D:/cache/profile" }]) {
+      const commands = [];
+      const report = await executePlan(plan, { env, run: async (program, args) => {
+        commands.push([program, args]);
+        return { code: 0, output: "passed" };
+      } });
+      assert.equal(validateGuestReport(report, plan, process.platform), report);
+      assert.throws(() => validateGuestReport({ ...report, results: report.results.filter(row => row.name !== "workflow-diagnostics") }, plan, process.platform), /mismatched/);
+      executions.push(commands);
+    }
+    assert.deepEqual(executions[0], executions[1]);
+    assert.throws(() => validatePlan({ ...plan, nodeDiagnostics: [files[0]] }), /diagnostic/i);
+    assert.throws(() => validatePlan({ ...plan, nodeDiagnostics: [...files, "arbitrary.mjs"] }), /diagnostic/i);
+    assert.throws(() => validatePlan({ ...plan, nodeDiagnostics: true }), /nodeDiagnostics|diagnostic/i);
+  }
+  for (const unrelated of ["docs/README.md", "scripts/diagnostics/release-preflight.test.mjs"]) {
+    const plan = buildPlan(parseFlags([]), [unrelated]);
+    assert.deepEqual(plan.nodeDiagnostics, []);
+    assert.equal(hasSelectedTests(plan), false);
+  }
 });
