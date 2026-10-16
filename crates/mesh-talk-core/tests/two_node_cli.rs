@@ -221,6 +221,7 @@ fn two_cli_nodes_discover_by_routed_query_and_exchange_a_dm() {
 }
 
 #[test]
+#[ignore = "spawns real CLI processes; run through the backend E2E gate"]
 fn participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error() {
     let dir = tempfile::tempdir().unwrap();
     let keystore = dir.path().join("custom-device.keystore");
@@ -294,6 +295,7 @@ fn participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_inp
 }
 
 #[test]
+#[ignore = "spawns real CLI processes; run through the backend E2E gate"]
 fn participant_cli_probe_respects_persisted_invisible_mode() {
     let dir = tempfile::tempdir().unwrap();
     mesh_talk_core::node::PrivacyPolicy::open(&dir.path().join("privacy.policy"), "pw")
