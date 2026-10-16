@@ -78,9 +78,16 @@ preserves that directory's registry and network configuration without logging
 its contents. Otherwise, Cargo uses the isolated D: cache. Source, build
 output, browser downloads and temporary directories remain isolated.
 
-For an existing PR, run `scripts/pr-preflight.sh` directly with the same
-selectors before pushing the candidate. Preview the plan without starting
-Docker or SSH:
+For an existing PR, run `scripts/pr-preflight.sh` directly before pushing the
+candidate. After a broader run has produced evidence, a focused follow-up can
+use `--base <previous-candidate>` with the tests affected by the delta. Retain
+the earlier reports and record both revisions, the comparison base, remaining
+failures and exact test scope in the PR. Shared fixture changes require all
+cases that use that fixture. An incremental pass is not whole-branch
+certification; final required CI still runs on the complete current PR head.
+The new-PR wrapper always uses the actual `origin/<target>` base.
+
+Preview the plan without starting Docker or SSH:
 
 ```bash
 node scripts/pr-platform/run.mjs --plan \

@@ -5910,14 +5910,31 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     a.replace_verified_dm_pull_peers(Vec::new());
     delayed.store(slow, Ordering::SeqCst);
     let worker = tokio::spawn(a.clone().run_delivery_loop());
+    let mut recipient_drains = 0;
     let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // First require every sender slot to reach qualified relay custody while
+        // Bob stays offline. Repeatedly decrypting his growing mailbox during
+        // this phase adds competing quadratic work unrelated to slot release.
+        while !files
+            .iter()
+            .all(|(_, file, _)| confirmed_files.lock().unwrap().contains(file))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            recipient_drains, 0,
+            "custody must not need recipient polling"
+        );
+        assert!(
+            files.iter().all(|(_, file, _)| {
+                !b.file_ready_to_save(*file) && b.log.lock().unwrap().events(file).is_empty()
+            }),
+            "recipient must remain without chunks until all relay custody is confirmed"
+        );
         loop {
+            recipient_drains += 1;
             b.drain_from_post_office().await;
-            if files.iter().all(|(_, file, _)| b.file_ready_to_save(*file))
-                && files
-                    .iter()
-                    .all(|(_, file, _)| confirmed_files.lock().unwrap().contains(file))
-            {
+            if files.iter().all(|(_, file, _)| b.file_ready_to_save(*file)) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -5937,7 +5954,19 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
     let _ = worker.await;
     let _ = server.await;
     let _ = rejecting.await;
-    assert!(received.is_ok(), "retained relay worker stranded bytes");
+    assert!(
+        received.is_ok(),
+        "retained relay worker stranded bytes: custody={}/{} ready={}/{} recipient-drains={} peak-slots={}",
+        confirmed_files.lock().unwrap().len(),
+        files.len(),
+        files
+            .iter()
+            .filter(|(_, file, _)| b.file_ready_to_save(*file))
+            .count(),
+        files.len(),
+        recipient_drains,
+        a.file_transfer_peak.load(Ordering::SeqCst)
+    );
     if let Some((quiet, before, after)) = cooldown {
         assert!(quiet, "relay must confirm exact final-chunk custody");
         assert_eq!(
