@@ -1219,7 +1219,13 @@ impl Node {
                 let Ok(mut conn) = self.privacy_dial(peer.addr, &peer.public).await else {
                     return None;
                 };
-                let store = self.sync_store(conn.peer_identity());
+                // Recovery fetches retained history; it must not turn an
+                // outbound connection into a sharing-preference bypass.
+                let store = if self.shares_replica(channel_id) {
+                    self.sync_store(conn.peer_identity())
+                } else {
+                    self.pull_sync_store(conn.peer_identity())
+                };
                 request_round(&mut conn, &store, *channel_id)
                     .await
                     .ok()

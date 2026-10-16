@@ -19,6 +19,7 @@ pub(crate) mod bridge_directory;
 pub(crate) mod call;
 pub(crate) mod channel;
 pub(crate) mod channel_custody;
+mod channel_projection_cache;
 pub(crate) mod channel_senders;
 pub(crate) mod channels;
 pub(crate) mod conversation;
@@ -37,6 +38,8 @@ mod file_consent_store;
 mod file_consent_tests;
 pub(crate) mod filebook;
 pub(crate) mod files;
+#[cfg(test)]
+mod group_chain_tests;
 pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;

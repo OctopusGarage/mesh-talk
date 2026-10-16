@@ -301,6 +301,10 @@ pub struct Node {
     pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
     pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
+    pub(in crate::node) channel_projection_cache:
+        Mutex<super::channel_projection_cache::ChannelProjectionCache>,
+    #[cfg(test)]
+    pub(in crate::node) channel_projection_replays: std::sync::atomic::AtomicUsize,
     /// Fixed read-only summaries recovered from previous devices at open time.
     pub(in crate::node) archived_channels: Vec<ChannelSummary>,
     /// Public author of the device that produced a restored local history.
@@ -356,6 +360,8 @@ pub struct Node {
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
+    pub(in crate::node) bridge_refresh: tokio::sync::Mutex<()>,
+    pub(in crate::node) bridge_generation: std::sync::atomic::AtomicU64,
     pub(in crate::node) delivery_control_ids:
         Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
     pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
@@ -743,6 +749,9 @@ impl Node {
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
+            channel_projection_cache: Mutex::new(Default::default()),
+            #[cfg(test)]
+            channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             channel_last_send: Mutex::new(None),
             emitted: Mutex::new(emitted),
@@ -763,6 +772,8 @@ impl Node {
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
             bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
+            bridge_refresh: tokio::sync::Mutex::new(()),
+            bridge_generation: std::sync::atomic::AtomicU64::new(0),
             delivery_control_ids: Mutex::new(delivery_control_ids),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),

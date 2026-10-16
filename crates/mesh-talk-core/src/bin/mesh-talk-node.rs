@@ -26,8 +26,14 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+#[path = "mesh-talk-node/federation_config.rs"]
+mod federation_config;
+#[path = "mesh-talk-node/federation_runtime.rs"]
+mod federation_runtime;
 #[path = "mesh-talk-node/file_saves.rs"]
 mod file_saves;
+use federation_config::{FederationSeed, parse_fingerprint};
+use federation_runtime::run_federation_loop;
 
 /// How often a normal node drains held DMs from the elected post office.
 const DRAIN_INTERVAL_SECS: u64 = 3;
@@ -90,38 +96,9 @@ struct Args {
     /// Repeat the same peer list on every relay; LAN addresses are discovered automatically.
     #[arg(long = "federation-peer", requires_all = ["post_office", "bridge"])]
     federation_peers: Vec<FederationSeed>,
-}
-
-#[derive(Clone, Debug)]
-struct FederationSeed {
-    id: String,
-    discovery: SocketAddr,
-}
-
-impl std::str::FromStr for FederationSeed {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (id, endpoint) = value
-            .split_once('@')
-            .ok_or_else(|| "expected <full-fingerprint>@<ip>:<discovery-port>".to_string())?;
-        let id = parse_fingerprint(id)?;
-        let discovery = endpoint
-            .parse::<SocketAddr>()
-            .map_err(|_| "expected a numeric routed IP and UDP port".to_string())?;
-        if discovery.port() == 0 {
-            return Err("federation discovery port must be nonzero".into());
-        }
-        Ok(Self { id, discovery })
-    }
-}
-
-fn parse_fingerprint(value: &str) -> Result<String, String> {
-    if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(value.to_ascii_lowercase())
-    } else {
-        Err("expected a full 32-character hexadecimal device fingerprint".into())
-    }
+    /// Public relay trust manifest. Changes take effect after restarting this relay.
+    #[arg(long, requires_all = ["post_office", "bridge"], conflicts_with = "federation_peers")]
+    federation_config: Option<std::path::PathBuf>,
 }
 
 /// Account addressing is explicit: a full crypto account id, never a local
@@ -325,7 +302,13 @@ impl Drop for DataDirLock {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("federation")) {
+        return federation_config::run_cli();
+    }
     let mut args = Args::parse();
+    if let Some(path) = args.federation_config.as_deref() {
+        args.federation_peers = federation_config::load(path)?;
+    }
     if let Some(path) = args.password_file.as_deref() {
         args.password = Some(read_password_file(path)?);
     }
@@ -760,7 +743,7 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.discovery_port
     ));
 
-    if !args.federation_peers.is_empty() {
+    if args.federation_config.is_some() || !args.federation_peers.is_empty() {
         let directory = gateway
             .map(FederationDirectory::with_gateway)
             .unwrap_or_default();
@@ -800,64 +783,6 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         run_relay_accept_loop(transport_identity, listener, store).await;
     }
     Ok(())
-}
-
-async fn run_federation_loop(
-    roster: Arc<Mutex<Roster>>,
-    seeds: Vec<FederationSeed>,
-    identity: DeviceIdentity,
-    store: Arc<Mutex<PostOffice>>,
-    directory: FederationDirectory,
-) {
-    let self_id = identity.user_id();
-    let trusted = seeds
-        .iter()
-        .map(|seed| seed.id.as_str())
-        .collect::<HashSet<_>>();
-    loop {
-        let mut routes = roster
-            .lock()
-            .expect("roster lock not poisoned")
-            .post_offices()
-            .into_iter()
-            .filter(|peer| {
-                peer.public.user_id() != self_id && trusted.contains(peer.public.user_id().as_str())
-            })
-            .map(|peer| (peer.addr, peer.public))
-            .collect::<Vec<_>>();
-        let probed =
-            futures_util::future::join_all(seeds.iter().filter(|seed| seed.id != self_id).map(
-                |seed| async move {
-                    mesh_talk_core::postoffice::gateway::query_pinned_relay(
-                        seed.discovery,
-                        &seed.id,
-                    )
-                    .await
-                    .map(|proof| {
-                        (
-                            SocketAddr::new(seed.discovery.ip(), proof.tcp_port),
-                            proof.public(),
-                        )
-                    })
-                },
-            ))
-            .await;
-        routes.extend(probed.into_iter().flatten());
-        routes.sort_by_key(|(addr, peer)| (peer.user_id(), *addr));
-        routes.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-        let results = futures_util::future::join_all(
-            routes
-                .iter()
-                .map(|(addr, peer)| directory.sync_with_relay(*addr, &identity, peer, &store)),
-        )
-        .await;
-        for ((addr, peer), result) in routes.iter().zip(results) {
-            if let Err(error) = result {
-                log::debug!("federation {} at {addr}: {error}", peer.user_id());
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
 }
 
 /// Parse and dispatch a `/msg <prefix> <text>` command: resolve the recipient

@@ -165,6 +165,13 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   kind 14, one-byte enabled flag). Peers show the signed status in the member list.
   Disabling sharing hides the local channel and channel-file logs from inbound
   reconciliation while preserving incoming pushes and the member's local history.
+  Recovery becomes pull-only; outbound control retries exclude retained third-party
+  events. Own events can be sent only when their parents are already held by the
+  recipient or are eligible own events in the batch. Otherwise the own event waits
+  rather than disclosing third-party ancestry. Public presence does not authorize
+  private channel access: signed membership is replayed even before ChannelBook
+  refresh, and an established genesis-owner pin cannot be replaced by a competing
+  signed root.
   The latest local preference is retried as a control event, so a member that was
   offline when it changed can learn the status after reconnecting.
   Because event-kind indices are positional in bincode, sync preflights the
@@ -211,10 +218,14 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   replicas until the channel-file budget evicts older files.
   Direct-message files and inline media keep their existing completion and
   cleanup paths.
-  A public channel's whole-set fingerprint is cached in the durable log and
-  invalidated on append or compaction, so idle anti-entropy probes do not sort
-  and hash the entire channel history every time. Invisible-mode projections
-  continue computing a fingerprint of only the events visible to that peer.
+  The durable log caches its raw conversation digest. A separate, bounded
+  128-entry principal-scoped cache stores only the public authorized projection's
+  fingerprint, count and sync-version requirement. Its key includes that raw
+  digest/count, exact identities/account, established owner/membership, direction,
+  sharing policy and privacy generation/configuration. Append, compaction, book
+  refresh, removal, sharing and privacy changes invalidate reuse; a fresh
+  connection to an unchanged channel avoids cloning ciphertext or replaying history.
+  Invisible-mode projections remain uncached and include only authorized events.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
@@ -286,6 +297,9 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
     Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
     query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
     these endpoints remain separate from device identity and from Noise authorization.
+    A UDP peer reset or refusal does not stop the listener: Windows can report a
+    departed peer's ICMP port-unreachable response as receive error 10054. Local
+    socket failures remain fatal and are logged with their OS error.
     The roster and encrypted route cache retain multiple addresses per device and
     a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
     for the protocol, limitations, and cross-network release checks; see
@@ -626,6 +640,16 @@ device/account proofs. A newly added device that has never been discovered or
 authenticated directly cannot deliver offline through a relay; unknown proofs
 are denied rather than learned from legacy relay event payloads. No new relay
 proof protocol or event format is introduced.
+
+Equal-relay enrollment uses the optional, authoritative versioned public
+`--federation-config` manifest; repeated seed flags remain compatible when no
+file is supplied. Atomic operator mutations serialize through a persistent
+companion lock. Running services use a startup snapshot and require restart
+for enrollment/revocation. See [federation operations](post-office-federation.md).
+Modern directory v3/federation v2 admit up to 1,024 presence entries, while legacy
+requests keep 128. Client refresh streams all eligible relays with eight queries
+in flight and publishes each persisted result immediately; policy generations
+and staged rollback prevent canceled or obsolete introductions from surviving.
 
 ## 5. Frontend (`frontend/`)
 

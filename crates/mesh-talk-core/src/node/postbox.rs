@@ -179,14 +179,7 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
                     std::time::Instant::now(),
                 );
                 peers.and_then(|peers| {
-                    if first == bridge_directory::legacy_request() {
-                        bridge_directory::encode_response(&peers)
-                    } else {
-                        bridge_directory::encode_response_with_gateway(
-                            &peers,
-                            directory.gateway_route(),
-                        )
-                    }
+                    bridge_directory::encode_for_request(&first, &peers, directory.gateway_route())
                 })
             };
             if let Some(response) = response {
@@ -206,9 +199,14 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
         if !federation_trust
             .as_ref()
             .is_some_and(|trusted| trusted.contains(&channel.peer_identity().user_id()))
-            || federation::send_inventory(&mut channel, &store, directory.as_ref())
-                .await
-                .is_err()
+            || federation::send_inventory(
+                &mut channel,
+                &store,
+                directory.as_ref(),
+                federation::presence_limit(&first),
+            )
+            .await
+            .is_err()
         {
             return;
         }

@@ -1481,4 +1481,135 @@ mod tests {
             .is_none()
         );
     }
+
+    #[tokio::test]
+    async fn unrelated_account_cannot_request_sibling_history_or_retained_attachment_over_tcp() {
+        use crate::{discovery::Roster, identity::device::DeviceIdentity};
+        use std::sync::Mutex;
+        use tokio::{net::TcpListener, sync::mpsc};
+
+        let directory = tempfile::tempdir().unwrap();
+        let open = |name: &str| {
+            let (dm, _) = mpsc::unbounded_channel();
+            let (channel, _) = mpsc::unbounded_channel();
+            let (file, _) = mpsc::unbounded_channel();
+            Node::open(
+                DeviceIdentity::generate(),
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channel,
+                file,
+                &directory.path().join(format!("{name}-events.log")),
+                &directory.path().join(format!("{name}-sent.log")),
+                "pw",
+            )
+            .unwrap()
+        };
+        let victim = open("victim");
+        let attacker = open("attacker");
+        assert_ne!(victim.account_id(), attacker.account_id());
+        assert!(
+            !victim
+                .linked_devices()
+                .iter()
+                .any(|device| device.public == attacker.identity.public())
+        );
+        victim
+            .set_device_sync_category(SyncCategory::Attachments, true)
+            .unwrap();
+        victim
+            .set_device_sync_category(SyncCategory::Appearance, true)
+            .unwrap();
+        victim
+            .set_account_preference(
+                SyncCategory::Appearance,
+                "theme".into(),
+                Some("private-theme".into()),
+            )
+            .unwrap();
+        let group = victim
+            .create_channel("victim archive", vec![])
+            .await
+            .unwrap();
+        victim
+            .send_channel_message(group, b"private archived text")
+            .await
+            .unwrap();
+        let contents = b"private retained attachment bytes";
+        let source = directory.path().join("private.bin");
+        std::fs::write(&source, contents).unwrap();
+        let attachment = victim
+            .send_file_channel(group, &source, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let verified = directory.path().join("retained.bin");
+        victim
+            .save_directory_archive(attachment, &verified)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(verified).unwrap(),
+            contents,
+            "the requested attachment actually exists and is readable locally"
+        );
+        assert!(!victim.channel_history(group, 10).is_empty());
+        assert!(
+            !victim
+                .account_preferences(SyncCategory::Appearance)
+                .is_empty()
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        struct Server(tokio::task::JoinHandle<()>);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _server = Server(tokio::spawn(Arc::clone(&victim).run_accept_loop(listener)));
+        let victim_account = victim.account_id();
+        let requests = [
+            AccountHistoryFrame::Request {
+                version: VERSION,
+                account_id: victim_account.clone(),
+                cursor: None,
+                known_digest: [0; 32],
+                wanted: DeviceSyncPolicy::default(),
+            },
+            AccountHistoryFrame::Request {
+                version: VERSION,
+                account_id: victim_account.clone(),
+                cursor: None,
+                known_digest: [0; 32],
+                wanted: DeviceSyncPolicy {
+                    history: true,
+                    attachments: true,
+                    profile: true,
+                    appearance: true,
+                    contacts: true,
+                },
+            },
+            AccountHistoryFrame::AttachmentRequest {
+                version: VERSION,
+                account_id: victim_account,
+                file_conv: *attachment.as_bytes(),
+            },
+        ];
+        for request in requests {
+            // Bypass sibling-selection client helpers: the unrelated account
+            // completes Noise authentication and directly submits a valid frame.
+            let mut channel = attacker
+                .privacy_dial(address, &victim.identity.public())
+                .await
+                .unwrap();
+            channel.send(&request.encode().unwrap()).await.unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(3), channel.recv())
+                .await
+                .expect("server promptly closes an unauthorized sibling request");
+            assert!(
+                response.is_err(),
+                "server must disclose no history, device certificates, preferences, or attachment frame to an unrelated account"
+            );
+        }
+    }
 }

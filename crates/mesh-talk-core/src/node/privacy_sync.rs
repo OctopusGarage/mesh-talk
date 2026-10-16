@@ -419,6 +419,25 @@ impl GuardedSyncStore<'_> {
             }
             return allowed;
         }
+        self.channel_projection(conversation, events, relay, own_peer, Some(state))
+    }
+
+    /// Signed channel authority applies in public and invisible presence modes.
+    /// Public presence does not make a private group's event log public.
+    fn channel_projection(
+        &self,
+        conversation: &ConversationId,
+        events: &[Event],
+        relay: bool,
+        own_peer: bool,
+        private_state: Option<&PrivacyState>,
+    ) -> HashSet<EventId> {
+        #[cfg(test)]
+        self.node
+            .channel_projection_replays
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let me = self.node.identity.public();
+        let mut allowed = HashSet::new();
         // Established channel metadata pins its owner. Historical membership only
         // authorizes that channel's history; it never grants DM/account permission.
         let established = {
@@ -483,6 +502,9 @@ impl GuardedSyncStore<'_> {
                             } else if event.parents.is_empty()
                                 && author == meta.owner
                                 && meta.is_member(&author)
+                                && established
+                                    .as_ref()
+                                    .is_none_or(|(owner, _)| owner == &author)
                             {
                                 let invited =
                                     crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
@@ -616,16 +638,23 @@ impl GuardedSyncStore<'_> {
                         let pinned = established
                             .as_ref()
                             .is_some_and(|(owner, _)| owner == &author);
-                        let owner_allowed = proofs.iter().any(|a| {
-                            a.ed25519_pub == *event.author.ed25519_pub()
-                                && a.account_id()
-                                    .is_some_and(|id| id == own_account || state.policy.allows(&id))
+                        let owner_allowed = private_state.is_none_or(|state| {
+                            state.proofs.announcements().iter().any(|a| {
+                                a.ed25519_pub == *event.author.ed25519_pub()
+                                    && a.account_id().is_some_and(|id| {
+                                        id == self.node.account_id() || state.policy.allows(&id)
+                                    })
+                            })
                         });
                         if event.parents.is_empty()
                             && meta.owner == author
                             && meta.is_member(&author)
                             && (meta.is_member(&me.user_id()) || future_pair)
-                            && (pinned || owner_allowed)
+                            && if established.is_some() {
+                                pinned
+                            } else {
+                                owner_allowed
+                            }
                         {
                             let invited =
                                 crate::channel::ChannelMeta::is_invitation(&event.ciphertext);
@@ -722,6 +751,121 @@ impl GuardedSyncStore<'_> {
         }
         allowed
     }
+    fn public_projection_key(
+        &self,
+        conversation: &ConversationId,
+    ) -> Option<super::channel_projection_cache::ProjectionKey> {
+        let guard = self
+            .node
+            .privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned");
+        if guard
+            .as_ref()
+            .is_some_and(|state| state.policy.snapshot().invisible)
+            || self.pending_channels.contains_key(conversation)
+        {
+            return None;
+        }
+        let privacy_configured = guard.is_some();
+        let privacy_generation = self
+            .node
+            .privacy
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let sharing = self.node.shares_replica(conversation);
+        let established = self
+            .node
+            .channels
+            .lock()
+            .expect("channels lock not poisoned")
+            .state(conversation)
+            .map(|state| {
+                use sha2::{Digest, Sha256};
+                let mut hash = Sha256::new();
+                hash.update(state.genesis_owner().len().to_le_bytes());
+                hash.update(state.genesis_owner().as_bytes());
+                let mut members = state.members().to_vec();
+                members.sort_unstable_by_key(|member| (member.ed25519_pub, member.x25519_pub));
+                for member in members {
+                    hash.update(member.ed25519_pub);
+                    hash.update(member.x25519_pub);
+                }
+                hash.finalize().into()
+            });
+        let raw = self
+            .node
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .fingerprint_and_len(conversation);
+        Some(super::channel_projection_cache::ProjectionKey {
+            conversation: *conversation,
+            raw,
+            peer: self.peer.clone(),
+            own: self.node.identity.public(),
+            own_account: self.node.account_id(),
+            established,
+            privacy_generation,
+            privacy_configured,
+            inbound: self.inbound,
+            sharing,
+        })
+    }
+
+    fn public_projection_metadata(
+        &self,
+        conversation: &ConversationId,
+    ) -> Option<super::channel_projection_cache::ProjectionMetadata> {
+        let key = self.public_projection_key(conversation)?;
+        let cached = self
+            .node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache lock not poisoned")
+            .get(&key);
+        if let Some(metadata) = cached {
+            if self.public_projection_key(conversation).as_ref() == Some(&key) {
+                return Some(metadata);
+            }
+            return None;
+        }
+        // On a miss, detect signed channel ancestry directly in the durable log.
+        // ChannelBook may lag behind the append; it is not the public authority.
+        let channel = key.established.is_some()
+            || self
+                .node
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .events(conversation)
+                .iter()
+                .any(|event| event.kind == EventKind::MembershipChange);
+        if !channel {
+            return None;
+        }
+        let visible = self.visible(conversation);
+        let metadata = super::channel_projection_cache::ProjectionMetadata {
+            fingerprint: crate::eventlog::sync::fingerprint(
+                visible.iter().map(|event| event.id).collect(),
+            ),
+            len: visible.len(),
+            requires_v2: visible
+                .iter()
+                .any(|event| event.kind == EventKind::ChannelReplica),
+        };
+        if self.public_projection_key(conversation).as_ref() != Some(&key) {
+            return None;
+        }
+        self.node
+            .channel_projection_cache
+            .lock()
+            .expect("projection cache lock not poisoned")
+            .insert(key, metadata);
+        Some(metadata)
+    }
+
     fn visible(&self, conversation: &ConversationId) -> Vec<Event> {
         if self.inbound && !self.node.shares_replica(conversation) {
             return Vec::new();
@@ -744,15 +888,22 @@ impl GuardedSyncStore<'_> {
         if guard
             .as_ref()
             .is_none_or(|state| !state.policy.snapshot().invisible)
-            && self
-                .node
-                .channels
-                .lock()
-                .expect("channels lock not poisoned")
-                .state(conversation)
-                .is_some()
+            && (events
+                .iter()
+                .any(|event| event.kind == EventKind::MembershipChange)
+                || self
+                    .node
+                    .channels
+                    .lock()
+                    .expect("channels lock not poisoned")
+                    .state(conversation)
+                    .is_some())
         {
-            return events;
+            let allowed = self.channel_projection(conversation, &events, false, false, None);
+            return events
+                .into_iter()
+                .filter(|event| allowed.contains(&event.id))
+                .collect();
         }
         // Local erase cancels receipt retries, while preserving encrypted chat
         // history's established non-recall semantics. Apply this in public mode
@@ -807,6 +958,9 @@ impl GuardedSyncStore<'_> {
 }
 impl SyncStore for GuardedSyncStore<'_> {
     fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        if let Some(metadata) = self.public_projection_metadata(conversation) {
+            return metadata.requires_v2;
+        }
         // Inspect the peer's projection: a hidden event must not affect the
         // compatibility response or reveal that it exists.
         if !self
@@ -823,29 +977,8 @@ impl SyncStore for GuardedSyncStore<'_> {
             .any(|event| event.kind == EventKind::ChannelReplica)
     }
     fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
-        if (!self.inbound || self.node.shares_replica(conversation))
-            && self
-                .node
-                .privacy
-                .state
-                .read()
-                .expect("privacy lock not poisoned")
-                .as_ref()
-                .is_none_or(|state| !state.policy.snapshot().invisible)
-            && self
-                .node
-                .channels
-                .lock()
-                .expect("channels lock not poisoned")
-                .state(conversation)
-                .is_some()
-        {
-            return self
-                .node
-                .log
-                .lock()
-                .expect("log lock not poisoned")
-                .fingerprint_and_len(conversation);
+        if let Some(metadata) = self.public_projection_metadata(conversation) {
+            return (metadata.fingerprint, metadata.len);
         }
         let ids = self.event_ids(conversation);
         let len = ids.len();
@@ -908,9 +1041,32 @@ impl SyncStore for GuardedSyncStore<'_> {
         if self.pull_only {
             return Vec::new();
         }
-        self.visible(conversation)
+        let events = self.visible(conversation);
+        if !self.inbound && !self.node.shares_replica(conversation) {
+            // Share-off applies to outbound retries and explicit sends too.
+            // Own records can advance only across parents the receiver already
+            // has, or other eligible own records in this same ordered batch.
+            // Missing third-party ancestry must come from a sharing holder.
+            let mut available = have.clone();
+            let own = self.node.identity.public().ed25519_pub;
+            return events
+                .into_iter()
+                .filter(|event| {
+                    let eligible = event.author.ed25519_pub() == &own
+                        && event
+                            .parents
+                            .iter()
+                            .all(|parent| available.contains(parent));
+                    if eligible {
+                        available.insert(event.id);
+                    }
+                    eligible && !have.contains(&event.id)
+                })
+                .collect();
+        }
+        events
             .into_iter()
-            .filter(|e| !have.contains(&e.id))
+            .filter(|event| !have.contains(&event.id))
             .collect()
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {

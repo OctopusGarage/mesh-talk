@@ -26,26 +26,21 @@ process on the same host already owns UDP 47474. In that case, also set
 dedicated port and also listens and advertises on the shared LAN port. This
 lets it discover other local relays and lets clients use it when another post
 office on the LAN is offline.
-For a relay on another LAN, use
-`--bridge-peer <peer-IP>:<peer-discovery-port>` and the peer's exact signed
-32-character device fingerprint. Its proxy port must differ from its own TCP
-relay port. Routed UDP queries and the peer's TCP port must be reachable over
-the existing network, such as Tailscale.
+For equal relays across LANs, create and distribute the same public trust file
+using the [federation operator workflow](post-office-federation.md). Routed UDP
+discovery and TCP must be permitted over LAN/Tailscale. The optional older
+`--bridge-peer` gateway remains a migration mechanism; equal federation does
+not require a designated hub or a TCP proxy port.
 
 Example for the Intel relay on LAN X (paths and addresses are deployment-specific):
 
 ```bash
-scp target/x86_64-apple-darwin/release/mesh-talk-node scripts/install-post-office-macos.sh mac2015:~/.local/state/mesh-talk-post-office/
+scp target/x86_64-apple-darwin/release/mesh-talk-node scripts/install-post-office-macos.sh relays.conf mac2015:~/.local/state/mesh-talk-post-office/
 ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare \
   --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node \
   --name mac2015-post-office --port 47475 --discovery-port 47479 \
   --lan-announce-port 47474 --bridge \
-  --bridge-peer 100.109.255.49:47480 \
-  --bridge-peer-id e2bc2167aab97af10cb893de4ae2fb0c --bridge-proxy-port 47477 \
-  --federation-peer d2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478 \
-  --federation-peer edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479 \
-  --federation-peer edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479 \
-  --federation-peer e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
+  --federation-config ~/.local/state/mesh-talk-post-office/relays.conf'
 ssh -tt mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
@@ -54,30 +49,23 @@ Example for the reciprocal relay on another LAN:
 ```bash
 scp target/aarch64-apple-darwin/release/mesh-talk-node mac2015:~/.local/state/mesh-talk-post-office/mesh-talk-node-arm
 ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/mesh-talk-node-arm mac-mini:/Users/stella/.local/state/mesh-talk-post-office/'
-ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh mac-mini:~/.local/state/mesh-talk-post-office/'
+ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh ~/.local/state/mesh-talk-post-office/relays.conf mac-mini:~/.local/state/mesh-talk-post-office/'
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare \
   --binary /Users/stella/.local/state/mesh-talk-post-office/mesh-talk-node-arm \
   --name mac-mini-post-office --port 47476 --discovery-port 47480 \
   --lan-announce-port 47474 --bridge \
-  --bridge-peer 100.82.240.19:47479 \
-  --bridge-peer-id edbbf0daac94d930e687ba86c20d3f06 \
-  --bridge-proxy-port 47475 \
-  --federation-peer d2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478 \
-  --federation-peer edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479 \
-  --federation-peer edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479 \
-  --federation-peer e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
+  --federation-config /Users/stella/.local/state/mesh-talk-post-office/relays.conf'
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
 ```
 
-The commands above keep the legacy gateway while enabling equal relay
-federation. Use the same `--federation-peer` entries on every relay; each
-keeps its own keystore,
-password file, name, and listener ports. Federation exchanges opted-in signed
-presence and version-3 encrypted mailboxes, while legacy gateways can remain
-during migration. A client that has not opted in remains a local-only peer.
-Multiple signed endpoints may name one relay identity, as above for mac2015.
-This lets each site use a reachable LAN or Tailscale route without giving that
-relay a special federation role.
+Both commands use the same public manifest; each host keeps its own private
+identity and listener configuration. Preparation validates the manifest and
+copies it to `~/.local/share/mesh-talk-post-office/federation.conf`; the daemon
+uses that persistent absolute path. Enrollment/revocation changes require
+redistributing the updated file and restarting every affected relay. A file edit
+alone does not revoke running sessions. Existing `--federation-peer` flags remain
+supported when no manifest is supplied.
+
 If the only physical route between two sites fails, the local relay retains
 encrypted outgoing mail until a route returns.
 
@@ -111,7 +99,7 @@ MESH_TALK_E2E_MAC2015_RELAY_ID=<relay-device-id> cargo test -p mesh-talk-core --
 
 The test creates disposable Alice and Bob identities, checks discovery of the
 installed relay, sends a DM and a private channel event while Bob is offline,
-checks that the remote relay log grows, stops Alice, and restarts Bob to verify
+stops Alice, and restarts Bob to verify
 both deliveries. It leaves the installed relay identity and queued data intact.
 The file roundtrip variant proves that the offer reaches Bob through the
 installed relay after Alice stops, including across a relay restart. Bob's
@@ -125,8 +113,10 @@ uploads the file offer, then drains the offer and obtains Bob's authenticated
 consent. It stops Bob before any chunks arrive, uploads the encrypted chunks to
 mac2015, stops Alice, restarts the relay, and checks that Bob recovers the exact
 file bytes. This is a deliberate test harness sequence: Bob must briefly be
-online to approve the offer and answer Alice's consent query. The protocol does
-not currently carry that approval through the post office while Alice is absent.
+online to approve the offer and answer Alice's consent query. This older rig uses a direct consent query. The current protocol also carries
+signed approval and verified-save completion through encrypted federated mailboxes;
+`scripts/e2e-four-machine-tailnet.py` in installed-federation mode verifies the
+cross-relay file bytes and SHA-256 separately.
 
 The multi-relay variant starts a disposable second post office on the test Mac,
 checks that both peers discover it and mac2015, and confirms that an offline DM

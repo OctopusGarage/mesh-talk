@@ -104,6 +104,14 @@ impl UpdateOutcome {
 /// or looking up a KNOWN peer is never blocked by the cap.
 pub const MAX_PEERS: usize = 1024;
 
+/// Undo only one staged directory update, retaining independent route changes.
+pub(crate) struct RelayedRollback {
+    user_id: String,
+    public: PublicIdentity,
+    previous: Vec<(usize, PeerEndpoint)>,
+    staged: PeerEndpoint,
+}
+
 /// The known-peers map.
 #[derive(Default)]
 pub struct Roster {
@@ -278,6 +286,109 @@ impl Roster {
         } else {
             UpdateOutcome::New
         }
+    }
+
+    /// Stage a directory route without evicting an unrelated peer at capacity.
+    pub(crate) fn stage_relayed(
+        &mut self,
+        announce: &Announce,
+        relay: SocketAddr,
+        self_user_id: &str,
+    ) -> Option<RelayedRollback> {
+        if !self.peers.contains_key(&announce.user_id) && self.peers.len() >= MAX_PEERS {
+            return None;
+        }
+        let previous = self
+            .peers
+            .get(&announce.user_id)
+            .map(|peer| peer.routes.clone())
+            .unwrap_or_default();
+        if self.update_relayed(announce, relay, self_user_id) == UpdateOutcome::Rejected {
+            return None;
+        }
+        let staged = self
+            .peers
+            .get(&announce.user_id)?
+            .routes
+            .iter()
+            .find(|route| route.addr == relay && route.source == RouteSource::PostOffice)?
+            .clone();
+        // Retain only records this update changed. Restoring the entire old
+        // snapshot would resurrect routes independently removed while awaiting IO.
+        let current = &self.peers.get(&announce.user_id)?.routes;
+        let previous = previous
+            .into_iter()
+            .enumerate()
+            .filter(|(_, old)| {
+                !current.iter().any(|route| {
+                    route.addr == old.addr
+                        && route.source == old.source
+                        && route.last_seen == old.last_seen
+                        && route.last_authenticated == old.last_authenticated
+                })
+            })
+            .collect();
+        Some(RelayedRollback {
+            user_id: announce.user_id.clone(),
+            public: announce.public(),
+            previous,
+            staged,
+        })
+    }
+
+    /// Restore overwritten or capacity-evicted routes without replacing newer
+    /// direct/authenticated observations. Revocation must not restore old relay paths.
+    pub(crate) fn rollback_relayed(&mut self, undo: RelayedRollback, restore_relays: bool) {
+        let Some(peer) = self
+            .peers
+            .get_mut(&undo.user_id)
+            .filter(|peer| peer.public == undo.public)
+        else {
+            return;
+        };
+        peer.routes.retain(|route| {
+            !(route.addr == undo.staged.addr
+                && route.source == undo.staged.source
+                && route.last_seen == undo.staged.last_seen
+                && route.last_authenticated == undo.staged.last_authenticated)
+        });
+        for (index, route) in undo.previous {
+            if (!restore_relays && route.source == RouteSource::PostOffice)
+                || peer
+                    .routes
+                    .iter()
+                    .any(|current| current.addr == route.addr && current.source == route.source)
+            {
+                continue;
+            }
+            // A concurrent discovery may have consumed the restored slot. Keep
+            // independently learned routes ahead of the oldest mailbox hint.
+            if peer.routes.len() == MAX_ROUTES_PER_PEER {
+                let oldest_relay = peer
+                    .routes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, current)| current.source == RouteSource::PostOffice)
+                    .min_by_key(|(_, current)| current.last_seen)
+                    .map(|(index, _)| index);
+                if route.source == RouteSource::PostOffice {
+                    continue;
+                }
+                let Some(oldest_relay) = oldest_relay else {
+                    continue;
+                };
+                peer.routes.remove(oldest_relay);
+            }
+            peer.routes.insert(index.min(peer.routes.len()), route);
+        }
+        if let Some(route) = preferred_route(&peer.routes) {
+            peer.addr = route.addr;
+            peer.last_seen = route.last_seen;
+        } else {
+            self.peers.remove(&undo.user_id);
+            self.announcements.remove(&undo.user_id);
+        }
+        self.changes.notify_one();
     }
 
     fn update_from(

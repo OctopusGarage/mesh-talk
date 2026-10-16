@@ -17,13 +17,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 const REQUEST: &[u8] = b"MTFI1Q";
+const REQUEST_V2: &[u8] = b"MTFI2Q";
 const RESPONSE: &[u8] = b"MTFI1R";
 const IDS_PER_PAGE: usize = 512;
 const MAX_PAGES: usize = 256;
 const ROUND_TIMEOUT: Duration = Duration::from_secs(30);
 const PRESENCE_FRAME: &[u8] = b"MTFP1D";
 const PRESENCE_PER_PAGE: usize = 16;
-const MAX_PRESENCE_PAGES: usize = 8;
 
 #[derive(Clone, Default)]
 pub struct FederationDirectory(Arc<Mutex<BridgeDirectory>>);
@@ -90,11 +90,12 @@ fn decode_presence_page(bytes: &[u8]) -> Result<(Vec<FederatedPresence>, bool), 
 async fn send_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
+    limit: usize,
 ) -> Result<(), String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let proofs = directory
+    let mut proofs = directory
         .map(|directory| {
             directory
                 .lock()
@@ -102,6 +103,7 @@ where
                 .export_federated(Instant::now(), unix_now())
         })
         .unwrap_or_default();
+    proofs.truncate(limit);
     let chunks = proofs.chunks(PRESENCE_PER_PAGE).collect::<Vec<_>>();
     if chunks.is_empty() {
         channel
@@ -122,13 +124,14 @@ where
 async fn receive_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
+    limit: usize,
 ) -> Result<(), String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let mut proofs = Vec::new();
     let mut complete = false;
-    for _ in 0..MAX_PRESENCE_PAGES {
+    for _ in 0..limit.div_ceil(PRESENCE_PER_PAGE) {
         let bytes = tokio::time::timeout(ROUND_TIMEOUT, channel.recv())
             .await
             .map_err(|e| e.to_string())?
@@ -153,7 +156,15 @@ where
 }
 
 pub(crate) fn is_inventory_request(bytes: &[u8]) -> bool {
-    bytes == REQUEST
+    bytes == REQUEST || bytes == REQUEST_V2
+}
+
+pub(crate) fn presence_limit(request: &[u8]) -> usize {
+    if request == REQUEST_V2 {
+        crate::node::bridge_directory::MAX_MEMBERS
+    } else {
+        crate::node::bridge_directory::LEGACY_MAX_MEMBERS
+    }
 }
 
 fn encode_page(ids: &[FederatedMailbox], last: bool) -> Result<Vec<u8>, String> {
@@ -248,11 +259,12 @@ pub(crate) async fn send_inventory<IO>(
     channel: &mut SecureChannel<IO>,
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
+    limit: usize,
 ) -> Result<(), String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    receive_presence_pages(channel, directory).await?;
+    receive_presence_pages(channel, directory, limit).await?;
     let remote = receive_inventory_pages(channel).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
@@ -264,7 +276,7 @@ where
     };
     local.sort_by_key(|entry| *entry.id.as_bytes());
     send_inventory_pages(channel, &local).await?;
-    send_presence_pages(channel, directory).await
+    send_presence_pages(channel, directory, limit).await
 }
 
 /// Reconcile every federated mailbox held by either relay. The remote public
@@ -286,6 +298,21 @@ async fn sync_with_directory(
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
 ) -> Result<usize, String> {
+    match sync_version(addr, identity, expected, store, directory, REQUEST_V2).await {
+        Ok(count) => Ok(count),
+        Err(_) => sync_version(addr, identity, expected, store, directory, REQUEST).await,
+    }
+}
+
+async fn sync_version(
+    addr: SocketAddr,
+    identity: &DeviceIdentity,
+    expected: &PublicIdentity,
+    store: &Arc<Mutex<PostOffice>>,
+    directory: Option<&Arc<Mutex<BridgeDirectory>>>,
+    request: &[u8],
+) -> Result<usize, String> {
+    let limit = presence_limit(request);
     let stream = tokio::time::timeout(ROUND_TIMEOUT, TcpStream::connect(addr))
         .await
         .map_err(|e| e.to_string())?
@@ -298,8 +325,8 @@ async fn sync_with_directory(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    channel.send(REQUEST).await.map_err(|e| e.to_string())?;
-    send_presence_pages(&mut channel, directory).await?;
+    channel.send(request).await.map_err(|e| e.to_string())?;
+    send_presence_pages(&mut channel, directory, limit).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
         office.prune_expired().map_err(|e| e.to_string())?;
@@ -313,7 +340,7 @@ async fn sync_with_directory(
         .map_err(|e| e.to_string())?
         .adopt_federated_arrivals(&remote, SystemTime::now())
         .map_err(|e| e.to_string())?;
-    receive_presence_pages(&mut channel, directory).await?;
+    receive_presence_pages(&mut channel, directory, limit).await?;
     let local_digests = local
         .iter()
         .map(|entry| (entry.id, entry.digest))
@@ -340,4 +367,136 @@ async fn sync_with_directory(
             .map_err(|e| format!("{e:?}"))?;
     }
     Ok(ids.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{discovery::Announce, identity::account::Account};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn legacy_peer_fallback_preserves_the_original_presence_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let expected = b.public();
+        let (ae, ax) = a.secret_bytes();
+        let (be, bx) = b.secret_bytes();
+        let local = Arc::new(Mutex::new(
+            PostOffice::open(
+                &temp.path().join("a"),
+                "pw",
+                DeviceIdentity::from_secret_bytes(ae, ax),
+            )
+            .unwrap(),
+        ));
+        let remote = Arc::new(Mutex::new(
+            PostOffice::open(&temp.path().join("b"), "pw", b).unwrap(),
+        ));
+        let source = FederationDirectory::new();
+        let target = FederationDirectory::new();
+        let account = Account::generate();
+        for _ in 0..130 {
+            let member = DeviceIdentity::generate();
+            let proof = Announce::new_with_account(&member, &account, "member", 47475);
+            source
+                .0
+                .lock()
+                .unwrap()
+                .register(&member.public(), Some(&proof), true, Instant::now())
+                .unwrap();
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let learned = target.clone();
+        let server = tokio::spawn(async move {
+            let identity = DeviceIdentity::from_secret_bytes(be, bx);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = SecureChannel::accept(stream, &identity).await.unwrap();
+            assert_eq!(first.recv().await.unwrap(), REQUEST_V2);
+            drop(first); // Simulate a pre-v2 endpoint rejecting the new request.
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut legacy = SecureChannel::accept(stream, &identity).await.unwrap();
+            assert_eq!(legacy.recv().await.unwrap(), REQUEST);
+            send_inventory(
+                &mut legacy,
+                &remote,
+                Some(&target.0),
+                presence_limit(REQUEST),
+            )
+            .await
+            .unwrap();
+        });
+        source
+            .sync_with_relay(address, &a, &expected, &local)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            learned
+                .0
+                .lock()
+                .unwrap()
+                .export_federated(Instant::now(), unix_now())
+                .len(),
+            crate::node::bridge_directory::LEGACY_MAX_MEMBERS
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_federation_carries_presence_beyond_legacy_128() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let (be, bx) = b.secret_bytes();
+        let expected = b.public();
+        let local = Arc::new(Mutex::new(
+            PostOffice::open(
+                &temp.path().join("a"),
+                "pw",
+                DeviceIdentity::from_secret_bytes(a.secret_bytes().0, a.secret_bytes().1),
+            )
+            .unwrap(),
+        ));
+        let remote = Arc::new(Mutex::new(
+            PostOffice::open(&temp.path().join("b"), "pw", b).unwrap(),
+        ));
+        let source = FederationDirectory::new();
+        let target = FederationDirectory::new();
+        let account = Account::generate();
+        for _ in 0..130 {
+            let member = DeviceIdentity::generate();
+            let proof = Announce::new_with_account(&member, &account, "member", 47475);
+            source
+                .0
+                .lock()
+                .unwrap()
+                .register(&member.public(), Some(&proof), true, Instant::now())
+                .unwrap();
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            crate::node::postbox::run_federated_relay_accept_loop_with_directory(
+                DeviceIdentity::from_secret_bytes(be, bx),
+                listener,
+                remote,
+                Arc::new(HashSet::from([a.user_id()])),
+                target.clone(),
+            ),
+        );
+        let result = source.sync_with_relay(address, &a, &expected, &local).await;
+        server.abort();
+        result.expect("modern peers must negotiate a bounded presence snapshot above 128");
+        assert_eq!(
+            target
+                .0
+                .lock()
+                .unwrap()
+                .export_federated(Instant::now(), unix_now())
+                .len(),
+            130
+        );
+    }
 }

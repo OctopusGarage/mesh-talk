@@ -4,7 +4,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 prepare --binary PATH --name NAME --port PORT [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] [--federation-peer ID@IP:PORT ...] | activate" >&2
+    echo "usage: $0 prepare --binary PATH --name NAME --port PORT [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] [--federation-peer ID@IP:PORT ... | --federation-config PATH] | activate" >&2
     exit 2
 }
 
@@ -46,9 +46,10 @@ bridge_peer=
 bridge_peer_id=
 bridge_proxy_port=
 federation_peers=()
+federation_config=
 while (($#)); do
     case $1 in
-        --binary|--name|--port|--discovery-port|--lan-announce-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port|--federation-peer)
+        --binary|--name|--port|--discovery-port|--lan-announce-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port|--federation-peer|--federation-config)
             (($# >= 2)) || usage
             case $1 in
                 --binary) source_binary=$2 ;;
@@ -60,6 +61,7 @@ while (($#)); do
                 --bridge-peer-id) bridge_peer_id=$2 ;;
                 --bridge-proxy-port) bridge_proxy_port=$2 ;;
                 --federation-peer) federation_peers+=("$2") ;;
+                --federation-config) federation_config=$2 ;;
             esac
             shift 2 ;;
         --bridge) bridge=true; shift ;;
@@ -77,10 +79,21 @@ if [[ -n $bridge_peer || -n $bridge_peer_id || -n $bridge_proxy_port ]]; then
     ((bridge_proxy_port >= 1 && bridge_proxy_port <= 65535 && bridge_proxy_port != port)) || usage
     bridge=true
 fi
-for seed in "${federation_peers[@]}"; do
+for seed in ${federation_peers[@]+"${federation_peers[@]}"}; do
     [[ $seed =~ ^[0-9a-fA-F]{32}@.+:[0-9]+$ ]] || usage
     bridge=true
 done
+
+if [[ -n $federation_config ]]; then
+    [[ -z ${federation_peers[*]-} ]] || { echo "--federation-config conflicts with --federation-peer" >&2; exit 2; }
+    [[ -f $federation_config ]] || { echo "Federation config must be an existing public manifest" >&2; exit 2; }
+    federation_config=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$federation_config")
+    # The staged node owns schema, endpoint, and bound validation. Do this before
+    # creating directories, passwords, or replacing the installed binary.
+    source_binary=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$source_binary")
+    "$source_binary" federation --file "$federation_config" list >/dev/null
+    bridge=true
+fi
 
 umask 077
 install -d -m 700 "$data_dir" "$state_dir" "$bin_dir"
@@ -94,12 +107,21 @@ chmod 600 "$data_dir/password"
 install -m 755 "$source_binary" "$binary.next"
 "$binary.next" --help >/dev/null
 mv -f "$binary.next" "$binary"
+if [[ -n $federation_config ]]; then
+    # Keep public trust separate from private identity, and alive after staging cleanup.
+    persistent_config=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$data_dir/federation.conf")
+    if [[ $federation_config != "$persistent_config" ]]; then
+        install -m 600 "$federation_config" "$data_dir/federation.conf.next"
+        mv -f "$data_dir/federation.conf.next" "$data_dir/federation.conf"
+    fi
+    federation_config=$persistent_config
+fi
 
-python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$lan_announce_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" "${federation_peers[@]}" <<'PY'
+python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$lan_announce_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" "$federation_config" ${federation_peers[@]+"${federation_peers[@]}"} <<'PY'
 import plistlib
 import sys
 
-plist, home, user, name, port, discovery_port, lan_announce_port, bridge, peer, peer_id, proxy_port, *federation_peers = sys.argv[1:]
+plist, home, user, name, port, discovery_port, lan_announce_port, bridge, peer, peer_id, proxy_port, federation_config, *federation_peers = sys.argv[1:]
 args = [
     f"{home}/.local/bin/mesh-talk-node",
     "--keystore", f"{home}/.local/share/mesh-talk-post-office/identity.keystore",
@@ -115,6 +137,8 @@ if bridge == "true":
 if peer:
     args.extend(["--bridge-peer", peer, "--bridge-peer-id", peer_id.lower(),
                  "--bridge-proxy-port", proxy_port])
+if federation_config:
+    args.extend(["--federation-config", federation_config])
 for seed in federation_peers:
     args.extend(["--federation-peer", seed])
 job = {

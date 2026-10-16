@@ -14,11 +14,14 @@ param(
     [int]$DiscoveryPort = 47478,
     [ValidateRange(1, 65535)]
     [int]$LanAnnouncePort = 47474,
-    [string[]]$FederationPeer = @()
+    [string[]]$FederationPeer = @(),
+    [string]$FederationConfig
 )
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'MeshTalk-PostOffice'
+$Root = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Root)
+$Root = [System.IO.Path]::GetFullPath($Root)
 $binary = Join-Path $Root 'mesh-talk-node.exe'
 $data = Join-Path $Root 'data'
 $passwordFile = Join-Path $data 'password'
@@ -37,6 +40,21 @@ foreach ($seed in $FederationPeer) {
 
 if (-not (Test-Path -LiteralPath $StagedBinary -PathType Leaf)) {
     throw "Staged Windows binary is missing: $StagedBinary"
+}
+
+if ($FederationConfig -and $FederationPeer.Count -gt 0) {
+    throw 'FederationConfig conflicts with FederationPeer'
+}
+if ($FederationConfig) {
+    if (-not (Test-Path -LiteralPath $FederationConfig -PathType Leaf)) {
+        throw "Federation config must be an existing public manifest: $FederationConfig"
+    }
+    $FederationConfig = (Resolve-Path -LiteralPath $FederationConfig).ProviderPath
+    # The staged node owns schema, endpoint, and bound validation. No installation
+    # state has been changed if the public manifest or the binary is incompatible.
+    $StagedBinary = (Resolve-Path -LiteralPath $StagedBinary).ProviderPath
+    & $StagedBinary federation --file $FederationConfig list | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Staged node rejected the federation config' }
 }
 
 # SYSTEM runs the boot task; Administrators can maintain and back up the data.
@@ -90,6 +108,16 @@ if (-not (Test-Path -LiteralPath $passwordFile)) {
 }
 Assert-RelayAcls
 
+if ($FederationConfig) {
+    # Keep the public manifest after staging cleanup without touching private state.
+    $persistentConfig = Join-Path $data 'federation.conf'
+    if (-not [string]::Equals($FederationConfig, $persistentConfig, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $FederationConfig -Destination "$persistentConfig.next" -Force
+        Move-Item -LiteralPath "$persistentConfig.next" -Destination $persistentConfig -Force
+    }
+    $FederationConfig = $persistentConfig
+}
+
 $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existing) {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -100,8 +128,11 @@ Copy-Item -LiteralPath $StagedBinary -Destination $binary -Force
 $arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47475 --discovery-port {3} --lan-announce-port {4}' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name, $DiscoveryPort, $LanAnnouncePort
 if ($BridgePeer) {
     $arguments += ' --bridge --bridge-peer "{0}" --bridge-peer-id "{1}" --bridge-proxy-port {2}' -f $BridgePeer, $BridgePeerId.ToLowerInvariant(), $BridgeProxyPort
-} elseif ($Bridge -or $FederationPeer.Count -gt 0) {
+} elseif ($Bridge -or $FederationConfig -or $FederationPeer.Count -gt 0) {
     $arguments += ' --bridge'
+}
+if ($FederationConfig) {
+    $arguments += ' --federation-config "{0}"' -f $FederationConfig
 }
 foreach ($seed in $FederationPeer) {
     $arguments += ' --federation-peer "{0}"' -f $seed

@@ -21,19 +21,20 @@ whole data directory if durable custody matters.
 
 ## Build, install, and update
 
-On an Apple Silicon Mac with Rust 1.99 and MinGW installed:
+On an Apple Silicon Mac with the project-compatible stable Rust toolchain and MinGW installed:
 
 ```bash
-rustup target add --toolchain 1.99.0-aarch64-apple-darwin x86_64-pc-windows-gnu
-RUSTC="$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/rustc" \
+rustup target add --toolchain stable x86_64-pc-windows-gnu
+RUSTC="$(rustup which --toolchain stable rustc)" \
   CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
-  "$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/cargo" \
+  cargo \
   build --release --target x86_64-pc-windows-gnu \
   -p mesh-talk-core --bin mesh-talk-node
 scp target/x86_64-pc-windows-gnu/release/mesh-talk-node.exe \
   windows10:'D:/mesh-talk-node.next.exe'
 scp scripts/install-post-office-windows.ps1 \
   windows10:'D:/install-post-office-windows.ps1'
+scp relays.conf windows10:'D:/mesh-talk-relays.conf'
 ```
 
 Then run this in a PowerShell session on Windows (working directory D:):
@@ -42,24 +43,22 @@ Then run this in a PowerShell session on Windows (working directory D:):
 & 'D:\install-post-office-windows.ps1' `
   -StagedBinary 'D:\mesh-talk-node.next.exe' `
   -Name 'windows10-post-office' `
-  -BridgePeer '192.168.3.72:47479' `
-  -BridgePeerId 'edbbf0daac94d930e687ba86c20d3f06' `
-  -BridgeProxyPort 47476 -DiscoveryPort 47478 -LanAnnouncePort 47474 `
-  -FederationPeer @(
-    'd2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478',
-    'edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479',
-    'edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479',
-    'e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480'
-  )
+  -DiscoveryPort 47478 -LanAnnouncePort 47474 `
+  -FederationConfig 'D:\mesh-talk-relays.conf'
 ```
 
+Create `relays.conf` with the [shared federation workflow](post-office-federation.md)
+and distribute the same public pins to every relay. The installer validates it
+before changes and persists it at
+`D:\ProgramData\MeshTalk\PostOffice\data\federation.conf`. Keep both LAN and
+Tailscale endpoints for a relay where appropriate; each pins the same identity.
+`-FederationConfig` conflicts with inline `-FederationPeer` entries. Enrollment
+and revocation require restarting all affected services after distribution;
+editing a file does not hot-revoke a running connection.
+
 `-LanAnnouncePort 47474` also listens on the shared LAN discovery port. The
-second mac2015 seed uses its reachable LAN address because the two machines'
-Tailscale accounts cannot reach each other. Both seeds pin the same signed
-identity; the relay uses whichever endpoint responds. Keep the LAN seed even
-when multicast works, since Windows can deliver shared-port multicast to only
-one of the local processes. The dedicated port remains available for routed
-signed queries.
+dedicated port remains available for routed signed queries when shared-port
+multicast reaches only one local process.
 
 Run those commands for a first install and for each update. The installer
 advertises the name `post-office` by default; pass `-Name <your-relay-name>`
@@ -70,9 +69,8 @@ existing task, replaces only the binary, checks ACLs, registers the boot task,
 starts it, and waits for the TCP listener and, when configured, the bridge
 proxy. It preserves the data directory and identity. `-Bridge` alone enables a
 local directory; `-BridgePeer` plus `-BridgePeerId` authenticate a signed remote relay
-and enable the gateway. The example points to mac2015's dedicated routed
-discovery port. Participating clients enable bridge discovery and can choose
-mac2015 as their preferred post office in Settings. If it is offline, another
+and enable the gateway. The manifest names mutually trusted equals. Participating clients enable bridge
+discovery and choose an eligible directly reachable preferred post office in Settings. If it is offline, another
 verified local post office can accept messages. The CLI reclaims a `node.lock` from a
 terminated process on Windows; it refuses a lock held by a live process.
 
