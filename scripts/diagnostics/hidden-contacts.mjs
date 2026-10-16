@@ -223,8 +223,10 @@ async function startApp() {
 }
 async function login(username, register = false) {
   await element("login-form");
+  await until("stay signed in settings loaded", () => execute("return document.querySelector('[data-testid=login-stay-signed-in]')?.disabled === false;"));
   if (await execute("return document.querySelector('[data-testid=login-stay-signed-in]')?.checked === true;")) await click("login-stay-signed-in");
   await until("stay signed in disabled in production settings", async () => (await observe("get_app_settings")).stay_signed_in === false);
+  await until("stay signed in unchecked", () => execute("const e=document.querySelector('[data-testid=login-stay-signed-in]'); return !!e && !e.disabled && !e.checked;"));
   if (register) await click("login-tab-register");
   await fill("login-username", username);
   await fill("login-password", password);
