@@ -10,6 +10,8 @@ Build the arm64, x86_64 macOS, and Windows GNU debug CLI binaries with
 --features fast-test-kdf before running this script. Then run
 `python3 scripts/e2e-four-machine-tailnet.py` from this checkout. The script
 uses SSH aliases mac2015/windows10 and reaches mac-mini through mac2015.
+Set `MESH_TALK_E2E_FEDERATION=1` to use mutual relay federation instead of
+the legacy gateway. `MESH_TALK_E2E_BASE_PORT` chooses a fixed test port range.
 `MESH_TALK_E2E_BRIDGE_FILE=1` additionally runs the currently unsupported
 cross-relay file-byte diagnostic and fails if it cannot complete.
 """
@@ -95,6 +97,7 @@ def probe_until(node, fingerprint, endpoint):
 
 
 def run():
+    federated = os.environ.get("MESH_TALK_E2E_FEDERATION") == "1"
     for binary in (TAILNET.LOCAL_BINARY, INTEL, WINDOWS):
         if not binary.is_file():
             raise SystemExit(f"Build the test binary first: {binary}")
@@ -160,7 +163,7 @@ def run():
         macmini(f"chmod 700 {shlex.quote(f_dir + '/mesh-talk-node')}")
 
         with tempfile.TemporaryDirectory(prefix="mesh-talk-four-e2e-") as local_dir:
-            base = random.randint(49000, 55000)
+            base = int(os.environ.get("MESH_TALK_E2E_BASE_PORT", random.randint(49000, 55000)))
             e_udp, f_udp, e_tcp, f_tcp = base, base + 1, base + 2, base + 3
             e = remote(MAC2015, e_dir, "E", e_udp, e_tcp, ("--post-office", "--bridge"))
             e_id = identity(e, "post-office")
@@ -170,15 +173,13 @@ def run():
             f.stop()
             stop_remote(MAC2015, e_dir, "E")
             stop_remote(MACMINI, f_dir, "F")
-            e = remote(MAC2015, e_dir, "E", e_udp, e_tcp, (
-                "--post-office", "--bridge", "--bridge-peer", f"{f_ip}:{f_udp}",
-                "--bridge-peer-id", f_id,
-            ))
+            e_link = (("--federation-peer", f"{f_id}@{f_ip}:{f_udp}") if federated
+                      else ("--bridge-peer", f"{f_ip}:{f_udp}", "--bridge-peer-id", f_id))
+            e = remote(MAC2015, e_dir, "E", e_udp, e_tcp, ("--post-office", "--bridge", *e_link))
             identity(e, "post-office")
-            f = remote(MACMINI, f_dir, "F", f_udp, f_tcp, (
-                "--post-office", "--bridge", "--bridge-peer", f"{e_ip}:{e_udp}",
-                "--bridge-peer-id", e_id,
-            ))
+            f_link = (("--federation-peer", f"{e_id}@{e_ip}:{e_udp}") if federated
+                      else ("--bridge-peer", f"{e_ip}:{e_udp}", "--bridge-peer-id", e_id))
+            f = remote(MACMINI, f_dir, "F", f_udp, f_tcp, ("--post-office", "--bridge", *f_link))
             identity(f, "post-office")
 
             a_dir = Path(local_dir) / "A"
@@ -191,10 +192,10 @@ def run():
             a_id = identity(a, "node")
 
             windows_dir = windows(
-                f"$path = Join-Path $env:TEMP 'mesh-talk-four-e2e-{base}'; "
+                f"$path = Join-Path 'D:\\' 'mesh-talk-four-e2e-{base}'; "
                 "New-Item -ItemType Directory -Force -Path $path | Out-Null; Write-Output $path"
             ).splitlines()[-1].strip().replace("\\", "/")
-            if not re.match(r"^[A-Za-z]:/.*mesh-talk-four-e2e-\d+$", windows_dir):
+            if not re.match(r"^D:/mesh-talk-four-e2e-\d+$", windows_dir):
                 raise AssertionError(f"Unexpected Windows temp directory: {windows_dir}")
             subprocess.run(["scp", "-q", str(WINDOWS),
                             f"{WINDOWS_HOST}:{windows_dir}/mesh-talk-node.exe"], check=True)
@@ -238,9 +239,13 @@ def run():
                 for _, _, other in clients:
                     if other != own:
                         peer(node, other)
-                peer(node, e_id)
-                peer(node, f_id)
-                print(f"PASS: {name} discovered all three clients and both relays", flush=True)
+                if federated:
+                    peer(node, e_id if name in ("A", "B") else f_id)
+                    print(f"PASS: {name} discovered all three clients and its local relay", flush=True)
+                else:
+                    peer(node, e_id)
+                    peer(node, f_id)
+                    print(f"PASS: {name} discovered all three clients and both relays", flush=True)
 
             for source_name, source, source_id in clients:
                 for target_name, target, target_id in clients:
@@ -314,7 +319,7 @@ def run():
 
             _, a_tailnet_ip = TAILNET.tailscale_status()
             b_tailnet_ip = windows(
-                "& 'C:\\Program Files\\Tailscale\\tailscale.exe' ip -4"
+                "& 'D:\\Tailscale\\tailscale.exe' ip -4"
             ).splitlines()[-1].strip()
             if not b_tailnet_ip.startswith("100."):
                 raise AssertionError("Windows has no usable Tailscale IPv4 address")
@@ -347,6 +352,7 @@ def run():
             nodes.append(w)
             w_id = identity(w, "node")
             environment = os.environ.copy()
+            environment["CARGO_INCREMENTAL"] = "0"
             environment["MESH_TALK_E2E_REMOTE_IP"] = b_tailnet_ip
             environment["MESH_TALK_E2E_DISCOVERY_PORT"] = str(base + 19)
             subprocess.run([

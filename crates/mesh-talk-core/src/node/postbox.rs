@@ -54,9 +54,9 @@ pub fn selected_post_office(roster: &Roster, hub_id: Option<&str>) -> Option<Pee
     post_office_candidates(roster, hub_id).into_iter().next()
 }
 
-/// For an introduced recipient, favor the relays that actually reported that
-/// recipient. A merely local relay may have no route to the other site's
-/// client, so successful custody there would not imply deliverability.
+/// Keep the user's preferred relay first. For an introduced recipient, favor
+/// reporting relays among the remaining candidates: they may have a shorter
+/// route to the recipient. Upload still retries every candidate on failure.
 pub fn post_office_candidates_for(
     roster: &Roster,
     preferred_id: Option<&str>,
@@ -74,7 +74,12 @@ pub fn post_office_candidates_for(
             .map(|route| route.addr)
             .collect();
         if !introduced_by.is_empty() {
-            candidates.sort_by_key(|relay| !introduced_by.contains(&relay.addr));
+            candidates.sort_by_key(|relay| {
+                (
+                    preferred_id.is_some() && preferred_id != Some(relay.public.user_id().as_str()),
+                    !introduced_by.contains(&relay.addr),
+                )
+            });
         }
     }
     candidates
@@ -511,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn recipient_introduction_routes_mail_to_a_shared_relay() {
+    fn recipient_introduction_respects_preference_and_prioritizes_shared_fallback() {
         let local = DeviceIdentity::generate();
         let shared = DeviceIdentity::generate();
         let recipient = DeviceIdentity::generate();
@@ -536,9 +541,12 @@ mod tests {
             "192.168.3.72:47476".parse().unwrap(),
             "self",
         );
+        let candidates =
+            post_office_candidates_for(&roster, Some(&local.user_id()), &recipient.public());
+        assert_eq!(candidates[0].public, local.public());
+        assert_eq!(candidates[1].public, shared.public());
         assert_eq!(
-            post_office_candidates_for(&roster, Some(&local.user_id()), &recipient.public())[0]
-                .public,
+            post_office_candidates_for(&roster, None, &recipient.public())[0].public,
             shared.public()
         );
     }
