@@ -349,6 +349,8 @@ export async function coreScenarios(c) {
   });
   await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified after recipient approval; OS save picker is outside embedded W3C DOM automation and was not invoked." });
   await privacySettings();
+  await click("settings-nav-appearance");
+  await c.element("theme-picker");
   const settingsLayouts = {};
   for (const { name, request, viewport } of settingsTargets) {
     const returned = await c.command("POST", "/window/rect", request);
@@ -415,6 +417,8 @@ export async function restartedCoreScenarios(c, state) {
   }
   await c.passed("history-process-restart", { actualProcessRestart: true, rendered: true, persisted: true });
   await c.privacySettings();
+  await c.click("settings-nav-appearance");
+  await c.element("theme-picker");
   assert.equal(await c.execute("return document.querySelector('[data-testid=theme-light]')?.getAttribute('aria-pressed')==='true' && localStorage.getItem('mesh-talk-theme')==='light' && !document.documentElement.classList.contains('dark');"), true);
   await c.passed("settings-theme-persistence", { selected: state.selectedTheme, visibleSelection: true, persistedAfterRestart: true });
   await c.key("\uE00C");

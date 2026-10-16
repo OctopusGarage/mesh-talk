@@ -613,14 +613,10 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
         .await;
         assert!(
             discovered.is_ok(),
-            "{stage}: certified peer discovery timed out; source={} account={} udp={}; target={} account={} udp={}; probes={probes}; last_probe={last_probe:?}; cache_error={last_cache_error:?}; roster={:?}",
-            from.user_id(),
-            from.account_id(),
+            "{stage}: certified peer discovery timed out; source_udp={}; target_udp={}; probes={probes}; last_probe={last_probe:?}; cache_error={last_cache_error:?}; roster_count={}",
             from.discovery_port(),
-            target.user_id(),
-            target.account_id(),
             target.discovery_port(),
-            from.roster.lock().unwrap().peers()
+            from.roster.lock().unwrap().peers().len()
         );
     };
     discover("before pairing: owner learns joiner", &alice, &bob).await;
@@ -638,6 +634,11 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
     discover("after restart: owner learns adopted joiner", &alice, &bob).await;
     discover("after restart: adopted joiner learns owner", &bob, &alice).await;
     let (contact, _) = start_reserved("pair-contact").await;
+    // Bob and this new contact model separate machines but share 127.0.0.1.
+    // Alice's ResponseBudget admits only one query response per source IP per
+    // second. Let Bob's response window expire before the contact's first query,
+    // so its unchanged six-second deadline covers an eligible challenge.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     discover("after restart: contact learns owner", &contact, &alice).await;
     contact
         .send_to_account(&account, b"after both restarts", None)

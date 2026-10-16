@@ -260,6 +260,7 @@ async function manage() {
   await ensureOverflowOpen();
   await openDialog("sidebar-nav-settings");
   await settledDialog("settings-dialog");
+  await click("settings-nav-privacy");
   await openDialog("manage-hidden-contacts");
   await element("hidden-contacts-dialog");
   await settledDialog("hidden-contacts-dialog");
@@ -277,6 +278,7 @@ async function privacySettings() {
   await ensureOverflowOpen();
   await openDialog("sidebar-nav-settings");
   await settledDialog("settings-dialog");
+  await click("settings-nav-connection");
   await until("privacy controls loaded", () => execute("return document.querySelector('[data-testid=invisible-switch]')?.disabled === false;"));
 }
 async function signOut() {

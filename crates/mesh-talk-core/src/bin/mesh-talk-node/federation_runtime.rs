@@ -83,7 +83,7 @@ async fn federation_round(
                 .sync_with_relay(addr, identity, &peer, store)
                 .await
             {
-                log::debug!("federation {} at {addr}: {error}", peer.user_id());
+                log::debug!("federation sync at {addr}: {error}");
             }
         })
         .await;

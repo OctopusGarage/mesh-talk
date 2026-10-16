@@ -3891,12 +3891,61 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
 #[tokio::test]
 #[ignore = "requires installed mac2015 post office on the same LAN"]
 async fn mac2015_post_office_delivers_file_bytes_after_both_peers_go_offline() {
+    let service = std::env::var("MESH_TALK_E2E_MAC2015_SERVICE").ok();
     installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         "MESH_TALK_E2E_MAC2015_RELAY_ID",
         "mac2015",
-        "launchctl kickstart -k gui/$(id -u)/com.octopusgarage.mesh-talk.post-office",
+        MacRelayService::parse(service.as_deref()).restart_command(),
     )
     .await;
+}
+
+#[derive(Debug, PartialEq)]
+enum MacRelayService {
+    LegacyAgent,
+    System,
+}
+
+impl MacRelayService {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            None | Some("legacy-agent") => Self::LegacyAgent,
+            Some("system") => Self::System,
+            Some(other) => panic!(
+                "invalid MESH_TALK_E2E_MAC2015_SERVICE={other:?}; use system or legacy-agent"
+            ),
+        }
+    }
+
+    fn restart_command(&self) -> &'static str {
+        match self {
+            Self::LegacyAgent => {
+                "launchctl kickstart -k gui/$(id -u)/com.octopusgarage.mesh-talk.post-office"
+            }
+            Self::System => {
+                "sudo -n launchctl kickstart -k system/com.octopusgarage.mesh-talk.post-office"
+            }
+        }
+    }
+}
+
+#[test]
+fn mac_relay_service_selector_preserves_legacy_and_requires_explicit_system() {
+    assert_eq!(MacRelayService::parse(None), MacRelayService::LegacyAgent);
+    assert_eq!(
+        MacRelayService::parse(Some("legacy-agent")),
+        MacRelayService::LegacyAgent
+    );
+    assert_eq!(
+        MacRelayService::parse(Some("system")),
+        MacRelayService::System
+    );
+    assert!(
+        MacRelayService::System
+            .restart_command()
+            .starts_with("sudo -n launchctl")
+    );
+    assert!(std::panic::catch_unwind(|| MacRelayService::parse(Some("typo"))).is_err());
 }
 
 #[tokio::test]
@@ -4019,8 +4068,63 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     assert!(!b.file_ready_to_save(file));
     assert!(b.log.lock().unwrap().events(&file).is_empty());
 
-    // The sender can now upload the encrypted chunks only to the installed relay.
-    a.flush_file_delivery(card).await;
+    // Confirm every encrypted chunk at the relay before removing the only sender.
+    // A best-effort flush turn alone is not a complete-upload barrier.
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &a.identity,
+        &bp.public(),
+        &relay_proof.public(),
+    )
+    .unwrap();
+    let outer_chunks = a
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .into_iter()
+        .map(|event| mailbox.wrap(event).unwrap().id)
+        .collect::<Vec<_>>();
+    assert!(!outer_chunks.is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            a.flush_file_delivery(card).await;
+            let mut channel = a
+                .privacy_dial(
+                    (relay_ip, relay_proof.tcp_port).into(),
+                    &relay_proof.public(),
+                )
+                .await
+                .unwrap();
+            let mut complete = true;
+            for outer in &outer_chunks {
+                if !super::session::request_durable_have(&mut channel, mailbox.id(), *outer)
+                    .await
+                    .unwrap_or(false)
+                {
+                    complete = false;
+                    break;
+                }
+            }
+            if complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("installed relay never confirmed custody of all encrypted chunks");
+    assert!(
+        !a.outgoing_file_progress(card).unwrap().delivered,
+        "relay custody must not claim recipient completion"
+    );
     assert!(!b.file_ready_to_save(file));
     assert!(b.log.lock().unwrap().events(&file).is_empty());
     drop(a);
@@ -4054,6 +4158,21 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     .await
     .expect("installed relay did not redeliver complete file bytes after restart");
     assert_eq!(b.read_file(file).unwrap(), bytes);
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public()),
+        "recovered chunks alone must not record a verified save"
+    );
+    let destination = bd.path().join("recovered.bin");
+    b.save_file(file, &destination).unwrap();
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        Sha256::digest(std::fs::read(&destination).unwrap()),
+        Sha256::digest(&bytes)
+    );
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public()),
+        "verified save must retain exact-file completion while sender remains stopped"
+    );
 }
 
 #[tokio::test]
