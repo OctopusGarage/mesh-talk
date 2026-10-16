@@ -9,6 +9,66 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
+#[tokio::test]
+async fn confirmed_destination_does_not_open_another_relay_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&recipient, &account, "recipient", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = DeviceIdentity::generate();
+    let relay_proof = Announce::new_post_office_with_account(
+        &relay,
+        &Account::generate(),
+        "relay",
+        listener.local_addr().unwrap().port(),
+    );
+    sender.roster.lock().unwrap().update(
+        &relay_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"already confirmed", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    // This store operation is invoked only after exact authenticated receipt
+    // validation; its authorization is exercised by the existing receipt tests.
+    sender
+        .delivery
+        .lock()
+        .unwrap()
+        .mark_delivered_for(id, destination.event.id)
+        .unwrap();
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Delivered));
+    let (result, incoming) = tokio::join!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            sender.replicate_delivery_destination(&destination)
+        ),
+        tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()),
+    );
+    assert!(
+        incoming.is_err(),
+        "confirmed destination opened an unnecessary relay connection"
+    );
+    assert!(matches!(result, Ok(false)));
+}
+
 async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dir = tempfile::tempdir().unwrap();

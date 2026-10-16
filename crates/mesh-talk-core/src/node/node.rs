@@ -253,6 +253,7 @@ type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) sessions: super::session_pool::SessionPool,
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
@@ -269,6 +270,8 @@ pub struct Node {
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     /// Host preference. Relay selection and every relay dial consult this live flag.
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
+    pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
+    pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
     /// Session-only IDs of relay envelopes already processed. Losing this cache
     /// on restart causes a safe re-download, never a lost inner event.
     pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
@@ -350,6 +353,7 @@ pub struct Node {
     /// Last authenticated recipient answer for each outgoing manifest destination.
     pub(in crate::node) outgoing_file_consents:
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
+    pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
     /// Exact device fingerprints the host user has safety-number verified for
@@ -357,6 +361,7 @@ pub struct Node {
     pub(in crate::node) verified_dm_pull_peers: Mutex<HashSet<UserId>>,
     /// Ephemeral identities introduced by an explicitly enabled bridge relay.
     pub(in crate::node) bridge_dm_pull_peers: Mutex<HashMap<UserId, std::time::Instant>>,
+    pub(in crate::node) physical_lan_only: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
@@ -765,18 +770,23 @@ impl Node {
             delivery: Mutex::new(delivery),
             outgoing_file_acks: Mutex::new(HashMap::new()),
             outgoing_file_consents: Mutex::new(HashMap::new()),
+            channel_recovery_notify: tokio::sync::Notify::new(),
             delivery_notify: tokio::sync::Notify::new(),
             delivery_status_notify: tokio::sync::Notify::new(),
             verified_dm_pull_peers: Mutex::new(HashSet::new()),
             bridge_dm_pull_peers: Mutex::new(HashMap::new()),
+            physical_lan_only: std::sync::atomic::AtomicBool::new(false),
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
             bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
             bridge_refresh: tokio::sync::Mutex::new(()),
+            sessions: super::session_pool::SessionPool::default(),
             bridge_generation: std::sync::atomic::AtomicU64::new(0),
             delivery_control_ids: Mutex::new(delivery_control_ids),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
+            post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
+            post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
             opaque_seen: Mutex::new(HashMap::new()),
             preferred_routes: Mutex::new(HashMap::new()),
             received: Mutex::new(received),

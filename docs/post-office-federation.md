@@ -114,8 +114,12 @@ in flight, and overlapping refreshes on that client are suppressed. Healthy
 results are persisted/published as they complete rather than waiting for stalled
 relays. Receipt timestamps, policy generations and rollback prevent canceled,
 expired or obsolete results from being published. The ninth relay is no longer
-permanently skipped. This is a directory concurrency bound,
-not a global eight-socket guarantee for files, calls, groups and account sync.
+permanently skipped. Directory concurrency is a separate scheduling bound. A client Node also shares
+eight managed TCP slots across incoming/outgoing handshakes, active sessions and
+retained idle sync sessions (at most seven per direction). Sequential sync may
+reuse an exact-identity/route/policy session for up to 15 idle seconds; one-shot
+protocols dial fresh. This is not one busy socket per relay. OS backlog, WebRTC
+media and other processes are outside the Node budget.
 Presence remains short-lived (about 45 seconds); forwarding does not renew its
 origin expiry. These bounds are resource limits, not a measured throughput SLA.
 
@@ -123,7 +127,7 @@ The relay runtime separately limits seed discovery to eight concurrent probes
 and reconciliation to eight concurrent relay sessions. Known trusted LAN routes
 are scheduled before routed seed discovery, and successful seed responses are
 consumed as they arrive. Routes are deduplicated by endpoint and both public
-keys. These independent budgets do not impose a global eight-connection cap;
+keys. These relay-runtime budgets are independent of the client Node TCP budget;
 large graphs of slow or unreachable peers can still lengthen a reconciliation
 round.
 

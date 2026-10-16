@@ -117,6 +117,14 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   devices; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
+  Durable enrollment permits only the exact certified Ed25519/X25519 device to
+  adopt the owning account; fresh self-signed presence alone cannot change a
+  pinned account. Startup reconstructs the expected binding and retires old
+  roster presence. Enrollment invalidates pre-transition managed sessions and
+  consumes the code atomically; only its current pairing response channel gets
+  a renewed guard. Interrupted adoption can retry with a new valid code through
+  a restricted incoming pairing-only channel; that exception never serves
+  ordinary sync, calls, attachments or account history before code validation.
   Message history, attachment catch-up, signed account-avatar updates, appearance,
   and contact presentation preferences obey separate device-local switches.
   Appearance and contact records use a versioned, encrypted local store with a
@@ -322,9 +330,18 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   Initial text/sticker contacts run concurrently (at most four for a small channel,
   two for a larger one), so a stalled handshake cannot delay another member.
   Membership and key controls contact every routed member with a four-connection
-  concurrency cap and a per-peer deadline. Sync rounds may share one authenticated
-  connection sequentially, but there is no global persistent connection pool or
-  one-socket-per-device invariant; independent operations may dial concurrently.
+  concurrency cap and a per-peer deadline. Newly validated messages wake a
+  dedicated coalesced recovery signal; duplicate processing and empty rounds do
+  not wake it. Identity/channel rotation distributes the bounded three-peer
+  recovery rounds. Sequential-sync operations use a Node-owned authenticated
+  session pool. A shared
+  eight-slot TCP budget covers both directions, handshakes and idle sessions;
+  seven-slot direction limits preserve opposite-direction progress. Idle sessions
+  expire after 15 seconds. Full identity, endpoint, account/role and policy checks
+  prevent cross-principal or stale-policy reuse. One-shot protocols dial fresh;
+  errors and cancellation discard sessions. One idle entry per identity/route
+  does not imply one busy connection per peer. OS backlog, discovery UDP, call
+  media and separate relay processes are outside the Node budget.
   Each channel send emits a debug metric with member count, seeded peer count,
   confirmed member copies, and elapsed milliseconds. The sync layer separately
   logs have-set size, applied and pushed events, and round count. These provide
@@ -337,8 +354,12 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   then direct LAN reachability, then fingerprint. Introduced recipients favor
   the relays that reported them; `drain_from_post_office` visits every known
   mailbox every 3 s. Each account may disable
-  relay use in Settings; the default remains enabled. This gates uploads and
-  downloads on that device. New clients wrap signed events for each recipient
+  relay use in Settings; the default remains enabled. Independent sending and
+  receiving preferences default to true under that master switch. Core policy
+  gates all opaque messages, file consent, receipts and chunk recovery. Receive
+  opt-out rejects content admission and durable seen state, while the unchanged
+  bidirectional protocol may still return encrypted frames. Disabling sending
+  preserves local queued work and prevents outgoing relay controls as well. New clients wrap signed events for each recipient
   in a pairwise opaque mailbox before relay sync. The relay sees mailbox IDs,
   pseudonymous outer headers, size buckets, and traffic timing, but cannot
   open event headers, channel controls, DM text, or file contents.

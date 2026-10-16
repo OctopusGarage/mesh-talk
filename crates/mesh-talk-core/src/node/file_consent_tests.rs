@@ -92,7 +92,27 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     assert_eq!(offers.try_recv().unwrap().file_conv, file);
     assert!(b.read_file(file).is_err());
     b.decide_attachment(file, true).unwrap();
+    let pending_controls = b.file_consent_events(&ap.public()).unwrap();
+    assert!(!pending_controls.is_empty());
+    let mailbox =
+        crate::postoffice::opaque::RelayMailbox::new(&b.identity, &ap.public(), &q.public())
+            .unwrap();
+    b.set_post_office_permissions(false, true);
     b.drain_from_post_office().await;
+    for control in &pending_controls {
+        assert!(
+            !qs.lock().unwrap().has(&mailbox.wrap(control).unwrap().id),
+            "receive-only must not publish signed file-consent controls"
+        );
+    }
+    b.set_post_office_permissions(true, true);
+    b.drain_from_post_office().await;
+    for control in &pending_controls {
+        assert!(
+            qs.lock().unwrap().has(&mailbox.wrap(control).unwrap().id),
+            "reenabling sends must publish retained consent controls"
+        );
+    }
     let binding = a
         .delivery
         .lock()

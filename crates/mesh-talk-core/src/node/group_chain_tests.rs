@@ -655,3 +655,76 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes() {
+    let mut chain = Chain::new().await;
+    let group = chain.accepted_group().await;
+    // Switch the prepared, fully accepted membership to the complete production
+    // accept/recovery runtime. No manual recovery calls occur after this point.
+    for index in 0..6 {
+        let previous = chain.servers[index].take().unwrap();
+        previous.abort();
+        let _ = previous.await;
+        let listener = TcpListener::bind(chain.addresses[index]).await.unwrap();
+        chain.servers[index] = Some(tokio::spawn(
+            chain.nodes[index].clone().run_accept_loop(listener),
+        ));
+    }
+    // Let startup and its immediately-ready interval tick finish before sending.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    chain.nodes[0]
+        .send_channel_message(group, b"notification-driven background gossip")
+        .await
+        .unwrap();
+    let sender = chain.servers[0].take().unwrap();
+    sender.abort();
+    let _ = sender.await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !chain.has_text(5, group, b"notification-driven background gossip") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
+    for index in 1..6 {
+        assert!(chain.has_text(index, group, b"notification-driven background gossip"));
+    }
+}
+
+#[tokio::test]
+async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
+    let chain = Chain::new().await;
+    let group = chain.accepted_group().await;
+    let receiver = &chain.nodes[1];
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            receiver.channel_recovery_notify.notified()
+        )
+        .await
+        .is_err(),
+        "membership setup and empty rounds do not signal message gossip"
+    );
+    chain.nodes[0]
+        .send_channel_message(group, b"wake once")
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        receiver.channel_recovery_notify.notified(),
+    )
+    .await
+    .expect("validated received message signals the dedicated recovery notification");
+    for _ in 0..3 {
+        receiver.process_channel(group);
+    }
+    chain.round(1, 0, group).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            receiver.channel_recovery_notify.notified()
+        )
+        .await
+        .is_err(),
+        "already surfaced messages and empty anti-entropy rounds must not self-wake"
+    );
+}

@@ -186,6 +186,9 @@ export interface AppSettings {
   calls_enabled: boolean;
   /** Use an available LAN post-office relay for offline delivery. */
   post_office_enabled: boolean;
+  post_office_send_enabled: boolean;
+  post_office_receive_enabled: boolean;
+  physical_lan_only: boolean;
   /** Share public presence through an opt-in post-office bridge. */
   bridge_discovery_enabled: boolean;
   /** Full fingerprint of the shared cross-site post-office hub (empty = normal election). */

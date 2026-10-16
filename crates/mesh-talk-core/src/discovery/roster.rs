@@ -119,10 +119,45 @@ pub struct Roster {
     announcements: HashMap<UserId, Announce>,
     historical: BTreeMap<UserId, Announce>,
     conflicting_history: HashSet<UserId>,
+    linked_bindings: HashMap<UserId, (PublicIdentity, crate::identity::account::DeviceCertificate)>,
     changes: std::sync::Arc<Notify>,
 }
 
 impl Roster {
+    /// Install a locally authorized own-account device transition. Callers derive
+    /// this from the durable account-device registry, never discovery traffic.
+    pub(crate) fn authorize_linked_account(
+        &mut self,
+        public: &PublicIdentity,
+        certificate: &crate::identity::account::DeviceCertificate,
+    ) {
+        debug_assert!(certificate.verify());
+        debug_assert_eq!(certificate.device_ed25519_pub, public.ed25519_pub);
+        let id = public.user_id();
+        let changed = self
+            .announcements
+            .get(&id)
+            .into_iter()
+            .chain(self.historical.get(&id))
+            .any(|old| old.public() != *public || old.account_cert.as_ref() != Some(certificate))
+            || self.conflicting_history.contains(&id);
+        if changed {
+            self.forget(public);
+            self.historical.remove(&id);
+            self.conflicting_history.remove(&id);
+        }
+        self.linked_bindings
+            .insert(id, (public.clone(), certificate.clone()));
+    }
+
+    fn linked_binding_matches(&self, announce: &Announce) -> bool {
+        self.linked_bindings
+            .get(&announce.user_id)
+            .is_none_or(|(public, cert)| {
+                announce.public() == *public && announce.account_cert.as_ref() == Some(cert)
+            })
+    }
+
     /// Wakes recovery when discovery learns a new peer or a peer's route changes.
     /// Notifications coalesce; consumers must inspect the roster after waking.
     pub fn changes(&self) -> std::sync::Arc<Notify> {
@@ -220,6 +255,7 @@ impl Roster {
     ) -> UpdateOutcome {
         if announce.user_id == self_user_id
             || !announce.valid_presence()
+            || !self.linked_binding_matches(announce)
             || announce.post_office
             || announce.account_id().is_none()
             || self.peers.get(&announce.user_id).is_some_and(|old| {
@@ -402,7 +438,7 @@ impl Roster {
         if announce.user_id == self_user_id {
             return UpdateOutcome::Rejected; // self-filter
         }
-        if !announce.valid_presence() {
+        if !announce.valid_presence() || !self.linked_binding_matches(announce) {
             return UpdateOutcome::Rejected;
         }
         if self.historical.get(&announce.user_id).is_some_and(|old| {
@@ -615,6 +651,35 @@ mod routed_tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn authorized_linked_binding_retires_old_beacons_and_historical_conflicts() {
+        let device = DeviceIdentity::generate();
+        let old = Account::generate();
+        let adopted = Account::generate();
+        let before = Announce::new_with_account(&device, &old, "Before", 1234);
+        let after = Announce::new_with_account(&device, &adopted, "After", 1235);
+        let mut roster = Roster::default();
+        let ip = "127.0.0.1".parse().unwrap();
+        assert!(roster.update(&before, ip, "self").accepted());
+        roster.authorize_linked_account(&device.public(), after.account_cert.as_ref().unwrap());
+        assert!(roster.get(&device.user_id()).is_none());
+        assert!(!roster.update(&before, ip, "self").accepted());
+        assert!(roster.update(&after, ip, "self").accepted());
+        assert_eq!(
+            roster.historical_announcement(&device.public()),
+            Some(&after)
+        );
+        assert!(
+            !roster
+                .update_relayed(&before, "127.0.0.1:7890".parse().unwrap(), "self")
+                .accepted()
+        );
+        assert_eq!(
+            roster.get(&device.user_id()).unwrap().account_id,
+            Some(adopted.account_id())
+        );
+    }
 
     #[test]
     fn same_identity_keeps_lan_and_routed_addresses() {

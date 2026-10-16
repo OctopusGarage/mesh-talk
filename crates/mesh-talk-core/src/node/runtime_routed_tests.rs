@@ -424,3 +424,51 @@ async fn set_display_name_updates_advertised_name_and_own_record() {
     );
     assert_eq!(runtime.user_id(), uid);
 }
+
+#[tokio::test]
+async fn startup_network_options_precede_discovery_and_delivery_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let reserve = crate::transport::net::discovery_socket(0).unwrap();
+    let port = reserve.local_addr().unwrap().port();
+    drop(reserve);
+    let runtime = NodeRuntime::start_configured_guarded_with_network(
+        RuntimeConfig {
+            base_dir: root.path(),
+            account_id: "network-options",
+            display_name: "Scoped",
+            password: "pw",
+            discovery_port: port,
+            post_office_enabled: true,
+            candidate_source: None,
+        },
+        RuntimeEvents {
+            on_dm: Box::new(|_| {}),
+            on_channel: Box::new(|_| {}),
+            on_file: Box::new(|_| {}),
+            on_profile: Box::new(|_| {}),
+            on_call_signal: Box::new(|_| {}),
+        },
+        RuntimeNetworkOptions {
+            post_office_send_enabled: false,
+            post_office_receive_enabled: true,
+            physical_lan_only: true,
+        },
+        |launch| {
+            let runtime = launch("Scoped");
+            let node = runtime.handle();
+            let relay = crate::identity::device::DeviceIdentity::generate().public();
+            assert!(node.physical_lan_only());
+            assert!(!node.relay_send_allowed(&relay));
+            assert!(node.relay_receive_allowed(&relay));
+            assert!(!node.bridge_directory_allowed());
+            Ok(runtime)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !runtime.visibility.routed_allowed().await,
+        "persisted scope initializes shared discovery gate before background probes"
+    );
+    runtime.stop().await;
+}

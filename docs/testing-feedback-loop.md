@@ -41,3 +41,34 @@ tests after every small edit; run the focused test during the loop, then the
 appropriate static check and final gates at the triggers above. Do not change
 the CI commands or the explicit `make test`, `make e2e`, and health-check
 entries: they provide the comprehensive evidence for review and release.
+
+## Explicit physical network acceptance
+
+These opt-in checks use disposable profiles and test-only `fast-test-kdf`
+binaries. Do not deploy those binaries as permanent services. They require the
+four authorized SSH hosts and their actual Tailscale routes; failure to reach a
+host is not a protocol pass. Windows fixtures, working directories, profiles and
+temporary files belong on drive D. No installed relay or network service needs
+to be stopped.
+
+- `scripts/e2e-routed-sibling.py`: build `network-acceptance` for arm64 and Intel
+  macOS, then exercise real SDK pairing, restart, history sharing off/on and
+  continued catch-up across mac2015 and mac-mini.
+- `scripts/e2e-federation-recovery.py`: build `mesh-talk-node` for arm64 macOS,
+  Intel macOS and Windows GNU, plus the arm64 `network-acceptance` example.
+  Exercise preferred-relay outage, a surviving three-relay route, consented file
+  delivery with sender restart and SHA-256, and bridge partition/recovery.
+- `frontend/e2e/call-media-physical.spec.ts`: build the `network-acceptance`
+  example for native macOS and Windows GNU, then run
+  `MESH_TALK_PHYSICAL_MEDIA=1 npx playwright test e2e/call-media-physical.spec.ts`
+  from `frontend/`. Override `MESH_TALK_MEDIA_LOCAL_IP` and
+  `MESH_TALK_MEDIA_REMOTE_IP` with the actual directly reachable Tailscale IPs.
+  It uses shared browser media
+  fixtures, authenticated backend signaling and an independently checked
+  Tailscale ICE pair between Chromium and Windows Edge. Synthetic capture
+  verifies transport/decode and cleanup, not native WKWebView or camera quality.
+
+Set `MESH_TALK_E2E_MAC2015_SSH=ys-aquria@192.168.3.72` when the `.local` alias
+is unavailable; `MESH_TALK_E2E_BASE_PORT` isolates disposable port ranges. Keep
+logs and machine-specific evidence outside git. Four hosts at two physical
+sites cannot establish a three-independent-LAN acceptance claim.

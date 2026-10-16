@@ -178,6 +178,10 @@ export function SettingsDialog({
   const [retentionDays, setRetentionDays] = useState(0);
   const [callsEnabled, setCallsEnabled] = useState(false);
   const [postOfficeEnabled, setPostOfficeEnabled] = useState(true);
+  const [postOfficeSendEnabled, setPostOfficeSendEnabled] = useState(true);
+  const [postOfficeReceiveEnabled, setPostOfficeReceiveEnabled] =
+    useState(true);
+  const [physicalLanOnly, setPhysicalLanOnly] = useState(false);
   const [bridgeDiscoveryEnabled, setBridgeDiscoveryEnabled] = useState(false);
   const [bridgeHubId, setBridgeHubId] = useState("");
   const localRelays = localPostOffices(peers);
@@ -226,6 +230,9 @@ export function SettingsDialog({
         setRetentionDays(s.retention_days);
         setCallsEnabled(s.calls_enabled);
         setPostOfficeEnabled(s.post_office_enabled);
+        setPostOfficeSendEnabled(s.post_office_send_enabled ?? true);
+        setPostOfficeReceiveEnabled(s.post_office_receive_enabled ?? true);
+        setPhysicalLanOnly(s.physical_lan_only ?? false);
         setBridgeDiscoveryEnabled(s.bridge_discovery_enabled ?? false);
         setBridgeHubId(s.bridge_hub_id ?? "");
         setRingtone(asRingtoneId(s.ringtone));
@@ -534,6 +541,59 @@ export function SettingsDialog({
                   />
                 }
               />
+              {(
+                [
+                  {
+                    id: "post-office-send",
+                    key: "postOfficeSend",
+                    value: postOfficeSendEnabled,
+                    field: "post_office_send_enabled",
+                    update: setPostOfficeSendEnabled,
+                    requiresRelay: true,
+                  },
+                  {
+                    id: "post-office-receive",
+                    key: "postOfficeReceive",
+                    value: postOfficeReceiveEnabled,
+                    field: "post_office_receive_enabled",
+                    update: setPostOfficeReceiveEnabled,
+                    requiresRelay: true,
+                  },
+                  {
+                    id: "physical-lan-only",
+                    key: "physicalLanOnly",
+                    value: physicalLanOnly,
+                    field: "physical_lan_only",
+                    update: setPhysicalLanOnly,
+                    requiresRelay: false,
+                  },
+                ] as const
+              ).map((option) => (
+                <Row
+                  key={option.id}
+                  id={`setting-${option.id}`}
+                  icon={<ShieldCheck className="h-4 w-4" />}
+                  title={t(`settings.${option.key}`)}
+                  desc={t(`settings.${option.key}Desc`)}
+                  control={
+                    <Switch
+                      id={`setting-${option.id}`}
+                      checked={option.value}
+                      disabled={
+                        !settingsLoaded ||
+                        saving ||
+                        (option.requiresRelay && !postOfficeEnabled)
+                      }
+                      onCheckedChange={(enabled) => {
+                        void saveSetting(
+                          () => settingsApi.update({ [option.field]: enabled }),
+                          () => option.update(enabled),
+                        );
+                      }}
+                    />
+                  }
+                />
+              ))}
               <Row
                 id="setting-bridge-discovery"
                 icon={<ShieldCheck className="h-4 w-4" />}
@@ -544,7 +604,12 @@ export function SettingsDialog({
                     id="setting-bridge-discovery"
                     checked={bridgeDiscoveryEnabled}
                     onCheckedChange={onBridgeDiscovery}
-                    disabled={!settingsLoaded || saving || !postOfficeEnabled}
+                    disabled={
+                      !settingsLoaded ||
+                      saving ||
+                      !postOfficeEnabled ||
+                      physicalLanOnly
+                    }
                   />
                 }
               />

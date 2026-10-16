@@ -1163,7 +1163,7 @@ impl Node {
         destination: &DeliveryDestination,
         conversation: ConversationId,
     ) -> bool {
-        let Ok(mut channel) = self.privacy_dial(peer.addr, &destination.device).await else {
+        let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &destination.device).await else {
             return false;
         };
         if !self.delivery_destination_allowed(destination)
@@ -1192,6 +1192,9 @@ impl Node {
             super::session::request_durable_have(&mut channel, conversation, destination.event.id)
                 .await
                 .unwrap_or(false);
+        if held {
+            self.recycle_sync_channel(channel);
+        }
         held && self.delivery_destination_allowed(destination)
     }
 
@@ -1199,19 +1202,31 @@ impl Node {
         &self,
         destination: &DeliveryDestination,
     ) -> bool {
+        // A validated receipt retires this exact destination. Avoid opening a
+        // new relay session for stale snapshots; other device copies remain
+        // independent work. Recheck after dialing below for concurrent receipts.
+        if !self.delivery_destination_allowed(destination)
+            || !self
+                .delivery
+                .lock()
+                .expect("delivery lock not poisoned")
+                .contains_work_event(destination.event.id)
+        {
+            return false;
+        }
         let candidates = {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             self.post_office_candidates_for(&roster, &destination.device)
         };
         for po in candidates {
-            if po.public == self.identity.public() || !self.relay_allowed(&po.public) {
+            if po.public == self.identity.public() || !self.relay_send_allowed(&po.public) {
                 continue;
             }
-            let Ok(mut channel) = self.privacy_dial(po.addr, &po.public).await else {
+            let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
                 continue;
             };
             if !self.delivery_destination_allowed(destination)
-                || !self.relay_allowed(&po.public)
+                || !self.relay_send_allowed(&po.public)
                 || channel
                     .peer_announcement()
                     .is_some_and(|p| po.account_id.is_some() && p.account_id() != po.account_id)
@@ -1249,9 +1264,12 @@ impl Node {
             let held = super::session::request_durable_have(&mut channel, mailbox.id(), *outer_id)
                 .await
                 .unwrap_or(false);
+            if held {
+                self.recycle_sync_channel(channel);
+            }
             if held
                 && self.delivery_destination_allowed(destination)
-                && self.relay_allowed(&po.public)
+                && self.relay_send_allowed(&po.public)
             {
                 return true;
             }
@@ -1445,24 +1463,24 @@ impl Node {
         };
         let mut completed = false;
         for peer in peers {
-            if relay && !self.relay_allowed(&peer.public) {
+            if relay && !self.relay_receive_allowed(&peer.public) {
                 continue;
             }
             if !relay && (peer.public != proof.public() || peer.account_id != proof.account_id()) {
                 continue;
             }
-            let Ok(mut channel) = self.privacy_dial(peer.addr, &peer.public).await else {
+            let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
                 continue;
             };
             if !current()
-                || (relay && !self.relay_allowed(&peer.public))
+                || (relay && !self.relay_receive_allowed(&peer.public))
                 || channel
                     .peer_announcement()
                     .is_some_and(|p| p.account_id() != peer.account_id)
             {
                 continue;
             }
-            completed |= if relay {
+            let success = if relay {
                 self.opaque_relay_round(&mut channel, &proof.public(), None)
                     .await
                     .is_ok()
@@ -1472,6 +1490,10 @@ impl Node {
                     .await
                     .is_ok()
             };
+            if success {
+                self.recycle_sync_channel(channel);
+            }
+            completed |= success;
         }
         completed
     }
@@ -1935,7 +1957,7 @@ impl Node {
             );
         }
         for (relay, peer) in candidates {
-            if (relay && !self.relay_allowed(&peer.public))
+            if (relay && !self.relay_send_allowed(&peer.public))
                 || (!relay && (peer.public != binding.device || peer.account_id != binding.account))
             {
                 continue;
@@ -1949,7 +1971,7 @@ impl Node {
                 #[cfg(test)]
                 phase.store(1, std::sync::atomic::Ordering::Relaxed);
                 if !current()
-                    || (relay && !self.relay_allowed(&peer.public))
+                    || (relay && !self.relay_send_allowed(&peer.public))
                     || channel
                         .peer_announcement()
                         .is_some_and(|proof| proof.account_id() != peer.account_id)
@@ -2008,7 +2030,7 @@ impl Node {
                 {
                     return false;
                 }
-                if !current() || (relay && !self.relay_allowed(&peer.public)) {
+                if !current() || (relay && !self.relay_send_allowed(&peer.public)) {
                     return false;
                 }
                 if !relay {
@@ -2103,7 +2125,7 @@ impl Node {
                 )
                 .await
                 .unwrap_or(false);
-                held && current() && (!relay || self.relay_allowed(&peer.public))
+                held && current() && (!relay || self.relay_send_allowed(&peer.public))
             })
             .await;
             #[cfg(test)]

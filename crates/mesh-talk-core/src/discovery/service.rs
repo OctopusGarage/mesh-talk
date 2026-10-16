@@ -197,6 +197,9 @@ async fn run_listen_with_routed(
     loop {
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, source))) => {
+                if !visibility.accepts_source(source) {
+                    continue;
+                }
                 if let Some(routed) = &routed {
                     if let Some(nonce) = query::decode_query(&buf[..n]) {
                         let allowed = routed
@@ -469,9 +472,17 @@ async fn scan_once_with_visibility(
     discovery_port: u16,
     visibility: &DiscoveryVisibility,
 ) {
-    let targets = scan_targets_for_interfaces(&ipv4_interface_addrs())
+    let interfaces = if visibility.physical_lan_only() {
+        visibility.physical_ipv4_addrs()
+    } else {
+        ipv4_interface_addrs()
+    };
+    let targets = scan_targets_for_interfaces(&interfaces)
         .into_iter()
-        .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port));
+        .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port))
+        // A /24 fallback scan can exceed the real interface netmask. Skip
+        // disallowed targets instead of ending the scan before another LAN.
+        .filter(|target| visibility.accepts_source(*target));
     let _ = scan_addresses(socket, bytes, targets, visibility).await;
 }
 

@@ -2407,7 +2407,7 @@ async fn allowed_carrier_cannot_append_a_stranger_authored_dm_event() {
     server.abort();
 }
 
-fn node(path: &Path) -> (Arc<Node>, mpsc::UnboundedReceiver<ReceivedDm>) {
+pub(super) fn node(path: &Path) -> (Arc<Node>, mpsc::UnboundedReceiver<ReceivedDm>) {
     std::fs::create_dir_all(path).unwrap();
     let (tx, rx) = mpsc::unbounded_channel();
     let (ctx, _) = mpsc::unbounded_channel();
@@ -2540,4 +2540,177 @@ async fn policy_startup_failure_and_unknown_grants_fail_closed() {
         .is_err()
     );
     assert!(node.privacy_snapshot().invisible);
+}
+
+#[tokio::test]
+async fn relay_direction_change_revokes_already_assembled_channel_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let expected = bob.identity.public();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = bob.privacy_accept(stream).await.unwrap();
+        assert!(
+            channel.recv().await.is_err(),
+            "staged payload must never arrive after direction revocation"
+        );
+    });
+    let mut channel = alice.privacy_dial(addr, &expected).await.unwrap();
+    let staged = b"already assembled encrypted publication".to_vec();
+    alice.set_post_office_permissions(false, true);
+    alice.set_post_office_permissions(true, true);
+    assert!(
+        !channel.io_admitted(),
+        "permission ABA must not revive an older session"
+    );
+    assert!(matches!(
+        channel.send(&staged).await,
+        Err(TransportError::AdmissionDenied)
+    ));
+    drop(channel);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_pairing_can_retry_with_new_code_without_unlocking_normal_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let (linker, _) = node(&dir.path().join("linker"));
+    let (joiner, _) = node(&dir.path().join("joiner"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    for (name, node, port) in [("linker", &linker, addr.port()), ("joiner", &joiner, 47475)] {
+        node.configure_privacy(
+            &dir.path().join(name),
+            "pw",
+            &node.signed_announce(name, port),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    let old = joiner.signed_announce("Before adoption", 47475);
+    linker
+        .remember_peer(&joiner.identity.public(), Some(&old), addr.ip())
+        .unwrap();
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let serving = linker.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let channel = serving.privacy_accept(stream).await.unwrap();
+        assert!(held_tx.send(channel).is_ok());
+        Box::pin(serving.run_accept_loop(listener)).await;
+    });
+    let before_pairing = joiner
+        .privacy_dial(addr, &linker.identity.public())
+        .await
+        .unwrap();
+    let held_inbound = held_rx.await.unwrap();
+    assert!(held_inbound.io_admitted());
+    let first_code = linker.start_linking();
+    let first = joiner
+        .link_to_device(addr, &linker.identity.public(), &first_code)
+        .await
+        .unwrap();
+    assert_eq!(first.account_id, linker.account_id());
+    assert!(
+        !held_inbound.io_admitted(),
+        "pairing enrollment must invalidate previously authenticated inbound normal-sync channels"
+    );
+    drop(held_inbound);
+    drop(before_pairing);
+    // Model the joiner disconnecting/crashing after the response but before
+    // saving the adopted account: its next Noise proof still presents the old pin.
+    drop(first);
+    assert_ne!(joiner.account_id(), linker.account_id());
+    let retry_code = linker.start_linking();
+    let mut normal = joiner
+        .privacy_dial(addr, &linker.identity.public())
+        .await
+        .expect("pending retry may authenticate only into the restricted pairing handler");
+    let store = joiner.sync_store(normal.peer_identity());
+    let sync = super::session::request_round(
+        &mut normal,
+        &store,
+        crate::eventlog::event::ConversationId::new([45; 32]),
+    )
+    .await;
+    assert!(
+        sync.is_err(),
+        "retired-account retry admission must never expose normal sync"
+    );
+    drop(normal);
+    let wrong = if let Some(rest) = retry_code.strip_prefix('0') {
+        format!("1{rest}")
+    } else {
+        format!("0{}", &retry_code[1..])
+    };
+    assert!(
+        joiner
+            .link_to_device(addr, &linker.identity.public(), &wrong)
+            .await
+            .is_err()
+    );
+    let retried = joiner
+        .link_to_device(addr, &linker.identity.public(), &retry_code)
+        .await
+        .expect("the authorized original device can recover with the new valid code");
+    assert_eq!(retried.account_id, linker.account_id());
+    assert_eq!(linker.linked_devices().len(), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn physical_scope_tcp_presence_preserves_lan_roster_and_hides_overlay_presence() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    for (node, path, port) in [
+        (&alice, dir.path().join("alice"), 4567),
+        (&bob, dir.path().join("bob"), addr.port()),
+    ] {
+        node.initialize_physical_lan_only(true);
+        let visibility = Arc::new(DiscoveryVisibility::with_inventory(true, || {
+            vec![crate::discovery::scope::LanInterface {
+                address: "127.0.0.1".parse().unwrap(),
+                prefix: 8,
+                index: Some(1),
+            }]
+        }));
+        node.configure_privacy(&path, "pw", &node.signed_announce("LAN", port), visibility)
+            .unwrap();
+        assert!(node.publicly_visible_at("127.0.0.1:1234".parse().unwrap()));
+        assert!(node.publicly_visible_at("[::ffff:127.0.0.1]:1234".parse().unwrap()));
+        assert!(!node.publicly_visible_at("100.82.240.19:1234".parse().unwrap()));
+        assert!(!node.publicly_visible_at("192.168.99.1:1234".parse().unwrap()));
+    }
+    alice.roster.lock().unwrap().update(
+        &bob.signed_announce("Bob", addr.port()),
+        addr.ip(),
+        &alice.user_id(),
+    );
+    bob.roster.lock().unwrap().update(
+        &alice.signed_announce("Alice", 4567),
+        addr.ip(),
+        &bob.user_id(),
+    );
+    let server_node = bob.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        server_node.privacy_accept(stream).await.unwrap()
+    });
+    let client = alice
+        .privacy_dial(addr, &bob.identity.public())
+        .await
+        .unwrap();
+    let accepted = server.await.unwrap();
+    assert!(client.peer_publicly_visible());
+    assert!(accepted.peer_publicly_visible());
+    assert!(alice.roster.lock().unwrap().get(&bob.user_id()).is_some());
+    assert!(bob.roster.lock().unwrap().get(&alice.user_id()).is_some());
+    alice.set_invisible(true).await.unwrap();
+    assert!(!alice.publicly_visible_at(addr));
 }

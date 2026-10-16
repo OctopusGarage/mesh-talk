@@ -13,12 +13,14 @@ use tokio::io::{AsyncRead, AsyncWrite};
 /// `seen` avoids pulling the same retained blobs every three seconds. The
 /// signed inner event remains the durable truth; the cache is only an in-memory
 /// transfer hint and can be discarded without losing delivery.
-struct OpaqueRoundStore {
+struct OpaqueRoundStore<'a> {
+    node: &'a Node,
+    relay: PublicIdentity,
     log: EventLog,
     seen: HashSet<EventId>,
 }
 
-impl SyncStore for OpaqueRoundStore {
+impl SyncStore for OpaqueRoundStore<'_> {
     fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
         let mut ids = self.seen.clone();
         ids.extend(SyncStore::event_ids(&self.log, conversation));
@@ -30,10 +32,18 @@ impl SyncStore for OpaqueRoundStore {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
+        if !self.node.relay_send_allowed(&self.relay) {
+            return Vec::new();
+        }
         SyncStore::events_excluding(&self.log, conversation, have)
     }
 
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        if !self.node.relay_receive_allowed(&self.relay) {
+            // Round-local only: do not mark ignored incoming data durably seen.
+            self.seen.insert(event.id);
+            return Ok(AppendOutcome::Duplicate);
+        }
         self.log.append(event)
     }
 }
@@ -51,6 +61,11 @@ impl Node {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        if !self.relay_send_allowed(channel.peer_identity())
+            && !self.relay_receive_allowed(channel.peer_identity())
+        {
+            return Ok(Vec::new());
+        }
         let legacy = RelayMailbox::new(&self.identity, recipient, channel.peer_identity())
             .map_err(|e| super::session::SessionError::Serialization(e.to_string()))?;
         let mut uploaded = self
@@ -85,12 +100,16 @@ impl Node {
             .cloned()
             .unwrap_or_default();
         let outer_store = Mutex::new(OpaqueRoundStore {
+            node: self,
+            relay: channel.peer_identity().clone(),
             log: EventLog::default(),
             seen,
         });
         let mut uploaded = Vec::new();
         let mut outgoing = Vec::new();
-        if let Some(conv) = conversation {
+        if let Some(conv) =
+            conversation.filter(|_| self.relay_send_allowed(channel.peer_identity()))
+        {
             let events = {
                 let store = self.sync_store(recipient);
                 store
@@ -100,9 +119,11 @@ impl Node {
             };
             outgoing.extend(events.into_iter().map(|event| (event, true)));
         }
-        match self.file_consent_events(recipient) {
-            Ok(controls) => outgoing.extend(controls.into_iter().map(|event| (event, false))),
-            Err(error) => log::debug!("file consent publication deferred: {error}"),
+        if self.relay_send_allowed(channel.peer_identity()) {
+            match self.file_consent_events(recipient) {
+                Ok(controls) => outgoing.extend(controls.into_iter().map(|event| (event, false))),
+                Err(error) => log::debug!("file consent publication deferred: {error}"),
+            }
         }
         for (event, requested) in outgoing {
             let outer = mailbox
@@ -146,6 +167,9 @@ impl Node {
         });
         let store = self.sync_store(channel.peer_identity());
         for (outer_id, event) in inner {
+            if !self.relay_receive_allowed(channel.peer_identity()) {
+                break;
+            }
             match self.accept_file_consent_event(&event, recipient) {
                 Ok(true) => {
                     processed.push(outer_id);
@@ -193,6 +217,141 @@ impl Node {
             }
             cache.entry(mailbox.id()).or_default().extend(processed);
         }
+        if !self.relay_send_allowed(channel.peer_identity()) {
+            uploaded.clear();
+        }
         Ok(uploaded)
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn relay_direction_matrix_preserves_pending_local_events() {
+        for send in [false, true] {
+            for receive in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let identity = DeviceIdentity::generate();
+                let remote = DeviceIdentity::generate();
+                let account = Account::generate();
+                let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+                let (group, _) = tokio::sync::mpsc::unbounded_channel();
+                let (files, _) = tokio::sync::mpsc::unbounded_channel();
+                let node = Node::open(
+                    identity,
+                    Arc::new(Mutex::new(crate::discovery::roster::Roster::default())),
+                    dm,
+                    group,
+                    files,
+                    &root.path().join("messages"),
+                    &root.path().join("sent"),
+                    "pw",
+                )
+                .unwrap();
+                let remote_proof = crate::discovery::Announce::new_with_account(
+                    &remote, &account, "Remote", 47475,
+                );
+                node.roster.lock().unwrap().update(
+                    &remote_proof,
+                    "127.0.0.1".parse().unwrap(),
+                    &node.user_id(),
+                );
+                node.cached_peer_snapshot_async().await.unwrap();
+                let relay = DeviceIdentity::generate();
+                let keys = relay.secret_bytes();
+                let relay_public = relay.public();
+                let mailbox =
+                    RelayMailbox::new(&node.identity, &remote.public(), &relay_public).unwrap();
+                let conv = super::super::conversation::dm_conversation_id(
+                    &node.identity.public(),
+                    &remote.public(),
+                );
+                let outgoing = Event::new(
+                    &node.identity,
+                    conv,
+                    1,
+                    vec![],
+                    1,
+                    0,
+                    EventKind::Message,
+                    b"outgoing".to_vec(),
+                );
+                node.log.lock().unwrap().append(outgoing.clone()).unwrap();
+                let incoming_conv = conv;
+                let incoming = Event::new(
+                    &remote,
+                    incoming_conv,
+                    1,
+                    vec![],
+                    1,
+                    0,
+                    EventKind::Message,
+                    b"incoming".to_vec(),
+                );
+                let incoming_outer = mailbox.wrap(&incoming).unwrap();
+                let relay_store = Arc::new(Mutex::new(EventLog::default()));
+                relay_store
+                    .lock()
+                    .unwrap()
+                    .append(incoming_outer.clone())
+                    .unwrap();
+                node.set_post_office_permissions(send, receive);
+                let (client_io, server_io) = tokio::io::duplex(128 * 1024);
+                let server_store = relay_store.clone();
+                let task = tokio::spawn(async move {
+                    let id = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                    let mut channel = crate::transport::SecureChannel::accept(server_io, &id)
+                        .await
+                        .unwrap();
+                    while matches!(
+                        super::super::session::serve_one(&mut channel, &server_store).await,
+                        Ok(super::super::session::Served::Handled(_))
+                    ) {}
+                });
+                let mut channel = crate::transport::SecureChannel::connect(
+                    client_io,
+                    &node.identity,
+                    Some(&relay_public),
+                )
+                .await
+                .unwrap();
+                node.opaque_relay_round(&mut channel, &remote.public(), Some(conv))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    relay_store
+                        .lock()
+                        .unwrap()
+                        .has(&mailbox.wrap(&outgoing).unwrap().id),
+                    send
+                );
+                assert!(
+                    node.log.lock().unwrap().has(&outgoing.id),
+                    "disabling upload retains accepted local work"
+                );
+                assert_eq!(
+                    node.log.lock().unwrap().has(&incoming.id),
+                    receive,
+                    "receive permission gates durable inner-event admission"
+                );
+                assert_eq!(
+                    node.opaque_seen
+                        .lock()
+                        .unwrap()
+                        .get(&mailbox.id())
+                        .is_some_and(|seen| seen.contains(&incoming_outer.id)),
+                    receive
+                );
+                drop(channel);
+                task.await.unwrap();
+                node.set_post_office_enabled(false);
+                assert!(!node.relay_send_allowed(&relay_public));
+                assert!(!node.relay_receive_allowed(&relay_public));
+            }
+        }
     }
 }

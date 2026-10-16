@@ -51,6 +51,40 @@ fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "privacy operation denied")
 }
 impl Node {
+    /// Restrict public discovery to enumerated physical LAN interfaces. Known,
+    /// explicitly authorized contacts can still use existing TCP routes.
+    pub fn physical_lan_only(&self) -> bool {
+        self.physical_lan_only.load(Ordering::Acquire)
+    }
+
+    /// Startup-only policy. Call before configure_privacy and network launch.
+    pub fn initialize_physical_lan_only(&self, enabled: bool) {
+        self.physical_lan_only.store(enabled, Ordering::Release);
+    }
+
+    pub async fn set_physical_lan_only(&self, enabled: bool) {
+        let _policy_guard = self.privacy.gate.write().await;
+        if self.physical_lan_only() == enabled {
+            return;
+        }
+        let visibility = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy state lock not poisoned")
+            .as_ref()
+            .map(|state| Arc::clone(&state.visibility));
+        if let Some(visibility) = visibility {
+            visibility.set_physical_lan_only(enabled).await;
+        }
+        self.physical_lan_only.store(enabled, Ordering::Release);
+        self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+        self.sessions.clear();
+        // Invalidate in-flight directory responses, including disable/enable ABA.
+        self.clear_bridge_introductions();
+        self.bridge_notify.notify_one();
+    }
+
     /// Configure before starting any network tasks. Unconfigured SDK constructors
     /// keep their legacy public behavior. Corrupt durable policy/proofs return errors.
     pub fn configure_privacy(
@@ -68,8 +102,16 @@ impl Node {
         }
         let policy = PrivacyPolicy::open(&directory.join("privacy.policy"), password)?;
         visibility.initialize_public(!policy.snapshot().invisible)?;
+        visibility.initialize_physical_lan_only(self.physical_lan_only())?;
         let mut proofs = PeerDirectory::open(&directory.join("peer-proofs"), password)?;
         proofs.record_own(own, &self.identity.public())?;
+        for device in self.linked_devices() {
+            proofs.authorize_linked_device(device.clone(), &self.account_id())?;
+            self.roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .authorize_linked_account(&device.public, &device.certificate);
+        }
         let routes =
             super::privacy_routes::RouteCache::open(&directory.join("peer-routes"), password)?;
         let (mut sent_manifest_scopes, stored_scopes) =
@@ -636,11 +678,8 @@ impl Node {
                 .read()
                 .expect("privacy lock not poisoned");
             if let Some(state) = state.as_ref()
-                && let (Some(old), Some(new)) = (
-                    state.proofs.by_author(&peer.public_identity().ed25519_pub),
-                    peer.announcement(),
-                )
-                && (old.public() != new.public() || old.account_id() != new.account_id())
+                && let Some(new) = peer.announcement()
+                && !state.proofs.accepts_binding(new)
             {
                 return false;
             }
@@ -649,6 +688,24 @@ impl Node {
             || self.group_member(peer.public_identity())
             || self.group_departure_peer(peer.public_identity())
     }
+    // This bit describes disclosure on this connection. Physical-LAN-only
+    // peers stay visible to their actual LAN neighbors while overlay contacts
+    // receive private presence. Use the connected endpoint, including IPv6 scope.
+    fn publicly_visible_at(&self, endpoint: std::net::SocketAddr) -> bool {
+        if self.privacy_snapshot().invisible {
+            return false;
+        }
+        if !self.physical_lan_only() {
+            return true;
+        }
+        self.privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned")
+            .as_ref()
+            .is_some_and(|state| state.visibility.accepts_source(endpoint))
+    }
+
     fn own_presence(&self) -> Option<Announce> {
         self.privacy
             .state
@@ -817,8 +874,13 @@ impl Node {
             })
             .collect())
     }
-    fn guard_channel(&self, channel: &mut SecureChannel<TcpStream>, generation: u64) {
+    pub(in crate::node) fn guard_channel(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+        generation: u64,
+    ) {
         let control = self.privacy.clone();
+        channel.set_host_generation(generation);
         channel.set_io_admission(
             control.gate.clone(),
             Arc::new(move || control.generation.load(Ordering::SeqCst) == generation),
@@ -831,13 +893,13 @@ impl Node {
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
+        let permits = self.sessions.outbound().await?;
         let mut addr = addr;
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         #[cfg(test)]
         timing.phase("dial-privacy-gate");
         let _operation = self.privacy.gate.read().await;
         let own = self.own_presence();
-        let publicly_visible = !self.privacy_snapshot().invisible;
         #[cfg(test)]
         timing.phase("dial-admission");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
@@ -938,6 +1000,7 @@ impl Node {
                     timing.phase("dial-noise-presence");
                 }
                 stream.set_nodelay(true)?;
+                let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
                 SecureChannel::connect_with_visibility(
                     stream,
                     &self.identity,
@@ -958,6 +1021,7 @@ impl Node {
             }
         }
         let (addr, mut channel) = successful.ok_or(last_error)?;
+        channel.retain_connection_permits(permits);
         #[cfg(test)]
         timing.phase("dial-proof-validation");
         if let Some(new) = channel.peer_announcement() {
@@ -967,8 +1031,7 @@ impl Node {
                 .read()
                 .expect("privacy lock not poisoned");
             if let Some(state) = state.as_ref()
-                && let Some(old) = state.proofs.by_author(&expected.ed25519_pub)
-                && (old.public() != new.public() || old.account_id() != new.account_id())
+                && !state.proofs.accepts_binding(new)
             {
                 return Err(TransportError::AdmissionDenied);
             }
@@ -990,15 +1053,26 @@ impl Node {
         timing.finish();
         Ok(channel)
     }
+    #[cfg(test)]
     pub(in crate::node) async fn privacy_accept(
         &self,
         stream: TcpStream,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        let permits = self.sessions.inbound().await?;
+        self.privacy_accept_with_permits(stream, permits).await
+    }
+
+    pub(in crate::node) async fn privacy_accept_with_permits(
+        &self,
+        stream: TcpStream,
+        permits: Vec<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("accept-tcp-ready");
         #[cfg(test)]
         timing.socket(&stream);
-        let ip = stream.peer_addr()?.ip();
+        let endpoint = stream.peer_addr()?;
+        let ip = endpoint.ip();
         stream.set_nodelay(true)?;
         #[cfg(test)]
         timing.phase("accept-own-presence");
@@ -1006,7 +1080,7 @@ impl Node {
         timing.phase("accept-privacy-gate");
         let _operation = self.privacy.gate.read().await;
         let own = self.own_presence();
-        let publicly_visible = !self.privacy_snapshot().invisible;
+        let publicly_visible = self.publicly_visible_at(endpoint);
         #[cfg(test)]
         timing.phase("accept-noise-presence");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
@@ -1017,19 +1091,27 @@ impl Node {
                 &self.identity,
                 own.as_ref(),
                 publicly_visible,
-                |peer| self.admitted(peer),
+                |peer| {
+                    self.admitted(peer)
+                        || self.pairing_retry_allowed(peer.public_identity(), peer.announcement())
+                },
             ),
         )
         .await
         .map_err(|_| TransportError::Noise("accept timed out".into()))??;
         #[cfg(test)]
         timing.phase("accept-remember-peer");
-        self.remember_peer_with_visibility(
-            channel.peer_identity(),
-            channel.peer_announcement(),
-            ip,
-            channel.peer_publicly_visible(),
-        )?;
+        channel.retain_connection_permits(permits);
+        if self.pairing_retry_allowed(channel.peer_identity(), channel.peer_announcement()) {
+            channel.restrict_to_pairing();
+        } else {
+            self.remember_peer_with_visibility(
+                channel.peer_identity(),
+                channel.peer_announcement(),
+                ip,
+                channel.peer_publicly_visible(),
+            )?;
+        }
         self.guard_channel(&mut channel, generation);
         #[cfg(test)]
         timing.finish();
@@ -1040,3 +1122,7 @@ impl Node {
 #[cfg(test)]
 #[path = "privacy_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_pool_tests.rs"]
+mod session_pool_tests;

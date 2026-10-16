@@ -116,6 +116,23 @@ pub struct RuntimeConfig<'a> {
     pub candidate_source: Option<Arc<dyn CandidateSource>>,
 }
 
+/// Additive startup policy options; legacy RuntimeConfig callers retain defaults.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeNetworkOptions {
+    pub post_office_send_enabled: bool,
+    pub post_office_receive_enabled: bool,
+    pub physical_lan_only: bool,
+}
+impl Default for RuntimeNetworkOptions {
+    fn default() -> Self {
+        Self {
+            post_office_send_enabled: true,
+            post_office_receive_enabled: true,
+            physical_lan_only: false,
+        }
+    }
+}
+
 /// Inbound events forwarded to the host from independent runtime tasks.
 pub struct RuntimeEvents {
     pub on_dm: Box<dyn Fn(ReceivedDm) + Send + 'static>,
@@ -269,6 +286,24 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded_with_network(
+            config,
+            events,
+            RuntimeNetworkOptions::default(),
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Initialize network preferences before any discovery or delivery producer starts.
+    pub async fn start_configured_guarded_with_network(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
             base_dir,
             account_id,
@@ -370,7 +405,12 @@ impl NodeRuntime {
         let names_result = names_handle.await;
         let node = node_result
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??;
+        node.set_post_office_permissions(
+            network.post_office_send_enabled,
+            network.post_office_receive_enabled,
+        );
         node.set_post_office_enabled(post_office_enabled);
+        node.initialize_physical_lan_only(network.physical_lan_only);
         let names = Arc::new(Mutex::new(names_result.map_err(|e| {
             RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
         })??));
@@ -444,7 +484,7 @@ impl NodeRuntime {
                             _ = tick.tick() => {},
                             _ = trigger.notified() => {},
                         }
-                        if visibility.is_public().await
+                        if visibility.routed_allowed().await
                             && let Ok(candidates) =
                                 tokio::time::timeout(Duration::from_secs(3), source.snapshot())
                                     .await
@@ -455,13 +495,14 @@ impl NodeRuntime {
                                 .filter(|addr| unique.insert(*addr))
                                 .take(256)
                             {
-                                if !visibility.is_public().await {
+                                if !visibility.routed_allowed().await {
                                     break;
                                 }
                                 if let Some(sender) = match endpoint {
                                     std::net::SocketAddr::V4(_) => Some(&socket),
                                     std::net::SocketAddr::V6(_) => socket_v6.as_ref(),
-                                } {
+                                } && let Some(_guard) = visibility.routed_send_guard().await
+                                {
                                     let _ = routed.probe(sender, endpoint).await;
                                 }
                                 tokio::time::sleep(Duration::from_millis(63)).await;
@@ -616,7 +657,7 @@ impl NodeRuntime {
     /// Probe a user-supplied address without revealing this device's identity
     /// until the other end returns a fresh, signed Mesh Talk response.
     pub async fn probe_endpoint(&self, endpoint: std::net::SocketAddr) -> std::io::Result<()> {
-        if !self.visibility.is_public().await {
+        if !self.visibility.routed_allowed().await {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "public discovery is disabled",
@@ -628,6 +669,12 @@ impl NodeRuntime {
                 std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "IPv6 unavailable")
             })?,
         };
+        let _guard = self.visibility.routed_send_guard().await.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "routed discovery is disabled",
+            )
+        })?;
         if self.routed_discovery.probe(socket, endpoint).await? {
             Ok(())
         } else {

@@ -70,7 +70,8 @@ impl BridgePolicyStamp {
 
 impl Node {
     pub(in crate::node) fn bridge_directory_allowed(&self) -> bool {
-        self.post_office_enabled.load(Ordering::Acquire)
+        !self.physical_lan_only()
+            && self.post_office_enabled.load(Ordering::Acquire)
             && self.bridge_discovery_enabled.load(Ordering::Acquire)
             && !self.privacy_snapshot().invisible
     }
@@ -312,6 +313,38 @@ mod tests {
         .unwrap();
         node.set_bridge_discovery_enabled(true);
         node
+    }
+
+    #[tokio::test]
+    async fn physical_scope_revokes_bridge_imports_without_changing_bridge_preference() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = directory_client(temp.path());
+        assert!(node.bridge_directory_allowed());
+        let member = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&member, &Account::generate(), "remote", 1);
+        node.roster.lock().unwrap().update_relayed(
+            &proof,
+            "127.0.0.1:47475".parse().unwrap(),
+            &node.user_id(),
+        );
+        node.bridge_dm_pull_peers
+            .lock()
+            .unwrap()
+            .insert(member.user_id(), Instant::now());
+        let stamp = BridgePolicyStamp::capture(&node);
+        node.set_physical_lan_only(true).await;
+        assert!(node.physical_lan_only());
+        assert!(!node.bridge_directory_allowed());
+        assert!(!stamp.current(&node));
+        assert!(node.bridge_dm_pull_peers.lock().unwrap().is_empty());
+        assert!(node.roster.lock().unwrap().get(&member.user_id()).is_none());
+        assert!(node.bridge_discovery_enabled.load(Ordering::Acquire));
+        node.set_physical_lan_only(false).await;
+        assert!(node.bridge_directory_allowed());
+        assert!(
+            !stamp.current(&node),
+            "scope off/on must not resurrect in-flight introductions"
+        );
     }
 
     #[tokio::test]

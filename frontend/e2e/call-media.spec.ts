@@ -1,4 +1,6 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+
+import { prepareCallMedia } from "./helpers/call-media-harness";
 
 // Production call engine and real Chromium capture/ICE/DTLS-SRTP. The backend
 // signaling boundary is substituted; this does not prove native/Tailscale media.
@@ -12,76 +14,6 @@ test.use({
 });
 
 type Signal = { target: string; payload: string };
-type Harness = {
-  phase: () => string;
-  signal: (from: string, payload: string) => void;
-  start: (target: string) => Promise<void>;
-  accept: () => Promise<void>;
-  hangup: () => void;
-  stats: () => Promise<Record<string, number | boolean>>;
-  cleaned: () => boolean;
-};
-declare global {
-  interface Window {
-    __callMediaHarness: Harness;
-  }
-}
-
-async function prepare(page: Page, url: string, id: string) {
-  await page.route("**/__call-media", (route) =>
-    route.fulfill({
-      contentType: "text/html",
-      body: `<!doctype html><title>Call media verification</title><script type="module">
-      import { useCalls } from '/src/store/calls.ts';
-      import { useAuth } from '/src/store/auth.ts';
-      import { useSettings } from '/src/store/settings.ts';
-      const connections = [], tracks = [];
-      const NativeConnection = window.RTCPeerConnection;
-      window.RTCPeerConnection = class extends NativeConnection {
-        constructor(options) { super(options); connections.push(this); }
-      };
-      window.__TAURI_INTERNALS__ = { invoke: async (command, args) => {
-        if (command === 'send_call_signal') return window.__deliverCallSignal(args);
-        if (command === 'initiate_privacy_contact') return null;
-        throw new Error('Unexpected IPC: ' + command);
-      }};
-      useAuth.setState({ user: { id: ${JSON.stringify(id)}, display_name: ${JSON.stringify(id)} } });
-      useSettings.setState({ callsEnabled: true });
-      useCalls.subscribe(state => {
-        for (const track of state.localStream?.getTracks() ?? []) {
-          if (!tracks.includes(track)) tracks.push(track);
-        }
-      });
-      window.__callMediaHarness = {
-        phase: () => useCalls.getState().phase,
-        signal: (from, payload) => useCalls.getState().onSignal({ from, payload }),
-        start: target => useCalls.getState().startCall({ name: target, accountId: target, deviceIds: [target] }, true),
-        accept: () => useCalls.getState().accept(),
-        hangup: () => useCalls.getState().hangup(),
-        stats: async () => {
-          const result = { audioSent: 0, audioReceived: 0, videoSent: 0, videoReceived: 0, dtls: false };
-          for (const entry of (await connections[0].getStats()).values()) {
-            if (entry.type === 'transport' && entry.dtlsState === 'connected') result.dtls = true;
-            if (entry.kind === 'audio' || entry.kind === 'video') {
-              if (entry.type === 'outbound-rtp') result[entry.kind + 'Sent'] += entry.bytesSent ?? 0;
-              if (entry.type === 'inbound-rtp') result[entry.kind + 'Received'] += entry.bytesReceived ?? 0;
-            }
-          }
-          return result;
-        },
-        cleaned: () => tracks.length === 2 && tracks.every(track => track.readyState === 'ended') &&
-          connections.every(connection => connection.connectionState === 'closed') &&
-          useCalls.getState().localStream === null && useCalls.getState().remoteStream === null,
-      };
-    </script>`,
-    }),
-  );
-  await page.goto(`${url}/__call-media`);
-  await expect
-    .poll(() => page.evaluate(() => Boolean(window.__callMediaHarness)))
-    .toBe(true);
-}
-
 test("real call engine exchanges encrypted audio/video and releases capture on hangup", async ({
   browser,
   baseURL,
@@ -110,8 +42,8 @@ test("real call engine exchanges encrypted audio/video and releases capture on h
       );
     });
     await Promise.all([
-      prepare(a, baseURL!, "device-a"),
-      prepare(b, baseURL!, "device-b"),
+      prepareCallMedia(a, baseURL!, "device-a"),
+      prepareCallMedia(b, baseURL!, "device-b"),
     ]);
     await a.evaluate(() => window.__callMediaHarness.start("device-b"));
     await expect

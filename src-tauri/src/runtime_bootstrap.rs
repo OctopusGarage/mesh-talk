@@ -64,19 +64,21 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             .unwrap_or_else(|| (crate::data_dir(), crate::configured_discovery_port()));
         #[cfg(not(test))]
         let (base_dir, discovery_port) = (crate::data_dir(), crate::configured_discovery_port());
-        let post_office_enabled = app_handle
+        let relay_settings = app_handle
             .state::<crate::settings::SettingsState>()
             .get_for_owner(&account_id)
-            .map(|settings| settings.post_office_enabled)
-            .unwrap_or(false);
-        match mesh_talk_core::node::NodeRuntime::start_configured_guarded(
+            .unwrap_or_else(|_| crate::settings::AppSettings {
+                post_office_enabled: false,
+                ..Default::default()
+            });
+        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network(
             mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
                 account_id: &account_id,
                 display_name: &display_name,
                 password: &password,
                 discovery_port,
-                post_office_enabled,
+                post_office_enabled: relay_settings.post_office_enabled,
                 #[cfg(not(test))]
                 candidate_source: Some(std::sync::Arc::new(
                     crate::tailscale_discovery::TailscaleCandidates { discovery_port },
@@ -138,6 +140,11 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     });
                 }),
             },
+            mesh_talk_core::node::RuntimeNetworkOptions {
+                post_office_send_enabled: relay_settings.post_office_send_enabled,
+                post_office_receive_enabled: relay_settings.post_office_receive_enabled,
+                physical_lan_only: relay_settings.physical_lan_only,
+            },
             |launch| {
                 authority
                     .current(|info| launch(&info.user.display_name))
@@ -175,7 +182,8 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     if let Ok(settings) = app_handle
                         .state::<crate::settings::SettingsState>()
                         .get_for_owner(&account_id)
-                        && let Err(error) = crate::settings::apply_relay_settings(&node, &settings)
+                        && let Err(error) =
+                            crate::settings::apply_relay_settings(&node, &settings).await
                     {
                         log::warn!("Ignored invalid bridge hub setting: {error}");
                     }

@@ -128,3 +128,42 @@ test("a failed settings load is explained and can be retried", async ({
   await expect(page.getByTestId("settings-error")).toHaveCount(0);
   await expect(notifications).toBeEnabled();
 });
+
+test("relay directions persist independently and physical LAN scope gates bridge discovery", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const send = page.getByRole("switch", {
+    name: "Send through post offices",
+    exact: true,
+  });
+  const receive = page.getByRole("switch", {
+    name: "Receive through post offices",
+    exact: true,
+  });
+  const scope = page.getByRole("switch", {
+    name: "Physical LAN discovery only",
+    exact: true,
+  });
+  const bridge = page.getByRole("switch", {
+    name: "Discover peers through a post office",
+    exact: true,
+  });
+  await expect(send).toHaveAttribute("aria-checked", "true");
+  await expect(receive).toHaveAttribute("aria-checked", "true");
+  await send.click();
+  await scope.click();
+  await expect(receive).toHaveAttribute("aria-checked", "true");
+  await expect(bridge).toBeDisabled();
+  await page.getByRole("button", { name: "Close" }).click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await expect(send).toHaveAttribute("aria-checked", "false");
+  await expect(receive).toHaveAttribute("aria-checked", "true");
+  await expect(scope).toHaveAttribute("aria-checked", "true");
+  await page
+    .getByRole("switch", { name: "Use post-office relays", exact: true })
+    .click();
+  await expect(send).toBeDisabled();
+  await expect(receive).toBeDisabled();
+});

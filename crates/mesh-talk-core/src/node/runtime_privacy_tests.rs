@@ -559,3 +559,71 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
     alice.node.pull_pending_files().await;
     assert_eq!(alice.privacy_snapshot(), snapshot);
 }
+
+#[tokio::test]
+async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts() {
+    let port = || {
+        let socket = crate::transport::net::discovery_socket(0).unwrap();
+        socket.local_addr().unwrap().port()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = start(dir.path(), "pair-owner", port()).await;
+    let (bob, _) = start(dir.path(), "pair-joiner", port()).await;
+    let alice_id = alice.user_id().to_owned();
+    let bob_id = bob.user_id().to_owned();
+    let account = alice.account_id().to_owned();
+    assert_ne!(account, bob.account_id());
+    let discover = async |from: &NodeRuntime, target: &NodeRuntime| {
+        tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let _ = from
+                    .probe_endpoint(([127, 0, 0, 1], target.discovery_port()).into())
+                    .await;
+                if from.peers().iter().any(|p| {
+                    p.public.user_id() == target.user_id()
+                        && p.account_id.as_deref() == Some(target.account_id())
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("certified peer must become visible");
+    };
+    discover(&alice, &bob).await;
+    discover(&bob, &alice).await;
+    // Force the prior account proof to durable storage before explicit pairing.
+    alice.handle().cached_peer_snapshot_async().await.unwrap();
+    let code = alice.start_linking();
+    assert_eq!(bob.link_device(&alice_id, &code).await.unwrap(), account);
+    bob.stop().await;
+    alice.stop().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (alice, _) = start(dir.path(), "pair-owner", port()).await;
+    let (bob, _) = start(dir.path(), "pair-joiner", port()).await;
+    assert_eq!(bob.user_id(), bob_id);
+    assert_eq!(bob.account_id(), account);
+    discover(&alice, &bob).await;
+    discover(&bob, &alice).await;
+    let (contact, _) = start(dir.path(), "pair-contact", port()).await;
+    discover(&contact, &alice).await;
+    contact
+        .send_to_account(&account, b"after both restarts", None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if bob
+                .account_history(contact.account_id(), 10)
+                .iter()
+                .any(|entry| entry.text == b"after both restarts")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .expect("ongoing certified sibling history synchronization");
+}
