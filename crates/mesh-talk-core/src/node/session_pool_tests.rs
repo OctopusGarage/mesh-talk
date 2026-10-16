@@ -231,6 +231,18 @@ async fn sync_pool_reconnects_after_remote_session_close() {
     .await
     .unwrap();
     finished.await.unwrap();
+    // The server's local drop only queues FIN. Wait until this endpoint has
+    // observed EOF before testing rejection of an already-closed idle session.
+    // No application frame remains after the completed request round.
+    let closed = tokio::time::timeout(Duration::from_secs(1), channel.recv())
+        .await
+        .expect("client observes remote session closure");
+    assert!(matches!(
+        closed,
+        Err(crate::transport::TransportError::Io(error))
+            if error.kind() == std::io::ErrorKind::UnexpectedEof
+    ));
+    assert!(!channel.idle_tcp_alive());
     alice.recycle_sync_channel(channel);
     let listener = first.await.unwrap();
     let server = tokio::spawn(async move {
