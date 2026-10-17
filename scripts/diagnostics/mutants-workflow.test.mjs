@@ -5,6 +5,16 @@ import test from "node:test";
 const workflow = readFileSync(new URL("../../.github/workflows/mutants.yml", import.meta.url), "utf8");
 const wrapper = readFileSync(new URL("../release/run-mutants.mjs", import.meta.url), "utf8");
 
+test("the required mutants check fails unless every matrix runner succeeds", () => {
+  const aggregate = workflow.split("  mutation-result:\n")[1];
+  assert.ok(aggregate, "branch protection requires an aggregate mutants check");
+  assert.match(aggregate, /name: mutants\n/);
+  assert.match(aggregate, /needs: mutants\n/);
+  assert.match(aggregate, /if: always\(\)\n/);
+  assert.match(aggregate, /MUTATION_RESULT: \$\{\{ needs\.mutants\.result \}\}/);
+  assert.match(aggregate, /run: test "\$MUTATION_RESULT" = success/);
+});
+
 test("both mutation modes forward test threads to the test binary, not Cargo", () => {
   assert.equal([...workflow.matchAll(/run: node \.\.\/scripts\/release\/run-mutants\.mjs/g)].length, 2);
   assert.match(wrapper, /"--", "--", "--test-threads=2"/);

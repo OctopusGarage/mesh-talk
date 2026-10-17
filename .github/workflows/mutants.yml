@@ -98,3 +98,16 @@ jobs:
           name: mutants-report-${{ matrix.worker }}
           path: mutants.out/
           if-no-files-found: error
+
+  # Preserve the stable branch-protection check across matrix size changes.
+  mutation-result:
+    name: mutants
+    needs: mutants
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every mutation shard to succeed
+        env:
+          MUTATION_RESULT: ${{ needs.mutants.result }}
+        run: test "$MUTATION_RESULT" = success
