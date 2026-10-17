@@ -168,6 +168,15 @@ existing two-Mac tailnet. Its header owns build prerequisites and cleanup.
 partition recovery. [Script entry points](../scripts/README.md) distinguishes
 these scenarios and the older gateway rigs.
 
+The [dated physical recovery record (2026-10-16)](network-design-reference.md#worked-example-current-mac-windows-mac2015-and-mac-mini)
+documents four disposable equal relays across two physical sites. After the
+preferred relay stops, encrypted mail traverses the surviving R→Q→S chain and
+returns recipient confirmation. A 130,000-byte file survives sender restart
+before consent, saves with matching SHA-256 and returns completion; stopping and
+restarting Q verifies partition recovery. This is an existing observation, not a
+new run. Three independent sites, a separate client on the mini's LAN and native
+macOS WebView calls remain unverified.
+
 For one shared relay across isolated discovery scopes, select the specific
 `bridge_introduces_both_lans_and_delivers_both_directions` test in
 `crates/mesh-talk-core/tests/bridge_cross_lan.rs`. Use the

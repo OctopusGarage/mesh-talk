@@ -90,18 +90,29 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   Noise XX still reveals the responder's static key, so this is not anonymity.
 - **DM crypto** — **Double Ratchet** (`ratchet/state.rs` + `node/dm_ratchet.rs`):
   `shared_root = HKDF(DH(me,peer))`; init_alice/init_bob; DH ratchet on each inbound →
-  forward secrecy + post-compromise recovery; bounded out-of-order (1000/2000); lower
+  fresh DH chains provide forward secrecy + post-compromise recovery, subject to
+  the bootstrap limitation below; bounded out-of-order (1000/2000); lower
   `user_id` is the canonical initiator (simultaneous-init tie-break); state encrypted on
   disk (`node/ratchet_sessions.rs`). The tie-break may replace an initial sending
   session only before an authenticated receiving chain exists; replayed ciphertext
   must not reset an established session, including after reload.
-  The `dm.rs` X3DH sealed-box (no FS) is now used only
+  Bootstrap uses the recipient's permanent X25519 key, so later compromise of
+  that key can recover recorded messages in the initiator's first sending chain,
+  until the initiator processes the responder's fresh DH header. Later chains
+  require the corresponding ephemeral secrets; this is not whole-session exposure.
+  The `dm.rs` recipient sealed-box (no FS) is now used only
   to distribute channel keys, seal file manifests and encrypt delivery-control
   metadata (the latter has no forward secrecy and contains no message text).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
-  persisted so a restarted node can resume sending. An owner-authored `ChannelDissolve`
+  persisted so a restarted node can resume sending. The static-recipient sealed
+  distributions remain recoverable after member identity-key compromise, so
+  deleting used chain keys does not protect recorded group history against that
+  attack. Receiver state currently rebuilds by reopening distributions from the
+  event log; replacing this with consuming pairwise ratchets requires a durable,
+  transactional receiver projection that preserves restart and replay behavior.
+  An owner-authored `ChannelDissolve`
   event closes a channel for all members without erasing local history; closed channels
   remain visible as read-only history and reject new local events. Desktop-created
   groups mark the
@@ -951,12 +962,18 @@ the UI sends users who suspect compromise to new identity creation.
 ## 8. Security posture (summary)
 
 Standard primitives + consistent domain separation; AEAD everywhere; PBKDF2-600k at rest;
-Noise XX with identity binding; Double-Ratchet + sender-key forward secrecy with
+Noise XX with identity binding; Double-Ratchet + sender-key encryption with
 zeroize-on-drop; signed content-addressed log with fork detection; deterministic relay
 election; the sync `have` id-set is streamed in chunks so arbitrarily large conversations
 reconcile; the relay bounds its storage by event count and 512 MiB of ciphertext
 (LRU whole-conversation eviction) plus a 30-day maximum mailbox age, and its serve
-loop (round cap + idle timeout). Known limitations (by design): device linking relies on
+loop (round cap + idle timeout). Arrival metadata is committed only after event
+validation, before the event is persisted, so rejected uploads cannot grow the
+retention sidecar. The log validates once under exclusive access; duplicate
+events do not write arrival records. Forward secrecy remains limited by the
+initial DM bootstrap and static-recipient group key distribution described in
+section 2 and [the security policy](../SECURITY.md).
+Known limitations: device linking relies on
 the one-time pairing code (no separate SAS UX); backfill history travels as plaintext over
 the Noise channel. A new client's relay upload contains a pairwise opaque
 mailbox event: original authors, conversation IDs, kinds, timestamps, channel
