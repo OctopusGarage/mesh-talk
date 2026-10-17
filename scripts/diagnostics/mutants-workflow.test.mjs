@@ -9,7 +9,8 @@ test("both mutation modes forward test threads to the test binary, not Cargo", (
   assert.equal([...workflow.matchAll(/run: node \.\.\/scripts\/release\/run-mutants\.mjs/g)].length, 2);
   assert.match(wrapper, /"--", "--", "--test-threads=2"/);
   assert.doesNotMatch(workflow, /continue-on-error: true/);
-  assert.match(workflow, /cargo test --workspace -- --test-threads=2/);
+  assert.doesNotMatch(workflow, /cargo test --workspace/);
+  assert.doesNotMatch(wrapper, /"--baseline", "skip"/);
   assert.match(workflow, /tool: cargo-mutants@27\.1\.0/);
   assert.match(wrapper, /const shard = mutationShard\(Number\(process\.env\.GITHUB_RUN_NUMBER/);
   assert.match(wrapper, /"--shard", shard/);
@@ -22,4 +23,17 @@ test("mutation report upload includes the workspace-root output directory", () =
   assert.ok(upload, "mutation report upload must be present");
   assert.match(upload, /^\s+(?:path: )?mutants\.out\/\s*$/m);
   assert.match(upload, /if: always\(\) && hashFiles\('mutants\.out\/\*\*'\) != ''/);
+});
+
+test("mutation builds reuse one incremental tree per matrix runner", () => {
+  assert.match(workflow, /worker: \[0, 1, 2, 3\]/);
+  assert.match(workflow, /fail-fast: false/);
+  assert.match(workflow, /CARGO_INCREMENTAL: ['"]1['"]/);
+  assert.match(workflow, /MUTATION_WORKER: \$\{\{ matrix.worker \}\}/);
+  assert.match(workflow, /MUTATION_WORKERS: ['"]4['"]/);
+  assert.match(workflow, /workspaces: ['"]\.['"]/);
+  assert.match(wrapper, /"--in-place"/);
+  assert.match(wrapper, /"--profile", "mutants"/);
+  assert.doesNotMatch(wrapper, /"(?:-j|--jobs)"/);
+  assert.match(workflow, /name: mutants-report-\$\{\{ matrix.worker \}\}/);
 });
