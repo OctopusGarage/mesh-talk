@@ -130,6 +130,10 @@ jobs:
         if: matrix.os != 'ubuntu-latest'
         working-directory: src-tauri
         shell: bash
+        env:
+          # Concurrent encrypted file/log rigs exceed loopback deadlines on
+          # shared Windows runners. Keep every assertion and timeout intact.
+          RUST_TEST_THREADS: ${{ matrix.os == 'windows-latest' && '1' || '4' }}
         run: |
           set -o pipefail
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
