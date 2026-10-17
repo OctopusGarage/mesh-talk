@@ -12,6 +12,8 @@ abd = "abd"
 seeked = "seeked"
 # The city-photo credit names the photographer's site, foto-tw.de.
 foto = "foto"
+# Spanish client-relative presence wording is asserted outside the locale catalogs.
+cliente = "cliente"
 
 [default.extend-identifiers]
 # "UPnP" (Universal Plug and Play) trips the Pn->On heuristic.
