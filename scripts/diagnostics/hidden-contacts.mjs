@@ -456,7 +456,10 @@ try {
   await closeDialogs();
 
   await stop(peer, true);
-  await until("real offline peer expires from roster", async () => !(await observe("list_peers")).some(p => p.name === peerName), 180000);
+  // Authenticated routes remain valid for 300s, then discovery evicts them on
+  // its next 30s receive/cleanup tick. Observe real expiry without shortening
+  // production presence lifetimes or clearing the roster through a test hook.
+  await until("real offline peer expires from roster", async () => !(await observe("list_peers")).some(p => p.name === peerName), 360000);
   await manage();
   await fill("hidden-contacts-search", peerName);
   const nativeRect = await command("POST", "/window/rect", coreState.minimumWindow);
