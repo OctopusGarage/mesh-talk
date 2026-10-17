@@ -6,8 +6,10 @@ import { mutationShard, parseSelectedMutants, validateMutationReport } from "./m
 
 const args = process.argv.slice(2);
 assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--in-diff"), "unsupported mutation filter arguments");
-const shard = mutationShard(Number(process.env.GITHUB_RUN_NUMBER ?? "1"));
-const options = ["--workspace", "--test-workspace", "true", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", "240", "--output", "..", "-j", "2", ...args];
+const shard = mutationShard(Number(process.env.GITHUB_RUN_NUMBER ?? "1"), Number(process.env.MUTATION_WORKER ?? "0"), Number(process.env.MUTATION_WORKERS ?? "1"));
+// In-place mode enforces one worker, reusing the checkout's build cache. CI runs
+// shards on separate machines to avoid competing workspace builds and tests.
+const options = ["--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", "240", "--output", "..", ...args];
 const listing = spawnSync("cargo", ["mutants", "--list", "--json", ...options], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
 if (listing.error) throw listing.error;
 assert.equal(listing.status, 0, `mutation list failed: ${listing.stderr}`);
