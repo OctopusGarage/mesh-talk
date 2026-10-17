@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ComposerImagePreview } from "./ComposerImagePreview";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   SendHorizontal,
@@ -192,6 +193,7 @@ export function Composer({
   onPasteFiles,
   onScreenshot,
   screenshotAvailable = true,
+  stagedScreenshot,
   placeholder,
   replyTo,
   onCancelReply,
@@ -210,9 +212,11 @@ export function Composer({
   onAttachDirectory?: () => void;
   /** Send copied files after the user presses Enter or Send. */
   onPasteFiles?: (files: File[]) => Promise<void>;
-  /** Capture a screenshot and send it (hideWindow = hide the app first). */
+  /** Capture and edit a screenshot (hideWindow = hide the app first). */
   onScreenshot?: (hideWindow: boolean) => void;
   screenshotAvailable?: boolean;
+  /** A confirmed screenshot joins copied files and waits for explicit Send. */
+  stagedScreenshot?: File | null;
   placeholder: string;
   replyTo?: ChatMessage | null;
   onCancelReply?: () => void;
@@ -244,6 +248,24 @@ export function Composer({
   const [sendRejected, setSendRejected] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [sendingFiles, setSendingFiles] = useState(false);
+  const lastScreenshot = useRef<File | null>(null);
+  const screenshotFiles = useRef(new WeakSet<File>());
+  useEffect(() => {
+    if (!stagedScreenshot) {
+      if (lastScreenshot.current) {
+        const stale = screenshotFiles.current;
+        setPendingFiles((files) => files.filter((file) => !stale.has(file)));
+        screenshotFiles.current = new WeakSet();
+        lastScreenshot.current = null;
+      }
+      return;
+    }
+    if (lastScreenshot.current === stagedScreenshot) return;
+    lastScreenshot.current = stagedScreenshot;
+    screenshotFiles.current.add(stagedScreenshot);
+    setPendingFiles((files) => [...files, stagedScreenshot]);
+    ref.current?.focus();
+  }, [stagedScreenshot]);
   const ref = useRef<HTMLTextAreaElement>(null);
   const [expressionTab, setExpressionTab] = useState<
     "emoji" | "stickers" | null
@@ -478,7 +500,11 @@ export function Composer({
               key={`${file.name}-${index}`}
               className="flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs"
             >
-              <Paperclip className="h-3.5 w-3.5 shrink-0" />
+              {file.type.startsWith("image/") ? (
+                <ComposerImagePreview file={file} />
+              ) : (
+                <Paperclip className="h-3.5 w-3.5 shrink-0" />
+              )}
               <span className="truncate" title={file.name}>
                 {file.name}
               </span>

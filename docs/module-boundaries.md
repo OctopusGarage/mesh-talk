@@ -143,6 +143,9 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   leases, staging cleanup and source-specific media intent; store intents retain
   accepted paths and retry ownership. Screenshot edits retain their originating
   conversation rather than targeting whichever conversation is active later.
+  Confirmed screenshots join the composer's pending files; only the normal Send
+  action hands them to delivery. `screenshot/` owns image-coordinate geometry,
+  annotation painting, floating controls and temporary fullscreen restoration.
 - `DiagnosticsDialog.tsx` delegates observations and native actions to
   `diagnostics/useDiagnosticsController.ts`. Each opening owns independent
   refresh generations, serial peer polling, bounded activity history and

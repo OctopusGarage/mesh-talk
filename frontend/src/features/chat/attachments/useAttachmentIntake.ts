@@ -3,6 +3,7 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { TFunction } from "i18next";
 import { chat } from "@/lib/api";
+import { useAuth } from "@/store/auth";
 import { errorMessage } from "@/lib/error";
 import {
   IMAGE_EXTENSIONS,
@@ -51,10 +52,17 @@ export function useAttachmentIntake(
   }, [sendOptions]);
   const mounted = useRef(false);
   const conversationEpoch = useRef(0);
+  const capturing = useRef(false);
+  const captureGeneration = useRef(0);
   const [dragOver, setDragOver] = useState(false);
   const [screenshotAvailable, setScreenshotAvailable] = useState(false);
   const [screenshot, setScreenshot] = useState<{
     bytes: Uint8Array;
+    current: Current;
+  } | null>(null);
+
+  const [stagedScreenshot, setStagedScreenshot] = useState<{
+    file: File;
     current: Current;
   } | null>(null);
 
@@ -173,12 +181,19 @@ export function useAttachmentIntake(
   }
   async function captureScreenshot(hideWindow: boolean) {
     const current = capture();
-    if (!current()) return;
+    if (!current() || capturing.current || screenshot) return;
+    const request = ++captureGeneration.current;
+    capturing.current = true;
     try {
       const bytes = await chat.captureScreen(hideWindow);
-      if (current() && bytes.length > 0) setScreenshot({ bytes, current });
+      if (
+        current() &&
+        request === captureGeneration.current &&
+        bytes.length > 0
+      )
+        setScreenshot({ bytes, current });
     } catch (error) {
-      if (!current()) return;
+      if (!current() || request !== captureGeneration.current) return;
       const message = errorMessage(error);
       useChat
         .getState()
@@ -187,25 +202,19 @@ export function useAttachmentIntake(
             ? t("screenshot.permission")
             : t("screenshot.failed", { error: message }),
         );
+    } finally {
+      capturing.current = false;
     }
   }
   async function sendScreenshot(bytes: Uint8Array) {
     const origin = screenshot;
     if (!origin?.current()) return;
-    try {
-      await stage(
-        bytes,
-        "png",
-        undefined,
-        true,
-        origin.current,
-        options.current,
-      );
-      setScreenshot((value) => (value === origin ? null : value));
-    } catch (error) {
-      report(error, origin.current);
-      throw error;
-    }
+    captureGeneration.current++;
+    const file = new File([new Uint8Array(bytes)], "screenshot.png", {
+      type: "image/png",
+    });
+    setStagedScreenshot({ file, current: origin.current });
+    setScreenshot((value) => (value === origin ? null : value));
   }
 
   useEffect(() => {
@@ -221,7 +230,18 @@ export function useAttachmentIntake(
       ) {
         conversationEpoch.current++;
         setScreenshot(null);
+        setStagedScreenshot(null);
         setDragOver(false);
+      }
+    });
+    const unsubscribeAuth = useAuth.subscribe((state, previous) => {
+      if (
+        state.generation !== previous.generation ||
+        state.user?.id !== previous.user?.id
+      ) {
+        conversationEpoch.current++;
+        setScreenshot(null);
+        setStagedScreenshot(null);
       }
     });
     let available = true;
@@ -237,6 +257,7 @@ export function useAttachmentIntake(
       mounted.current = false;
       available = false;
       unsubscribe();
+      unsubscribeAuth();
     };
   }, []);
   useEffect(() => {
@@ -290,6 +311,9 @@ export function useAttachmentIntake(
 
   return {
     dragOver,
+    stagedScreenshot: stagedScreenshot?.current()
+      ? stagedScreenshot.file
+      : null,
     screenshotAvailable,
     screenshotBytes: screenshot?.current() ? screenshot.bytes : null,
     attachFile: () => pick("file"),
@@ -298,6 +322,9 @@ export function useAttachmentIntake(
     pasteFiles,
     captureScreenshot,
     sendScreenshot,
-    cancelScreenshot: () => setScreenshot(null),
+    cancelScreenshot: () => {
+      captureGeneration.current++;
+      setScreenshot(null);
+    },
   };
 }

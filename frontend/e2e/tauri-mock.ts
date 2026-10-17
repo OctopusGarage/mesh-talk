@@ -977,8 +977,9 @@ export const test = base.extend({
           // supplies a decodable image for the selection and annotation flow.
           capture_screen: () => {
             const canvas = document.createElement("canvas");
-            canvas.width = 320;
-            canvas.height = 180;
+            const desktop = dataMode === "screenshot-desktop";
+            canvas.width = desktop ? window.innerWidth * 2 : 320;
+            canvas.height = desktop ? window.innerHeight * 2 : 180;
             const context = canvas.getContext("2d");
             if (!context)
               throw new Error("Canvas unavailable in screenshot mock");
@@ -989,6 +990,42 @@ export const test = base.extend({
               context.fillStyle = gradient;
             } else context.fillStyle = "#1c293d";
             context.fillRect(0, 0, canvas.width, canvas.height);
+            if (desktop) {
+              context.scale(2, 2);
+              context.fillStyle = "#d9e2e7";
+              context.fillRect(0, 0, window.innerWidth, window.innerHeight);
+              context.fillStyle = "#fff";
+              context.fillRect(
+                45,
+                55,
+                window.innerWidth - 90,
+                window.innerHeight - 100,
+              );
+              context.fillStyle = "#eef1f4";
+              context.fillRect(45, 55, window.innerWidth - 90, 36);
+              context.fillStyle = "#263c48";
+              context.font = "16px sans-serif";
+              context.fillText("Demo desktop — project notes", 66, 79);
+              context.font = "28px sans-serif";
+              context.fillText("Screenshot interaction review", 84, 147);
+              context.font = "16px sans-serif";
+              context.fillText(
+                "Select an area. Annotate it. Add it to your message.",
+                84,
+                183,
+              );
+              const gradient = context.createLinearGradient(80, 220, 600, 420);
+              gradient.addColorStop(0, "#b7d8ce");
+              gradient.addColorStop(1, "#618c9d");
+              context.fillStyle = gradient;
+              context.fillRect(84, 220, window.innerWidth - 180, 180);
+              context.fillStyle = "#526777";
+              context.fillText(
+                "Synthetic fixture · no personal desktop content",
+                84,
+                window.innerHeight - 80,
+              );
+            }
             const b64 = canvas.toDataURL("image/png").split(",")[1];
             const bin = atob(b64);
             return Array.from(bin, (char) => char.charCodeAt(0));
