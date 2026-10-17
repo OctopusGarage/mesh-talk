@@ -30,6 +30,7 @@ test("separate PR preflights cannot erase each other's or full-health browser ar
     executable("node", `#!/bin/sh\nexec ${node} ${shellQuote(path.join(root, "fake-node.mjs"))} "$@"\n`);
     executable("npx", `#!/bin/sh\nexec ${node} ${shellQuote(path.join(root, "capture.mjs"))} "$@"\n`);
     for (const tool of ["npm", "typos"]) executable(tool, "#!/bin/sh\nexit 0\n");
+    executable("rg", '#!/bin/sh\nexec grep -E "$@"\n');
     executable("git", `#!/bin/sh
       case "$1" in
         status) ;;

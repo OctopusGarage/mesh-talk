@@ -119,6 +119,9 @@ MESH_PR_LINUX_HOST=mac2015 MESH_PR_LINUX_PLATFORM=linux/amd64 \
 The remote adapter uploads the same committed source archive, plan and Dockerfile
 used by local Docker. Mounts and named caches belong to the remote Docker host;
 local filesystem paths are never passed as remote bind mounts. Selected test
+containers enable IPv6 loopback so routed discovery tests exercise `::1` even
+when Docker's bridge network has no IPv6 subnet. This is a container setting;
+the Docker daemon's network configuration stays unchanged. Test
 reports and logs are copied back before the source revision and archive digest
 are validated. Remote run directories remain under the configured temporary root
 for diagnosis; named caches are reusable. Docker's executable directory is added
