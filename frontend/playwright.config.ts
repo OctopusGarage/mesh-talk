@@ -15,9 +15,12 @@ const url = `http://127.0.0.1:${port}`;
 // headless Chromium with a mocked Tauri IPC layer (see e2e/tauri-mock.ts).
 export default defineConfig({
   testDir: "./e2e",
-  // A cold Vite transform on Windows can consume most of Playwright's 30s
-  // default before the first page becomes interactive.
-  timeout: process.platform === "win32" ? 90_000 : 30_000,
+  // Cold Windows transforms and browser coverage instrumentation can consume
+  // the 30s default before a multi-step scenario completes.
+  timeout:
+    process.platform === "win32" || process.env.MESH_TALK_E2E_COVERAGE === "1"
+      ? 90_000
+      : 30_000,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
