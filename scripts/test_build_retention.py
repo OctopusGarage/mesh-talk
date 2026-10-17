@@ -120,6 +120,20 @@ class RetentionTests(unittest.TestCase):
         ]
         self.assertEqual(log[0]["root"], str(other))
 
+    def test_tree_stats_counts_files_once_across_hard_links(self):
+        tree = self.base / "stat-tree"
+        tree.mkdir()
+        nested = tree / "deps"
+        nested.mkdir()
+        artifact = nested / "artifact.rlib"
+        artifact.write_bytes(b"x" * 8192)
+        os.link(artifact, nested / "artifact-copy.rlib")
+        expected = sum(
+            info.st_blocks * 512 if hasattr(info, "st_blocks") else info.st_size
+            for info in (tree.stat(), nested.stat(), artifact.stat())
+        )
+        self.assertEqual(RETENTION.tree_stats(tree)[0], expected)
+
     def test_retains_five_successful_sets_globally(self):
         other = self.base / "other"
         self.git("worktree", "add", "-qb", "other", str(other))

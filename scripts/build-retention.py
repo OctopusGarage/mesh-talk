@@ -164,7 +164,14 @@ def tree_stats(path):
             with os.scandir(directory) as entries:
                 for entry in entries:
                     try:
-                        info = entry.stat(follow_symlinks=False)
+                        # Windows DirEntry.stat() reports zero file IDs. Use
+                        # stat() there so distinct files are not deduplicated
+                        # as one inode and hard links still count only once.
+                        info = (
+                            os.stat(entry.path, follow_symlinks=False)
+                            if os.name == "nt"
+                            else entry.stat(follow_symlinks=False)
+                        )
                     except FileNotFoundError:
                         continue
                     account(info)
