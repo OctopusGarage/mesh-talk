@@ -51,3 +51,22 @@ command lists. A script without direct imports may still be selected by CI globs
 or be an explicitly documented manual acceptance rig; check those callers before
 removing it. Dated evidence is retained as evidence, not rewritten as current
 implementation truth.
+
+## Local validation stages
+
+`validation/stage.mjs` runs named commands with explicit argv, stage timings,
+logs and successful local evidence reuse. Example:
+
+```bash
+node scripts/validation/stage.mjs workspace-tests --profile shared --resource heavy -- cargo test --workspace
+MESH_VALIDATION_FRESH=1 ./scripts/check-health.sh
+```
+
+Reuse requires a clean identical revision, matching tool/environment/command
+inputs, and intact required artifacts; receipts expire after 24 hours. CI always
+executes. Shared stages exclude PR transport settings from identity because those
+settings do not affect local checks. Full preflight binds its comparison base and
+always executes Linux/Windows checks. Resource locks serialize heavy workloads
+across worktrees. `validation/selectors.mjs` checks actual compiled test inventories
+before expensive browser/remote work; `validation/browser.mjs` owns each browser
+run's port and evidence directory. Neither helper removes required scenarios.

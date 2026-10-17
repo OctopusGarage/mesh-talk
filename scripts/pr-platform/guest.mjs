@@ -19,7 +19,7 @@ export async function digestFile(filename) {
   return hash.digest("hex");
 }
 
-export function runCommand(program, args, { cwd, env = process.env, timeoutMs = 1_800_000, logPath, maxOutputBytes = 128 * 1024 * 1024 } = {}) {
+export function runCommand(program, args, { cwd, env = process.env, timeoutMs = 1_800_000, logPath, detached = process.platform !== "win32", maxOutputBytes = 128 * 1024 * 1024 } = {}) {
   return new Promise(resolve => {
     const started = Date.now();
     let output = "";
@@ -39,7 +39,7 @@ export function runCommand(program, args, { cwd, env = process.env, timeoutMs = 
     }
     const log = logPath ? createWriteStream(logPath) : undefined;
     log?.on("error", error => { failure = error.message; });
-    const child = spawn(executable, argv, { cwd, env, shell: false, detached: process.platform !== "win32", windowsHide: true });
+    const child = spawn(executable, argv, { cwd, env, shell: false, detached, windowsHide: true });
     const consume = chunk => { log?.write(chunk); output += chunk.toString(); if (Buffer.byteLength(output) > maxOutputBytes) output = output.slice(-Math.floor(maxOutputBytes / 4)); };
     child.stdout?.on("data", consume);
     child.stderr?.on("data", consume);
@@ -51,8 +51,9 @@ export function runCommand(program, args, { cwd, env = process.env, timeoutMs = 
     }, timeoutMs);
     child.on("close", code => {
       clearTimeout(timer);
-      log?.end();
-      resolve({ code, timedOut, output, error: failure, elapsedMs: Date.now() - started });
+      const finish = () => resolve({ code, timedOut, output, error: failure, elapsedMs: Date.now() - started });
+      if (log) log.end(finish);
+      else finish();
     });
   });
 }

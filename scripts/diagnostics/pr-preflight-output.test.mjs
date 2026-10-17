@@ -1,65 +1,46 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-// The controller is a POSIX shell script; the Windows guest runs its Node plan.
-test("separate PR preflights cannot erase each other's or full-health browser artifacts", { skip: process.platform === "win32" }, () => {
+test("separate browser stages isolate server ports, results and HTML reports", () => {
   const root = mkdtempSync(path.join(tmpdir(), "mesh-preflight-output-"));
   try {
-    for (const directory of ["scripts", "scripts/diagnostics", "frontend", "bin"])
+    for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
       mkdirSync(path.join(root, directory), { recursive: true });
-    copyFileSync(new URL("../pr-preflight.sh", import.meta.url), path.join(root, "scripts/pr-preflight.sh"));
-    const executable = (name, body) => writeFileSync(path.join(root, "bin", name), body, { mode: 0o755 });
-    const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
-    const node = shellQuote(process.execPath);
-    writeFileSync(path.join(root, "fake-node.mjs"), `
-      import { readFileSync } from 'node:fs';
-      const args = process.argv.slice(2);
-      if (args[0] === '--input-type=module') {
-        const source = readFileSync(0, 'utf8');
-        console.log(source.includes('flags.uiSpecs.join') ? 'e2e/settings-recovery.spec.ts' : 'origin/main');
-      } else if (args.includes('--plan')) console.log('{}');
-    `);
-    writeFileSync(path.join(root, "capture.mjs"), `
-      import { appendFileSync } from 'node:fs';
-      appendFileSync(process.env.PREFLIGHT_TRACE, JSON.stringify({ args: process.argv.slice(2), html: process.env.PLAYWRIGHT_HTML_OUTPUT_DIR }) + '\\n');
-    `);
-    executable("node", `#!/bin/sh\nexec ${node} ${shellQuote(path.join(root, "fake-node.mjs"))} "$@"\n`);
-    executable("npx", `#!/bin/sh\nexec ${node} ${shellQuote(path.join(root, "capture.mjs"))} "$@"\n`);
-    for (const tool of ["npm", "typos"]) executable(tool, "#!/bin/sh\nexit 0\n");
-    executable("rg", '#!/bin/sh\nexec grep -E "$@"\n');
-    executable("git", `#!/bin/sh
-      case "$1" in
-        status) ;;
-        rev-parse|merge-base) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
-        diff) echo frontend/src/App.tsx ;;
-      esac
-    `);
+    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs"])
+      copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
     const trace = path.join(root, "trace.jsonl");
+    writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), `
+      const fs = require('node:fs');
+      fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify({ stats: { expected: 1, unexpected: 0, flaky: 0 }, errors: [] }));
+      fs.appendFileSync(process.env.PREFLIGHT_TRACE, JSON.stringify({ args: process.argv.slice(2), html: process.env.PLAYWRIGHT_HTML_OUTPUT_DIR, port: process.env.MESH_TALK_E2E_PORT }) + '\\n');
+    `);
     for (let run = 0; run < 2; run++) {
-      const result = spawnSync("bash", [path.join(root, "scripts/pr-preflight.sh"), "e2e/settings-recovery.spec.ts"], {
-        cwd: root,
-        env: { ...process.env, PATH: `${path.join(root, "bin")}:${process.env.PATH}`, MESH_PR_KEEP_AWAKE: "1", PREFLIGHT_TRACE: trace },
-        encoding: "utf8",
-        timeout: 15_000,
+      const result = spawnSync(process.execPath, [path.join(root, "scripts/validation/browser.mjs"), "full", "e2e/settings-recovery.spec.ts"], {
+        cwd: path.join(root, "frontend"), env: { ...process.env, PREFLIGHT_TRACE: trace }, encoding: "utf8", timeout: 15_000,
       });
       assert.equal(result.status, 0, result.stdout + result.stderr);
     }
     const commands = readFileSync(trace, "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(commands.length, 2);
-    const outputs = commands.map(({ args, html }) => {
+    const outputs = commands.map(({ args, html, port }) => {
       const position = args.indexOf("--output");
-      assert(position >= 0, "PR preflight must isolate its artifacts from full-health's default test-results");
-      const directory = path.resolve(root, "frontend", args[position + 1]);
-      assert(directory.startsWith(path.join(root, "target") + path.sep));
+      assert(position >= 0);
+      const directory = args[position + 1];
+      assert(directory.startsWith(path.join(realpathSync(root), "target") + path.sep));
       assert(args.includes("e2e/settings-recovery.spec.ts"));
       assert.equal(path.dirname(html), path.dirname(directory));
       assert.notEqual(html, directory);
+      assert(Number(port) > 0 && Number(port) < 65536);
+      assert(args.includes("--workers=1") && args.includes("--retries=0"));
       return directory;
     });
-    assert.notEqual(outputs[0], outputs[1], "each invocation needs its own output directory");
+    assert.notEqual(outputs[0], outputs[1]);
+    const controller = readFileSync(new URL("../pr-preflight.sh", import.meta.url), "utf8");
+    assert(controller.includes('--resource heavy'));
+    assert(controller.includes('scripts/validation/browser.mjs coverage'));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

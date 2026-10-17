@@ -24,6 +24,45 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+## Local evidence reuse and resource ownership
+
+Local gates use `scripts/validation/stage.mjs` for diagnostics, frontend builds,
+lint/typechecking, unit coverage, workspace tests, and browser runs. An identical
+successful stage on a clean committed HEAD can be reused for up to 24 hours.
+Receipts bind the revision, working directory, platform, tool versions, command
+arguments, relevant environment and required output digests. Base-sensitive local
+preflight also binds the resolved comparison ref. Changed or missing artifacts,
+failed/interrupted stages, dirty sources, and changed inputs require execution.
+`CI=1` and `MESH_VALIDATION_FRESH=1` always execute checks. Advisory and secret
+scans continue to run directly rather than reusing time-sensitive scan verdicts.
+
+`make test` and full health share the same workspace-test stage. Preflight and
+health share frontend static/unit stages. The PR wrapper still invokes preflight;
+its local work can reuse intact evidence, while both required remote platforms
+always execute. An unavailable environment therefore still blocks publication.
+No local receipt replaces a protected GitHub check. Local receipts are trusted
+workspace acceleration, not signed attestations against a hostile local user.
+
+Heavy local stages share a resource lock across Git worktrees, preventing browser,
+coverage and Rust compilation workloads from competing. Node unit tests default
+to two workers and Rust tests to one thread; explicit `VITEST_MAX_WORKERS` and
+`RUST_TEST_THREADS` values override those defaults and invalidate matching evidence.
+Each browser stage owns an available port and private results/report directory.
+Coverage cleanup and merging occur inside that stage's exclusive resource window.
+
+Before browser coverage or remote execution, preflight compiles the workspace
+library test executables once and checks selectors against libtest's actual test
+names without executing tests. Invalid filters fail locally with the crate and
+selector. Choose module filters present on the preparing platform for tests whose
+individual names are platform-specific. Remote execution still rejects selectors
+that run zero tests on either guest.
+
+Per-stage logs and atomic success receipts live under `target/validation/`.
+Console output reports queue time, execution time, reuse, and running-stage
+heartbeats. Platform preflight reports each platform's completion immediately and
+prints progress while the other continues. Missing/corrupted evidence is a cache
+miss; it is never a successful verification result.
+
 ## CI ownership and browser sharding
 
 The standalone `scripts/check-health.sh` still runs the full local gate before
@@ -106,8 +145,7 @@ workflow-only diagnostic plan does not install frontend dependencies.
 Verification archives suppress export substitutions and text/filter conversions
 in private Git metadata so the archived bytes match the committed source.
 
-Frontend changes require affected browser specs. Frontend unit coverage runs
-once in the existing local preflight; the two platform guests do not repeat
+Frontend changes require affected browser specs. Frontend unit coverage is a shared local stage; the two platform guests do not repeat
 the whole frontend unit suite. To target another PR base, pass
 `--base origin/release` before `--`; the wrapper uses that same base for
 change selection, coverage and `gh pr create --base release`. A local revision
@@ -120,7 +158,8 @@ before they consume time. Both platforms test an archive of committed HEAD. Work
 isolated from installed applications and post-office services. Both results
 are collected even if one fails. Logs and revision-bound reports remain
 untracked under `target/pr-platform/`; dependency and build caches can be
-reused, but successful verdicts are never reused for another revision.
+reused, but successful verdicts are never reused for another revision. Required
+remote execution is never replaced by local receipts.
 On macOS the preflight holds a temporary `caffeinate -is` assertion until it
 exits, preventing idle/system sleep on AC without changing power settings or
 keeping the display lit. This avoids Docker timer failures during maintenance

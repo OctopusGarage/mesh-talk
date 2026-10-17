@@ -231,11 +231,21 @@ async function main() {
   await writeFile(path.join(directory, "plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
   console.log(`Linux Docker: starting selected plan for ${plan.sourceSha}; evidence ${path.join(directory, "linux")}`);
   console.log(`Windows SSH: starting selected plan for ${plan.sourceSha}; evidence ${path.join(directory, "windows")}`);
-  const platforms = await collectPlatforms({ linux: () => linux(cwd, directory, plan, timeoutSeconds), windows: () => windows(cwd, directory, plan, timeoutSeconds) });
-  for (const [name, result] of Object.entries(platforms)) {
-    const failures = result.results?.filter(step => !step.ok).map(step => `${step.name}: ${step.error}`).join("; ");
-    console.log(`${name}: ${result.ok ? "passed" : `failed: ${result.error || failures || "guest process failed"}`}; evidence ${path.join(directory, name)}`);
-  }
+  const pending = new Set(["linux", "windows"]);
+  const started = Date.now();
+  const progress = setInterval(() => console.log(`Platform preflight: ${[...pending].join(", ")} running for ${Math.round((Date.now() - started) / 1000)}s; evidence ${directory}`), 30_000);
+  const tracked = (name, adapter) => async () => {
+    try {
+      const result = await adapter();
+      const failures = result.results?.filter(step => !step.ok).map(step => `${step.name}: ${step.error}`).join("; ");
+      console.log(`${name}: ${result.ok ? "passed" : `failed: ${result.error || failures || "guest process failed"}`}; evidence ${path.join(directory, name)}`);
+      return result;
+    } catch (error) { console.log(`${name}: failed: ${error.message}; evidence ${path.join(directory, name)}`); throw error; }
+    finally { pending.delete(name); }
+  };
+  let platforms;
+  try { platforms = await collectPlatforms({ linux: tracked("linux", () => linux(cwd, directory, plan, timeoutSeconds)), windows: tracked("windows", () => windows(cwd, directory, plan, timeoutSeconds)) }); }
+  finally { clearInterval(progress); }
   const report = { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, plan, platforms, ok: Object.values(platforms).every(result => result.ok) };
   if (await checked("git", ["rev-parse", "HEAD"], { cwd, timeoutMs: 30_000 }) !== candidate || await checked("git", ["status", "--porcelain"], { cwd, timeoutMs: 30_000 })) {
     report.ok = false;

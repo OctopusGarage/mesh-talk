@@ -15,16 +15,16 @@ build:
 	python3 scripts/build-retention.py run --archive binary -- cargo build --release
 
 test:
-	$(MANAGED_BUILD) cargo test --workspace
+	$(MANAGED_BUILD) node scripts/validation/stage.mjs workspace-tests --profile shared --resource heavy -- cargo test --workspace
 
 # Normal development: select the affected crate and test filter, or one integration
 # target. Keep `make test` as the explicit comprehensive pre-PR/CI command.
 test-focused:
 	@test -n "$(TEST_PACKAGE)" && { test -n "$(TEST_FILTER)" || test -n "$(TEST_TARGET)"; } || { echo "Usage: make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync [TEST_TARGET=bridge_cross_lan]" >&2; exit 2; }
 	@if [ -n "$(TEST_TARGET)" ]; then \
-		$(MANAGED_BUILD) cargo test -p "$(TEST_PACKAGE)" --test "$(TEST_TARGET)" "$(TEST_FILTER)"; \
+		$(MANAGED_BUILD) node scripts/validation/stage.mjs rust-focused --profile shared --resource heavy -- cargo test -p "$(TEST_PACKAGE)" --test "$(TEST_TARGET)" "$(TEST_FILTER)"; \
 	else \
-		$(MANAGED_BUILD) cargo test -p "$(TEST_PACKAGE)" --lib "$(TEST_FILTER)"; \
+		$(MANAGED_BUILD) node scripts/validation/stage.mjs rust-focused --profile shared --resource heavy -- cargo test -p "$(TEST_PACKAGE)" --lib "$(TEST_FILTER)"; \
 	fi
 
 # End-to-end integration tests: real `mesh-talk-node` processes over UDP discovery +
