@@ -144,7 +144,7 @@ where
 }
 
 #[cfg(test)]
-async fn serve_relay_or_bridge_connection<IO>(
+pub(super) async fn serve_relay_or_bridge_connection<IO>(
     channel: SecureChannel<IO>,
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,

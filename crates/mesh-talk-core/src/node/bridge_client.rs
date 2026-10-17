@@ -597,6 +597,12 @@ mod tests {
                 .unwrap()
                 .update(&proof, address.ip(), &node.user_id());
         }
+        node.set_bridge_hub_id(Some(&slow.user_id())).unwrap();
+        assert_eq!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            slow.public(),
+            "the stalled query must precede the healthy query"
+        );
         let member = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&member, &Account::generate(), "remote", 1);
         let directory = crate::postoffice::federation::FederationDirectory::new();
@@ -610,27 +616,51 @@ mod tests {
         let office = Arc::new(Mutex::new(
             crate::postoffice::PostOffice::open(&temp.path().join("relay"), "pw", healthy).unwrap(),
         ));
-        let server = tokio::spawn(
-            super::super::postbox::run_federated_relay_accept_loop_with_directory(
-                DeviceIdentity::from_secret_bytes(ed, x),
-                listener,
+        let (served, response_served) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let channel = crate::transport::SecureChannel::accept(
+                stream,
+                &DeviceIdentity::from_secret_bytes(ed, x),
+            )
+            .await
+            .unwrap();
+            super::super::postbox::serve_relay_or_bridge_connection(
+                channel,
                 office,
-                Arc::new(std::collections::HashSet::new()),
-                directory,
-            ),
-        );
+                Some(directory.shared()),
+            )
+            .await;
+            // Directory serving returns after writing every response page; it
+            // does not wait for the client to close its authenticated channel.
+            let _ = served.send(());
+        });
         let release = Arc::new(tokio::sync::Notify::new());
         let resume = release.clone();
+        let (accepted, query_accepted) = tokio::sync::oneshot::channel();
         let stalled = tokio::spawn(async move {
             let (stream, _) = stalled_listener.accept().await.unwrap();
             let mut channel = crate::transport::SecureChannel::accept(stream, &slow)
                 .await
                 .unwrap();
-            channel.recv().await.unwrap();
-            resume.notified().await;
+            let request = channel.recv().await.unwrap();
+            assert!(bridge_directory::is_request(&request));
+            let _ = accepted.send(());
+            tokio::select! {
+                _ = resume.notified() => {},
+                result = channel.recv() => panic!("stalled query ended before release: {result:?}"),
+            }
         });
         let client = node.clone();
         let refresh = tokio::spawn(async move { client.refresh_bridge_directory().await });
+        // Separate authenticated request/response setup from publication. The
+        // publication bound starts only when the healthy response was served.
+        let setup = tokio::time::timeout(BRIDGE_TIMEOUT, async {
+            let healthy = response_served.await;
+            let stalled = query_accepted.await;
+            (healthy, stalled)
+        })
+        .await;
         let published = tokio::time::timeout(Duration::from_secs(3), async {
             while !node
                 .bridge_dm_pull_peers
@@ -642,10 +672,27 @@ mod tests {
             }
         })
         .await;
+        let refresh_pending = !refresh.is_finished();
+        let stall_held = !stalled.is_finished();
         release.notify_one();
-        refresh.await.unwrap();
+        refresh.abort();
+        let _ = refresh.await;
         server.abort();
-        stalled.await.unwrap();
+        let _ = server.await;
+        stalled.abort();
+        let _ = stalled.await;
+        let (healthy_response, stalled_request) =
+            setup.expect("authenticated healthy response and stalled query complete setup");
+        healthy_response.expect("healthy response was fully served");
+        stalled_request.expect("slow server accepted the directory request");
+        assert!(
+            stall_held,
+            "stalled server must remain held until publication"
+        );
+        assert!(
+            refresh_pending,
+            "healthy publication must precede refresh completion"
+        );
         assert!(
             published.is_ok(),
             "a stalled relay must not delay a healthy introduction's publication"
