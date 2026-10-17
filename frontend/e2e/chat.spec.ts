@@ -266,6 +266,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("composer-send").click();
     const link = page.getByRole("link", { name: "https://example.com" });
     await expect(link).toBeVisible();
+    const appUrl = page.url();
     await link.click();
     await expect
       .poll(() =>
@@ -274,7 +275,7 @@ test.describe("Mesh-Talk UI flow", () => {
         ),
       )
       .toEqual(["https://example.com"]);
-    await expect(page).toHaveURL(/localhost/);
+    await expect(page).toHaveURL(appUrl);
   });
 
   test("emoji picker inserts into the composer", async ({ page }) => {
