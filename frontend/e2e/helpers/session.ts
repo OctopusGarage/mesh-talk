@@ -10,7 +10,7 @@ export const CAROL = {
 };
 export const CHANNEL = { id: "chan_team_dddd4444" };
 
-export async function enterChat(page: Page, user = "tester", path = "/") {
+export async function enterChatShell(page: Page, user = "tester", path = "/") {
   await page.goto(path);
   for (const tab of ["register", "signin"]) {
     await page.getByTestId(`login-tab-${tab}`).click();
@@ -22,6 +22,10 @@ export async function enterChat(page: Page, user = "tester", path = "/") {
   await expect(page.getByTestId("chat-shell")).toBeVisible({
     timeout: process.platform === "win32" ? 90_000 : 15_000,
   });
+}
+
+export async function enterChat(page: Page, user = "tester", path = "/") {
+  await enterChatShell(page, user, path);
   await expect(
     page.getByTestId(`conversation-row-${BOB.account}`),
   ).toBeVisible();

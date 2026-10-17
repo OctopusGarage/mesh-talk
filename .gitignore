@@ -80,6 +80,7 @@ coverage/
 
 # Playwright: local runs still ignore the generated artifacts; CI uploads them on failure.
 frontend/playwright-report/
+frontend/blob-report/
 frontend/test-results/
 frontend/eval-results/
 site/market/studio/

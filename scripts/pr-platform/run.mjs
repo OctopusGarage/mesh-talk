@@ -160,6 +160,9 @@ async function linux(cwd, directory, plan, timeoutSeconds) {
   const guestSeconds = Math.max(1, Math.floor(options.timeoutMs / 1000));
   const name = `mesh-pr-${plan.runId}`;
   const args = ["run", "--rm", ...platformArgs, "--name", name,
+    // Docker can bind IPv6 sockets while disabling ::1. Exercise real IPv6
+    // discovery without requiring daemon-wide IPv6 networking configuration.
+    "--sysctl", "net.ipv6.conf.lo.disable_ipv6=0",
     "-v", `${target.directory}:/evidence`,
     "-v", "mesh-pr-cargo:/cache/cargo", "-v", "mesh-pr-target:/cache/target", "-v", "mesh-pr-npm:/cache/npm",
     "-e", "CARGO_HOME=/cache/cargo", "-e", "CARGO_TARGET_DIR=/cache/target", "-e", "npm_config_cache=/cache/npm",

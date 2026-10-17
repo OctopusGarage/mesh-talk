@@ -116,12 +116,12 @@ for (const viewport of VIEWPORTS) {
           viewport.height,
         );
         // Compact OLED exposes native font metrics across enough pixels to need
-        // a Windows reference; keep the same strict comparison threshold.
+        // Linux/Windows references; keep the same strict comparison threshold.
         const reference =
-          process.platform === "win32" &&
+          ["linux", "win32"].includes(process.platform) &&
           theme === "oled" &&
           viewport.width === 760
-            ? name.replace(".png", "-win32.png")
+            ? name.replace(".png", `-${process.platform}.png`)
             : name;
         await expect(shell).toHaveScreenshot(
           reference,
