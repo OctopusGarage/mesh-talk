@@ -354,7 +354,9 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
     startup. The fallback scan visits each LAN /24 once, omits every local interface address,
     and excludes Tailscale's 100.64.0.0/10 overlay range.
     Desktop builds can additionally obtain candidate IPs from an already-running local
-    Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
+    Tailscale or EasyTier client through host-owned adapters. Both inventories run
+    concurrently with independent deadlines and share a deduplicated, interleaved
+    256-address budget; a user can also enter an address. A rate-limited, identity-free UDP
     query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
     these endpoints remain separate from device identity and from Noise authorization.
     A UDP peer reset or refusal does not stop the listener: Windows can report a

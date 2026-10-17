@@ -32,7 +32,7 @@ It is the starting point for evaluating whether a change preserves the agreed co
 
 ### Product intent and background
 
-Mesh Talk is a local-first conversation system with local identity, authenticated peer connections and end-to-end encrypted content. A local network must remain useful without a post office or vendor-operated account service. A directly routed connection, including Tailscale, extends which application endpoints can communicate. A peer-operated post office adds temporary encrypted custody and, when configured as a bridge, introduces consenting participants and reconciles opaque mail with trusted equal relays.
+Mesh Talk is a local-first conversation system with local identity, authenticated peer connections and end-to-end encrypted content. A local network must remain useful without a post office or vendor-operated account service. A directly routed connection, including Tailscale or EasyTier, extends which application endpoints can communicate. A peer-operated post office adds temporary encrypted custody and, when configured as a bridge, introduces consenting participants and reconciles opaque mail with trusted equal relays.
 
 The desired user experience is that reachable, permitted participants can discover one another and communicate without choosing a global hub. The implementation must still preserve the distinctions between network reachability, device identity, visibility, conversation authority and delivery confirmation.
 
@@ -50,7 +50,7 @@ flowchart TB
   SESS[Transport: authenticated Noise TCP and bounded sessions]
   DIR[Opt-in bridge directories]
   PO[Post offices: opaque custody and trusted federation]
-  IP[Existing IP paths: physical LAN or routed Tailscale]
+  IP[Existing IP paths: physical LAN or routed VPN]
   RTC[Separate WebRTC call media]
   UI --> HOST --> CORE
   CORE --> DISC
@@ -106,6 +106,15 @@ The UI-free core owns protocol decisions. The desktop host owns account/session 
 Paths below are relative to the repository root. `core/` is shorthand for `crates/mesh-talk-core/src/` in tables only; links use actual paths.
 
 ### Module inventory and contracts
+
+Desktop address inventory is owned by
+[`routed_discovery.rs`](../src-tauri/src/routed_discovery.rs), with
+[`Tailscale`](../src-tauri/src/tailscale_discovery.rs) and
+[`EasyTier`](../src-tauri/src/easytier_discovery.rs) adapters. Both use the same
+signed discovery and privacy gates. Concurrent bounded snapshots merge fairly
+into one 256-candidate budget; VPN-specific commands and schemas stay outside
+core. See the [routed setup guide](routed-network-discovery.md) for refresh,
+CLI/RPC configuration and supported-version boundaries.
 
 | Owner                              | Implementation                                                                                                                                                                                                                                                                                          | Contract                                                                                                                                                                                                                     |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -166,13 +175,13 @@ are never freshness evidence. Retired or conflicting device/account bindings and
 infrastructure cannot contribute. Legacy unbound devices remain explicit device
 identities rather than invented account associations.
 
-| Eligible public observation | Presence lifetime | Boundary |
-| --- | --- | --- |
-| Local signed discovery within the observed interface scope | 30 seconds | No TCP success required; no physical co-location claim. |
-| Signed UDP discovery with undetermined scope | 30 seconds | Show signed discovery only; do not infer local or cross-network location. |
-| Routed signed discovery | 120 seconds | A permitted Tailscale candidate alone is insufficient. |
-| Public authenticated contact | 300 seconds | No inferred LAN scope or continuing connection. Private route knowledge remains excluded. |
-| Directory/federation introduction | Original origin expiry, at most 45 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
+| Eligible public observation                                | Presence lifetime                          | Boundary                                                                                                                |
+| ---------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Local signed discovery within the observed interface scope | 30 seconds                                 | No TCP success required; no physical co-location claim.                                                                 |
+| Signed UDP discovery with undetermined scope               | 30 seconds                                 | Show signed discovery only; do not infer local or cross-network location.                                               |
+| Routed signed discovery                                    | 120 seconds                                | A permitted Tailscale candidate alone is insufficient.                                                                  |
+| Public authenticated contact                               | 300 seconds                                | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
+| Directory/federation introduction                          | Original origin expiry, at most 45 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
 
 The explicitly negotiated `MTBD4Q`/`MTBD4R` directory extension carries the
 existing self-signed identity proof with the trusted directory's origin expiry.
