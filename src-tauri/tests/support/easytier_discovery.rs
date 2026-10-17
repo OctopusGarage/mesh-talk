@@ -200,18 +200,21 @@ async fn cancelling_inventory_kills_the_running_cli() {
         &format!("echo $$ > '{}'\nexec sleep 30", pid_file.display()),
     );
     let task = tokio::spawn(local_inventory_from(vec![hung], "127.0.0.1:15888", 47474));
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !pid_file.exists() {
+    let pid = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            // Creating the file precedes writing the PID; existence alone can
+            // expose an empty file when the test and child run concurrently.
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|value| value.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
-    let pid: i32 = std::fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    .expect("test CLI must publish its process ID");
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     tokio::time::timeout(Duration::from_secs(1), async {
