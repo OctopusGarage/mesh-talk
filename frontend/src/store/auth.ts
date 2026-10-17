@@ -11,6 +11,8 @@ interface AuthState {
   /** True from app start until the one-shot auto-login attempt resolves; gates a brief
    * "unlocking…" splash so we don't flash the login screen for a remembered session. */
   booting: boolean;
+  /** Hide ownerless login settings while the native session is being retired. */
+  loggingOut: boolean;
   loading: boolean;
   error: string | null;
   clearError: () => void;
@@ -28,6 +30,7 @@ export const useAuth = create<AuthState>((set, get) => ({
   generation: 0,
   operation: 0,
   booting: true,
+  loggingOut: false,
   loading: false,
   error: null,
   clearError: () => set({ error: null }),
@@ -35,7 +38,7 @@ export const useAuth = create<AuthState>((set, get) => ({
   tryAutoLogin: async () => {
     const generation = get().generation;
     const operation = get().operation + 1;
-    set({ operation });
+    set({ operation, loggingOut: false });
     try {
       const user = await auth.autoLogin();
       if (get().generation !== generation || get().operation !== operation)
@@ -53,7 +56,14 @@ export const useAuth = create<AuthState>((set, get) => ({
   login: async (username, password) => {
     const generation = get().generation + 1;
     const operation = get().operation + 1;
-    set({ generation, operation, user: null, loading: true, error: null });
+    set({
+      generation,
+      operation,
+      user: null,
+      loading: true,
+      loggingOut: false,
+      error: null,
+    });
     try {
       const res = await auth.login(username, password);
       if (get().generation !== generation || get().operation !== operation)
@@ -72,7 +82,7 @@ export const useAuth = create<AuthState>((set, get) => ({
   register: async (username, password) => {
     const generation = get().generation;
     const operation = get().operation + 1;
-    set({ operation, loading: true, error: null });
+    set({ operation, loading: true, loggingOut: false, error: null });
     try {
       const res = await auth.register(username, password);
       if (get().generation !== generation || get().operation !== operation)
@@ -125,8 +135,10 @@ export const useAuth = create<AuthState>((set, get) => ({
       operation: s.operation + 1,
       loading: false,
       booting: false,
+      loggingOut: true,
       error: null,
     }));
+    const { generation, operation } = get();
     // The unread badge belongs to the signed-in session. ChatApp unmounts at this
     // point, so its unread-count effect cannot clear the OS badge on its own.
     if (owner) void chat.setBadge(0, owner).catch(() => {});
@@ -137,5 +149,7 @@ export const useAuth = create<AuthState>((set, get) => ({
     }
     // Native logout already serializes exact-original-owner remembered-secret cleanup.
     // No ownerless post-retirement cleanup or state mutation may target a newer login.
+    if (get().generation === generation && get().operation === operation)
+      set({ loggingOut: false });
   },
 }));

@@ -150,17 +150,17 @@ node scripts/pr-platform/run.mjs --plan \
   e2e/ui-visual-regression.spec.ts
 ```
 
-| Setting                            | Default / purpose                                                                                                           |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                                     |
-| `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D                |
-| `MESH_PR_LINUX_HOST`               | Optional SSH host, such as `mac2015`, to run Docker remotely; unset keeps local Docker.                                     |
-| `MESH_PR_LINUX_PLATFORM`           | Optional `linux/amd64` or `linux/arm64`; remote Docker defaults to `linux/amd64` and rejects mismatched guest architecture. |
-| `MESH_PR_LINUX_DOCKER`             | Remote Docker executable; defaults to `/Applications/Docker.app/Contents/Resources/bin/docker`.                             |
-| `MESH_PR_LINUX_ROOT`               | Remote temporary source/evidence root; defaults to `/tmp/mesh-talk-pr-preflight`.                                           |
-| `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`                          |
-| `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                                    |
-| `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                                |
+| Setting                            | Default / purpose                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                      |
+| `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D |
+| `MESH_PR_LINUX_HOST` | Optional SSH host, such as `mac2015`, to run Docker remotely; unset keeps local Docker. |
+| `MESH_PR_LINUX_PLATFORM` | Optional `linux/amd64` or `linux/arm64`; remote Docker defaults to `linux/amd64` and rejects mismatched guest architecture. |
+| `MESH_PR_LINUX_DOCKER` | Remote Docker executable; defaults to `/Applications/Docker.app/Contents/Resources/bin/docker`. |
+| `MESH_PR_LINUX_ROOT` | Remote temporary source/evidence root; defaults to `/tmp/mesh-talk-pr-preflight`. |
+| `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`           |
+| `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                     |
+| `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                 |
 
 To run native Linux amd64 containers on the Intel Mac while preparing a PR:
 

@@ -1,6 +1,10 @@
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm, seedThemeBeforeLoad } from "./helpers/session";
-import { prepareForScreenshot, snapshotName } from "./helpers/visual-snapshot";
+import {
+  prepareForScreenshot,
+  snapshotName,
+  windowsSnapshotProfile,
+} from "./helpers/visual-snapshot";
 
 const THEMES = [
   "light",
@@ -117,11 +121,19 @@ for (const viewport of VIEWPORTS) {
         );
         // Compact OLED exposes native font metrics across enough pixels to need
         // Linux/Windows references; keep the same strict comparison threshold.
+        const profile =
+          process.platform === "win32" &&
+          theme === "oled" &&
+          viewport.width === 760
+            ? await windowsSnapshotProfile(
+                page.getByText("hey, welcome to the mesh", { exact: true }),
+              )
+            : process.platform;
         const reference =
           ["linux", "win32"].includes(process.platform) &&
           theme === "oled" &&
           viewport.width === 760
-            ? name.replace(".png", `-${process.platform}.png`)
+            ? name.replace(".png", `-${profile}.png`)
             : name;
         await expect(shell).toHaveScreenshot(
           reference,

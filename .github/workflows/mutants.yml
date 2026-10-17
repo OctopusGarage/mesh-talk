@@ -99,11 +99,13 @@ jobs:
           path: mutants.out/
           if-no-files-found: error
 
+  # Preserve the stable branch-protection check across matrix size changes.
   mutation-gate:
     name: mutants
     needs: mutants
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require all mutation shards
         env:
