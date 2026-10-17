@@ -48,6 +48,10 @@ coverage and Rust compilation workloads from competing. Node unit tests default
 to two workers and Rust tests to one thread; explicit `VITEST_MAX_WORKERS` and
 `RUST_TEST_THREADS` values override those defaults and invalidate matching evidence.
 Each browser stage owns an available port and private results/report directory.
+The full browser process has a two-hour ceiling; selected/portable processes have
+30 minutes. `MESH_BROWSER_TIMEOUT_SECONDS` can set an explicit 1–7200 second
+ceiling and participates in evidence identity. Individual scenario timeouts remain
+unchanged.
 Coverage cleanup and merging occur inside that stage's exclusive resource window.
 
 Before browser coverage or remote execution, preflight compiles the workspace
