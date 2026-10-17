@@ -189,6 +189,8 @@ mod tests {
         });
         held.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
+        let (producer_entered, producer_started) = std::sync::mpsc::channel();
+        *app.owner_command_captured.lock().unwrap() = Some(producer_entered);
         let caller_app = app.clone();
         let caller_state = state.clone();
         let caller = tokio::spawn(async move {
@@ -201,12 +203,18 @@ mod tests {
             .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while state.0.try_lock().is_ok() {
-                tokio::task::yield_now().await;
+            loop {
+                match producer_started.try_recv() {
+                    Ok("owner-producer") => break,
+                    Ok(_) => continue,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+                    Err(error) => panic!("detached producer did not start: {error}"),
+                }
             }
         })
         .await
-        .unwrap();
+        .expect("detached producer owns the runtime lifecycle before IPC cancellation");
+        *app.owner_command_captured.lock().unwrap() = None;
         caller.abort();
         assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
         assert!(

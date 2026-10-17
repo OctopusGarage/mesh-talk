@@ -133,6 +133,11 @@ impl RuntimeAdmission {
         let guard = self.node.0.clone().lock_owned().await;
         tokio::spawn(async move {
             let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
+            #[cfg(test)]
+            if let Some(entered) = self.app.owner_command_captured.lock().unwrap().as_ref() {
+                // Distinguish a live detached owner from queued mutex admission.
+                let _ = entered.send("owner-producer");
+            }
             operation(runtime, &self).await
         })
         .await
