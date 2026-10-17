@@ -8,7 +8,8 @@ const worktreePort =
 const port = Number(
   process.env.MESH_TALK_E2E_PORT ?? (process.env.CI ? 5173 : worktreePort),
 );
-const url = `http://localhost:${port}`;
+// Keep browser navigation and server binding on the same address family.
+const url = `http://127.0.0.1:${port}`;
 
 // Browser E2E for the Mesh-Talk UI. Runs the Vite dev server + drives the real React app in
 // headless Chromium with a mocked Tauri IPC layer (see e2e/tauri-mock.ts).
@@ -43,7 +44,7 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: `npm run dev -- --port ${port}`,
+    command: `npm run dev -- --host 127.0.0.1 --port ${port}`,
     env: { MESH_TALK_E2E: "1" },
     url,
     // Another worktree may already have Vite on this port. Reusing it can

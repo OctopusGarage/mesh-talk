@@ -1618,15 +1618,20 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
     bob_node.replace_verified_dm_pull_peers(vec![alice_uid.clone()]);
 
     // Bob drains from the PO (retry to absorb the relay's async ingest).
-    let mut received = None;
-    for _ in 0..25 {
-        bob_node.drain_from_post_office().await;
-        if let Ok(dm) = tokio::time::timeout(Duration::from_millis(200), bob_rx.recv()).await {
-            received = dm;
-            break;
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut received = None;
+        for _ in 0..25 {
+            bob_node.drain_from_post_office().await;
+            if let Ok(dm) = tokio::time::timeout(Duration::from_millis(200), bob_rx.recv()).await {
+                received = dm;
+                break;
+            }
         }
-    }
-    let received = received.expect("Bob received the held DM from the post office");
+        received
+    })
+    .await
+    .expect("post-office drain must finish within the receive budget")
+    .expect("Bob received the held DM from the post office");
     assert_eq!(received.from, alice_uid);
     assert_eq!(received.from_name, "Alice");
     assert_eq!(received.text, b"held-hello");
@@ -1797,14 +1802,19 @@ async fn preferred_post_office_fails_over_and_fallback_mailbox_is_drained_after_
         preferred_store,
     ));
     bob_node.replace_verified_dm_pull_peers(vec![alice_uid]);
-    let mut received = None;
-    for _ in 0..10 {
-        bob_node.drain_from_post_office().await;
-        if let Ok(dm) = bob_rx.try_recv() {
-            received = Some(dm);
-            break;
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut received = None;
+        for _ in 0..10 {
+            bob_node.drain_from_post_office().await;
+            if let Ok(dm) = bob_rx.try_recv() {
+                received = Some(dm);
+                break;
+            }
         }
-    }
+        received
+    })
+    .await
+    .expect("fallback mailbox drain must finish within the receive budget");
     assert_eq!(
         received.expect("fallback mailbox drained").text,
         b"fallback-delivery"
