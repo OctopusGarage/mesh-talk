@@ -866,7 +866,7 @@ impl Node {
         }
         let mut roster = self.roster.lock().expect("roster lock not poisoned");
         if publicly_visible {
-            roster.update(announce, ip, &self.user_id());
+            roster.update_authenticated(announce, ip, &self.user_id());
             roster.mark_authenticated(public, std::net::SocketAddr::new(ip, announce.tcp_port));
         } else {
             roster.forget(public);
@@ -936,7 +936,12 @@ impl Node {
                 }
                 continue;
             }
-            if state.proofs.record(&proof).is_err() {
+            if let Err(error) = state.proofs.record(&proof) {
+                // Rejected bindings are ineligible peers; failed persistence is
+                // an unavailable snapshot, never a successful empty roster.
+                if error.kind() != io::ErrorKind::InvalidData {
+                    return Err(error);
+                }
                 log::warn!("discovered peer proof was not cached");
                 continue;
             }
@@ -955,8 +960,7 @@ impl Node {
                 .into_iter()
                 .any(|ip| state.routes.record(&peer.public, ip).is_err())
             {
-                log::warn!("discovered peer route was not cached");
-                continue;
+                return Err(io::Error::other("discovered peer route was not cached"));
             }
             successful.push(proof);
         }

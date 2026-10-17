@@ -2,8 +2,9 @@
 import { act, createElement, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it, vi } from "vitest";
-import "@/lib/i18n";
+import { afterEach, expect, it, vi } from "vitest";
+import { setLanguage } from "@/lib/i18n";
+import type { PresenceInfo } from "@/lib/types";
 
 const { peers } = vi.hoisted(() => ({
   peers: [
@@ -20,11 +21,17 @@ vi.mock("@/store/chat", () => ({
   useChat: (select: (s: { peers: typeof peers }) => unknown) =>
     select({ peers }),
 }));
-vi.mock("@/store/presence", () => ({
-  usePresenceFor: () => ({ online: true, last_seen_secs: 0 }),
-  presenceStatus: () => "online",
-  presenceLabel: () => "Online",
+const presenceState = vi.hoisted(() => ({
+  value: { online: true, last_seen_secs: 0 } as PresenceInfo,
 }));
+vi.mock("@/store/presence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/store/presence")>()),
+  usePresenceFor: () => presenceState.value,
+}));
+afterEach(() => {
+  presenceState.value = { online: true, last_seen_secs: 0 };
+  setLanguage("en");
+});
 vi.mock("@/components/identity", () => ({
   IdentityCrest: ({ name }: { name: string }) =>
     createElement("span", null, name),
@@ -96,4 +103,62 @@ it("keeps messaging available for members with a known account", async () => {
   } finally {
     await act(async () => root.unmount());
   }
+});
+
+it("renders one freshly observed device with overlapping localized sources and offline explanation", () => {
+  setLanguage("zh-Hans");
+  presenceState.value = {
+    online: true,
+    last_seen_secs: 0,
+    devices: [
+      {
+        user_id: "device-a",
+        evidence: [
+          { source: "local", last_seen_secs: 2, expires_in_secs: 28 },
+          { source: "routed", last_seen_secs: 1, expires_in_secs: 119 },
+          { source: "directory", last_seen_secs: 3, expires_in_secs: 42 },
+          { source: "unscoped", last_seen_secs: 0, expires_in_secs: 29 },
+        ],
+      },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: { name: "Alice", accountId: "account-a" },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(html).toContain("发现 1 台在线设备");
+  for (const label of [
+    "在线",
+    "本地网络发现",
+    "跨网络发现",
+    "经邮局发现",
+    "签名发现记录（网络范围未确定）",
+    "本机 2 秒前发现",
+    "离线表示当前客户端未发现对方的有效在线信息",
+  ])
+    expect(html).toContain(label);
+  expect(html).not.toContain("已连接");
+});
+it("renders Offline as the primary state with local observation history", () => {
+  setLanguage("zh-Hans");
+  presenceState.value = { online: false, last_seen_secs: 180, devices: [] };
+  const html = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: { name: "Alice", accountId: "account-a" },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(html).toContain("离线 · 本机 3 分钟前发现");
+  presenceState.value = { online: false, last_seen_secs: null, devices: [] };
+  const neverSeen = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: { name: "Alice", deviceId: "legacy" },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(neverSeen).toContain("离线");
+  expect(neverSeen).not.toContain("状态未知");
+  expect(neverSeen).not.toContain("分钟前发现");
 });

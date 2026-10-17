@@ -39,6 +39,17 @@ describe("settings translations", () => {
         resources: { test: { translation: locale } },
         interpolation: { escapeValue: false },
       });
+      for (const key of [
+        "discoveryScope",
+        "discoveryScopeLocal",
+        "discoveryScopeRouted",
+        "discoveryScopeLocalDesc",
+        "discoveryScopeRoutedDesc",
+        "addDeviceAddress",
+      ]) {
+        expect(i18n.exists(`settings.${key}`), key).toBe(true);
+        expect(i18n.t(`settings.${key}`).trim(), key).not.toBe("");
+      }
       const cases = [
         ["settings.bridgeHubRemote", { name: "Garden relay" }, "Garden relay"],
         ["settings.bridgeHubUnavailable", { id: "a1b2c3" }, "a1b2c3"],

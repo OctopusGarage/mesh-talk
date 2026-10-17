@@ -150,6 +150,16 @@ impl Chain {
             );
         }
         assert_eq!(self.nodes[0].roster.lock().unwrap().peers().len(), 1);
+        let roster = self.nodes[0].roster.lock().unwrap();
+        let remote_c = self.nodes[2].user_id();
+        assert!(
+            !roster
+                .peers()
+                .iter()
+                .any(|peer| peer.public.user_id() == remote_c
+                    && !peer.presence_evidence(std::time::Instant::now()).is_empty()),
+            "accepted group ancestry through B cannot establish C's presence at A"
+        );
         channel
     }
 

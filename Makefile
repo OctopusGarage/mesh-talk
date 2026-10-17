@@ -1,7 +1,10 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test test-focused e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run check
+.PHONY: dev build test test-focused e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run clean-builds clean-builds-dry-run check
+
+# Managed commands coordinate with cache eviction across all local worktrees.
+MANAGED_BUILD = python3 scripts/build-retention.py run --
 
 dev: install-deps frontend-install
 	@echo "Development environment configured!"
@@ -9,19 +12,19 @@ dev: install-deps frontend-install
 	./scripts/install-auto-clean-macos.sh
 
 build:
-	cd src-tauri && cargo build --release
+	python3 scripts/build-retention.py run --archive binary -- cargo build --release
 
 test:
-	cargo test --workspace
+	$(MANAGED_BUILD) cargo test --workspace
 
 # Normal development: select the affected crate and test filter, or one integration
 # target. Keep `make test` as the explicit comprehensive pre-PR/CI command.
 test-focused:
 	@test -n "$(TEST_PACKAGE)" && { test -n "$(TEST_FILTER)" || test -n "$(TEST_TARGET)"; } || { echo "Usage: make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync [TEST_TARGET=bridge_cross_lan]" >&2; exit 2; }
 	@if [ -n "$(TEST_TARGET)" ]; then \
-		cargo test -p "$(TEST_PACKAGE)" --test "$(TEST_TARGET)" "$(TEST_FILTER)"; \
+		$(MANAGED_BUILD) cargo test -p "$(TEST_PACKAGE)" --test "$(TEST_TARGET)" "$(TEST_FILTER)"; \
 	else \
-		cargo test -p "$(TEST_PACKAGE)" --lib "$(TEST_FILTER)"; \
+		$(MANAGED_BUILD) cargo test -p "$(TEST_PACKAGE)" --lib "$(TEST_FILTER)"; \
 	fi
 
 # End-to-end integration tests: real `mesh-talk-node` processes over UDP discovery +
@@ -30,8 +33,8 @@ test-focused:
 # by default (real UDP-multicast discovery + node cold starts), so run them explicitly here. Serial
 # (--test-threads=1) to avoid discovery-port / CPU contention between the heavy processes.
 e2e:
-	nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli --test bridge_cross_lan -- --ignored --test-threads=1
-	nice -n 10 cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli --test bridge_cross_lan -- --ignored --test-threads=1
+	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
 
 eval-smoke:
 	./scripts/ai-eval-smoke.sh
@@ -43,7 +46,7 @@ smoke-full:
 	./scripts/run-real-smoke.sh
 
 clean:
-	cd src-tauri && cargo clean
+	$(MANAGED_BUILD) cargo clean
 
 clean-target-cache:
 	./scripts/clean-target-cache.sh --yes
@@ -53,6 +56,12 @@ clean-target-cache-dry-run:
 
 auto-clean-targets-dry-run:
 	./scripts/auto-clean-targets.sh --dry-run
+
+clean-builds:
+	python3 scripts/build-retention.py clean
+
+clean-builds-dry-run:
+	python3 scripts/build-retention.py clean --dry-run
 
 # Frontend commands
 .PHONY: frontend-dev frontend-build
@@ -67,17 +76,17 @@ frontend-build:
 .PHONY: install-deps frontend-install check lint fix format
 
 install-deps:
-	cd src-tauri && cargo build
+	$(MANAGED_BUILD) cargo build
 
 frontend-install:
 	cd frontend && npm install
 
 check:
 	chmod +x scripts/check-health.sh
-	./scripts/check-health.sh
+	$(MANAGED_BUILD) ./scripts/check-health.sh
 
 lint:
-	cargo clippy --workspace --all-targets -- -D warnings
+	$(MANAGED_BUILD) cargo clippy --workspace --all-targets -- -D warnings
 
 fix:
 	cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
@@ -92,10 +101,10 @@ format:
 .PHONY: tauri-dev tauri-build
 
 tauri-dev:
-	cd src-tauri && cargo tauri dev
+	$(MANAGED_BUILD) cargo tauri dev
 
 tauri-build:
-	cd src-tauri && node ../frontend/node_modules/@tauri-apps/cli/tauri.js build
+	python3 scripts/build-retention.py run --archive bundle -- node frontend/node_modules/@tauri-apps/cli/tauri.js build
 
 # Help
 .PHONY: help
@@ -116,6 +125,8 @@ help:
 	@echo "  make clean-target-cache      Prune stale Cargo target cache"
 	@echo "  make clean-target-cache-dry-run Preview target cache pruning"
 	@echo "  make auto-clean-targets-dry-run Preview dormant Mesh Talk target removal"
+	@echo "  make clean-builds     Apply five-build retention and 40 GiB cache budget"
+	@echo "  make clean-builds-dry-run Preview build retention across worktrees"
 	@echo "  make check            Run all quality checks"
 	@echo "  make lint             Run linting tools"
 	@echo "  make fix              Automatically fix code issues"

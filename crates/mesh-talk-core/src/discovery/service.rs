@@ -108,13 +108,25 @@ pub fn handle_datagram(
     source: SocketAddr,
     self_user_id: &str,
 ) -> UpdateOutcome {
+    handle_datagram_with_scope(roster, data, source, self_user_id, true)
+}
+
+fn handle_datagram_with_scope(
+    roster: &Mutex<Roster>,
+    data: &[u8],
+    source: SocketAddr,
+    self_user_id: &str,
+    local_scope: bool,
+) -> UpdateOutcome {
     let Some(announce) = decode(data) else {
         return UpdateOutcome::Rejected;
     };
-    roster
-        .lock()
-        .expect("roster mutex not poisoned")
-        .update(&announce, source.ip(), self_user_id)
+    let mut roster = roster.lock().expect("roster mutex not poisoned");
+    if local_scope {
+        roster.update(&announce, source.ip(), self_user_id)
+    } else {
+        roster.update_unscoped(&announce, source.ip(), self_user_id)
+    }
 }
 
 /// Peers not heard from within this window are evicted from the roster. Broadcast
@@ -194,6 +206,8 @@ async fn run_listen_with_routed(
     routed: Option<Arc<RoutedDiscovery>>,
 ) {
     let mut buf = vec![0u8; 2048];
+    let mut physical_scope = visibility.discovery_scope();
+    let mut scope_refreshed = Instant::now();
     loop {
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, source))) => {
@@ -234,8 +248,19 @@ async fn run_listen_with_routed(
                         continue;
                     }
                 }
-                if handle_datagram(&roster, &buf[..n], source, &self_user_id) == UpdateOutcome::New
-                {
+                // Reuse a short-lived interface snapshot, not one OS inventory per peer.
+                if scope_refreshed.elapsed() >= Duration::from_secs(2) {
+                    physical_scope = visibility.discovery_scope();
+                    scope_refreshed = Instant::now();
+                }
+                let outcome = handle_datagram_with_scope(
+                    &roster,
+                    &buf[..n],
+                    source,
+                    &self_user_id,
+                    crate::discovery::scope::permits(&physical_scope, source),
+                );
+                if outcome == UpdateOutcome::New {
                     // First sight → unicast our (current) announce back to the peer's
                     // discovery port so the link is recorded symmetrically.
                     let reply_target = SocketAddr::new(source.ip(), discovery_port);
@@ -829,6 +854,26 @@ mod tests {
                 .is_err()
         );
         task.abort();
+    }
+
+    #[test]
+    fn signed_udp_without_established_scope_is_online_without_a_lan_claim() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new(&device, "Peer", 1234);
+        let roster = Mutex::new(Roster::default());
+        let address = "192.168.1.20:47474".parse().unwrap();
+        assert_eq!(
+            handle_datagram_with_scope(&roster, &encode(&proof), address, "self", false),
+            UpdateOutcome::New
+        );
+        let guard = roster.lock().unwrap();
+        let peer = guard.get(&device.user_id()).unwrap();
+        assert!(!peer.has_lan_route());
+        assert!(peer.has_direct_route());
+        assert_eq!(
+            peer.presence_evidence(Instant::now())[0].0,
+            crate::discovery::roster::RouteSource::Discovery
+        );
     }
 
     #[test]

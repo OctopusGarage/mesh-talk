@@ -2,6 +2,10 @@
 //! The requester and responder both use the ordinary durable sync protocol;
 //! neither handles plaintext messages or impersonates another relay.
 
+use crate::eventlog::LogError;
+use crate::eventlog::event::{ConversationId, Event, EventId};
+use crate::eventlog::store::AppendOutcome;
+use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::bridge_directory::{BridgeDirectory, FederatedPresence};
 use crate::node::session::request_round;
@@ -9,7 +13,7 @@ use crate::postoffice::gateway::GatewayProof;
 use crate::postoffice::{FederatedMailbox, MAX_RELAY_AGE, PostOffice};
 use crate::transport::{MAX_PLAINTEXT, SecureChannel};
 use bincode::Options;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,6 +28,86 @@ const MAX_PAGES: usize = 256;
 const ROUND_TIMEOUT: Duration = Duration::from_secs(30);
 const PRESENCE_FRAME: &[u8] = b"MTFP1D";
 const PRESENCE_PER_PAGE: usize = 16;
+
+/// Arrival hints belong to one bounded inventory exchange. Unknown mailboxes
+/// stay in memory until a valid event establishes durable custody.
+pub(crate) struct FederationStore {
+    store: Arc<Mutex<PostOffice>>,
+    arrivals: HashMap<ConversationId, u64>,
+}
+
+impl FederationStore {
+    fn new(store: &Arc<Mutex<PostOffice>>, inventory: Vec<FederatedMailbox>) -> Self {
+        let mut arrivals = HashMap::with_capacity(inventory.len());
+        for entry in inventory {
+            arrivals
+                .entry(entry.id)
+                .and_modify(|seen: &mut u64| *seen = (*seen).min(entry.first_seen_secs))
+                .or_insert(entry.first_seen_secs);
+        }
+        Self {
+            store: Arc::clone(store),
+            arrivals,
+        }
+    }
+}
+
+impl SyncStore for FederationStore {
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .durable_have(conversation, id)
+    }
+
+    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .event_ids(conversation)
+    }
+
+    fn events_excluding(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+    ) -> Vec<Event> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .events_excluding(conversation, have)
+    }
+
+    fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        let mut office = self.store.lock().expect("post office lock not poisoned");
+        if office.opaque_only && !crate::postoffice::opaque::envelope_shape(&event) {
+            return Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "post office requires an opaque envelope",
+            )));
+        }
+        let origin = self.arrivals.get(&event.conversation_id).copied();
+        let now = SystemTime::now();
+        if let Some(first_seen_secs) = origin
+            && office
+                .first_seen
+                .get(&event.conversation_id)
+                .is_some_and(|&prior| first_seen_secs < prior)
+        {
+            // Another session may have established custody after this inventory
+            // arrived. Correct that existing clock even for a duplicate event.
+            office.adopt_federated_arrivals(
+                &[FederatedMailbox {
+                    id: event.conversation_id,
+                    digest: [0; 32],
+                    first_seen_secs,
+                }],
+                now,
+            )?;
+        }
+        office.record_at_with_arrival(event, now, origin)
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct FederationDirectory(Arc<Mutex<BridgeDirectory>>);
@@ -260,7 +344,7 @@ pub(crate) async fn send_inventory<IO>(
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
-) -> Result<(), String>
+) -> Result<FederationStore, String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -276,7 +360,8 @@ where
     };
     local.sort_by_key(|entry| *entry.id.as_bytes());
     send_inventory_pages(channel, &local).await?;
-    send_presence_pages(channel, directory, limit).await
+    send_presence_pages(channel, directory, limit).await?;
+    Ok(FederationStore::new(store, remote))
 }
 
 /// Reconcile every federated mailbox held by either relay. The remote public
@@ -360,11 +445,15 @@ async fn sync_version(
     );
     let mut ids = changed.into_iter().collect::<Vec<_>>();
     ids.sort_by_key(|id| *id.as_bytes());
+    let session_store = Mutex::new(FederationStore::new(store, remote));
     for id in &ids {
-        tokio::time::timeout(ROUND_TIMEOUT, request_round(&mut channel, store, *id))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("{e:?}"))?;
+        tokio::time::timeout(
+            ROUND_TIMEOUT,
+            request_round(&mut channel, &session_store, *id),
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:?}"))?;
     }
     Ok(ids.len())
 }
@@ -374,6 +463,223 @@ mod tests {
     use super::*;
     use crate::{discovery::Announce, identity::account::Account};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn dropping_sessions_with_unknown_inventory_never_persists_hints() {
+        use crate::postoffice::opaque::RelayMailbox;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("relay.log");
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(&path, "pw", DeviceIdentity::generate()).unwrap(),
+        ));
+        let before = std::fs::read(path.with_extension("retention")).unwrap();
+        let sender = DeviceIdentity::generate();
+        for _ in 0..16 {
+            let recipient = DeviceIdentity::generate();
+            let mailbox = RelayMailbox::federated(&sender, &recipient.public()).unwrap();
+            let session = FederationStore::new(
+                &store,
+                vec![FederatedMailbox {
+                    id: mailbox.id(),
+                    digest: [0; 32],
+                    first_seen_secs: unix_now() - 60,
+                }],
+            );
+            assert_eq!(session.arrivals.len(), 1);
+            drop(session);
+        }
+        assert!(store.lock().unwrap().first_seen.is_empty());
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn session_arrivals_are_committed_only_with_valid_events_and_survive_restart() {
+        use crate::eventlog::event::EventKind;
+        use crate::postoffice::opaque::RelayMailbox;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("relay.log");
+        let identity = DeviceIdentity::generate();
+        let (ed, x) = identity.secret_bytes();
+        let store = Arc::new(Mutex::new(PostOffice::open(&path, "pw", identity).unwrap()));
+        store.lock().unwrap().require_opaque_envelopes();
+        let before = std::fs::read(path.with_extension("retention")).unwrap();
+        let sender = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let mailbox = RelayMailbox::federated(&sender, &recipient.public()).unwrap();
+        let inner = Event::new(
+            &sender,
+            ConversationId::new([1; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"queued".to_vec(),
+        );
+        let event = mailbox.wrap(&inner).unwrap();
+        let origin = unix_now() - 10 * 24 * 60 * 60;
+        let inventory = vec![FederatedMailbox {
+            id: mailbox.id(),
+            digest: [0; 32],
+            first_seen_secs: origin,
+        }];
+        store
+            .lock()
+            .unwrap()
+            .adopt_federated_arrivals(&inventory, SystemTime::now())
+            .unwrap();
+        let mut session = FederationStore::new(&store, inventory);
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            before
+        );
+        let mut forged = event.clone();
+        forged.sig[0] ^= 1;
+        for _ in 0..8 {
+            assert!(matches!(
+                session.ingest(forged.clone()),
+                Err(LogError::BadSignature)
+            ));
+        }
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            before
+        );
+        assert!(store.lock().unwrap().first_seen.is_empty());
+        assert_eq!(
+            session.ingest(event.clone()).unwrap(),
+            AppendOutcome::Appended
+        );
+        let accepted = std::fs::read(path.with_extension("retention")).unwrap();
+        assert_eq!(
+            session.ingest(event.clone()).unwrap(),
+            AppendOutcome::Duplicate
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            accepted
+        );
+        drop(session);
+        drop(store);
+        let reopened =
+            PostOffice::open(&path, "pw", DeviceIdentity::from_secret_bytes(ed, x)).unwrap();
+        assert!(reopened.has(&event.id));
+        assert_eq!(reopened.first_seen.get(&mailbox.id()), Some(&origin));
+        let mut reopened = reopened;
+        reopened
+            .prune_expired_at(UNIX_EPOCH + Duration::from_secs(origin) + MAX_RELAY_AGE)
+            .unwrap();
+        assert!(!reopened.has(&event.id));
+    }
+
+    #[test]
+    fn session_origin_survives_concurrent_first_custody_and_duplicate_ingest() {
+        use crate::eventlog::event::EventKind;
+        use crate::postoffice::opaque::RelayMailbox;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("relay.log");
+        let identity = DeviceIdentity::generate();
+        let (ed, x) = identity.secret_bytes();
+        let store = Arc::new(Mutex::new(PostOffice::open(&path, "pw", identity).unwrap()));
+        let sender = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let mailbox = RelayMailbox::federated(&sender, &recipient.public()).unwrap();
+        let inner = Event::new(
+            &sender,
+            ConversationId::new([1; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"concurrent custody".to_vec(),
+        );
+        let event = mailbox.wrap(&inner).unwrap();
+        let origin = unix_now() - 10 * 24 * 60 * 60;
+        let mut session = FederationStore::new(
+            &store,
+            vec![FederatedMailbox {
+                id: mailbox.id(),
+                digest: [0; 32],
+                first_seen_secs: origin,
+            }],
+        );
+        assert_eq!(
+            store.lock().unwrap().ingest(event.clone()).unwrap(),
+            AppendOutcome::Appended
+        );
+        assert!(store.lock().unwrap().first_seen[&mailbox.id()] > origin);
+        assert_eq!(
+            session.ingest(event.clone()).unwrap(),
+            AppendOutcome::Duplicate
+        );
+        assert_eq!(store.lock().unwrap().first_seen[&mailbox.id()], origin);
+        let accepted = std::fs::read(path.with_extension("retention")).unwrap();
+        assert_eq!(
+            session.ingest(event.clone()).unwrap(),
+            AppendOutcome::Duplicate
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            accepted
+        );
+        drop(session);
+        drop(store);
+        let mut reopened =
+            PostOffice::open(&path, "pw", DeviceIdentity::from_secret_bytes(ed, x)).unwrap();
+        assert_eq!(reopened.first_seen[&mailbox.id()], origin);
+        reopened
+            .prune_expired_at(UNIX_EPOCH + Duration::from_secs(origin) + MAX_RELAY_AGE)
+            .unwrap();
+        assert!(!reopened.has(&event.id));
+    }
+
+    #[test]
+    fn session_rejects_an_origin_that_expired_after_inventory() {
+        use crate::eventlog::event::EventKind;
+        use crate::postoffice::opaque::RelayMailbox;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("relay.log");
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(&path, "pw", DeviceIdentity::generate()).unwrap(),
+        ));
+        let before = std::fs::read(path.with_extension("retention")).unwrap();
+        let sender = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let mailbox = RelayMailbox::federated(&sender, &recipient.public()).unwrap();
+        let inner = Event::new(
+            &sender,
+            ConversationId::new([1; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"expired".to_vec(),
+        );
+        let event = mailbox.wrap(&inner).unwrap();
+        let mut session = FederationStore::new(
+            &store,
+            vec![FederatedMailbox {
+                id: mailbox.id(),
+                digest: [0; 32],
+                first_seen_secs: unix_now() - MAX_RELAY_AGE.as_secs(),
+            }],
+        );
+        assert!(session.ingest(event.clone()).is_err());
+        assert!(!store.lock().unwrap().has(&event.id));
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            before
+        );
+    }
 
     #[tokio::test]
     async fn legacy_peer_fallback_preserves_the_original_presence_bound() {

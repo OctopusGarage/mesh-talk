@@ -14,7 +14,7 @@ below are explicit gates or environment-specific tools.
 | Delivery and agent contracts | [`ai-eval-smoke.sh`](ai-eval-smoke.sh), [`ai-eval.mjs`](ai-eval.mjs)                               | When changing their contracts or in CI; the model-backed runner needs a provider              |
 | Complete real smoke          | [`run-real-smoke.sh`](run-real-smoke.sh)                                                           | Explicit release validation; includes backend and browser E2E                                 |
 | Git hooks                    | [`setup-hooks.sh`](setup-hooks.sh), [`../hooks/`](../hooks/)                                       | On initial checkout; the commit hook checks source formatting only                            |
-| Cargo cache                  | [`clean-target-cache.sh`](clean-target-cache.sh), [`auto-clean-targets.sh`](auto-clean-targets.sh) | Explicit maintenance; the macOS scheduler is installed by `make dev`                          |
+| Build retention              | [`build-retention.py`](build-retention.py) | After managed builds/tests; five successful build sets and a 40 GiB cache budget; see [configuration](../docs/build-retention.md) |
 | Release                      | [`release/`](release/)                                                                             | CI release workflow and signed artifact validation                                            |
 | CI diagnostics               | [`diagnostics/`](diagnostics/) and [`evals/`](evals/)                                              | Their `.test.mjs` files are selected by CI globs, even when no script names them individually |
 
@@ -25,17 +25,18 @@ owns exact builds/hosts/flags; [network evidence](../docs/network-design-referen
 owns what each observed result establishes. Windows test data, profiles, working
 directories and temporary files belong on drive D.
 
-| Rig                                        | Distinct boundary                                                                                                |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `e2e-tailnet-macos.py`                     | Direct routed discovery, bidirectional DMs and consented file integrity on two Macs.                             |
-| `e2e-tailnet-bridge.py`                    | One bridge introduces clients across isolated discovery scopes.                                                  |
-| `e2e-tailnet-two-bridges.py`               | Legacy reciprocal gateway compatibility; not equal-federation acceptance.                                        |
-| `e2e-four-machine-tailnet.py`              | Four-host gateway/federation/installed-relay modes and consented cross-site files.                               |
-| `e2e-four-machine-hub.py`                  | Explicit selected-hub compatibility with another local relay; not a mandatory global-hub architecture.           |
-| `e2e-post-office-lan.py`                   | Directly consented offline custody/restart and optional mailbox-only local alternative.                          |
-| `e2e-federation-recovery.py`               | Preferred outage, surviving three-relay chain, file completion after sender restart and partition/rejoin.        |
-| `e2e-routed-sibling.py`                    | Actual SDK pairing/restarts, controlled history sharing and ongoing sibling replay over Tailscale.               |
-| `frontend/e2e/call-media-physical.spec.ts` | Opt-in real Noise signaling and Tailscale ICE/DTLS browser media; separate from native WebView/hardware quality. |
+| Rig                                        | Distinct boundary                                                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `e2e-tailnet-macos.py`                     | Direct routed discovery, bidirectional DMs and consented file integrity on two Macs.                                     |
+| `e2e-easytier-macos.py`                    | EasyTier automatic desktop inventory/discovery, bidirectional DMs/group events and consented file integrity on two Macs. |
+| `e2e-tailnet-bridge.py`                    | One bridge introduces clients across isolated discovery scopes.                                                          |
+| `e2e-tailnet-two-bridges.py`               | Legacy reciprocal gateway compatibility; not equal-federation acceptance.                                                |
+| `e2e-four-machine-tailnet.py`              | Four-host gateway/federation/installed-relay modes and consented cross-site files.                                       |
+| `e2e-four-machine-hub.py`                  | Explicit selected-hub compatibility with another local relay; not a mandatory global-hub architecture.                   |
+| `e2e-post-office-lan.py`                   | Directly consented offline custody/restart and optional mailbox-only local alternative.                                  |
+| `e2e-federation-recovery.py`               | Preferred outage, surviving three-relay chain, file completion after sender restart and partition/rejoin.                |
+| `e2e-routed-sibling.py`                    | Actual SDK pairing/restarts, controlled history sharing and ongoing sibling replay over Tailscale.                       |
+| `frontend/e2e/call-media-physical.spec.ts` | Opt-in real Noise signaling and Tailscale ICE/DTLS browser media; separate from native WebView/hardware quality.         |
 
 The legacy rigs remain because they test distinct compatibility contracts. They
 are not routine local tests and do not authorize changes to installed services.

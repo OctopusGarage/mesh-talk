@@ -102,6 +102,9 @@ jobs:
         shell: bash
         run: node --test scripts/diagnostics/*.test.mjs
 
+      - name: Build retention safeguards (all platforms)
+        run: python3 -m unittest discover -s scripts -p test_build_retention.py -v
+
       - name: Validate release checksum generation
         shell: bash
         run: node --test scripts/diagnostics/release-workflow.test.mjs

@@ -818,6 +818,119 @@ mod tests {
     use crate::eventlog::store::EventLog;
     use crate::identity::device::DeviceIdentity;
 
+    #[tokio::test]
+    async fn rejected_relay_upload_over_loopback_preserves_retention_and_valid_delivery() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            use crate::postoffice::{PostOffice, opaque::RelayMailbox};
+            use std::sync::Arc;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("relay.log");
+            let sender = DeviceIdentity::generate();
+            let recipient = DeviceIdentity::generate();
+            let relay = DeviceIdentity::generate();
+            let relay_keys = relay.secret_bytes();
+            let relay_public = relay.public();
+            let mailbox = RelayMailbox::new(&sender, &recipient.public(), &relay_public).unwrap();
+            let inner = Event::new(
+                &sender,
+                conv(),
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                b"private".to_vec(),
+            );
+            let outer = mailbox.wrap(&inner).unwrap();
+            let conversation = outer.conversation_id;
+            let mut office = PostOffice::open(&path, "pw", relay).unwrap();
+            office.require_opaque_envelopes();
+            let store = Arc::new(Mutex::new(office));
+            let before = std::fs::read(path.with_extension("retention")).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server_store = Arc::clone(&store);
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let identity = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
+                let channel = SecureChannel::accept(stream, &identity).await.unwrap();
+                crate::node::postbox::serve_relay_connection(channel, server_store).await;
+            });
+            let mut channel = SecureChannel::connect(
+                tokio::net::TcpStream::connect(addr).await.unwrap(),
+                &sender,
+                Some(&relay_public),
+            )
+            .await
+            .unwrap();
+            let mut bad_signature = outer.clone();
+            bad_signature.sig[0] ^= 1;
+            let mut bad_id = outer.clone();
+            bad_id.ciphertext[12] ^= 1;
+            let events = (0..16)
+                .map(|n| {
+                    if n % 2 == 0 {
+                        bad_signature.clone()
+                    } else {
+                        bad_id.clone()
+                    }
+                })
+                .collect();
+            channel
+                .send(
+                    &encode(&SyncWire::Followup(SyncFollowup {
+                        conversation,
+                        events,
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            // This reply is a processing barrier for all preceding uploads.
+            assert!(
+                !request_durable_have(&mut channel, conversation, outer.id)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                std::fs::read(path.with_extension("retention")).unwrap(),
+                before
+            );
+
+            channel
+                .send(
+                    &encode(&SyncWire::Followup(SyncFollowup {
+                        conversation,
+                        events: vec![outer.clone()],
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                request_durable_have(&mut channel, conversation, outer.id)
+                    .await
+                    .unwrap()
+            );
+            drop(channel);
+            server.await.unwrap();
+            drop(store);
+            let reopened = PostOffice::open(
+                &path,
+                "pw",
+                DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1),
+            )
+            .unwrap();
+            assert!(reopened.has(&outer.id));
+            let recipient_mailbox =
+                RelayMailbox::new(&recipient, &sender.public(), &relay_public).unwrap();
+            assert_eq!(recipient_mailbox.open(&outer).unwrap(), inner);
+        })
+        .await
+        .expect("loopback relay upload timed out");
+    }
+
     #[test]
     fn exact_single_event_transport_boundary_includes_long_parent_frontier() {
         let signer = DeviceIdentity::generate();

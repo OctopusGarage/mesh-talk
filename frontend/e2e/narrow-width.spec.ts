@@ -1,4 +1,5 @@
 import { test, expect } from "./tauri-mock";
+import { enterChat } from "./helpers/session";
 
 // Regression: the conversation pane must adapt to the window width — a wide message must
 // wrap inside the pane, never push it past the window edge (where it'd be clipped under the
@@ -12,14 +13,7 @@ test.use({ viewport: { width: 820, height: 700 } });
 test("conversation pane adapts to a narrow window (no clipped messages)", async ({
   page,
 }) => {
-  await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await enterChat(page);
   await page.getByTestId(`conversation-row-${BOB}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await page.getByTestId("composer-input").fill(WIDE);

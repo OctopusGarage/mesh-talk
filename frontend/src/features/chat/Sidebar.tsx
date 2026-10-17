@@ -89,7 +89,7 @@ export function Sidebar() {
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const ready = useChat((s) => s.ready);
-  // Online people on the LAN — distinct OTHER accounts that are presence-ONLINE (the same
+  // Known online people — distinct OTHER accounts that are presence-ONLINE (the same
   // signal the conversation-row dots use, so the count always matches the visible green dots).
   // Excludes post-office relays (infrastructure, not people) and our own other devices, and
   // ignores roster entries that are merely lingering (seen, but past the online window) so the
@@ -468,8 +468,8 @@ export function Sidebar() {
               className="h-4 w-4 shrink-0 object-contain"
             />
           )}
-          {/* Live LAN headcount — restored from the old footer text; a breathing signal dot +
-            the number of people currently discovered around us. Always visible (the SSID can
+          {/* Client-relative headcount — restored from the old footer text; a breathing signal dot +
+            the number of people currently observed by this client. Always visible (the SSID can
             grow long and truncate), with the full phrase in the tooltip. */}
           <span
             data-testid="lan-online-count"

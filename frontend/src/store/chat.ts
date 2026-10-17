@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { chat, favorites as favoritesApi } from "@/lib/api";
+import { chat, contactPolicy, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import { loadPendingUnread, loadUnread } from "@/lib/unreadStorage";
@@ -249,6 +249,7 @@ export interface ChatState {
   clearError: () => void;
   setError: (msg: string) => void;
   refreshRoster: () => Promise<void>;
+  deleteContact: (account: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
   reload: () => Promise<boolean>;
@@ -563,6 +564,46 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         rawSet((s) => ({ runEpoch: s.runEpoch + 1, ready: false }));
       }
     };
+  },
+
+  deleteContact: async (account) => {
+    const lease = captureChat(get);
+    if (
+      !lease.current() ||
+      !lease.owner ||
+      !get().ready ||
+      account === get().myAccountId
+    )
+      return false;
+    try {
+      await contactPolicy.delete(lease.owner, account);
+      if (!lease.current()) return false;
+      rawSet((state) => {
+        const unread = { ...state.unread };
+        delete unread[`account:${account}`];
+        const closing =
+          state.active?.kind === "account" && state.active.id === account;
+        return {
+          ...clearConversationMessages(state, `account:${account}`),
+          reactions: { ...state.reactions, [`account:${account}`]: [] },
+          accounts: state.accounts.filter((a) => a.account_id !== account),
+          unread,
+          rosterRequest: state.rosterRequest + 1,
+          ...(closing
+            ? {
+                active: null,
+                searchTarget: null,
+                historyError: null,
+                activeRequest: state.activeRequest + 1,
+                loading: false,
+              }
+            : {}),
+        };
+      });
+      return true;
+    } catch {
+      return false;
+    }
   },
 
   refreshRoster: async () => {

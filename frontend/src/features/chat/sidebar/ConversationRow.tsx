@@ -14,6 +14,7 @@ import { formatTime } from "@/lib/format";
 import { convKey, useChat, type Conversation } from "@/store/chat";
 import {
   presenceLabel,
+  groupPresenceLabel,
   presenceStatus,
   usePresenceFor,
 } from "@/store/presence";
@@ -59,11 +60,16 @@ export function ConversationRow({
   const status = presenceStatus(presence);
   const latest = history?.[history.length - 1];
   const lastTime = latest ? formatTime(latest.wallClock) : null;
-  const summary = prioritizeSubtitle
-    ? subtitle
-    : latest?.text ||
-      latest?.file?.name ||
-      (channel ? subtitle : presenceLabel(presence, t));
+  const summary =
+    channel && !prioritizeSubtitle && !latest
+      ? groupPresenceLabel(presence, t)
+      : prioritizeSubtitle
+        ? subtitle
+        : latest?.text ||
+          latest?.file?.name ||
+          (channel
+            ? groupPresenceLabel(presence, t)
+            : presenceLabel(presence, t));
 
   const row = (
     <div

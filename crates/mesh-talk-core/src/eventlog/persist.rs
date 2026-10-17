@@ -77,9 +77,23 @@ impl PersistentEventLog {
 
     /// Validate, persist, then index an event.
     pub fn append(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        self.append_with_precommit(event, || Ok(()))
+    }
+
+    /// Commit local prerequisites after validation, before publishing a new event.
+    /// Invalid events and duplicates never run `precommit`. Exclusive access keeps
+    /// validation valid through the write without a second signature check.
+    /// A hook failure leaves this log unchanged; a later event-write failure may
+    /// leave committed prerequisites, which the caller must tolerate on recovery.
+    pub(crate) fn append_with_precommit(
+        &mut self,
+        event: Event,
+        precommit: impl FnOnce() -> Result<(), LogError>,
+    ) -> Result<AppendOutcome, LogError> {
         if !self.log.validate(&event)? {
             return Ok(AppendOutcome::Duplicate);
         }
+        precommit()?;
         self.file.append(&event)?;
         self.fingerprint_cache
             .get_mut()
@@ -441,6 +455,78 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn precommit_runs_only_for_new_valid_events_and_before_the_event_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.log");
+        let author = DeviceIdentity::generate();
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let event = mk(&author, 1, 1, b"valid");
+        let before = std::fs::read(&path).unwrap();
+        let mut corrupt = event.clone();
+        corrupt.sig[0] ^= 1;
+        assert!(matches!(
+            log.append_with_precommit(corrupt, || panic!("invalid event ran precommit")),
+            Err(LogError::BadSignature)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let mut calls = 0;
+        assert_eq!(
+            log.append_with_precommit(event.clone(), || {
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                calls += 1;
+                Ok(())
+            })
+            .unwrap(),
+            AppendOutcome::Appended
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(
+            log.append_with_precommit(event.clone(), || panic!("duplicate ran precommit"))
+                .unwrap(),
+            AppendOutcome::Duplicate
+        );
+        // A distinct, correctly signed event at the same author sequence is
+        // rejected before a prerequisite can be written, too.
+        assert!(matches!(
+            log.append_with_precommit(mk(&author, 1, 1, b"fork"), || {
+                panic!("equivocation ran precommit")
+            }),
+            Err(LogError::AuthorEquivocation { .. })
+        ));
+        drop(log);
+        let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(reopened.get(&event.id), Some(&event));
+        assert_eq!(reopened.all_event_ids(), vec![event.id]);
+    }
+
+    #[test]
+    fn failed_precommit_does_not_publish_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.log");
+        let author = DeviceIdentity::generate();
+        let event = mk(&author, 1, 1, b"retry");
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let fingerprint = log.fingerprint_and_len(&event.conversation_id);
+        assert!(matches!(
+            log.append_with_precommit(event.clone(), || {
+                Err(LogError::Io(std::io::Error::other("precommit failed")))
+            }),
+            Err(LogError::Io(_))
+        ));
+        assert!(!log.has(&event.id));
+        assert_eq!(log.fingerprint_and_len(&event.conversation_id), fingerprint);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(log);
+        let mut reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert!(!reopened.has(&event.id));
+        assert_eq!(
+            reopened.append_with_precommit(event, || Ok(())).unwrap(),
+            AppendOutcome::Appended
+        );
     }
 
     #[test]

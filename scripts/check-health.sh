@@ -89,12 +89,13 @@ fi
 print_status "success" "Checking target cache cleanup safeguards..."
 scripts/test-clean-target-cache.sh
 scripts/test-auto-clean-targets.sh
+python3 -m unittest discover -s scripts -p test_build_retention.py -v
 
 # Keep Cargo's target/ from growing without bound. This is intentionally best-effort:
 # cleanup failures should not block formatting, tests, or commits.
-if [ -x "scripts/clean-target-cache.sh" ]; then
+if [ -f "scripts/build-retention.py" ]; then
     print_status "success" "Pruning stale Cargo target cache when needed..."
-    if ! scripts/clean-target-cache.sh --yes; then
+    if ! python3 scripts/build-retention.py clean; then
         print_status "warning" "Cargo target cache cleanup failed; continuing."
     fi
 fi

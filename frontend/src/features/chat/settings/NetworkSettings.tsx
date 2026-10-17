@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
 import { useChat } from "@/store/chat";
 import { usePrivacy } from "@/store/privacy";
 import {
@@ -8,6 +10,7 @@ import {
   savedIndirectPostOffice,
 } from "@/lib/postOfficeOptions";
 import { PrivacySettings } from "../PrivacySettings";
+import { OfflineConnectDialog } from "../OfflineConnectDialog";
 import { SettingsRow, SELECT_CLASS, InactiveHelp } from "./primitives";
 import { networkControlState } from "./model";
 import type { SettingsController } from "./useSettingsController";
@@ -18,6 +21,7 @@ export function NetworkSettings({
   controller: SettingsController;
 }) {
   const { t } = useTranslation();
+  const [connectOpen, setConnectOpen] = useState(false);
   const peers = useChat((s) => s.peers);
   const policyOwner = usePrivacy((s) => s.owner);
   const loaded = usePrivacy((s) => s.loaded);
@@ -47,20 +51,51 @@ export function NetworkSettings({
       {s && (
         <div className="mt-5">
           <SettingsRow
-            id="setting-physical-lan-only"
+            id="setting-discovery-scope"
             icon={icon}
-            title={t("settings.physicalLanOnly")}
-            desc={t("settings.physicalLanOnlyDesc")}
+            title={t("settings.discoveryScope")}
+            desc={t(
+              s.physical_lan_only
+                ? "settings.discoveryScopeLocalDesc"
+                : "settings.discoveryScopeRoutedDesc",
+            )}
             control={
-              <Switch
-                id="setting-physical-lan-only"
-                checked={s.physical_lan_only}
+              <select
+                id="setting-discovery-scope"
+                value={s.physical_lan_only ? "local" : "routed"}
                 disabled={c.saving}
-                onCheckedChange={(on) =>
-                  void c.update({ physical_lan_only: on }, "connection")
+                onChange={(event) =>
+                  void c.update(
+                    { physical_lan_only: event.target.value === "local" },
+                    "connection",
+                  )
                 }
-              />
+                className={`${SELECT_CLASS} w-56`}
+              >
+                <option value="local">
+                  {t("settings.discoveryScopeLocal")}
+                </option>
+                <option value="routed">
+                  {t("settings.discoveryScopeRouted")}
+                </option>
+              </select>
             }
+          />
+          <div className="flex justify-end py-2 max-[700px]:justify-start">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setConnectOpen(true)}
+            >
+              {t("settings.addDeviceAddress")}
+            </Button>
+          </div>
+          <OfflineConnectDialog
+            key={c.owner}
+            open={connectOpen}
+            onOpenChange={setConnectOpen}
+            includeSharedNetwork
           />
           <SettingsRow
             id="setting-bridge-discovery"

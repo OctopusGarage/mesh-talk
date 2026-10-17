@@ -48,8 +48,19 @@ alongside `verify` in branch protection to make these PR checks merge-blocking;
 the workflow alone does not change administrator branch-protection settings.
 
 Mutation testing uses pinned cargo-mutants 27.1.0 and examines both Rust workspace
-members. A hard unmutated workspace test runs first; the mutation tool also runs its
-own baseline for nonempty selections. Selected counts, completed outcomes, baseline,
+members. Each run rotates through one of 256 round-robin samples and partitions that
+same sample across four runners (subshards of 1024), without changing the selected
+mutant set. Each runner uses one in-place worker, incremental compilation, the
+symbol-free `mutants` Cargo profile, and the workspace-root build cache. Every
+mutant still runs the workspace tests. Reports are uploaded as `mutants-report-0`
+through `mutants-report-3`; assess all four reports for the complete sample.
+
+The mutation tool runs a hard unmutated workspace baseline for each nonempty
+selection; no separate workspace test duplicates that baseline. Empty selections
+only validate selection/tooling and do not constitute baseline evidence. Tiny
+dependency-free fixture crates check the actual pinned CLI, caught/advisory outcomes,
+baseline failure, and empty selection via `node --test scripts/release/run-mutants.test.mjs`.
+Selected counts, completed outcomes, baseline,
 tool exit code and summary counts must agree. Zero selected mutations are recorded
 explicitly and may have no report; a stale report is rejected.
 
