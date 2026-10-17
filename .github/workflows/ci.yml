@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '0 6 * * 1' # Preserve the former weekly full-health Rust run.
   workflow_dispatch:
     inputs:
       diagnostic_timing:
@@ -56,7 +58,9 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: . -> target
+          key: workspace-checks
+          cache-on-failure: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -105,24 +109,14 @@ jobs:
       - name: Build retention safeguards (all platforms)
         run: python3 -m unittest discover -s scripts -p test_build_retention.py -v
 
-      - name: Validate release checksum generation
-        shell: bash
-        run: node --test scripts/diagnostics/release-workflow.test.mjs
-
-      - name: Lint frontend (ESLint)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: frontend
-        run: npm run lint
-
-      - name: Rustfmt (check)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: src-tauri
-        run: cargo fmt --all -- --check
-
+      # All platforms retain the Clippy and build checks formerly repeated by health.
       - name: Clippy
-        if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build workspace
+        working-directory: src-tauri
+        run: cargo build --workspace --locked
 
       # Linux runs the suite under llvm-cov (below); macOS + Windows run it directly.
       # --workspace so BOTH crates (mesh-talk-core + the app) are tested, not just the app.
@@ -229,44 +223,6 @@ jobs:
           files: frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/e2e-lcov.info
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
-
-      - name: Spelling (typos)
-        if: matrix.os == 'ubuntu-latest'
-        uses: crate-ci/typos@v1
-
-      - name: Shellcheck scripts
-        if: matrix.os == 'ubuntu-latest'
-        run: shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/*
-
-      - name: Install Go for workflow validation
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/setup-go@v7
-        with:
-          go-version: '1.25'
-          cache: false
-
-      - name: Validate GitHub Actions workflows
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          "$(go env GOPATH)/bin/actionlint"
-
-      - name: Install supply-chain tools
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.27
-        with:
-          tool: cargo-deny,cargo-machete
-
-      # Unused dependencies (knip's Rust equivalent). Cargo.toml files at root.
-      - name: Unused dependencies (cargo-machete)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo machete
-
-      # Advisories + licenses + bans + sources (config: deny.toml).
-      - name: Supply-chain policy (cargo-deny)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo deny check
 
   # Stable name for the branch-protection required check: stays "verify" no
   # matter how the matrix above evolves.

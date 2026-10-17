@@ -24,6 +24,60 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+## CI ownership and browser sharding
+
+The standalone `scripts/check-health.sh` still runs the full local gate before
+requesting review. Hosted workflows divide the same responsibilities so that
+independent checks run concurrently and heavy suites are not repeated by health.
+
+| Owner                                 | Checks                                                                                                                                                                                                                 |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, cache cleanup shell regressions on Linux/macOS/Windows                                                                                        |
+| `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
+| `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; Linux Rust/E2E coverage and eval smoke |
+| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, lite checks, portable browser matrices and scheduled extended scenarios                                                                       |
+| Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
+
+Every existing protected health name now requires both the source scanner job
+and the complete platform static matrix. A failed, cancelled or skipped dependency
+fails the gate. Health runs for every PR base so moving source checks out of CI
+does not leave non-main PRs without them. CI retains the weekly Rust run formerly
+provided by scheduled full health; UI E2E runs the full browser matrices daily.
+A manual health workflow dispatch runs static checks; dispatch CI and UI E2E too
+when complete hosted verification is needed. The local full-health command is
+unchanged. Required CI, health, UI E2E and backend check names remain stable.
+The protected `Full Linux UI regression` name now belongs to the coverage merge
+job, which explicitly fails when its browser shard matrix is unsuccessful.
+
+Full Chromium tests use four Playwright shards per OS, with one worker and zero
+retries per runner. This keeps the existing per-machine rendering budget while
+running all scenarios. Portable/native scenarios and snapshot assertions remain
+in place. Sharding trades more concurrent runner slots and setup work for shorter
+elapsed time; account concurrency limits can reduce the gain.
+
+Each Linux shard uploads raw browser coverage plus its source SHA and shard
+identity. The coverage job generates the unit line map once, then requires all
+four distinct current-source shards before collecting their parts and producing
+one browser LCOV upload. It prefixes filenames so reports from different runners
+cannot overwrite each other and clears old output only after validating every
+input. The final UI gate requires successful browser, coverage, merged-report,
+lite and portable jobs, plus Firefox when selected. Blob reports and failure
+traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
+when browser execution fails.
+
+The Rust build cache maps the workspace root to `target/`, matching
+`cargo metadata --no-deps --format-version 1`. The CI cache has its own build
+configuration key; native release, mutation and sanitizer caches stay separate.
+Cached build output never replaces executing checks on the current revision.
+
+To assess performance after deployment, compare at least several unchanged-scope
+runs with warm caches and a cold-cache run. Record time from PR update to all
+required checks passing, queue delay, slowest browser shard, native build/test
+steps, total runner minutes, and first-attempt failures. The pre-change October 17
+sample had 27–38 minute health jobs and a 31.5 minute full Linux UI job. These are
+baseline observations, not promised speedups; hosted runs must establish the new
+latency and reliability.
+
 ## Automatic platform checks before PR creation
 
 Commit the candidate and use the repository's PR entry point:
@@ -96,17 +150,17 @@ node scripts/pr-platform/run.mjs --plan \
   e2e/ui-visual-regression.spec.ts
 ```
 
-| Setting                            | Default / purpose                                                                                            |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                      |
-| `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D |
-| `MESH_PR_LINUX_HOST` | Optional SSH host, such as `mac2015`, to run Docker remotely; unset keeps local Docker. |
-| `MESH_PR_LINUX_PLATFORM` | Optional `linux/amd64` or `linux/arm64`; remote Docker defaults to `linux/amd64` and rejects mismatched guest architecture. |
-| `MESH_PR_LINUX_DOCKER` | Remote Docker executable; defaults to `/Applications/Docker.app/Contents/Resources/bin/docker`. |
-| `MESH_PR_LINUX_ROOT` | Remote temporary source/evidence root; defaults to `/tmp/mesh-talk-pr-preflight`. |
-| `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`           |
-| `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                     |
-| `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                 |
+| Setting                            | Default / purpose                                                                                                           |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                                     |
+| `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D                |
+| `MESH_PR_LINUX_HOST`               | Optional SSH host, such as `mac2015`, to run Docker remotely; unset keeps local Docker.                                     |
+| `MESH_PR_LINUX_PLATFORM`           | Optional `linux/amd64` or `linux/arm64`; remote Docker defaults to `linux/amd64` and rejects mismatched guest architecture. |
+| `MESH_PR_LINUX_DOCKER`             | Remote Docker executable; defaults to `/Applications/Docker.app/Contents/Resources/bin/docker`.                             |
+| `MESH_PR_LINUX_ROOT`               | Remote temporary source/evidence root; defaults to `/tmp/mesh-talk-pr-preflight`.                                           |
+| `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`                          |
+| `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                                    |
+| `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                                |
 
 To run native Linux amd64 containers on the Intel Mac while preparing a PR:
 
