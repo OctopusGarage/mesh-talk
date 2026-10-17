@@ -178,9 +178,7 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
                     channel.peer_publicly_visible(),
                     std::time::Instant::now(),
                 );
-                peers.and_then(|peers| {
-                    bridge_directory::encode_for_request(&first, &peers, directory.gateway_route())
-                })
+                peers.and_then(|peers| directory.encode_snapshot(&first, &peers))
             };
             if let Some(response) = response {
                 for page in response {

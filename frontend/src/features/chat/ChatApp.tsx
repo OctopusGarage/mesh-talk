@@ -1,3 +1,4 @@
+import { PresenceAvailability } from "./PresenceAvailability";
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CircleAlert, X } from "lucide-react";
@@ -25,6 +26,8 @@ export function ChatApp() {
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const ready = useChat((s) => s.ready);
+  const presenceRun = useChat((s) => s.runEpoch);
+  const presenceIdentity = useChat((s) => s.identityEpoch);
   const [mediaWarning, setMediaWarning] = useState(false);
   const active = useChat((s) => s.active);
   const peers = useChat((s) => s.peers);
@@ -149,10 +152,10 @@ export function ChatApp() {
   // Presence polls on its own slow interval into an isolated store — kept apart from the
   // chat store so a presence tick never re-renders the virtualized message list.
   useEffect(() => {
-    if (!owner || !ready) return;
+    if (!owner) return;
     const stop = startPresence();
     return stop;
-  }, [startPresence, owner, generation, ready]);
+  }, [startPresence, owner, generation, presenceRun, presenceIdentity]);
 
   return (
     <div
@@ -162,14 +165,17 @@ export function ChatApp() {
       <Sidebar />
       <ConversationView />
       <CallDialog />
-      {mediaWarning && (
-        <div
-          role="alert"
-          className="absolute inset-x-4 top-3 z-50 rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
-        >
-          {t("settings.mediaMigrationWarning")}
-        </div>
-      )}
+      <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
+        <PresenceAvailability />
+        {mediaWarning && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
+          >
+            {t("settings.mediaMigrationWarning")}
+          </div>
+        )}
+      </div>
       <AnimatePresence>
         {error && (
           <motion.div

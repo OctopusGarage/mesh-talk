@@ -128,8 +128,8 @@
     "contactsOnLan_one": "局域网内 {{count}} 个联系人",
     "contactsOnLan_other": "局域网内 {{count}} 个联系人",
     "localNetwork": "局域网",
-    "peopleOnLan_one": "局域网 {{count}} 人在线",
-    "peopleOnLan_other": "局域网 {{count}} 人在线",
+    "peopleOnLan_one": "当前客户端已知在线 {{count}} 人",
+    "peopleOnLan_other": "当前客户端已知在线 {{count}} 人",
     "onlineShort": "{{count}} 人在线",
     "pin": "置顶",
     "unpin": "取消置顶",
@@ -145,7 +145,8 @@
     "moreActions": "更多",
     "resize": "调整侧边栏宽度",
     "strandedAlone": "找不到人？试试无网直连",
-    "strandedNoNetwork": "未连接任何网络 · 设置直连"
+    "strandedNoNetwork": "未连接任何网络 · 设置直连",
+    "peopleOnLan": "当前客户端已知在线 {{count}} 人"
   },
   "recovery": {
     "mediaUnavailable": "此备份中不可用",
@@ -227,11 +228,27 @@
   },
   "presence": {
     "online": "在线",
-    "lastSeenJustNow": "刚刚还在线",
-    "lastSeenSecs": "{{count}} 秒前在线",
-    "lastSeenMins": "{{count}} 分钟前在线",
-    "lastSeenHours": "{{count}} 小时前在线",
-    "offline": "离线"
+    "lastSeenJustNow": "本机刚刚发现",
+    "lastSeenSecs": "本机 {{count}} 秒前发现",
+    "lastSeenMins": "本机 {{count}} 分钟前发现",
+    "lastSeenHours": "本机 {{count}} 小时前发现",
+    "offline": "离线",
+    "offlineHistory": "离线 · {{history}}",
+    "offlineHint": "离线表示当前客户端未发现对方的有效在线信息；对方可能已退出，也可能暂时无法被当前网络发现。",
+    "communicationHint": "在线不保证消息送达、文件传输或通话成功。发现来源不代表设备的物理位置。",
+    "knownOnlineHint": "已知在线以当前客户端的观察为准。已接受的成员按已验证账号去重；本机节点运行时计入自己。",
+    "groupSummary": "{{total}} 位成员 · 已知在线 {{online}} 人",
+    "groupUpdating": "正在更新成员在线信息…",
+    "groupUnbound": "{{summary}} · 另有 {{count}} 个未绑定账号的成员设备",
+    "unavailable": "在线状态暂无法更新，已有在线信息将正常过期；正在自动重试。",
+    "observedDevices": "发现 {{count}} 台在线设备",
+    "source_local": "本地网络发现",
+    "source_routed": "跨网络发现",
+    "source_directory": "经邮局发现",
+    "source_authenticated": "已验证的通信记录（网络范围未确定）",
+    "source_self": "本机节点运行中",
+    "sourceAge": "{{source}} · 本机 {{seconds}} 秒前发现",
+    "source_unscoped": "签名发现记录（网络范围未确定）"
   },
   "message": {
     "delivery": {

@@ -138,86 +138,6 @@ pub async fn diag_network_info(
     })
 }
 
-// --- Presence (online / last-seen) ------------------------------------------
-
-/// A peer is considered "online" if heard from within this window. Generous enough
-/// to ride out a missed announce tick, tight enough that a departed peer dims promptly.
-pub(super) const PRESENCE_TTL_SECS: u64 = 30;
-
-/// Per-conversation presence, keyed by account id (DMs) and channel id (channels).
-#[derive(Serialize)]
-pub struct PresenceInfo {
-    /// True when at least one relevant device was heard from within the TTL.
-    pub online: bool,
-    /// Whole seconds since the most-recently-seen relevant device (None if never seen).
-    pub last_seen_secs: Option<u64>,
-}
-
-/// Fold per-device "seconds since last seen" values into a [`PresenceInfo`]: the freshest
-/// (minimum) device wins, and the conversation is online if that freshest sighting is
-/// strictly within [`PRESENCE_TTL_SECS`]. An empty iterator yields offline / never-seen.
-pub(super) fn presence_from_seen(secs: impl Iterator<Item = u64>) -> PresenceInfo {
-    let best = secs.min();
-    PresenceInfo {
-        online: best.is_some_and(|s| s < PRESENCE_TTL_SECS),
-        last_seen_secs: best,
-    }
-}
-
-/// A snapshot of presence for every account + channel conversation, keyed by id.
-///
-/// Online = the account (DM) has ≥1 device currently in the roster seen within the TTL;
-/// for a channel, ≥1 known member device is present within the TTL. Reuses the same
-/// roster the diagnostics commands read, so it's a cheap, lock-once snapshot. Polled by
-/// the frontend on a slow interval into an isolated store (presence ticks must not
-/// re-render the message list).
-#[tauri::command]
-pub async fn get_presence(
-    state: tauri::State<'_, NodeState>,
-) -> Result<std::collections::HashMap<String, PresenceInfo>, CommandError> {
-    use std::collections::HashMap;
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-
-    // last_seen (whole secs) per user_id, from one roster snapshot.
-    let peers = rt.peers();
-    let seen_by_user: HashMap<String, u64> = peers
-        .iter()
-        .map(|p| (p.public.user_id(), p.last_seen.elapsed().as_secs()))
-        .collect();
-
-    let mut out: HashMap<String, PresenceInfo> = HashMap::new();
-
-    // Per-account presence: the freshest of the account's known devices.
-    let mut by_account: HashMap<String, Vec<u64>> = HashMap::new();
-    for p in &peers {
-        if let Some(acct) = &p.account_id {
-            by_account
-                .entry(acct.clone())
-                .or_default()
-                .push(p.last_seen.elapsed().as_secs());
-        }
-    }
-    for (acct, secs) in by_account {
-        out.insert(acct, presence_from_seen(secs.into_iter()));
-    }
-
-    // Per-channel presence: the freshest of any known member device currently in roster.
-    for c in rt.list_channels() {
-        let secs: Vec<u64> = rt
-            .channel_members(c.id)
-            .into_iter()
-            .filter_map(|m| seen_by_user.get(&m.user_id()).copied())
-            .collect();
-        out.insert(
-            hex::encode(c.id.as_bytes()),
-            presence_from_seen(secs.into_iter()),
-        );
-    }
-
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,7 +180,7 @@ mod tests {
             mesh_talk_core::node::DEFAULT_DISCOVERY_PORT
         );
         assert!(!info.multicast_group.is_empty());
-        assert!(get_presence(state.clone()).await.unwrap().is_empty());
+        assert!(super::super::get_presence(state.clone()).await.unwrap()[&info.account_id].online);
         rescan_peers(state.clone()).await.unwrap();
 
         let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -313,7 +233,48 @@ mod tests {
                 .iter()
                 .any(|peer| peer.name == "Remote Diagnostics")
         );
-        assert!(get_presence(state.clone()).await.unwrap()[&remote_account].online);
+        assert!(super::super::get_presence(state.clone()).await.unwrap()[&remote_account].online);
+
+        let node = managed.0.lock().await.as_ref().unwrap().handle();
+        let public = managed
+            .0
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .peers()
+            .into_iter()
+            .find(|p| p.public.user_id() == remote_id)
+            .unwrap()
+            .public;
+        let unbound = mesh_talk_core::identity::device::DeviceIdentity::generate().public();
+        let pending_group = node
+            .create_channel_invited("Pending", vec![public.clone(), unbound.clone()])
+            .await
+            .unwrap();
+        let accepted_group = node
+            .create_channel("Accepted", vec![public, unbound])
+            .await
+            .unwrap();
+        let snapshot =
+            serde_json::to_value(super::super::get_presence(state.clone()).await.unwrap()).unwrap();
+        let pending = &snapshot[hex::encode(pending_group.as_bytes())];
+        assert_eq!(
+            pending["member_count"], 1,
+            "self is counted; pending invitees are excluded"
+        );
+        assert_eq!(pending["online_count"], 1);
+        assert_eq!(pending["unbound_member_count"], 0);
+        let accepted = &snapshot[hex::encode(accepted_group.as_bytes())];
+        assert_eq!(
+            accepted["member_count"], 2,
+            "accepted self and remote are distinct people"
+        );
+        assert_eq!(accepted["online_count"], 2);
+        assert_eq!(
+            accepted["unbound_member_count"], 1,
+            "an unbound device is never labeled a person"
+        );
 
         for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
             assert!(

@@ -53,7 +53,7 @@ test("shell and sidebar meet baseline layout and interaction invariants", async 
   await expect(page.getByTestId("lan-online-count")).toContainText("online");
   await expect(page.getByTestId("lan-online-count")).toHaveAttribute(
     "aria-label",
-    /person online on the LAN/,
+    "People observed online by this client: 1",
   );
   await page.getByTestId("sidebar-overflow").click();
   await expect(page.getByTestId("sidebar-nav-connection")).toHaveText(

@@ -128,8 +128,8 @@
     "contactsOnLan_one": "區域網絡中有 {{count}} 位聯絡人",
     "contactsOnLan_other": "區域網絡中有 {{count}} 位聯絡人",
     "localNetwork": "區域網絡",
-    "peopleOnLan_one": "區域網絡 {{count}} 人在線",
-    "peopleOnLan_other": "區域網絡 {{count}} 人在線",
+    "peopleOnLan_one": "呢個客戶端已知在線 {{count}} 人",
+    "peopleOnLan_other": "呢個客戶端已知在線 {{count}} 人",
     "onlineShort": "{{count}} 人在線",
     "pin": "釘選至頂部",
     "unpin": "取消釘選",
@@ -145,7 +145,8 @@
     "moreActions": "更多",
     "resize": "調整側邊欄寬度",
     "strandedAlone": "找不到其他人？嘗試無網絡直連",
-    "strandedNoNetwork": "未連接至任何網絡 · 設定直連"
+    "strandedNoNetwork": "未連接至任何網絡 · 設定直連",
+    "peopleOnLan": "呢個客戶端已知在線 {{count}} 人"
   },
   "recovery": {
     "mediaUnavailable": "呢份備份冇呢個檔案",
@@ -227,11 +228,27 @@
   },
   "presence": {
     "online": "在線",
-    "lastSeenJustNow": "剛剛仍在線",
-    "lastSeenSecs": "{{count}} 秒前仍在線",
-    "lastSeenMins": "{{count}} 分鐘前仍在線",
-    "lastSeenHours": "{{count}} 小時前仍在線",
-    "offline": "不在線"
+    "lastSeenJustNow": "本機啱啱發現",
+    "lastSeenSecs": "本機 {{count}} 秒前發現",
+    "lastSeenMins": "本機 {{count}} 分鐘前發現",
+    "lastSeenHours": "本機 {{count}} 小時前發現",
+    "offline": "不在線",
+    "offlineHistory": "離線 · {{history}}",
+    "offlineHint": "離線即係呢個客戶端未發現對方有效嘅在線資訊；對方可能已退出，亦可能暫時無法喺目前網絡被發現。",
+    "communicationHint": "在線唔保證訊息送達、檔案傳輸或者通話成功。發現來源唔代表裝置嘅實際位置。",
+    "knownOnlineHint": "已知在線以呢個客戶端嘅觀察為準。已接受嘅成員按已驗證帳戶去重；本機節點運行時計埋自己。",
+    "groupSummary": "{{total}} 位成員 · 已知在線 {{online}} 人",
+    "groupUpdating": "更新緊成員在線資訊…",
+    "groupUnbound": "{{summary}} · 另有 {{count}} 個未綁定帳戶嘅成員裝置",
+    "unavailable": "暫時更新唔到在線狀態，已有資訊會正常過期；自動重試緊。",
+    "observedDevices": "發現 {{count}} 部在線裝置",
+    "source_local": "本地網絡發現",
+    "source_routed": "跨網絡發現",
+    "source_directory": "經郵局發現",
+    "source_authenticated": "已驗證嘅通訊記錄（網絡範圍未確定）",
+    "source_self": "本機節點運行緊",
+    "sourceAge": "{{source}} · 本機 {{seconds}} 秒前發現",
+    "source_unscoped": "簽名發現記錄（網絡範圍未確定）"
   },
   "message": {
     "delivery": {

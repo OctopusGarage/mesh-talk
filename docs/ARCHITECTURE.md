@@ -739,7 +739,7 @@ Equal-relay enrollment uses the optional, authoritative versioned public
 file is supplied. Atomic operator mutations serialize through a persistent
 companion lock. Running services use a startup snapshot and require restart
 for enrollment/revocation. See [federation operations](post-office-federation.md).
-Modern directory v3/federation v2 admit up to 1,024 presence entries, while legacy
+Modern directory v3/v4 and federation v2 admit up to 1,024 presence entries, while legacy
 requests keep 128. Client refresh streams all eligible relays with eight queries
 in flight and publishes each persisted result immediately; policy generations
 and staged rollback prevent canceled or obsolete introductions from surviving.
@@ -770,6 +770,29 @@ empty conversation pane distinguishes no peers, hidden contacts, and a failed
 contact-visibility read; Connection diagnostics distinguish loading from failure.
 The chat roster and presence snapshot poll every 2 s. Unchanged roster snapshots
 retain their existing references so a poll does not redraw conversation rows.
+`chat_commands/presence.rs` projects eligible observations by verified account,
+retaining devices, source and expiry independently of routes and connection state.
+The isolated `store/presence.ts` ages those lifetimes during silence or IPC errors,
+protects owner/runtime generations and response ordering, and retains bounded
+session-local last-seen history. Online/Offline are client-relative observations;
+recent history remains secondary to Offline. A global notice reports failed
+presence refresh or terminated discovery producers without asserting an Internet
+or LAN outage. Device presence has independent 30-second local/unscoped signed UDP, 120-second routed,
+300-second public authenticated, and at-most-45-second original directory expiry.
+Private authenticated routing does not contribute. Directory v4 preserves the
+origin expiry across the final relay-to-client boundary; older directory replies
+remain route hints without eligible freshness. Existing wire layouts and capacity
+budgets are unchanged.
+
+Conversation headers show accepted distinct account counts and known-online
+counts, including self while an accepted local node runs. Pending/removed members
+and infrastructure are excluded. Account-unresolved device memberships appear
+separately rather than being labeled people; membership actions still address
+devices. Member profiles expose deduplicated fresh devices and overlapping source
+details without inferring physical LAN location or claiming a connection. Group
+history through an intermediary does not propagate presence. See the
+[network presence contract](network-design-reference.md#person-presence-contract)
+and [presence Q&A](network-design-qa.md#q16-what-does-a-persons-online-or-offline-status-actually-mean).
 
 Unread counters are local presentation state. An incoming event in the selected
 conversation remains unread while the window is unfocused or hidden; focusing that

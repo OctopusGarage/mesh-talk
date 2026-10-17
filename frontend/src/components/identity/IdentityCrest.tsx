@@ -79,6 +79,11 @@ export function IdentityCrest({
         {status && (
           <PresenceDot
             status={status}
+            label={
+              status === "online" || status === "offline"
+                ? t(`presence.${status}`)
+                : undefined
+            }
             size={large ? "lg" : "md"}
             className="pointer-events-none absolute -bottom-0.5 -right-0.5"
           />

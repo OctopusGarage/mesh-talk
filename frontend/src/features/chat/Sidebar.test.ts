@@ -78,9 +78,10 @@ vi.mock("@/store/settings", () => ({
 }));
 vi.mock("@/store/presence", () => ({
   usePresence: (selector: (state: unknown) => unknown) => selector({ map: {} }),
-  usePresenceFor: () => null,
+  usePresenceFor: () => ({ online: false, last_seen_secs: null }),
   presenceStatus: () => "offline",
   presenceLabel: () => "Offline",
+  groupPresenceLabel: () => "3 members · 0 known online",
 }));
 vi.mock("@/lib/theme", () => ({
   useTheme: (selector: (state: unknown) => unknown) =>
@@ -165,7 +166,7 @@ it("falls back to presence and member count when conversations have no messages"
   const html = renderToStaticMarkup(createElement(Sidebar));
 
   expect(html).toContain('aria-label="Alice, Offline"');
-  expect(html).toContain('aria-label="Study, 3 members"');
+  expect(html).toContain('aria-label="Study, 3 members · 0 known online"');
 });
 
 it("labels a recovered channel as an archive", () => {
@@ -230,7 +231,7 @@ it.each([81, 82])(
     expect(html).toContain('data-nav-position="1"');
     expect(html).toContain(`data-nav-position="${count + 1}"`);
     expect(html).toContain('aria-label="First, Offline"');
-    expect(html).toContain('aria-label="Study, 3 members"');
+    expect(html).toContain('aria-label="Study, 3 members · 0 known online"');
     expect(html.includes('data-testid="virtual-section"')).toBe(count === 82);
     expect(html.indexOf('conversation-row-person-1"')).toBeLessThan(
       html.indexOf('conversation-row-group"'),

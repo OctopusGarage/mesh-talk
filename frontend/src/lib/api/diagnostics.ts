@@ -19,7 +19,7 @@ export const diag = {
 };
 
 export const presence = {
-  /** Per-conversation presence snapshot, keyed by account_id (DMs) and channel_id. */
+  /** Shared person/device observations and accepted-account group count summaries. */
   get: () => invoke<PresenceMap>("get_presence"),
 };
 

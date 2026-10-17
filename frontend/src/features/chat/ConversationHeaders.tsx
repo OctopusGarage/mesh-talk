@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  AvatarEditMenu,
-  IdentityCrest,
-  PresenceDot,
-} from "@/components/identity";
+import { AvatarEditMenu, IdentityCrest } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { chat as chatApi } from "@/lib/api";
 import { rosterProjection } from "@/lib/rosterProjection";
@@ -12,6 +8,7 @@ import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import {
   presenceLabel,
+  groupPresenceLabel,
   presenceStatus,
   usePresenceFor,
 } from "@/store/presence";
@@ -98,7 +95,6 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
 export function ChannelHeader({
   id,
   name,
-  memberCount,
   archived,
   dissolved,
   left,
@@ -114,7 +110,6 @@ export function ChannelHeader({
 }) {
   const { t } = useTranslation();
   const presence = usePresenceFor(id);
-  const status = presenceStatus(presence);
   return (
     <div className="flex min-w-0 items-center gap-3">
       <div className="relative">
@@ -125,13 +120,6 @@ export function ChannelHeader({
         >
           <GroupAvatar channelId={id} size={36} title={name} />
         </AvatarEditMenu>
-        {!archived && !dissolved && !left && !pendingInvite && (
-          <PresenceDot
-            status={status}
-            size="md"
-            className="absolute -bottom-0.5 -right-0.5"
-          />
-        )}
       </div>
       <div className="min-w-0">
         <div
@@ -140,7 +128,10 @@ export function ChannelHeader({
         >
           {name}
         </div>
-        <div className="truncate text-xs text-muted-foreground">
+        <div
+          className="text-xs text-muted-foreground"
+          title={t("presence.knownOnlineHint")}
+        >
           {dissolved
             ? t("conversation.dissolvedChannel")
             : archived
@@ -149,9 +140,7 @@ export function ChannelHeader({
                 ? t("conversation.leftChannel")
                 : pendingInvite
                   ? t("conversation.pendingInvite")
-                  : memberCount
-                    ? t("conversation.members", { count: memberCount })
-                    : t("conversation.channel")}
+                  : groupPresenceLabel(presence, t)}
         </div>
       </div>
     </div>

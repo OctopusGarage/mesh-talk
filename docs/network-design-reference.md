@@ -136,7 +136,7 @@ Paths below are relative to the repository root. `core/` is shorthand for `crate
 
 ### Route contract and UI projection
 
-`PeerRecord::has_direct_route()` accepts `Lan`, `RoutedQuery` and `Authenticated` routes. `Gateway` and `PostOffice` routes alone do not qualify. A device with both direct and indirect alternatives remains eligible through its direct route. An address string alone is insufficient evidence.
+`PeerRecord::has_direct_route()` accepts `Lan`, `RoutedQuery`, `Authenticated` and unscoped `Discovery` routes. `Gateway` and `PostOffice` routes alone do not qualify. A device with both direct and indirect alternatives remains eligible through its direct route. An address string alone is insufficient evidence.
 
 The desktop publishes two different fields:
 
@@ -154,6 +154,57 @@ The [member profile](../frontend/src/features/chat/MemberProfileDialog.tsx) uses
 Sidebar contacts, group invite candidates and counts must use the shared person/role projection. Raw connection diagnostics may include post offices because their role and endpoint matter for routing. Group membership is owned by signed channel state, not rebuilt from whoever is currently discoverable. A member can be offline without leaving the group; a discovered relay cannot become a member through a UI picker.
 
 When one machine runs both the app and a relay, their names, keys, TCP listeners and selected interface addresses can differ. A directory-introduced user's route may point at the mailbox relay; it must not be interpreted as that user's physical machine IP. New UI must consume route provenance and account/device identity explicitly, retaining this distinction for profiles and connection explanations.
+
+### Person presence contract
+
+The maintained [presence Q&A](network-design-qa.md#q16-what-does-a-persons-online-or-offline-status-actually-mean)
+defines Online/Offline as observations by the current client, not a global census.
+The desktop [presence projection](../src-tauri/src/chat_commands/presence.rs)
+aggregates one verified roster snapshot by account, retaining device/source
+observations with independent monotonic lifetimes. Membership and cached routes
+are never freshness evidence. Retired or conflicting device/account bindings and
+infrastructure cannot contribute. Legacy unbound devices remain explicit device
+identities rather than invented account associations.
+
+| Eligible public observation | Presence lifetime | Boundary |
+| --- | --- | --- |
+| Local signed discovery within the observed interface scope | 30 seconds | No TCP success required; no physical co-location claim. |
+| Signed UDP discovery with undetermined scope | 30 seconds | Show signed discovery only; do not infer local or cross-network location. |
+| Routed signed discovery | 120 seconds | A permitted Tailscale candidate alone is insufficient. |
+| Public authenticated contact | 300 seconds | No inferred LAN scope or continuing connection. Private route knowledge remains excluded. |
+| Directory/federation introduction | Original origin expiry, at most 45 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
+
+The explicitly negotiated `MTBD4Q`/`MTBD4R` directory extension carries the
+existing self-signed identity proof with the trusted directory's origin expiry.
+It preserves bounded pagination, gateway provenance, policy generation checks,
+and staged rollback. v1–v3 request/response layouts and resource budgets remain
+unchanged. New clients try v4 first and retain legacy fallback for route hints;
+legacy clients retain their existing behavior. Federation's existing fixed
+expiry remains authoritative. No group presence propagation protocol is added.
+
+Group summaries count accepted current verified accounts once, including self
+when accepted and the local node runs. Pending/removed devices and infrastructure
+are excluded. Unresolved device memberships are reported separately; the signed
+membership model still addresses devices. Group presence never means “any member
+online”; each person's own eligible observations determine their status and the
+known-online count. A↔B↔C history recovery cannot establish C's presence at A.
+
+Source details belong in the member profile. A device may have overlapping local,
+routed, directory, and public authenticated observations; source categories are
+not disjoint device totals. Source is distinct from physical location, an
+established connection, delivery, file completion and call readiness. Discovery
+with blocked TCP can still validly show Online. Only current authenticated
+transport evidence could justify “Connected”; the presence projection makes no
+such claim and opens no new connections.
+
+The isolated frontend store uses the shared two-second scheduling loop, permits
+at most two outstanding refreshes, guards owner/runtime generations and response
+ordering, and ages every observation locally even during failure. IPC timeouts,
+failed reads and discovery task termination produce a global availability notice,
+not an empty successful snapshot or a fabricated network diagnosis. Successful
+withdrawals take effect immediately. Up to 1,024 actually observed historical
+account/device entries remain Offline within the session, without inventing times
+for never-observed people. Lock/logout/replacement clears this history.
 
 ### Protocol surfaces and durable ownership
 
