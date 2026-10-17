@@ -98,3 +98,15 @@ jobs:
           name: mutants-report-${{ matrix.worker }}
           path: mutants.out/
           if-no-files-found: error
+
+  mutation-gate:
+    name: mutants
+    needs: mutants
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all mutation shards
+        env:
+          SHARDS: ${{ needs.mutants.result }}
+        run: |
+          test "$SHARDS" = success

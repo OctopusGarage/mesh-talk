@@ -1,9 +1,26 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 
 const workflow = readFileSync(new URL("../../.github/workflows/mutants.yml", import.meta.url), "utf8");
 const wrapper = readFileSync(new URL("../release/run-mutants.mjs", import.meta.url), "utf8");
+
+test("the protected mutants check requires every mutation shard to succeed", () => {
+  const gate = workflow.split("  mutation-gate:\n")[1];
+  assert.ok(gate, "the sharded workflow must still report the protected mutants check");
+  assert.match(gate, /name: mutants\n/);
+  assert.match(gate, /needs: mutants\n/);
+  assert.match(gate, /if: always\(\)/);
+  assert.match(gate, /SHARDS: \$\{\{ needs.mutants.result \}\}/);
+  const script = gate.split("        run: |\n")[1].replace(/^          /gm, "");
+  for (const result of ["success", "failure", "cancelled", "skipped", ""]) {
+    const run = spawnSync("bash", ["-e", "-c", script], {
+      encoding: "utf8", env: { ...process.env, SHARDS: result },
+    });
+    assert.equal(run.status === 0, result === "success", result);
+  }
+});
 
 test("both mutation modes forward test threads to the test binary, not Cargo", () => {
   assert.equal([...workflow.matchAll(/run: node \.\.\/scripts\/release\/run-mutants\.mjs/g)].length, 2);
