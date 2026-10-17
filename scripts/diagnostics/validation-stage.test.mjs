@@ -157,3 +157,14 @@ test("changing Cargo configuration invalidates an otherwise identical command", 
   await writeFile(path.join(cargoHome, "config.toml"), "[build]\njobs=2\n");
   assert.equal((await f.run({ env })).reused, false);
 });
+
+test("a failed forced rerun invalidates the older successful verdict", async t => {
+  const f = await fixture(t);
+  const command = [process.execPath, "-e", "if(require('node:fs').existsSync('target/fail'))process.exit(7)"];
+  assert.equal((await f.run({ command })).code, 0);
+  await writeFile(path.join(f.root, "target/fail"), "fail");
+  assert.equal((await f.run({ command, fresh: true })).code, 7);
+  const next = await f.run({ command });
+  assert.equal(next.reused, false);
+  assert.equal(next.code, 7);
+});

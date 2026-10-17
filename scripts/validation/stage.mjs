@@ -147,7 +147,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
         if (record.schema === 1 && record.key === key && record.code === 0 && Date.now() >= record.finished && Date.now() - record.finished < 86_400_000 &&
             await digest(record.logPath) === record.logDigest && JSON.stringify(await artifactDigests(cwd, artifacts)) === JSON.stringify(record.artifacts)) {
           const current = source(root);
-          if (!current.dirty && current.head === initial.head) { log(`reused successful evidence (${Math.round(record.elapsedMs / 1000)}s saved): ${receipt}`); return { ...record, reused: true, receipt }; }
+          if (!current.dirty && current.head === initial.head) { log(`reused successful evidence (${Math.round((record.executionMs ?? record.elapsedMs - record.queuedMs) / 1000)}s saved): ${receipt}`); return { ...record, reused: true, receipt }; }
         }
       } catch { /* Missing, stale or damaged evidence requires execution. */ }
     }
@@ -160,6 +160,8 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       const current = source(root);
       if (current.dirty || current.head !== initial.head) throw Error("Source changed while waiting for validation");
     }
+    // A new attempt supersedes previous proof even if it fails or is cancelled.
+    await rm(receipt, { force: true });
     const runId = `${Date.now()}-${randomUUID()}`;
     const logPath = path.join(directory, "logs", `${name}-${runId}.log`);
     await mkdir(path.dirname(logPath), { recursive: true });
@@ -178,7 +180,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       const current = source(root);
       if (current.dirty || current.head !== initial.head) result = { code: 1, error: "Source changed during validation" };
     }
-    const record = { schema: 1, key, name, source: initial.head, code: result.code, error: result.error, artifacts: measured, logPath, logDigest: await digest(logPath), elapsedMs: Date.now() - started, queuedMs, finished: Date.now() };
+    const record = { schema: 1, key, name, source: initial.head, code: result.code, error: result.error, artifacts: measured, logPath, logDigest: await digest(logPath), elapsedMs: Date.now() - started, executionMs: Date.now() - started - queuedMs, queuedMs, finished: Date.now() };
     if (result.code === 0 && !initial.dirty && !signal?.aborted) {
       await mkdir(path.dirname(receipt), { recursive: true });
       const temporary = `${receipt}.${randomUUID()}.tmp`;
