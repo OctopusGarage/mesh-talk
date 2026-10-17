@@ -212,6 +212,7 @@ test("related workflow changes select the same bounded Node diagnostics without 
     "scripts/diagnostics/pr-preflight-awake.test.mjs",
     "scripts/diagnostics/source-identity.test.mjs",
     "scripts/diagnostics/linux-target.test.mjs",
+    "scripts/diagnostics/pr-preflight-output.test.mjs",
   ];
   for (const changed of ["scripts/pr-platform/guest.mjs", "scripts/pr-preflight.sh", "scripts/create-pr.sh", "scripts/evals/source-identity.mjs", ...files]) {
     const plan = { ...buildPlan(parseFlags([]), [changed]), sourceSha: sha, archiveSha: "b".repeat(64) };

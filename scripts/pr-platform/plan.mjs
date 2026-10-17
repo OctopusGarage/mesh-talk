@@ -30,6 +30,7 @@ const workflowDiagnostics = [
   "scripts/diagnostics/pr-preflight-awake.test.mjs",
   "scripts/diagnostics/source-identity.test.mjs",
   "scripts/diagnostics/linux-target.test.mjs",
+  "scripts/diagnostics/pr-preflight-output.test.mjs",
 ];
 
 export function buildPlan(flags, changedFiles) {

@@ -125,6 +125,12 @@ for diagnosis; named caches are reusable. Docker's executable directory is added
 to the remote command's PATH so GUI-installed credential helpers work over SSH.
 SSH uses configured host keys and noninteractive authentication, as for Windows.
 
+Local PR browser traces, screenshots and the HTML report use a unique directory
+under `target/pr-preflight-playwright/<commit>-<process>/`. They do not share
+Playwright's default `frontend/test-results` or `frontend/playwright-report`
+directories with the full health gate, so starting a preflight cannot delete
+another active run's traces.
+
 Required environments being unavailable blocks preparation; it is not a pass.
 Fix the environment or report the blocker. Documentation-only changes without
 explicit selectors report platform tests as not applicable. Container reports state the actual
