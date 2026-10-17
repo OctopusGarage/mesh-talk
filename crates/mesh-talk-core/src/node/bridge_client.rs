@@ -10,6 +10,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+type BridgeResponse = (
+    Vec<Announce>,
+    Option<(String, u16)>,
+    HashMap<String, Instant>,
+);
+
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_DIRECTORY_QUERIES: usize = 8;
 const DIRECTORY_MEMBERSHIP_TTL: Duration = Duration::from_secs(45);
@@ -155,9 +161,11 @@ impl Node {
                 return 0;
             }
             self.expire_bridge_introductions();
-            if let Some((proofs, gateway)) = response
+            if let Some((proofs, gateway, expiries)) = response
                 && let Some(ids) = self
-                    .publish_bridge_response(&relay, proofs, gateway, received, &policy)
+                    .publish_bridge_response_with_expiry(
+                        &relay, proofs, gateway, received, &policy, expiries,
+                    )
                     .await
             {
                 introduced.extend(ids);
@@ -167,6 +175,7 @@ impl Node {
         introduced.len()
     }
 
+    #[cfg(test)]
     async fn publish_bridge_response(
         &self,
         relay: &PeerRecord,
@@ -174,6 +183,27 @@ impl Node {
         gateway: Option<(String, u16)>,
         received: Instant,
         policy: &BridgePolicyStamp,
+    ) -> Option<Vec<String>> {
+        self.publish_bridge_response_with_expiry(
+            relay,
+            proofs,
+            gateway,
+            received,
+            policy,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_bridge_response_with_expiry(
+        &self,
+        relay: &PeerRecord,
+        proofs: Vec<Announce>,
+        gateway: Option<(String, u16)>,
+        received: Instant,
+        policy: &BridgePolicyStamp,
+        expiries: HashMap<String, Instant>,
     ) -> Option<Vec<String>> {
         if !policy.current(self) || !self.relay_allowed(&relay.public) {
             return None;
@@ -209,6 +239,16 @@ impl Node {
         {
             return None;
         }
+        // Publish presence only after persistence and the final policy check.
+        // Provisional directory routes must not turn a concurrent UI snapshot green.
+        {
+            let mut roster = self.roster.lock().expect("roster lock not poisoned");
+            for id in staged.peers.keys() {
+                if let Some(expiry) = expiries.get(id) {
+                    roster.set_directory_expiry(id, relay.addr, *expiry);
+                }
+            }
+        }
         let ids = staged.peers.keys().cloned().collect();
         bridge_peers.extend(staged.peers.iter().map(|(id, seen)| (id.clone(), *seen)));
         staged.committed = true;
@@ -217,15 +257,13 @@ impl Node {
         Some(ids)
     }
 
-    async fn query_bridge_relay(
-        &self,
-        relay: &PeerRecord,
-    ) -> Option<(Vec<Announce>, Option<(String, u16)>)> {
+    async fn query_bridge_relay(&self, relay: &PeerRecord) -> Option<BridgeResponse> {
         if !self.relay_allowed(&relay.public) {
             return None;
         }
         let mut response = None;
         for request in [
+            bridge_directory::freshness_request(),
             bridge_directory::request(),
             bridge_directory::gateway_request(),
             bridge_directory::legacy_request(),
@@ -246,7 +284,7 @@ impl Node {
         &self,
         relay: &PeerRecord,
         request: &[u8],
-    ) -> Option<(Vec<Announce>, Option<(String, u16)>)> {
+    ) -> Option<BridgeResponse> {
         let mut channel = self.privacy_dial(relay.addr, &relay.public).await.ok()?;
         let response = tokio::time::timeout(BRIDGE_TIMEOUT, async {
             channel.send(request).await.ok()?;
@@ -256,7 +294,7 @@ impl Node {
                 match response.add_page(&bytes)? {
                     bridge_directory::DirectoryProgress::More => {}
                     bridge_directory::DirectoryProgress::Complete(snapshot) => {
-                        return Some(snapshot);
+                        return Some((snapshot.0, snapshot.1, response.expiries));
                     }
                 }
             }
@@ -313,6 +351,30 @@ mod tests {
         .unwrap();
         node.set_bridge_discovery_enabled(true);
         node
+    }
+
+    #[tokio::test]
+    async fn tcp_failure_does_not_erase_fresh_routed_presence() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = directory_client(temp.path());
+        let device = DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", addr.port());
+        node.roster
+            .lock()
+            .unwrap()
+            .update_routed(&proof, addr.ip(), &node.user_id());
+        assert!(node.privacy_dial(addr, &device.public()).await.is_err());
+        let peers = node.roster.lock().unwrap().peers();
+        let peer = peers.iter().find(|p| p.public == device.public()).unwrap();
+        assert!(
+            peer.presence_evidence(Instant::now())
+                .iter()
+                .any(|e| e.0 == RouteSource::RoutedQuery)
+        );
+        assert!(!peer.has_lan_route());
     }
 
     #[tokio::test]
@@ -378,16 +440,34 @@ mod tests {
             }));
             let client = node.clone();
             let policy = BridgePolicyStamp::capture(&node);
+            let expiries = HashMap::from([(
+                proof.user_id.clone(),
+                Instant::now() + Duration::from_secs(45),
+            )]);
             let publish = tokio::spawn(async move {
                 client
-                    .publish_bridge_response(&route, vec![proof], None, Instant::now(), &policy)
+                    .publish_bridge_response_with_expiry(
+                        &route,
+                        vec![proof],
+                        None,
+                        Instant::now(),
+                        &policy,
+                        expiries,
+                    )
                     .await
             });
             tokio::time::timeout(Duration::from_secs(3), waiting)
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(node.roster.lock().unwrap().get(&member.user_id()).is_some());
+            {
+                let roster = node.roster.lock().unwrap();
+                let staged = roster.get(&member.user_id()).unwrap();
+                assert!(
+                    staged.presence_evidence(Instant::now()).is_empty(),
+                    "uncommitted directory routes cannot publish presence"
+                );
+            }
             if cancel {
                 publish.abort();
                 assert!(publish.await.unwrap_err().is_cancelled());
@@ -569,6 +649,26 @@ mod tests {
             count, 9,
             "all eligible relays must be queried with bounded concurrency"
         );
+        let peers = node.roster.lock().unwrap().peers();
+        let introduced: Vec<_> = peers
+            .iter()
+            .filter(|p| {
+                !p.post_office && p.routes.iter().any(|r| r.source == RouteSource::PostOffice)
+            })
+            .collect();
+        assert_eq!(introduced.len(), 9);
+        for peer in introduced {
+            assert!(
+                !peer.has_direct_route(),
+                "directory introduction is not a recipient route"
+            );
+            assert!(
+                peer.presence_evidence(Instant::now())
+                    .iter()
+                    .any(|e| e.0 == RouteSource::PostOffice),
+                "authenticated loopback directory query retains fresh source evidence"
+            );
+        }
         for server in servers {
             server.abort();
         }

@@ -48,7 +48,10 @@ function MemberProfileContent({
 }) {
   const { t } = useTranslation();
   const peers = useChat((s) => s.peers);
-  const presence = usePresenceFor(target.accountId ?? undefined);
+  const presence = usePresenceFor(
+    target.accountId ||
+      (target.deviceId ? `device:${target.deviceId}` : undefined),
+  );
   const devices = memberProfileDevices(target, peers);
   const name = target.name || t("common.unnamed");
   const accountId = target.accountId;
@@ -68,24 +71,51 @@ function MemberProfileContent({
             name={name}
             hideId
             wrapName
-            status={
-              target.isSelf
-                ? "online"
-                : accountId
-                  ? presenceStatus(presence)
-                  : undefined
-            }
+            status={presenceStatus(presence)}
             variant="large"
           />
           <p className="mt-2 pl-[68px] text-xs text-muted-foreground">
-            {target.isSelf
-              ? t("presence.online")
-              : accountId
-                ? presenceLabel(presence, t)
-                : t("memberProfile.presenceUnavailable")}
+            {presenceLabel(presence, t)}
           </p>
         </div>
 
+        <p className="text-xs text-muted-foreground">
+          {t("presence.offlineHint")}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {t("presence.communicationHint")}
+        </p>
+        {!!presence.devices?.length && (
+          <div
+            className="space-y-2 text-xs"
+            data-testid="presence-device-details"
+          >
+            <p>
+              {t("presence.observedDevices", {
+                count: presence.devices.length,
+              })}
+            </p>
+            {presence.devices.map((device) => (
+              <div key={device.user_id}>
+                <code className="block break-all">{device.user_id}</code>
+                <span className="block">
+                  {[...new Set(device.evidence.map((e) => e.source))]
+                    .map((source) =>
+                      t("presence.sourceAge", {
+                        source: t(`presence.source_${source}`),
+                        seconds: Math.min(
+                          ...device.evidence
+                            .filter((e) => e.source === source)
+                            .map((e) => e.last_seen_secs),
+                        ),
+                      }),
+                    )
+                    .join(" · ")}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="space-y-3">
           {accountId && (
             <div>

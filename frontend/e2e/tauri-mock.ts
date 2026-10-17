@@ -1,5 +1,5 @@
 import { test as base, expect } from "@playwright/test";
-import type { PeerInfo } from "../src/lib/types";
+import type { PeerInfo, PresenceInfo } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -190,9 +190,8 @@ export const test = base.extend({
         name: string;
         pending?: boolean;
       }> = [
-        // Self is a member of its own channel. We never appear in our own discovery
-        // roster, so the backend can only fall back to our raw user_id for the name and
-        // there is no presence entry for us — the UI must fill in our name + online state.
+        // Self is absent from discovery but has explicit runtime presence in the shared snapshot.
+        // The raw name exercises the UI's local display-name fallback.
         { user_id: SELF.device, name: SELF.device },
         { user_id: BOB.device_id, name: BOB.name },
         { user_id: CAROL.device_id, name: CAROL.name },
@@ -546,13 +545,67 @@ export const test = base.extend({
       const attachmentDecisions: Record<string, boolean> = {};
 
       // --- Presence (account DM + channel) ----------------------------------
-      const presenceMap: Record<
-        string,
-        { online: boolean; last_seen_secs: number | null }
-      > = {
-        [BOB.account_id]: { online: true, last_seen_secs: 2 },
-        [CAROL.account_id]: { online: false, last_seen_secs: 120 },
-        [CHANNEL.channel_id]: { online: true, last_seen_secs: 5 },
+      const presenceMap: Record<string, PresenceInfo> = {
+        [BOB.account_id]: {
+          online: true,
+          last_seen_secs: 2,
+          devices: [
+            {
+              user_id: BOB.device_id,
+              evidence: [
+                { source: "local", last_seen_secs: 2, expires_in_secs: 28 },
+              ],
+            },
+          ],
+        },
+        [CAROL.account_id]: { online: false, last_seen_secs: 120, devices: [] },
+      };
+      let presenceFailure = false;
+      (window as unknown as Record<string, unknown>).__mockPresenceFailure = (
+        failed: boolean,
+      ) => {
+        presenceFailure = failed;
+      };
+      const presenceSnapshot = () => {
+        if (presenceFailure)
+          throw new Error("Presence temporarily unavailable");
+        const snapshot: Record<string, PresenceInfo> = {
+          ...presenceMap,
+          [SELF.account]: {
+            online: true,
+            last_seen_secs: 0,
+            devices: [
+              {
+                user_id: SELF.device,
+                evidence: [
+                  { source: "self", last_seen_secs: 0, expires_in_secs: 30 },
+                ],
+              },
+            ],
+          },
+        };
+        const acceptedAccounts = new Set<string>();
+        const unbound = new Set<string>();
+        for (const member of channelMembers) {
+          const peer = peers.find((p) => p.user_id === member.user_id);
+          if (member.pending || peer?.post_office) continue;
+          const account =
+            member.user_id === SELF.device ? SELF.account : peer?.account_id;
+          if (account) acceptedAccounts.add(account);
+          else unbound.add(member.user_id);
+        }
+        snapshot[CHANNEL.channel_id] = {
+          online: false,
+          last_seen_secs: null,
+          devices: [],
+          member_keys: [...acceptedAccounts],
+          member_count: acceptedAccounts.size,
+          online_count: [...acceptedAccounts].filter(
+            (id) => snapshot[id]?.online,
+          ).length,
+          unbound_member_count: unbound.size,
+        };
+        return snapshot;
       };
 
       // --- Trust / safety numbers -------------------------------------------
@@ -1202,7 +1255,7 @@ export const test = base.extend({
           }),
 
           // presence
-          get_presence: () => presenceMap,
+          get_presence: presenceSnapshot,
 
           // diagnostics / observability
           diag_get_peers: () => diagPeers,
@@ -1232,10 +1285,7 @@ export const test = base.extend({
       };
 
       (window as unknown as Record<string, unknown>).__mockSetPresence = (
-        next: Record<
-          string,
-          { online: boolean; last_seen_secs: number | null }
-        >,
+        next: Record<string, PresenceInfo>,
       ) => {
         Object.assign(presenceMap, next);
       };

@@ -80,9 +80,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 discovery_port,
                 post_office_enabled: relay_settings.post_office_enabled,
                 #[cfg(not(test))]
-                candidate_source: Some(std::sync::Arc::new(
-                    crate::tailscale_discovery::TailscaleCandidates { discovery_port },
-                )),
+                candidate_source: Some(crate::routed_discovery::desktop_candidates(discovery_port)),
                 #[cfg(test)]
                 candidate_source: None,
             },

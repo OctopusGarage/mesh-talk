@@ -9,6 +9,31 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[test]
+fn failed_presence_cache_write_is_not_a_successful_empty_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let proof = bob.signed_announce("Bob", 2);
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &alice.user_id());
+    std::fs::remove_file(path.join("peer-proofs")).unwrap();
+    std::fs::create_dir(path.join("peer-proofs")).unwrap();
+    assert!(alice.cached_peer_snapshot().is_err());
+}
+
 #[tokio::test]
 async fn pinned_dial_falls_back_to_second_verified_endpoint() {
     let dir = tempfile::tempdir().unwrap();

@@ -12,11 +12,10 @@ mod files;
 mod messaging;
 mod models;
 mod platform;
+mod presence;
 mod state;
 mod sync;
 
-#[cfg(test)]
-use diagnostics::{PRESENCE_TTL_SECS, presence_from_seen};
 #[cfg(test)]
 use files::temp_file_basename;
 
@@ -29,6 +28,7 @@ pub use files::*;
 pub use messaging::*;
 pub use models::*;
 pub use platform::*;
+pub use presence::*;
 pub use state::NodeState;
 pub(crate) use state::RuntimeAuthority;
 pub use sync::*;
@@ -118,47 +118,5 @@ mod tests {
         );
         assert!(parse_event_id(&"cd".repeat(10)).is_err()); // too short
         assert!(parse_event_id(&"gg".repeat(32)).is_err()); // not hex
-    }
-
-    #[test]
-    fn presence_fresh_device_is_online() {
-        let p = presence_from_seen([5u64].into_iter());
-        assert!(p.online);
-        assert_eq!(p.last_seen_secs, Some(5));
-    }
-
-    #[test]
-    fn presence_all_stale_is_offline_with_freshest_last_seen() {
-        let p = presence_from_seen([60u64, 45, 90].into_iter());
-        assert!(!p.online);
-        assert_eq!(p.last_seen_secs, Some(45)); // freshest (min), still > TTL
-    }
-
-    #[test]
-    fn presence_empty_is_offline_never_seen() {
-        let p = presence_from_seen(std::iter::empty());
-        assert!(!p.online);
-        assert_eq!(p.last_seen_secs, None);
-    }
-
-    #[test]
-    fn presence_uses_freshest_of_many_devices() {
-        // One fresh device among stale ones makes the conversation online,
-        // and last_seen reflects the freshest (min).
-        let p = presence_from_seen([100u64, 3, 50].into_iter());
-        assert!(p.online);
-        assert_eq!(p.last_seen_secs, Some(3));
-    }
-
-    #[test]
-    fn presence_ttl_boundary_is_strict() {
-        // Exactly TTL is offline (strict `<`); one second under is online.
-        let at = presence_from_seen([PRESENCE_TTL_SECS].into_iter());
-        assert!(!at.online);
-        assert_eq!(at.last_seen_secs, Some(PRESENCE_TTL_SECS));
-
-        let under = presence_from_seen([PRESENCE_TTL_SECS - 1].into_iter());
-        assert!(under.online);
-        assert_eq!(under.last_seen_secs, Some(PRESENCE_TTL_SECS - 1));
     }
 }

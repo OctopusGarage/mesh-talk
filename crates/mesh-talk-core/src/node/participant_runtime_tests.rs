@@ -61,6 +61,19 @@ async fn prepare_preserves_requested_listener_and_starts_no_producers() {
     assert_eq!(snapshots.load(Ordering::SeqCst), 0);
     let running = prepared.launch("Owner");
     assert_eq!(running.listen_tcp_port(), address.port());
+    assert!(running.discovery_available());
+    running.tasks[0].abort();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while running.discovery_available() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !running.discovery_available(),
+        "terminated discovery is unavailable, not an empty snapshot"
+    );
     running.stop().await;
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
 }

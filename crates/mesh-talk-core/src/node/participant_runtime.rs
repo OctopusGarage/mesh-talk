@@ -104,6 +104,7 @@ impl PreparedParticipant {
                 Arc::clone(&routed),
             ));
         }
+        let discovery_health = tasks.iter().map(JoinHandle::abort_handle).collect();
         if let Some(source) = candidate_source {
             let socket = Arc::clone(&socket);
             let socket_v6 = socket_v6.clone();
@@ -194,6 +195,7 @@ impl PreparedParticipant {
             routed_discovery: routed,
             visibility,
             discovery_trigger,
+            discovery_health,
             tasks,
         }
     }
@@ -211,10 +213,16 @@ pub struct ParticipantRuntime {
     routed_discovery: Arc<RoutedDiscovery>,
     pub(super) visibility: Arc<DiscoveryVisibility>,
     discovery_trigger: Arc<Notify>,
+    discovery_health: Vec<tokio::task::AbortHandle>,
     pub(super) tasks: Vec<JoinHandle<()>>,
 }
 
 impl ParticipantRuntime {
+    /// Local discovery producer health; makes no claim about Internet or LAN reachability.
+    pub fn discovery_available(&self) -> bool {
+        self.discovery_health.iter().all(|task| !task.is_finished())
+    }
+
     /// Adopt a host producer so retirement cancels and joins it too.
     pub fn register_host_task(&mut self, task: JoinHandle<()>) {
         self.tasks.retain(|task| !task.is_finished());

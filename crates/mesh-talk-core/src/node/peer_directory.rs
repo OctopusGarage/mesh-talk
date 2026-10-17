@@ -229,7 +229,9 @@ impl PeerDirectory {
                 next.insert(i, announce.clone());
             }
         }
-        self.save(&next)?;
+        // Storage validation failures (for example a replaced cache path) must
+        // remain distinguishable from a rejected device/account binding.
+        self.save(&next).map_err(io::Error::other)?;
         self.records = next;
         Ok(())
     }
