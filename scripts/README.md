@@ -14,7 +14,7 @@ below are explicit gates or environment-specific tools.
 | Delivery and agent contracts | [`ai-eval-smoke.sh`](ai-eval-smoke.sh), [`ai-eval.mjs`](ai-eval.mjs)                               | When changing their contracts or in CI; the model-backed runner needs a provider              |
 | Complete real smoke          | [`run-real-smoke.sh`](run-real-smoke.sh)                                                           | Explicit release validation; includes backend and browser E2E                                 |
 | Git hooks                    | [`setup-hooks.sh`](setup-hooks.sh), [`../hooks/`](../hooks/)                                       | On initial checkout; the commit hook checks source formatting only                            |
-| Cargo cache                  | [`clean-target-cache.sh`](clean-target-cache.sh), [`auto-clean-targets.sh`](auto-clean-targets.sh) | Explicit maintenance; the macOS scheduler is installed by `make dev`                          |
+| Build retention              | [`build-retention.py`](build-retention.py) | After managed builds/tests; five successful build sets and a 40 GiB cache budget; see [configuration](../docs/build-retention.md) |
 | Release                      | [`release/`](release/)                                                                             | CI release workflow and signed artifact validation                                            |
 | CI diagnostics               | [`diagnostics/`](diagnostics/) and [`evals/`](evals/)                                              | Their `.test.mjs` files are selected by CI globs, even when no script names them individually |
 
