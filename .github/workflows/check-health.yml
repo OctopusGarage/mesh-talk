@@ -131,3 +131,14 @@ jobs:
         shell: bash
         run: |
           bash scripts/check-health.sh
+
+      - name: Upload failed browser evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: health-browser-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
+          if-no-files-found: warn
+          retention-days: 7

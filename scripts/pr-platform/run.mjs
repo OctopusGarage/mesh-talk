@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPlan, hasSelectedTests, parseFlags, validateWindowsRoot } from "./plan.mjs";
 import { digestFile, expectedSteps, runCommand, validatePlaywrightEvidence } from "./guest.mjs";
+import { linuxTarget, dockerInvocation, remoteInvocation } from "./linux-target.mjs";
 
 async function checked(program, args, options, run = runCommand) {
   const result = await run(program, args, options);
@@ -137,26 +138,47 @@ async function linux(cwd, directory, plan, timeoutSeconds) {
   const image = process.env.MESH_PR_DOCKER_IMAGE || `mesh-talk-pr-platform:${imageHash}`;
   if (!/^[\w][\w./:@-]+$/u.test(image)) throw Error("Invalid Docker image tag");
   const limits = budget(directory, "linux", timeoutSeconds);
-  const available = await runCommand("docker", ["image", "inspect", image], { cwd, ...limits("inspect") });
+  const target = linuxTarget(process.env, plan.runId, directory);
+  const platformArgs = target.platform ? ["--platform", target.platform] : [];
+  const dockerRun = (_program, args, options) => {
+    const invocation = dockerInvocation(target, args);
+    return runCommand(invocation.program, invocation.args, options);
+  };
+  if (target.host) {
+    const prepare = remoteInvocation(target.host, "mkdir", ["-p", `${target.directory}/image`, `${target.directory}/linux`]);
+    await checked(prepare.program, prepare.args, { cwd, ...limits("prepare") });
+    await checked("scp", ["-o", "BatchMode=yes", path.join(directory, "source.tar"), path.join(directory, "plan.json"), `${target.host}:${target.directory}/`], { cwd, ...limits("upload") });
+    await checked("scp", ["-o", "BatchMode=yes", dockerfile, `${target.host}:${target.directory}/image/Dockerfile`], { cwd, ...limits("upload-image") });
+  }
+  const available = await dockerRun("docker", ["image", "inspect", image], { cwd, ...limits("inspect") });
   if (available.code !== 0) {
     if (process.env.MESH_PR_DOCKER_IMAGE) throw Error(`Configured Docker image is unavailable: ${image}`);
-    await checked("docker", ["build", "--build-arg", `PLAYWRIGHT_VERSION=${playwright}`, "-t", image, "-f", dockerfile, path.dirname(dockerfile)], { cwd, ...limits("build") });
+    const context = path.posix.join(target.directory, "image");
+    await checked("docker", ["build", ...platformArgs, "--build-arg", `PLAYWRIGHT_VERSION=${playwright}`, "-t", image, "-f", `${context}/Dockerfile`, context], { cwd, ...limits("build") }, dockerRun);
   }
   const options = { cwd, ...limits("run") };
   const guestSeconds = Math.max(1, Math.floor(options.timeoutMs / 1000));
   const name = `mesh-pr-${plan.runId}`;
-  const args = ["run", "--rm", "--name", name,
-    "-v", `${directory}:/evidence`,
+  const args = ["run", "--rm", ...platformArgs, "--name", name,
+    // Docker can bind IPv6 sockets while disabling ::1. Exercise real IPv6
+    // discovery without requiring daemon-wide IPv6 networking configuration.
+    "--sysctl", "net.ipv6.conf.lo.disable_ipv6=0",
+    "-v", `${target.directory}:/evidence`,
     "-v", "mesh-pr-cargo:/cache/cargo", "-v", "mesh-pr-target:/cache/target", "-v", "mesh-pr-npm:/cache/npm",
     "-e", "CARGO_HOME=/cache/cargo", "-e", "CARGO_TARGET_DIR=/cache/target", "-e", "npm_config_cache=/cache/npm",
     "-e", "MESH_PR_ARCHIVE=/evidence/source.tar", "-e", `MESH_PR_PLATFORM_TIMEOUT_SECONDS=${guestSeconds}`,
     image, "bash", "-c", "mkdir -p /work/source && tar -xf /evidence/source.tar -C /work/source && cd /work/source && node scripts/pr-platform/guest.mjs /evidence/plan.json /evidence/linux/report.json"];
   try {
-    const result = await runCommand("docker", args, options);
+    const result = await dockerRun("docker", args, options);
+    if (target.host) {
+      await checked("scp", ["-o", "BatchMode=yes", "-r", `${target.host}:${target.directory}/linux/.`, path.join(directory, "linux")], { cwd, timeoutMs: 120_000, logPath: path.join(directory, "linux-download.log") });
+    }
     const report = await platformReport(path.join(directory, "linux/report.json"), plan, "linux");
-    return { ...report, ok: report.ok && result.code === 0 && !result.timedOut, image };
+    const expectedArchitecture = { "linux/amd64": "x64", "linux/arm64": "arm64" }[target.platform];
+    if (expectedArchitecture && report.architecture !== expectedArchitecture) throw Error(`Linux architecture mismatch: expected ${expectedArchitecture}, got ${report.architecture}`);
+    return { ...report, ok: report.ok && result.code === 0 && !result.timedOut, image, host: target.host, requestedPlatform: target.platform };
   } finally {
-    await runCommand("docker", ["rm", "-f", name], { cwd, timeoutMs: 30_000, logPath: path.join(directory, "linux-cleanup.log") });
+    await dockerRun("docker", ["rm", "-f", name], { cwd, timeoutMs: 30_000, logPath: path.join(directory, "linux-cleanup.log") });
   }
 }
 

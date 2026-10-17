@@ -1,5 +1,9 @@
 //! Local account-scoped contact presentation policy, separate from network admission.
 
+mod deletion;
+// Glob also forwards Tauri command macros.
+pub use deletion::*;
+
 #[cfg(test)]
 mod native_mesh_tests;
 
@@ -9,6 +13,98 @@ mod tests {
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const ME: &str = "cccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn deleting_offline_contact_persists_without_becoming_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        store
+            .delete_unlocked("alice", A, ME, false, || Ok(()))
+            .unwrap();
+        let reopened = HiddenContactsState::new(dir.path().to_owned());
+        let snapshot = reopened.get(Some("alice"), "alice").unwrap();
+        assert!(snapshot.contacts.is_empty());
+        assert_eq!(snapshot.deleted, vec![A.to_owned()]);
+        assert!(reopened.get(Some("bob"), "bob").unwrap().deleted.is_empty());
+        assert!(
+            reopened
+                .visible_accounts("alice", &[], vec![A.into()])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .visible_accounts("alice", &[A.into()], vec![A.into()])
+                .unwrap(),
+            vec![A.to_owned()]
+        );
+        assert!(
+            reopened
+                .get(Some("alice"), "alice")
+                .unwrap()
+                .deleted
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .visible_accounts("alice", &[], vec![A.into()])
+                .unwrap(),
+            vec![A.to_owned()]
+        );
+    }
+
+    #[test]
+    fn deletion_rejects_online_self_invalid_and_failed_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        assert!(
+            store
+                .delete_unlocked("alice", A, ME, true, || Ok(()))
+                .is_err()
+        );
+        assert!(
+            store
+                .delete_unlocked("alice", ME, ME, false, || Ok(()))
+                .is_err()
+        );
+        assert!(
+            store
+                .delete_unlocked("alice", "invalid", ME, false, || Ok(()))
+                .is_err()
+        );
+        assert!(
+            store
+                .get(Some("alice"), "alice")
+                .unwrap()
+                .deleted
+                .is_empty()
+        );
+        std::fs::create_dir_all(store.path("alice")).unwrap();
+        assert!(
+            store
+                .delete_unlocked("alice", A, ME, false, || Ok(()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deletion_validates_before_erasing_and_does_not_commit_failed_erasure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        assert!(
+            store
+                .delete_unlocked("alice", A, ME, true, || panic!(
+                    "online history must remain"
+                ))
+                .is_err()
+        );
+        assert!(
+            store
+                .delete_unlocked("alice", A, ME, false, || Err("erase failed".into()))
+                .is_err()
+        );
+        assert!(!store.path("alice").exists());
+    }
 
     #[test]
     fn owner_length_contract_accepts_128_and_rejects_129_bytes() {
@@ -194,6 +290,9 @@ mod tests {
         for value in [
             serde_json::json!({ "owner": "bob", "contacts": [] }),
             serde_json::json!({ "owner": "alice", "contacts": [{ "account_id": "bad", "name": "name" }] }),
+            serde_json::json!({ "owner": "alice", "contacts": [], "deleted": ["bad"] }),
+            serde_json::json!({ "owner": "alice", "contacts": [], "deleted": [A, A] }),
+            serde_json::json!({ "owner": "alice", "contacts": [{ "account_id": A, "name": "name" }], "deleted": [A] }),
             serde_json::json!({ "owner": "alice", "contacts": [{ "account_id": A, "name": "invalid\nname" }] }),
             serde_json::json!({ "owner": "alice", "contacts": [{ "account_id": A, "name": "name" }, { "account_id": A, "name": "name" }] }),
         ] {
@@ -208,6 +307,7 @@ mod tests {
         }
         let snapshot = HiddenContactsSnapshot {
             owner: "alice".into(),
+            deleted: vec![],
             contacts: (0..MAX_CONTACTS)
                 .map(|index| HiddenContact {
                     account_id: format!("{index:032x}"),
@@ -263,6 +363,7 @@ mod tests {
         let store = HiddenContactsState::new(dir.path().to_owned());
         let snapshot = HiddenContactsSnapshot {
             owner: "alice".into(),
+            deleted: vec![],
             contacts: vec![HiddenContact {
                 account_id: A.into(),
                 name: "name".into(),
@@ -465,7 +566,9 @@ mod tests {
             .manage(HiddenContactsState::new(dir.path().to_owned()))
             .invoke_handler(tauri::generate_handler![
                 get_hidden_contacts,
-                set_contact_hidden
+                set_contact_hidden,
+                delete_contact,
+                crate::chat_commands::list_accounts
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -572,6 +675,33 @@ mod tests {
             .contacts,
             hidden.contacts
         );
+        assert!(
+            invoke(
+                "delete_contact",
+                serde_json::json!({ "owner": "bob", "account": A })
+            )
+            .is_err()
+        );
+        let deleted = invoke(
+            "delete_contact",
+            serde_json::json!({ "owner": "alice", "account": A }),
+        )
+        .unwrap();
+        assert_eq!(deleted.deleted, vec![A.to_owned()]);
+        assert!(deleted.contacts.is_empty());
+        assert!(
+            invoke(
+                "delete_contact",
+                serde_json::json!({ "owner": "alice", "account": own })
+            )
+            .is_err()
+        );
+        // Preserve the original offline restore coverage by hiding the contact again.
+        invoke(
+            "set_contact_hidden",
+            serde_json::json!({ "owner": "alice", "account": A, "hidden": true, "name": "Alice" }),
+        )
+        .unwrap();
         // Stop the node: restoration remains a local authenticated operation.
         app.state::<crate::chat_commands::NodeState>()
             .0
@@ -617,6 +747,8 @@ pub struct HiddenContact {
 #[serde(deny_unknown_fields)]
 pub struct HiddenContactsSnapshot {
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<String>,
     pub contacts: Vec<HiddenContact>,
 }
 /// One application-wide lock serializes complete read/modify/replace operations.
@@ -696,7 +828,7 @@ impl HiddenContactsState {
             )
         })
     }
-    fn transaction<T>(
+    pub(crate) fn transaction<T>(
         &self,
         session: &crate::state::SessionState,
         owner: &str,
@@ -749,6 +881,7 @@ impl HiddenContactsState {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(HiddenContactsSnapshot {
                     owner: owner.into(),
+                    deleted: vec![],
                     contacts: vec![],
                 });
             }
@@ -766,7 +899,11 @@ impl HiddenContactsState {
             serde_json::from_reader(file).map_err(|_| "Invalid hidden contacts file")?;
         let mut accounts = HashSet::new();
         if snapshot.owner != owner
-            || snapshot.contacts.len() > MAX_CONTACTS
+            || snapshot.contacts.len() + snapshot.deleted.len() > MAX_CONTACTS
+            || snapshot
+                .deleted
+                .iter()
+                .any(|account| !valid_account(account) || !accounts.insert(account))
             || snapshot.contacts.iter().any(|contact| {
                 !valid_account(&contact.account_id)
                     || !valid_name(&contact.name)
@@ -877,6 +1014,7 @@ impl HiddenContactsState {
             }
         }
         let mut snapshot = self.load(owner)?;
+        snapshot.deleted.retain(|id| id != account);
         if hidden {
             let name = normalized_name(name, account);
             if let Some(contact) = snapshot
@@ -886,7 +1024,7 @@ impl HiddenContactsState {
             {
                 contact.name = name;
             } else {
-                if snapshot.contacts.len() >= MAX_CONTACTS {
+                if snapshot.contacts.len() + snapshot.deleted.len() >= MAX_CONTACTS {
                     return Err("Too many hidden contacts".into());
                 }
                 snapshot.contacts.push(HiddenContact {

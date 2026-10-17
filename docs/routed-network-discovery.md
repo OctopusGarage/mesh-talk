@@ -1,9 +1,9 @@
 # Routed discovery and cross-network setup
 
 Mesh Talk discovers compatible application endpoints across an existing permitted
-IP route, including Tailscale. Mesh Talk never installs, configures or authorizes
-Tailscale or its accounts/devices. It does not change VPN ACLs, merge LANs or trust
-a device because it appears in a tailnet inventory.
+IP route, including Tailscale and EasyTier. Mesh Talk never installs, configures
+or authorizes either VPN or its accounts/devices. It does not change VPN ACLs,
+merge LANs or trust a device because it appears in a VPN inventory.
 
 For communication principles, module contracts and illustrated cases, use the
 [network architecture baseline](network-design-reference.md). This guide owns
@@ -12,16 +12,41 @@ own equal-relay enrollment/deployment.
 
 ## Boundaries
 
-The desktop's optional Tailscale adapter reads an already available
-`tailscale status --json`, checks running/online peers and omits self. Its bounded
-snapshot provides up to 256 candidate addresses through the core `CandidateSource`
-interface. Missing CLI/client permissions or incompatible output yield no
-candidates; this is best effort, not proof of application capability.
+The desktop automatically reads both optional local-client inventories:
+
+| Provider  | Inventory                                                                 | Candidate addresses                                                                                                                        |
+| --------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Tailscale | `tailscale status --json`                                                 | Visible online peer addresses when the client is running; self is omitted.                                                                 |
+| EasyTier  | `easytier-cli --rpc-portal 127.0.0.1:15888 --verbose --output json route` | Virtual IPv4/IPv6 addresses of direct and multihop routes; self, unusable addresses, proxy subnets and outer tunnel endpoints are omitted. |
+
+Both feed the same core `CandidateSource` interface. Collection runs concurrently
+with independent 2.5-second deadlines, below the core's three-second snapshot
+budget. Results are interleaved, deduplicated, and capped at 256 total addresses
+so neither provider takes the entire candidate budget. Missing clients, denied
+RPC access, timeouts or incompatible JSON make that provider unavailable without
+discarding the other's results. Discovery starts automatically and refreshes
+every 25 seconds; **Connection → Rescan** also refreshes both inventories.
+
+EasyTier JSON parsing is verified against CLI 2.6.4. Multiple network-instance
+results from the selected management endpoint are supported. A node on a
+different management endpoint requires `MESH_TALK_EASYTIER_RPC`, for example
+`127.0.0.1:15899`; only loopback IP endpoints are accepted. To select a CLI outside
+the normal PATH/install locations, set `MESH_TALK_EASYTIER_CLI` to its executable
+path in the app's launch environment. macOS lookup includes user-local, Cargo,
+Homebrew and the installed MeshTalk-EasyTier service paths. Windows lookup also
+checks Program Files/EasyTier and the application's executable directory;
+nonstandard ZIP locations can use the override. GUI launch environments may
+have a different PATH from terminals.
+
+The EasyTier search has a two-second total deadline and a 1 MiB output cap;
+cancellation kills a running CLI process. Raw verbose output can contain private
+configuration, so it is never logged or persisted. Only route fields are decoded.
+These inventories are best effort, not proof of application capability.
 
 A candidate receives a rate-limited UDP query. Only a fresh valid signed response
 establishes Mesh Talk identity and a possible TCP listener. Actual data transport
 rechecks pinned identity and admission through Noise. Discovery send success,
-tailnet presence and TCP connectivity are different observations.
+VPN presence and TCP connectivity are different observations.
 
 ## Protocol and routes
 
@@ -42,16 +67,25 @@ cached ports. IPv4/IPv6 support follows available sockets and interface scope.
 1. Establish the actual permitted IP route outside Mesh Talk.
 2. Run compatible Mesh Talk nodes and allow the target discovery UDP port plus
    its advertised TCP listener through the relevant ACL/firewall.
-3. With the desktop adapter available, use **Connection → Rescan**. If automatic
-   discovery is unavailable, enter the target endpoint in connection diagnostics.
-   The CLI uses `/probe <ip:discovery-port>`.
+3. In **Settings → Connection & delivery**, select **Device discovery scope →
+   Local and routed networks**. Automatic discovery uses available local VPN
+   clients; **Connection → Rescan** refreshes their inventories. If automatic
+   discovery is unavailable, choose **Add device address…** and enter the other
+   device's IP address or hostname. The CLI uses `/probe <ip:discovery-port>`.
 4. Validate the discovered identity; normal private-contact/group permissions
    still apply. A blocked TCP listener can prevent delivery after discovery.
 
 The default discovery port is 47474. A custom relay/app discovery port must be
-queried explicitly or otherwise supplied as a candidate; Tailscale status does
-not advertise Mesh Talk service ports. A device-to-device Tailscale edge exposes
-those endpoints, not all machines on their neighboring LANs.
+queried explicitly or otherwise supplied as a candidate; VPN inventories do not
+advertise Mesh Talk service ports. A device-to-device VPN edge exposes those
+endpoints, not all machines on their neighboring LANs. Tailscale-only and
+EasyTier-only devices still need a shared permitted route or a separately
+configured Mesh Talk relay topology.
+
+The [two-Mac EasyTier acceptance](evals/easytier-macos-2026-10-17.md) records
+automatic inventory discovery and encrypted messaging over the EasyTier virtual
+IP, plus bidirectional DM/group/file checks. It does not establish WebRTC media,
+every operating system, or internet NAT/relay behavior.
 
 ## Opt-in post-office bridge
 
@@ -61,9 +95,9 @@ physical LAN already provides direct reachability to E.
 
 E runs `--post-office --bridge` with its persistent identity/password file and a
 permitted TCP listener. A, B and C each explicitly enable **Use post offices** and
-**Discover peers through a post office**, leave **Physical LAN discovery only**
-off, and permit the required mailbox directions. Bridge discovery defaults to
-off; enabling E alone does not opt its clients in.
+**Discover peers through a post office**, select **Local and routed networks**
+for **Device discovery scope**, and permit the required mailbox directions.
+Bridge discovery defaults to off; enabling E alone does not opt its clients in.
 
 E introduces eligible registered clients using self-signed, freshness- and
 lifetime-bounded presence proofs. A and B can discover C through E's authenticated

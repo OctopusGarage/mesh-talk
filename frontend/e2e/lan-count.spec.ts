@@ -18,6 +18,6 @@ test("footer counts only presence-ONLINE people, not every roster entry", async 
   await expect(count).toHaveText("1 online");
   await expect(count).toHaveAttribute(
     "aria-label",
-    "1 person online on the LAN",
+    "People observed online by this client: 1",
   );
 });

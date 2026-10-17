@@ -57,6 +57,10 @@ jobs:
           RUSTFLAGS: "-Zsanitizer=address"
           RUSTDOCFLAGS: "-Zsanitizer=address"
           ASAN_OPTIONS: "detect_leaks=1"
+          # Instrumented crypto competes with intentional subsecond network
+          # deadlines when tests run concurrently. Keep every test and its
+          # production timeout, but run one instrumented test at a time.
+          RUST_TEST_THREADS: "1"
         run: |
           cargo +nightly test \
             -p mesh-talk-core --lib \

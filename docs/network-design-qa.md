@@ -220,7 +220,7 @@ Desktop Tailscale candidate discovery is best effort, and the headless CLI needs
 
 **Yes at the Mesh Talk application level**, when the client and the other participants permit public bridge discovery. It participates in the relay's discovery and encrypted-mailbox domain. This is a useful meaning of “join,” and it does not require an extra post office on the client's physical LAN.
 
-Example: A is on LAN X; Q, B and C are on LAN Y. A can reach Q through Tailscale, while B and C reach Q locally. Q runs `--post-office --bridge`. A/B/C enable **Use post offices** and **Discover peers through a post office**; for bidirectional mailbox traffic, sending and receiving are enabled. A leaves **Physical LAN discovery only** off.
+Example: A is on LAN X; Q, B and C are on LAN Y. A can reach Q through Tailscale, while B and C reach Q locally. Q runs `--post-office --bridge`. A/B/C enable **Use post offices** and **Discover peers through a post office**; for bidirectional mailbox traffic, sending and receiving are enabled. A selects **Device discovery scope → Local and routed networks**.
 
 1. A discovers Q by a signed routed query; B/C discover Q locally.
 2. Each participant registers its own eligible signed presence with Q.
@@ -236,7 +236,7 @@ The settings picker uses the core's direct-route capability, not physical-LAN pr
 
 **Proposed controls:** (a) public discovery scope, with “directly reachable peers only” versus explicit cross-site directory opt-in; (b) permission to use post offices for opaque offline custody and recovery; (c) optional preferred reachable relay with automatic fallback. These are different choices and should remain separate. A known authorized contact may still use a direct route when cross-site public listing is off; directory visibility is not messaging authorization.
 
-**Current.** **Use post offices** defaults on and gates mailbox upload/drain. **Discover peers through a post office** defaults off and shares public signed presence with eligible directories. **Invisible mode** suppresses public presence, including bridge participation, and uses separate private permission rules. Turning bridge discovery off does **not** limit ordinary signed routed discovery to the physical LAN: a directly Tailscale-connected public client can still find this device. **Physical LAN discovery only** now adds a stricter optional scope: recognized physical subnets and scoped IPv6 link-local discovery, excluding routed/Tailscale probes and public bridge directories. It does not revoke an authorized TCP contact. See Q13 for independent send/receive modes and adapter boundaries.
+**Current.** **Use post offices** defaults on and gates mailbox upload/drain. **Discover peers through a post office** defaults off and shares public signed presence with eligible directories. **Invisible mode** suppresses public presence, including bridge participation, and uses separate private permission rules. Turning bridge discovery off does **not** limit ordinary signed routed discovery to the physical LAN: a directly Tailscale-connected public client can still find this device. **Device discovery scope → Local network only** adds a stricter optional scope: recognized physical subnets and scoped IPv6 link-local discovery, excluding routed/Tailscale probes and public bridge directories. It does not revoke an authorized TCP contact. See Q13 for independent send/receive modes and adapter boundaries.
 
 ## Q9. What layered architecture should express these principles?
 
@@ -289,7 +289,7 @@ Thus the bound is an enforced resource policy, not arithmetic derived from “fi
 
 **Current controls.** **Discover peers through a post office** is the cross-site public-directory opt-in (off by default). **Use post offices** is the master switch (on by default). **Send through post offices** and **Receive through post offices** are independent, both on by default. Directory participation remains a separate choice when the master is on; disabling both data directions does not itself grant or withdraw public-directory consent. The post-office service role remains a separate `--post-office` deployment; bridge federation uses explicit trust.
 
-**Physical LAN discovery only** is off by default. Enabling it stops routed discovery probes, rejects off-LAN discovery announcements and responses, sends multicast only on recognized physical interfaces, and withdraws local bridge introductions. Physical IPv4 netmasks and scoped IPv6 link-local interfaces define the scope. Tailscale/other known overlays are excluded. Adapter classification is conservative: renamed or unrecognized physical adapters can be excluded. This is a disclosure policy, not a firewall, source-spoofing defense or recall of advertisements already copied by other nodes. Existing explicitly authorized TCP contacts remain usable. Authenticated sessions may advertise public presence only to endpoints admitted by the physical-interface scope; routed endpoints do not receive that public-discovery consent.
+**Device discovery scope** defaults to **Local and routed networks**. Selecting **Local network only** stops routed discovery probes, rejects off-LAN discovery announcements and responses, sends multicast only on recognized physical interfaces, and withdraws local bridge introductions. Physical IPv4 netmasks and scoped IPv6 link-local interfaces define the scope. Tailscale/other known overlays are excluded. Adapter classification is conservative: renamed or unrecognized physical adapters can be excluded. This is a disclosure policy, not a firewall, source-spoofing defense or recall of advertisements already copied by other nodes. Existing explicitly authorized TCP contacts remain usable. Authenticated sessions may advertise public presence only to endpoints admitted by the physical-interface scope; routed endpoints do not receive that public-discovery consent.
 
 **Partial-direction consequences.** Disabling sending also prevents outgoing relay receipts and signed file decisions; receive-only mode cannot promise a sender will learn completion through the relay. Disabling receiving prevents decrypted events and durable seen markers from being installed. The existing bidirectional wire protocol can still carry encrypted response frames, which are discarded before content admission; the setting is not a zero-download-byte guarantee. Accepted local outgoing work remains queued while sending is disabled and can resume after re-enabling it. Direct peers remain available under either setting. Group **Share a copy** remains a per-member permission and does not create unrestricted third-party sync nodes.
 
@@ -346,3 +346,57 @@ flowchart LR
 These decisions are the implementation baseline. The evidence tracker distinguishes enforced local rules, measured tests and physical topologies that the available machines cannot reproduce.
 
 Use this Q&A and the [topology baseline](network-topologies.md) to compare the agreed rules with code and targeted cross-LAN evidence; avoid extending a test result to an untested feature or topology.
+
+## Q16. What does a person's Online or Offline status actually mean?
+
+**Online** means this client has unexpired eligible public evidence for at least
+one currently valid device bound to the person's verified account. **Offline**
+means this client has no such evidence; the person may have exited or may simply
+be undiscoverable from this client's network. It is not a global sign-out claim.
+Recent observations enrich Offline (for example, “Offline · Seen by this client
+3m ago”); they are not a third primary state. A never-observed member has no
+invented last-seen time.
+
+The member profile shows fresh devices once each and their actual sources:
+local network discovery, cross-network discovery, post-office discovery, or
+public authenticated contact with unspecified network scope. Ordinary signed UDP
+observations outside the established interface scope show signed discovery with
+unspecified scope; they are not labeled local merely because of an address prefix.
+Sources can overlap
+on one device. Neither a source nor an endpoint establishes physical location.
+A direct application path means no intermediate Mesh Talk post office; it says
+nothing about Tailscale's underlying transport. Online does not guarantee TCP,
+message delivery, file transfer, or calls. UDP discovery can succeed while TCP
+fails; communication failures belong to delivery/call/connection diagnostics.
+
+A group header shows “24 members · 6 known online”, relative to this client.
+Both numbers count accepted current **verified accounts**, deduplicating devices
+and paths. Pending and removed members and post-office identities are excluded.
+The current account counts once in both numbers while its accepted local node is
+running. Zero known online is valid. Membership controls remain device-addressed;
+when a device's account cannot be verified, the UI explicitly adds “unbound device
+members” separately rather than counting them as people. Those rows remain
+inspectable and use their device-scoped observations without inventing an account.
+
+Local evidence lasts 30 seconds, routed evidence 120 seconds, and permitted public
+authenticated observations 300 seconds. Directory presence lasts at most 45
+seconds from its origin observation, retaining the original expiry through
+federation and the versioned v4 client directory response. Legacy directory
+responses still provide route hints but cannot establish fresh presence because
+they omit origin expiry. Private authenticated routes do not refresh visible
+presence. Cached routes, membership, stored contacts, historical messages,
+receipts, relay reachability, and mailbox custody never establish presence.
+
+The frontend ages observations even when refreshes fail, shows a global presence
+availability explanation, and retries its normal shared poll. It does not infer
+loss of LAN connectivity from Internet availability or claim everyone signed out.
+A stopped discovery producer is reported as unavailable; silent packet loss is
+not proof of a local network outage. Normal discovery/runtime recovery restores
+observations. Last-seen history is bounded, session-local, and clears on lock,
+logout, or account/runtime replacement; absence of history is not evidence that
+the person has never run the application.
+
+In A↔B↔C group recovery, A observing B or receiving C's historical events through
+B does **not** establish C's presence at A. A needs its own eligible fresh discovery,
+directory, or permitted public authenticated observation. There is no global
+presence service or new transitive group-presence gossip.

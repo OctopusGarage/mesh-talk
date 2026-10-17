@@ -23,6 +23,7 @@ export default function App() {
   const user = useAuth((s) => s.user);
   const owner = user?.id ?? null;
   const booting = useAuth((s) => s.booting);
+  const loggingOut = useAuth((s) => s.loggingOut);
   const tryAutoLogin = useAuth((s) => s.tryAutoLogin);
   const loadAvatars = useAvatars((s) => s.load);
   const locked = useAppLock((s) => s.locked);
@@ -181,6 +182,8 @@ export default function App() {
         >
           <ChatApp />
         </Suspense>
+      ) : loggingOut ? (
+        <Unlocking label={t("common.loading")} />
       ) : booting ? (
         <Unlocking label={t("login.resuming")} />
       ) : (

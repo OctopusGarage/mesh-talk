@@ -22,17 +22,18 @@ import { useAuth } from "@/store/auth";
 import { displayName, useChat } from "@/store/chat";
 import { chat as chatApi } from "@/lib/api";
 import type { ChannelActivityInfo, ChannelMemberInfo } from "@/lib/types";
-import { OFFLINE, presenceStatus, usePresence } from "@/store/presence";
+import {
+  OFFLINE,
+  presenceLabel,
+  presenceStatus,
+  usePresence,
+} from "@/store/presence";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { peerAccountKey, rosterProjection } from "@/lib/rosterProjection";
 import { visiblePeers } from "@/lib/contactVisibility";
 import { VirtualRosterList, VIRTUALIZE_AT } from "./VirtualRosterList";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import type { MemberProfileTarget } from "./memberProfileDetails";
-
-// We are always reachable to ourselves, and we never appear in our own discovery roster
-// (so no peer/presence entry exists for us) — show the self member as online.
-const SELF_ONLINE = presenceStatus({ online: true, last_seen_secs: 0 });
 
 export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const { t } = useTranslation();
@@ -291,7 +292,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           <DialogTitle className="flex items-baseline gap-2">
             {t("members.title")}
             <span className="font-display text-base font-normal tabular-nums text-muted-foreground">
-              {members.length}
+              {channelId && presenceMap[channelId]?.member_count != null
+                ? t("presence.groupSummary", {
+                    total: presenceMap[channelId].member_count,
+                    online: presenceMap[channelId].online_count ?? 0,
+                  })
+                : t("presence.groupUpdating")}
             </span>
           </DialogTitle>
           <DialogDescription>{t("members.description")}</DialogDescription>
@@ -318,15 +324,20 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             className="space-y-0.5 overflow-y-auto"
             itemKey={(m) => m.user_id}
             renderItem={(m, index) => {
-              // Self isn't in the discovery roster, so it has no peer-derived name/presence:
-              // show our own display name and treat ourselves as online.
+              // Self presence uses the same expiring runtime snapshot as other accounts.
               const isSelf = m.user_id === myId;
               const accountId = roster.accountForMember(m);
               const name = isSelf
                 ? myName || m.name || t("common.unnamed")
                 : displayName(favorites, accountId ?? m.user_id, m.name) ||
                   t("common.unnamed");
-              const status = isSelf ? SELF_ONLINE : statusFor(accountId);
+              const memberPresence =
+                presenceMap[
+                  isSelf
+                    ? myAccountId || ""
+                    : accountId || `device:${m.user_id}`
+                ] ?? OFFLINE;
+              const status = presenceStatus(memberPresence);
               // Key the crest by ACCOUNT id, not the device user_id: custom/propagated avatars
               // are stored per account (useAvatar reads account ids), so a device-keyed crest
               // would never resolve a member's photo. Fall back to the device id if the account
@@ -379,6 +390,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                       status={status}
                       variant="compact"
                     />
+                    <span
+                      className="block pl-12 text-xs text-muted-foreground"
+                      title={t("presence.offlineHint")}
+                    >
+                      {presenceLabel(memberPresence, t)}
+                    </span>
                   </button>
                   {dmAccount && (
                     <Button

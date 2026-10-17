@@ -29,6 +29,8 @@ const workflowDiagnostics = [
   "scripts/diagnostics/create-pr.test.mjs",
   "scripts/diagnostics/pr-preflight-awake.test.mjs",
   "scripts/diagnostics/source-identity.test.mjs",
+  "scripts/diagnostics/linux-target.test.mjs",
+  "scripts/diagnostics/pr-preflight-output.test.mjs",
 ];
 
 export function buildPlan(flags, changedFiles) {
@@ -63,7 +65,7 @@ export function validatePlan(plan) {
   if (plan.schema !== 1 || !/^[a-f0-9]{40,64}$/u.test(plan.sourceSha)) throw Error("Invalid committed source SHA in platform plan");
   for (const key of ["coreFilters", "coreTests", "hostFilters", "uiSpecs", "nodeDiagnostics"]) if (!Array.isArray(plan[key])) throw Error(`Invalid plan field: ${key}`);
   for (const key of ["frontendBuild"]) if (typeof plan[key] !== "boolean") throw Error(`Invalid plan field: ${key}`);
-  if (plan.nodeDiagnostics.length && JSON.stringify(plan.nodeDiagnostics) !== JSON.stringify(workflowDiagnostics)) throw Error("Invalid workflow diagnostic selection: expected the four fixed test files");
+  if (plan.nodeDiagnostics.length && JSON.stringify(plan.nodeDiagnostics) !== JSON.stringify(workflowDiagnostics)) throw Error("Invalid workflow diagnostic selection: expected the fixed test files");
   // Validate guest input again: archive/JSON transport must not broaden selection.
   parseFlags([
     ...plan.coreFilters.flatMap(filter => ["--core-filter", filter]),

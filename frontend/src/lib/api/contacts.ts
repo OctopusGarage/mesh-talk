@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { FavoriteInfo, HiddenContactsSnapshot } from "../types";
 
 export const contactPolicy = {
+  delete: (owner: string, account: string) =>
+    invoke<HiddenContactsSnapshot>("delete_contact", { owner, account }),
   get: (owner: string) =>
     invoke<HiddenContactsSnapshot>("get_hidden_contacts", { owner }),
   set: (owner: string, account: string, hidden: boolean, name: string) =>

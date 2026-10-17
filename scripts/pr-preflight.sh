@@ -60,9 +60,14 @@ if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
         # JavaScript template literals belong to Node.
         # shellcheck disable=SC2016
         node --input-type=module -e 'import { readdir, unlink } from "node:fs/promises"; const dir="frontend/coverage/e2e-parts"; for (const name of await readdir(dir).catch(() => [])) if (name.endsWith(".json")) await unlink(`${dir}/${name}`);'
+        # Playwright clears its output directory at startup. Keep this run's
+        # traces and HTML report separate from full-health and other preflights.
+        browser_artifacts="$repo_root/target/pr-preflight-playwright/${candidate}-$$"
         (
             cd frontend
-            MESH_TALK_E2E_COVERAGE=1 npx playwright test --project=chromium --workers=1 --retries=0 "${ui_specs[@]}"
+            MESH_TALK_E2E_COVERAGE=1 PLAYWRIGHT_HTML_OUTPUT_DIR="$browser_artifacts/report" \
+                npx playwright test --project=chromium --workers=1 --retries=0 \
+                --output "$browser_artifacts/results" "${ui_specs[@]}"
             node scripts/merge-e2e-coverage.mjs
         )
         coverage_reports+=(frontend/coverage/e2e.lcov)

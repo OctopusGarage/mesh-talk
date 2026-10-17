@@ -155,8 +155,8 @@ test("relay directions persist independently and physical LAN scope gates bridge
     name: "Receive through post offices",
     exact: true,
   });
-  const scope = page.getByRole("switch", {
-    name: "Physical LAN discovery only",
+  const scope = page.getByRole("combobox", {
+    name: "Device discovery scope",
     exact: true,
   });
   const bridge = page.getByRole("switch", {
@@ -165,8 +165,11 @@ test("relay directions persist independently and physical LAN scope gates bridge
   });
   await expect(send).toHaveAttribute("aria-checked", "true");
   await expect(receive).toHaveAttribute("aria-checked", "true");
+  await expect(scope).toHaveValue("routed");
+  await bridge.click();
+  await expect(bridge).toHaveAttribute("aria-checked", "true");
   await send.click();
-  await scope.click();
+  await scope.selectOption("local");
   await expect(receive).toHaveAttribute("aria-checked", "true");
   await expect(bridge).toBeDisabled();
   await page.getByRole("button", { name: "Close" }).click();
@@ -174,7 +177,11 @@ test("relay directions persist independently and physical LAN scope gates bridge
   await selectSettingsCategory(page, "connection");
   await expect(send).toHaveAttribute("aria-checked", "false");
   await expect(receive).toHaveAttribute("aria-checked", "true");
-  await expect(scope).toHaveAttribute("aria-checked", "true");
+  await expect(scope).toHaveValue("local");
+  await expect(bridge).toHaveAttribute("aria-checked", "true");
+  await scope.selectOption("routed");
+  await expect(bridge).toBeEnabled();
+  await expect(bridge).toHaveAttribute("aria-checked", "true");
   await page
     .getByRole("switch", { name: "Use post-office relays", exact: true })
     .click();

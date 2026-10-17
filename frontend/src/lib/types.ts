@@ -105,6 +105,8 @@ export interface HiddenContact {
 }
 
 export interface HiddenContactsSnapshot {
+  /** Device-local contact deletions, cleared by fresh online discovery. */
+  deleted?: string[];
   owner: string;
   contacts: HiddenContact[];
 }
@@ -159,14 +161,29 @@ export interface DiagNetworkInfo {
 
 // --- Presence (online / last-seen) (src-tauri/src/chat_commands.rs) ---
 
+export interface PresenceEvidence {
+  source:
+    "local" | "routed" | "directory" | "authenticated" | "unscoped" | "self";
+  last_seen_secs: number;
+  expires_in_secs: number;
+}
+export interface PresenceDevice {
+  user_id: string;
+  evidence: PresenceEvidence[];
+}
 export interface PresenceInfo {
-  /** True when ≥1 relevant device was heard from within the presence TTL. */
+  /** Person has fresh eligible device evidence; groups use member counts instead. */
   online: boolean;
+  devices?: PresenceDevice[];
+  member_count?: number;
+  online_count?: number;
+  unbound_member_count?: number;
+  member_keys?: string[];
   /** Whole seconds since the most-recently-seen relevant device (null = never seen). */
   last_seen_secs: number | null;
 }
 
-/** Per-conversation presence snapshot, keyed by account_id (DMs) and channel_id. */
+/** Accounts, explicit device:<id> legacy identities, and channel count summaries. */
 export type PresenceMap = Record<string, PresenceInfo>;
 
 // --- Background-presence settings (src-tauri/src/settings.rs) ---

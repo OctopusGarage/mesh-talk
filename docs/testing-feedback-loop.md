@@ -100,9 +100,39 @@ node scripts/pr-platform/run.mjs --plan \
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                      |
 | `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D |
+| `MESH_PR_LINUX_HOST` | Optional SSH host, such as `mac2015`, to run Docker remotely; unset keeps local Docker. |
+| `MESH_PR_LINUX_PLATFORM` | Optional `linux/amd64` or `linux/arm64`; remote Docker defaults to `linux/amd64` and rejects mismatched guest architecture. |
+| `MESH_PR_LINUX_DOCKER` | Remote Docker executable; defaults to `/Applications/Docker.app/Contents/Resources/bin/docker`. |
+| `MESH_PR_LINUX_ROOT` | Remote temporary source/evidence root; defaults to `/tmp/mesh-talk-pr-preflight`. |
 | `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`           |
 | `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                     |
 | `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                 |
+
+To run native Linux amd64 containers on the Intel Mac while preparing a PR:
+
+```bash
+MESH_PR_LINUX_HOST=mac2015 MESH_PR_LINUX_PLATFORM=linux/amd64 \
+  ./scripts/create-pr.sh --core-filter discovery:: --host-filter discovery \
+  e2e/settings-recovery.spec.ts -- --title "Your PR title" --body-file /tmp/pr-body.md
+```
+
+The remote adapter uploads the same committed source archive, plan and Dockerfile
+used by local Docker. Mounts and named caches belong to the remote Docker host;
+local filesystem paths are never passed as remote bind mounts. Selected test
+containers enable IPv6 loopback so routed discovery tests exercise `::1` even
+when Docker's bridge network has no IPv6 subnet. This is a container setting;
+the Docker daemon's network configuration stays unchanged. Test
+reports and logs are copied back before the source revision and archive digest
+are validated. Remote run directories remain under the configured temporary root
+for diagnosis; named caches are reusable. Docker's executable directory is added
+to the remote command's PATH so GUI-installed credential helpers work over SSH.
+SSH uses configured host keys and noninteractive authentication, as for Windows.
+
+Local PR browser traces, screenshots and the HTML report use a unique directory
+under `target/pr-preflight-playwright/<commit>-<process>/`. They do not share
+Playwright's default `frontend/test-results` or `frontend/playwright-report`
+directories with the full health gate, so starting a preflight cannot delete
+another active run's traces.
 
 Required environments being unavailable blocks preparation; it is not a pass.
 Fix the environment or report the blocker. Documentation-only changes without

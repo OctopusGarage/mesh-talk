@@ -1,0 +1,63 @@
+{
+  "name": "mesh-talk-person-presence-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-PRESENCE-001",
+      "name": "client-relative person presence contract",
+      "subject_file": "docs/network-design-qa.md",
+      "min_score": 0.9,
+      "scenario": "Review the person-presence contract for group members observed across local discovery, routed discovery, and federated post-office directories. Judge the current Q16 presence specification, not unrelated historical scenario text.",
+      "rubric": [
+        "Online and Offline are observations of the current client; recent history is secondary and never-observed people receive no invented timestamp.",
+        "Presence distinguishes eligible public local, routed, directory and authenticated observations from private routes, membership, cached routes, receipts and relay custody.",
+        "Group counts use accepted distinct verified accounts, exclude pending/removed members and infrastructure, include running accepted self, and report unresolved devices separately.",
+        "Explains source overlap, source versus physical location, discovery versus TCP/delivery success, and the absence of transitive A-B-C presence guarantees.",
+        "Lists source-specific expiry and original directory expiry preservation, legacy freshness limitations, failed-refresh aging and recovery."
+      ]
+    },
+    {
+      "id": "MT-PRESENCE-002",
+      "name": "account and accepted-member presence aggregation",
+      "subject_file": "src-tauri/src/chat_commands/presence.rs",
+      "min_score": 0.9,
+      "scenario": "Review only the supplied desktop presence projection. Assume the called core certificate/admission APIs enforce their documented existing contracts. Judge whether its aggregation and publication preserve person/device/evidence distinctions.",
+      "rubric": [
+        "Uses fresh per-source evidence rather than peer last_seen or routes alone to establish online status.",
+        "Groups by verified account identity, retains device evidence, excludes post-office infrastructure, and does not merge names or IP addresses.",
+        "Rechecks current device/account association; gives unbound identities an explicit device-scoped key.",
+        "Group summaries exclude pending members, deduplicate accounts, include accepted current self, and keep unresolved device membership separate.",
+        "Reuses a shared roster snapshot, performs no per-member dial, propagates snapshot errors, and rejects replacement runtime publication."
+      ]
+    },
+    {
+      "id": "MT-PRESENCE-003",
+      "name": "frontend expiry failure and ownership safeguards",
+      "subject_file": "frontend/src/store/presence.ts",
+      "min_score": 0.9,
+      "scenario": "Review the shared presence store as a small state machine. Native observations supply source-specific remaining lifetime and optional history. Judge frontend handling of silence, failed IPC, overlapping responses, owner changes, and group counters.",
+      "rubric": [
+        "Ages evidence independently and removes expired device evidence even without a successful refresh; recent history does not become a third primary state.",
+        "Failed/malformed top-level refreshes produce an unavailable indication instead of an empty successful map; valid recovery clears that indication.",
+        "Prevents older successful or failed responses and obsolete owner/runtime polling sessions from overwriting newer accepted state.",
+        "Bounds outstanding refreshes and retained history, clears state on stop/replacement, and preserves unchanged record references.",
+        "Uses account member keys to recompute group online counts after expiry, not a group-level online boolean; offline labels retain available observation history."
+      ]
+    },
+    {
+      "id": "MT-PRESENCE-004",
+      "name": "directory origin freshness and compatibility",
+      "subject_file": "crates/mesh-talk-core/src/node/bridge_directory.rs",
+      "min_score": 0.9,
+      "scenario": "Review directory freshness metadata, federation forwarding and the explicitly negotiated v4 response. Trusted relays report original origin expiry; clients must not renew it by re-querying.",
+      "rubric": [
+        "Federated export/import retain original remote expiry and reject expired or excessive-lifetime remote proofs.",
+        "Local directory observations have bounded lifetime and require authenticated visible self presence with a valid account proof.",
+        "v4 response is explicitly versioned and preserves origin expiry with bounded pagination and valid identity proofs.",
+        "Legacy directory response layouts remain compatible but omit eligible freshness metadata; response assembly rejects mixing legacy and freshness pages.",
+        "Valid expiry becomes a monotonic client deadline and unusable freshness cannot establish online status; gateway provenance remains separate from ordinary device presence."
+      ]
+    }
+  ]
+}

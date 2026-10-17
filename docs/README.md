@@ -22,8 +22,9 @@ belongs and how to keep the site, README, and guides aligned.
 | [`PROJECT.md`](../PROJECT.md)                                                       | Top-level context pointer for AI tools / new contributors.                                                                                                  |
 | [`CONTEXT.md`](../CONTEXT.md)                                                       | Domain model — entities, layers, invariants, what the project does _not_ own.                                                                               |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)                                           | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI.                                             |
-| [`docs/routed-network-discovery.md`](routed-network-discovery.md)                   | Optional routed discovery over existing Tailscale or manually supplied addresses, identity boundary, route selection, and release checks.                   |
+| [`docs/routed-network-discovery.md`](routed-network-discovery.md)                   | Optional routed discovery over existing Tailscale, EasyTier or manually supplied addresses, identity boundary, route selection, and release checks.         |
 | [`docs/routed-network-discovery-research.md`](routed-network-discovery-research.md) | Historical cited research and design options behind routed discovery; see the implementation guide for current behavior.                                    |
+| [`docs/easytier-compatibility-research.md`](easytier-compatibility-research.md)     | Dated EasyTier feasibility research, discovery integration options, source evidence, and validation limits.                                                 |
 | [`docs/network-design-reference.md`](network-design-reference.md)                   | Network Topology and Communication Architecture: principles, module contracts, settings, 34 illustrated scenarios, resource limits and acceptance evidence. |
 | [`docs/network-topologies.md`](network-topologies.md)                               | Review baseline: network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.                         |
 | [`docs/network-design-qa.md`](network-design-qa.md)                                 | Focused questions and current answers; remote-relay participation, group chains and links to the architectural baseline.                                    |
@@ -49,6 +50,7 @@ belongs and how to keep the site, README, and guides aligned.
 | [`specifications/development_conventions.md`](../specifications/development_conventions.md)   | Coding standards, naming, error handling, performance, cross-platform conventions.                       |
 | [`specifications/testing_guidelines.md`](../specifications/testing_guidelines.md)             | The three test layers — inline unit, multi-process backend E2E, Playwright UI E2E.                       |
 | [`docs/testing-feedback-loop.md`](testing-feedback-loop.md)                                   | Focused local test commands, module boundaries, and full-gate triggers.                                  |
+| [`docs/build-retention.md`](build-retention.md)                                               | Shared build archives, compiler-cache budget, worktree discovery, and cleanup coordination.             |
 | [`specifications/git_standards.md`](../specifications/git_standards.md)                       | Conventional-commit format, scopes, and GPG signing / hook enforcement.                                  |
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements.                            |
 | [`scripts/README.md`](../scripts/README.md)                                                   | Script entry points, CI globs, manual real-machine rigs, and maintenance tools.                          |
@@ -63,6 +65,8 @@ belongs and how to keep the site, README, and guides aligned.
 
 These dated reports record what was tested and the limits of that evidence. Use
 the current guides above for commands and implementation behavior.
+
+EasyTier-specific evidence: [two-Mac acceptance, 2026-10-17](evals/easytier-macos-2026-10-17.md).
 
 | Doc                                                                                               | What it covers                                                                                       |
 | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |

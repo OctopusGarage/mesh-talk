@@ -35,8 +35,10 @@ The same **Connection & delivery** page separates:
   off also withholds relay receipts and file decisions; receiving off prevents
   content admission but is not a zero-wire-byte guarantee.
 - **Discover peers through a post office**: opt into public participant introductions.
-- **Physical LAN discovery only**: exclude routed/Tailscale public discovery and
-  bridge directories, while retaining permitted physical-interface disclosure.
+- **Device discovery scope → Local network only**: exclude routed public discovery
+  (including Tailscale and EasyTier) and bridge directories, while retaining
+  permitted physical-interface disclosure. **Local and routed networks** allows
+  these optional discovery sources; post-office discovery stays a separate choice.
 - **Preferred post office**: select a known direct LAN/Tailscale candidate and
   retain alternatives. A known candidate is rechecked when actually connected.
 
@@ -50,6 +52,14 @@ and startup/live-change contract are in the
 local contact lists and direct-message search. It keeps their history and does
 not stop their messages or calls. Shared groups are unchanged. This is a local
 view setting, separate from invisible mode.
+
+Right-click an offline contact and choose **Delete contact** to remove it from
+this device's contact list and permanently erase its local message history after
+confirmation. This cannot be undone; other devices keep their own history.
+Deletion survives restarts and is separate from Hidden contacts. Verified identity
+bindings remain intact. Fresh online discovery adds the contact back without
+restoring deleted history. Deletion does not block new messages or change shared
+groups. The app checks presence again before deleting.
 
 ## Limits
 

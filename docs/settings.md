@@ -32,8 +32,15 @@ offices retains send/receive, discovery and preferred-relay choices. Dependent
 controls are disabled with the reason shown; re-enabling the parent restores the
 saved choices rather than resetting them.
 
-- **Physical LAN discovery only** suppresses routed public discovery and bridge
-  directories. It is not a firewall against authorized existing contacts.
+- **Device discovery scope** offers **Local network only** and **Local and routed
+  networks**. Local-only discovery uses recognized physical Ethernet/Wi-Fi
+  interfaces and suppresses routed public discovery and post-office directories.
+  Routed discovery also uses optional local Tailscale and EasyTier inventories;
+  it does not enable post-office discovery. **Add device address…** opens the
+  existing manual-address connection flow for other networks or unavailable
+  clients. Existing authorized connections remain governed by their permissions.
+  The saved `physical_lan_only` value and default are unchanged, so older settings
+  retain their meaning. This control is not a connection firewall.
 - **Invisible mode** suppresses public disclosure. Public bridge discovery stays
   inactive while invisible, even when its saved preference is enabled. A privacy
   policy that is loading/unavailable is not assumed to permit public disclosure.

@@ -32,7 +32,7 @@ It is the starting point for evaluating whether a change preserves the agreed co
 
 ### Product intent and background
 
-Mesh Talk is a local-first conversation system with local identity, authenticated peer connections and end-to-end encrypted content. A local network must remain useful without a post office or vendor-operated account service. A directly routed connection, including Tailscale, extends which application endpoints can communicate. A peer-operated post office adds temporary encrypted custody and, when configured as a bridge, introduces consenting participants and reconciles opaque mail with trusted equal relays.
+Mesh Talk is a local-first conversation system with local identity, authenticated peer connections and end-to-end encrypted content. A local network must remain useful without a post office or vendor-operated account service. A directly routed connection, including Tailscale or EasyTier, extends which application endpoints can communicate. A peer-operated post office adds temporary encrypted custody and, when configured as a bridge, introduces consenting participants and reconciles opaque mail with trusted equal relays.
 
 The desired user experience is that reachable, permitted participants can discover one another and communicate without choosing a global hub. The implementation must still preserve the distinctions between network reachability, device identity, visibility, conversation authority and delivery confirmation.
 
@@ -50,7 +50,7 @@ flowchart TB
   SESS[Transport: authenticated Noise TCP and bounded sessions]
   DIR[Opt-in bridge directories]
   PO[Post offices: opaque custody and trusted federation]
-  IP[Existing IP paths: physical LAN or routed Tailscale]
+  IP[Existing IP paths: physical LAN or routed VPN]
   RTC[Separate WebRTC call media]
   UI --> HOST --> CORE
   CORE --> DISC
@@ -107,6 +107,15 @@ Paths below are relative to the repository root. `core/` is shorthand for `crate
 
 ### Module inventory and contracts
 
+Desktop address inventory is owned by
+[`routed_discovery.rs`](../src-tauri/src/routed_discovery.rs), with
+[`Tailscale`](../src-tauri/src/tailscale_discovery.rs) and
+[`EasyTier`](../src-tauri/src/easytier_discovery.rs) adapters. Both use the same
+signed discovery and privacy gates. Concurrent bounded snapshots merge fairly
+into one 256-candidate budget; VPN-specific commands and schemas stay outside
+core. See the [routed setup guide](routed-network-discovery.md) for refresh,
+CLI/RPC configuration and supported-version boundaries.
+
 | Owner                              | Implementation                                                                                                                                                                                                                                                                                          | Contract                                                                                                                                                                                                                     |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Runtime lifecycle                  | [`node/runtime.rs`](../crates/mesh-talk-core/src/node/runtime.rs), [`runtime_work.rs`](../crates/mesh-talk-core/src/node/runtime_work.rs)                                                                                                                                                               | Initialize identity, persisted policy and network options before producers start; retire admitted work and tasks safely. Original `RuntimeConfig` remains compatible; additive `RuntimeNetworkOptions` carries new controls. |
@@ -136,7 +145,7 @@ Paths below are relative to the repository root. `core/` is shorthand for `crate
 
 ### Route contract and UI projection
 
-`PeerRecord::has_direct_route()` accepts `Lan`, `RoutedQuery` and `Authenticated` routes. `Gateway` and `PostOffice` routes alone do not qualify. A device with both direct and indirect alternatives remains eligible through its direct route. An address string alone is insufficient evidence.
+`PeerRecord::has_direct_route()` accepts `Lan`, `RoutedQuery`, `Authenticated` and unscoped `Discovery` routes. `Gateway` and `PostOffice` routes alone do not qualify. A device with both direct and indirect alternatives remains eligible through its direct route. An address string alone is insufficient evidence.
 
 The desktop publishes two different fields:
 
@@ -154,6 +163,57 @@ The [member profile](../frontend/src/features/chat/MemberProfileDialog.tsx) uses
 Sidebar contacts, group invite candidates and counts must use the shared person/role projection. Raw connection diagnostics may include post offices because their role and endpoint matter for routing. Group membership is owned by signed channel state, not rebuilt from whoever is currently discoverable. A member can be offline without leaving the group; a discovered relay cannot become a member through a UI picker.
 
 When one machine runs both the app and a relay, their names, keys, TCP listeners and selected interface addresses can differ. A directory-introduced user's route may point at the mailbox relay; it must not be interpreted as that user's physical machine IP. New UI must consume route provenance and account/device identity explicitly, retaining this distinction for profiles and connection explanations.
+
+### Person presence contract
+
+The maintained [presence Q&A](network-design-qa.md#q16-what-does-a-persons-online-or-offline-status-actually-mean)
+defines Online/Offline as observations by the current client, not a global census.
+The desktop [presence projection](../src-tauri/src/chat_commands/presence.rs)
+aggregates one verified roster snapshot by account, retaining device/source
+observations with independent monotonic lifetimes. Membership and cached routes
+are never freshness evidence. Retired or conflicting device/account bindings and
+infrastructure cannot contribute. Legacy unbound devices remain explicit device
+identities rather than invented account associations.
+
+| Eligible public observation                                | Presence lifetime                          | Boundary                                                                                                                |
+| ---------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Local signed discovery within the observed interface scope | 30 seconds                                 | No TCP success required; no physical co-location claim.                                                                 |
+| Signed UDP discovery with undetermined scope               | 30 seconds                                 | Show signed discovery only; do not infer local or cross-network location.                                               |
+| Routed signed discovery                                    | 120 seconds                                | A permitted Tailscale candidate alone is insufficient.                                                                  |
+| Public authenticated contact                               | 300 seconds                                | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
+| Directory/federation introduction                          | Original origin expiry, at most 45 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
+
+The explicitly negotiated `MTBD4Q`/`MTBD4R` directory extension carries the
+existing self-signed identity proof with the trusted directory's origin expiry.
+It preserves bounded pagination, gateway provenance, policy generation checks,
+and staged rollback. v1–v3 request/response layouts and resource budgets remain
+unchanged. New clients try v4 first and retain legacy fallback for route hints;
+legacy clients retain their existing behavior. Federation's existing fixed
+expiry remains authoritative. No group presence propagation protocol is added.
+
+Group summaries count accepted current verified accounts once, including self
+when accepted and the local node runs. Pending/removed devices and infrastructure
+are excluded. Unresolved device memberships are reported separately; the signed
+membership model still addresses devices. Group presence never means “any member
+online”; each person's own eligible observations determine their status and the
+known-online count. A↔B↔C history recovery cannot establish C's presence at A.
+
+Source details belong in the member profile. A device may have overlapping local,
+routed, directory, and public authenticated observations; source categories are
+not disjoint device totals. Source is distinct from physical location, an
+established connection, delivery, file completion and call readiness. Discovery
+with blocked TCP can still validly show Online. Only current authenticated
+transport evidence could justify “Connected”; the presence projection makes no
+such claim and opens no new connections.
+
+The isolated frontend store uses the shared two-second scheduling loop, permits
+at most two outstanding refreshes, guards owner/runtime generations and response
+ordering, and ages every observation locally even during failure. IPC timeouts,
+failed reads and discovery task termination produce a global availability notice,
+not an empty successful snapshot or a fabricated network diagnosis. Successful
+withdrawals take effect immediately. Up to 1,024 actually observed historical
+account/device entries remain Offline within the session, without inventing times
+for never-observed people. Lock/logout/replacement clears this history.
 
 ### Protocol surfaces and durable ownership
 
@@ -222,18 +282,18 @@ This uniformity applies to identity and protocol handling across permitted route
 
 Settings apply per client device. Shared account identity does not silently apply one device's visibility or relay choices to another.
 
-| Control                                  | Default                 | Effective contract                                                                                                                                                                                           |
-| ---------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Use post offices**                     | On in desktop settings  | Master admission for ordinary relay data and public bridge participation. Off preserves direction preferences and pending local work; direct peers remain available.                                         |
-| **Send through post offices**            | On                      | Permit opaque publication under the master. Off also withholds relay receipts, consent decisions and completion controls.                                                                                    |
-| **Receive through post offices**         | On                      | Permit incoming mailbox content admission under the master. Off installs no received content or durable seen markers from ignored data. Existing bidirectional sync can still return encrypted frames.       |
-| **Discover peers through a post office** | Off                     | Opt into public signed directory registration and introductions when master on, visible and physical-only mode off. It does not itself grant conversation authority.                                         |
-| **Physical LAN discovery only**          | Off                     | Restrict disclosure to recognized physical IPv4 subnets and correctly scoped IPv6 link-local interfaces. Suppress routed discovery and public directories. Existing authorized TCP contacts are not revoked. |
-| **Preferred post office**                | Automatic               | Order a directly reachable LAN or routed/Tailscale relay first, retaining alternatives. A saved unavailable choice remains a preference for later recovery.                                                  |
-| **Invisible mode**                       | Off                     | Suppress public discovery/directory presence and apply the separate explicit private-contact/account/group admission rules.                                                                                  |
-| **Channel: Share a copy**                | On for accepted members | Permit serving authorized retained group history. Off does not prevent receiving one's own events, but can interrupt a member-sync chain.                                                                    |
-| **Calls**                                | Off                     | Enable desktop call UI/signaling. A live direct application signaling route and separate WebRTC media route are still required.                                                                              |
-| **Sibling sync categories**              | Device-local policy     | Independently control supported history, attachment/profile/settings catch-up categories between certified devices. They do not turn an arbitrary relay into a sibling.                                      |
+| Control                                  | Default                   | Effective contract                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Use post offices**                     | On in desktop settings    | Master admission for ordinary relay data and public bridge participation. Off preserves direction preferences and pending local work; direct peers remain available.                                                                                                                                      |
+| **Send through post offices**            | On                        | Permit opaque publication under the master. Off also withholds relay receipts, consent decisions and completion controls.                                                                                                                                                                                 |
+| **Receive through post offices**         | On                        | Permit incoming mailbox content admission under the master. Off installs no received content or durable seen markers from ignored data. Existing bidirectional sync can still return encrypted frames.                                                                                                    |
+| **Discover peers through a post office** | Off                       | Opt into public signed directory registration and introductions when master on, visible and physical-only mode off. It does not itself grant conversation authority.                                                                                                                                      |
+| **Device discovery scope**               | Local and routed networks | Selecting **Local network only** restricts disclosure to recognized physical IPv4 subnets and correctly scoped IPv6 link-local interfaces, suppressing routed discovery and public directories. The persisted `physical_lan_only` boolean is unchanged. Existing authorized TCP contacts are not revoked. |
+| **Preferred post office**                | Automatic                 | Order a directly reachable LAN or routed/Tailscale relay first, retaining alternatives. A saved unavailable choice remains a preference for later recovery.                                                                                                                                               |
+| **Invisible mode**                       | Off                       | Suppress public discovery/directory presence and apply the separate explicit private-contact/account/group admission rules.                                                                                                                                                                               |
+| **Channel: Share a copy**                | On for accepted members   | Permit serving authorized retained group history. Off does not prevent receiving one's own events, but can interrupt a member-sync chain.                                                                                                                                                                 |
+| **Calls**                                | Off                       | Enable desktop call UI/signaling. A live direct application signaling route and separate WebRTC media route are still required.                                                                                                                                                                           |
+| **Sibling sync categories**              | Device-local policy       | Independently control supported history, attachment/profile/settings catch-up categories between certified devices. They do not turn an arbitrary relay into a sibling.                                                                                                                                   |
 
 The desktop persists and applies the new network settings at startup through `RuntimeNetworkOptions`; older SDK startup entry points keep compatible defaults. The CLI exposes its documented flags and commands, not every desktop switch. Do not assume an identically named CLI option exists for each UI control.
 

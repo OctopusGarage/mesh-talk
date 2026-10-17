@@ -78,6 +78,11 @@ impl DiscoveryVisibility {
             .collect()
     }
 
+    /// Observed interface scope, not a claim about a peer's physical location.
+    pub(crate) fn discovery_scope(&self) -> Vec<LanInterface> {
+        (self.inventory)()
+    }
+
     pub(crate) fn accepts_source(&self, source: SocketAddr) -> bool {
         !self.physical_lan_only() || scope::permits(&(self.inventory)(), source)
     }

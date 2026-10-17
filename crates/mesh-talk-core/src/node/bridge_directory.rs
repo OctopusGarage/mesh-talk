@@ -15,6 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const REQUEST_V1: &[u8] = b"MTBD1Q";
 const REQUEST_V2: &[u8] = b"MTBD2Q";
 const REQUEST_V3: &[u8] = b"MTBD3Q";
+const REQUEST_V4: &[u8] = b"MTBD4Q";
+const RESPONSE_V4: &[u8] = b"MTBD4R";
 const RESPONSE: &[u8] = b"MTBD1R";
 const TTL: Duration = Duration::from_secs(45);
 pub(crate) const MAX_MEMBERS: usize = 1024;
@@ -180,7 +182,47 @@ impl BridgeDirectory {
 }
 
 pub fn is_request(bytes: &[u8]) -> bool {
-    bytes == REQUEST_V1 || bytes == REQUEST_V2 || bytes == REQUEST_V3
+    bytes == REQUEST_V1 || bytes == REQUEST_V2 || bytes == REQUEST_V3 || bytes == REQUEST_V4
+}
+
+/// Existing directory introductions with original expiry metadata, explicitly negotiated.
+pub fn freshness_request() -> &'static [u8] {
+    REQUEST_V4
+}
+
+impl BridgeDirectory {
+    pub(crate) fn encode_snapshot(
+        &self,
+        request: &[u8],
+        proofs: &[Announce],
+    ) -> Option<Vec<Vec<u8>>> {
+        if request != REQUEST_V4 {
+            return encode_for_request(request, proofs, self.gateway_route());
+        }
+        let now = unix_seconds_now();
+        let expiry: HashMap<_, _> = self
+            .export_federated(Instant::now(), now)
+            .into_iter()
+            .map(|p| (p.announce.user_id, p.expires_at_secs))
+            .collect();
+        let gateway = self.gateway_route();
+        encode_pages(proofs, |selected, last| {
+            let entries: Vec<_> = selected
+                .iter()
+                .map(|proof| FederatedPresence {
+                    announce: proof.clone(),
+                    expires_at_secs: expiry.get(&proof.user_id).copied().unwrap_or(now),
+                })
+                .collect();
+            let mut bytes = Vec::from(RESPONSE_V4);
+            bytes.push(u8::from(last));
+            bytes.extend_from_slice(
+                &bincode::serialize(&(entries, gateway_on_page(selected, gateway.as_ref())))
+                    .ok()?,
+            );
+            (bytes.len() <= MAX_PLAINTEXT).then_some(bytes)
+        })
+    }
 }
 
 pub fn request() -> &'static [u8] {
@@ -347,6 +389,8 @@ pub(crate) struct DirectoryResponse {
     proofs: Vec<Announce>,
     gateway: Option<GatewayRoute>,
     finished: bool,
+    pub(crate) expiries: HashMap<String, Instant>,
+    freshness_version: Option<bool>,
 }
 
 impl DirectoryResponse {
@@ -356,6 +400,8 @@ impl DirectoryResponse {
             proofs: Vec::new(),
             gateway: None,
             finished: false,
+            expiries: HashMap::new(),
+            freshness_version: None,
         }
     }
 
@@ -363,15 +409,63 @@ impl DirectoryResponse {
         if self.finished {
             return None;
         }
-        let (page, route, last) = decode_response_with_gateway(bytes).or_else(|| {
-            decode_response(bytes).map(|(page, last)| {
-                let route = page
-                    .iter()
-                    .find(|proof| proof.post_office && proof.public() != self.relay_public)
-                    .map(|proof| (proof.user_id.clone(), proof.tcp_port));
-                (page, route, last)
-            })
-        })?;
+        let fresh = bytes.starts_with(RESPONSE_V4);
+        if self.freshness_version.is_some_and(|old| old != fresh) {
+            return None;
+        }
+        self.freshness_version = Some(fresh);
+        let decoded = if fresh {
+            let body = bytes.strip_prefix(RESPONSE_V4)?;
+            if bytes.len() > MAX_PLAINTEXT || body.is_empty() || body[0] > 1 {
+                return None;
+            }
+            let (entries, route): (Vec<FederatedPresence>, Option<GatewayRoute>) =
+                bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .with_limit(MAX_PLAINTEXT as u64)
+                    .reject_trailing_bytes()
+                    .deserialize(&body[1..])
+                    .ok()?;
+            if entries.len() > MAX_MEMBERS
+                || entries.iter().any(|p| !valid_directory_proof(&p.announce))
+            {
+                return None;
+            }
+            let now = unix_seconds_now();
+            let mut page = Vec::new();
+            for entry in entries {
+                if !entry.announce.post_office
+                    && entry.expires_at_secs > now
+                    && entry.expires_at_secs <= now.saturating_add(TTL.as_secs())
+                {
+                    self.expiries.insert(
+                        entry.announce.user_id.clone(),
+                        Instant::now() + Duration::from_secs(entry.expires_at_secs - now),
+                    );
+                }
+                page.push(entry.announce);
+            }
+            if route
+                .as_ref()
+                .is_some_and(|route| !valid_gateway_route(&page, route))
+            {
+                return None;
+            }
+            Some((page, route, body[0] == 1))
+        } else {
+            None
+        };
+        let (page, route, last) = decoded
+            .or_else(|| decode_response_with_gateway(bytes))
+            .or_else(|| {
+                decode_response(bytes).map(|(page, last)| {
+                    let route = page
+                        .iter()
+                        .find(|proof| proof.post_office && proof.public() != self.relay_public)
+                        .map(|proof| (proof.user_id.clone(), proof.tcp_port));
+                    (page, route, last)
+                })
+            })?;
         if self.gateway.is_some() && route.is_some() && self.gateway != route {
             return None;
         }
@@ -397,6 +491,114 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn directory_freshness_rejects_expired_and_out_of_budget_origin_lifetimes() {
+        let now = unix_seconds_now();
+        let entries: Vec<_> = [now.saturating_sub(1), now, now + 90, now + 7]
+            .into_iter()
+            .map(|expiry| FederatedPresence {
+                announce: Announce::new_with_account(
+                    &DeviceIdentity::generate(),
+                    &Account::generate(),
+                    "Peer",
+                    1,
+                ),
+                expires_at_secs: expiry,
+            })
+            .collect();
+        let valid_id = entries[3].announce.user_id.clone();
+        let mut frame = Vec::from(RESPONSE_V4);
+        frame.push(1);
+        frame.extend_from_slice(
+            &bincode::serialize(&(entries, Option::<GatewayRoute>::None)).unwrap(),
+        );
+        let mut response = DirectoryResponse::new(DeviceIdentity::generate().public());
+        assert!(matches!(
+            response.add_page(&frame),
+            Some(DirectoryProgress::Complete(_))
+        ));
+        assert_eq!(
+            response.expiries.len(),
+            1,
+            "unusable freshness may supply hints but never online evidence"
+        );
+        assert!(response.expiries.contains_key(&valid_id));
+        assert!(
+            response.expiries[&valid_id].saturating_duration_since(Instant::now())
+                <= Duration::from_secs(7)
+        );
+    }
+
+    #[test]
+    fn directory_response_cannot_mix_freshness_and_legacy_pages() {
+        let mut frame = Vec::from(RESPONSE_V4);
+        frame.push(0);
+        frame.extend_from_slice(
+            &bincode::serialize(&(
+                Vec::<FederatedPresence>::new(),
+                Option::<GatewayRoute>::None,
+            ))
+            .unwrap(),
+        );
+        let mut response = DirectoryResponse::new(DeviceIdentity::generate().public());
+        assert!(matches!(
+            response.add_page(&frame),
+            Some(DirectoryProgress::More)
+        ));
+        let legacy = encode_response(&[]).unwrap();
+        assert!(response.add_page(&legacy[0]).is_none());
+    }
+
+    #[test]
+    fn freshness_response_preserves_forwarded_origin_deadline() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "remote", 1);
+        let now = unix_seconds_now();
+        let deadline = now + 3;
+        let mut directory = BridgeDirectory::default();
+        directory.import_federated(
+            &[FederatedPresence {
+                announce: proof.clone(),
+                expires_at_secs: deadline,
+            }],
+            now,
+        );
+        for _ in 0..2 {
+            let pages = directory
+                .encode_snapshot(freshness_request(), std::slice::from_ref(&proof))
+                .unwrap();
+            let mut response = DirectoryResponse::new(DeviceIdentity::generate().public());
+            for page in pages {
+                assert!(response.add_page(&page).is_some());
+            }
+            assert!(
+                response.expiries[&proof.user_id].saturating_duration_since(Instant::now())
+                    <= Duration::from_secs(3)
+            );
+            assert_eq!(
+                directory.export_federated(Instant::now(), now)[0].expires_at_secs,
+                deadline
+            );
+        }
+        let pages = directory
+            .encode_snapshot(request(), std::slice::from_ref(&proof))
+            .unwrap();
+        let mut legacy = DirectoryResponse::new(DeviceIdentity::generate().public());
+        for page in pages {
+            assert!(legacy.add_page(&page).is_some());
+        }
+        assert!(
+            legacy.expiries.is_empty(),
+            "legacy introductions cannot prove origin freshness"
+        );
+        directory.import_federated(&[], deadline);
+        assert!(
+            directory
+                .export_federated(Instant::now(), deadline)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn legacy_directory_snapshots_keep_their_original_bound() {

@@ -601,6 +601,11 @@ impl NodeRuntime {
         self.participant.trigger_discovery();
     }
 
+    /// Whether this runtime's discovery producers are still running.
+    pub fn discovery_available(&self) -> bool {
+        self.participant.discovery_available()
+    }
+
     /// A snapshot of currently-known peers.
     pub fn peers(&self) -> Vec<PeerRecord> {
         match self.node.cached_peer_snapshot() {
