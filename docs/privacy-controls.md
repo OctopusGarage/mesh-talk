@@ -51,6 +51,14 @@ local contact lists and direct-message search. It keeps their history and does
 not stop their messages or calls. Shared groups are unchanged. This is a local
 view setting, separate from invisible mode.
 
+Right-click an offline contact and choose **Delete contact** to remove it from
+this device's contact list and permanently erase its local message history after
+confirmation. This cannot be undone; other devices keep their own history.
+Deletion survives restarts and is separate from Hidden contacts. Verified identity
+bindings remain intact. Fresh online discovery adds the contact back without
+restoring deleted history. Deletion does not block new messages or change shared
+groups. The app checks presence again before deleting.
+
 ## Limits
 
 Files exported outside the encrypted app store and text copied to the clipboard

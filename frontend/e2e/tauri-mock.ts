@@ -599,6 +599,12 @@ export const test = base.extend({
         build_profile: "release",
       };
 
+      let contactOwner = "u_self";
+      const deletedKey = () => `mock-deleted-${contactOwner}`;
+      const deletedContacts = (): string[] =>
+        JSON.parse(localStorage.getItem(deletedKey()) ?? "[]");
+      const erasedHistory = (): string[] =>
+        JSON.parse(localStorage.getItem(`mock-erased-${contactOwner}`) ?? "[]");
       const ok = () => null;
       const probedEndpoints: string[] = [];
       (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
@@ -692,14 +698,19 @@ export const test = base.extend({
             success: true,
             user: { id: "u_self", username: "tester", display_name: "tester" },
           }),
-          login: (a) => ({
-            success: true,
-            user: {
-              id: a.username === "other_user" ? "u_other" : "u_self",
-              username: String(a.username ?? "tester"),
-              display_name: String(a.username ?? "tester"),
-            },
-          }),
+          login: (a) => {
+            contactOwner = a.username === "other_user" ? "u_other" : "u_self";
+            for (const account of erasedHistory())
+              clearConversation(`acc:${account}`);
+            return {
+              success: true,
+              user: {
+                id: contactOwner,
+                username: String(a.username ?? "tester"),
+                display_name: String(a.username ?? "tester"),
+              },
+            };
+          },
           rename_account: (a) => ({
             id: "u_self",
             username: "tester",
@@ -717,11 +728,18 @@ export const test = base.extend({
 
           // roster
           list_peers: () => peers.map((peer) => ({ ...peer })),
-          list_accounts: () =>
-            accounts.map((account) => ({
-              ...account,
-              names: [...account.names],
-            })),
+          list_accounts: () => {
+            const deleted = deletedContacts().filter(
+              (id) => !presenceMap[id]?.online,
+            );
+            localStorage.setItem(deletedKey(), JSON.stringify(deleted));
+            return accounts
+              .filter((account) => !deleted.includes(account.account_id))
+              .map((account) => ({
+                ...account,
+                names: [...account.names],
+              }));
+          },
           list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
@@ -1034,6 +1052,41 @@ export const test = base.extend({
           stop_linking: ok,
           link_device: () => SELF.account,
           rekey_account: () => "acc_rekeyed_ffff6666",
+
+          // Local contact deletion mirrors the native roster/history contract.
+          delete_contact: (a) => {
+            const account = String(a.account);
+            if (
+              a.owner !== contactOwner ||
+              account === SELF.account ||
+              presenceMap[account]?.online
+            )
+              throw new Error(
+                "Only another offline contact can be deleted by the current owner",
+              );
+            clearConversation(`acc:${account}`);
+            localStorage.setItem(
+              deletedKey(),
+              JSON.stringify([...new Set([...deletedContacts(), account])]),
+            );
+            localStorage.setItem(
+              `mock-erased-${contactOwner}`,
+              JSON.stringify([...new Set([...erasedHistory(), account])]),
+            );
+            const key = `mock-hidden-${contactOwner}`;
+            const contacts = (
+              JSON.parse(localStorage.getItem(key) ?? "[]") as Array<{
+                account_id: string;
+                name: string;
+              }>
+            ).filter((c) => c.account_id !== account);
+            localStorage.setItem(key, JSON.stringify(contacts));
+            return {
+              owner: contactOwner,
+              contacts,
+              deleted: deletedContacts(),
+            };
+          },
 
           // favorites
           get_hidden_contacts: (a) => ({

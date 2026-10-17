@@ -2108,3 +2108,60 @@ describe("send/action failures", () => {
     expect(useChat.getState().error).toContain("no peer");
   });
 });
+
+describe("offline contact deletion", () => {
+  beforeEach(() => {
+    useChat.setState({
+      ready: true,
+      accounts: [{ account_id: "contact", device_count: 0, names: [] }],
+      active: { kind: "account", id: "contact", name: "Contact" },
+      unread: { "account:contact": 3, "account:other": 2 },
+      messages: {
+        "account:contact": [
+          {
+            id: "old",
+            fromMe: true,
+            who: "me",
+            text: "private history",
+            wallClock: 1,
+            replyTo: null,
+          },
+        ],
+      },
+      error: null,
+    });
+    invoke.mockResolvedValue({ owner: "host", contacts: [] });
+  });
+  it("removes the contact and closes its conversation after persistence", async () => {
+    expect(await useChat.getState().deleteContact("contact")).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("delete_contact", {
+      owner: "host",
+      account: "contact",
+    });
+    expect(useChat.getState().accounts).toEqual([]);
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().unread["account:contact"]).toBeUndefined();
+    expect(useChat.getState().unread["account:other"]).toBe(2);
+    expect(useChat.getState().messages["account:contact"]).toEqual([]);
+  });
+  it("keeps the contact when persistence fails or it comes online", async () => {
+    invoke.mockRejectedValue(new Error("Contact is online"));
+    expect(await useChat.getState().deleteContact("contact")).toBe(false);
+    expect(useChat.getState().accounts).toHaveLength(1);
+    expect(useChat.getState().active?.id).toBe("contact");
+  });
+  it("does not apply a deletion completion to a later session", async () => {
+    let complete!: (value: unknown) => void;
+    invoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const request = useChat.getState().deleteContact("contact");
+    useAuth.setState({ generation: useAuth.getState().generation + 1 });
+    complete({ owner: "host", contacts: [] });
+    expect(await request).toBe(false);
+    expect(useChat.getState().accounts).toHaveLength(1);
+  });
+});

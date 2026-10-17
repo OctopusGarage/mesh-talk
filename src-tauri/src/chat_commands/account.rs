@@ -104,19 +104,55 @@ pub struct AccountInfo {
 
 #[tauri::command]
 pub async fn list_accounts(
+    app: tauri::State<'_, crate::state::AppState>,
+    policy: tauri::State<'_, crate::contact_policy::HiddenContactsState>,
     state: tauri::State<'_, NodeState>,
 ) -> Result<Vec<AccountInfo>, CommandError> {
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    let live = rt
-        .peers()
-        .into_iter()
-        .filter_map(|p| {
-            p.account_id
-                .map(|account_id| (account_id, p.name, p.post_office))
+    let session = app.session().clone();
+    let owner = session
+        .with_owner(|owner| {
+            owner
+                .map(str::to_owned)
+                .ok_or_else(|| "Missing contact owner".to_owned())
         })
-        .collect();
-    Ok(merge_account_rows(live, rt.known_account_ids()))
+        .map_err(CommandError::Authorization)?;
+    let node = state.0.clone();
+    let policy = policy.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        // Match deletion's lock order: policy, session, node. Take fresh presence
+        // inside the transaction so an older poll cannot undo a later deletion.
+        policy.transaction(&session, &owner, || {
+            let guard = node.blocking_lock();
+            let rt = guard.as_ref().ok_or("Node not started")?;
+            if rt.host_account_id() != Some(owner.as_str()) {
+                return Err("Contact roster requires this account's running node".into());
+            }
+            let peers = rt.peers();
+            let online = online_account_ids(peers.clone());
+            let live = peers
+                .into_iter()
+                .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
+                .collect();
+            let mut rows = merge_account_rows(live, rt.known_account_ids());
+            let accounts = rows.iter().map(|row| row.account_id.clone()).collect();
+            let visible = policy.visible_accounts(&owner, &online, accounts)?;
+            rows.retain(|row| visible.contains(&row.account_id));
+            Ok(rows)
+        })
+    })
+    .await
+    .map_err(|_| CommandError::Internal("Contact policy task failed".into()))?
+    .map_err(CommandError::from)
+}
+
+pub(crate) fn online_account_ids(
+    peers: Vec<mesh_talk_core::discovery::roster::PeerRecord>,
+) -> Vec<String> {
+    peers
+        .into_iter()
+        .filter(|p| p.last_seen.elapsed().as_secs() < super::diagnostics::PRESENCE_TTL_SECS)
+        .filter_map(|p| p.account_id)
+        .collect()
 }
 
 fn merge_account_rows(live: Vec<(String, String, bool)>, known: Vec<String>) -> Vec<AccountInfo> {
@@ -145,6 +181,24 @@ fn merge_account_rows(live: Vec<(String, String, bool)>, known: Vec<String>) -> 
 #[cfg(test)]
 mod recovery_accounts_tests {
     use super::merge_account_rows;
+
+    #[test]
+    fn deletion_presence_uses_the_freshest_device_and_same_ttl_as_ui() {
+        use mesh_talk_core::{discovery::roster::PeerRecord, identity::device::DeviceIdentity};
+        let fresh = PeerRecord {
+            public: DeviceIdentity::generate().public(),
+            addr: "127.0.0.1:1234".parse().unwrap(),
+            routes: vec![],
+            name: "Alice".into(),
+            post_office: false,
+            account_id: Some("alice".into()),
+            last_seen: std::time::Instant::now(),
+        };
+        let mut stale = fresh.clone();
+        stale.last_seen -= std::time::Duration::from_secs(31);
+        assert!(super::online_account_ids(vec![stale.clone()]).is_empty());
+        assert_eq!(super::online_account_ids(vec![stale, fresh]), vec!["alice"]);
+    }
 
     #[test]
     fn offline_history_account_is_listed_with_zero_live_devices() {

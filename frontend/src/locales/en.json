@@ -1,4 +1,11 @@
 {
+  "contactDeletion": {
+    "title": "Delete contact?",
+    "description": "This removes the contact and permanently deletes its message history on this device. This cannot be undone. Fresh online discovery will add the contact back without restoring deleted history.",
+    "delete": "Delete contact",
+    "online": "This contact is online. Only offline contacts can be deleted.",
+    "error": "Deletion could not be completed. Some local history may already have been removed. Check that the contact is still offline, then try again."
+  },
   "privacy": {
     "relayHelp": "Offline delivery requires a manually allowed trusted relay account. Missing verified sender identity is rejected; old relay versions may not support delivery while invisible.",
     "retry": "Retry",

@@ -787,7 +787,15 @@ macOS menu-bar title and the OS app-icon badge through one session-guarded comma
 
 **Contact visibility** (`store/contactPolicy.ts`, `src-tauri/src/contact_policy.rs`):
 the signed-in local user's hidden account IDs and last-known names are stored separately
-in `accounts/<local-user-id>/hidden-contacts.json`. Mutations validate the session owner
+in `accounts/<local-user-id>/hidden-contacts.json`. Offline contact deletion uses a
+separate device-local `deleted` account-ID list in the same atomic snapshot
+(defaulting to empty for existing files). Roster reads suppress these accounts until
+fresh online presence clears the deletion. The delete command and roster read
+serialize policy, session, and runtime checks in that order. Deletion reuses
+`Node::clear_account_conversation` to erase local history and cancel pending delivery
+before saving the contact policy; cryptographic identity proofs remain intact.
+The history stores and contact policy have separate atomic commits. A failure may
+leave history partially erased, so the UI reports failure and allows retry. Mutations validate the session owner
 and replace the file atomically. A linked device may optionally synchronize these
 presentation choices through the account preference log; each device keeps its
 own contact-sync switch.

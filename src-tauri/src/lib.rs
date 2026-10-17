@@ -328,6 +328,7 @@ pub fn run_tauri_configured(
                 commands::login,
                 crate::contact_policy::get_hidden_contacts,
                 crate::contact_policy::set_contact_hidden,
+                crate::contact_policy::delete_contact,
                 crate::privacy_commands::get_privacy,
                 crate::privacy_commands::set_invisible,
                 crate::privacy_commands::set_privacy_allowed,
