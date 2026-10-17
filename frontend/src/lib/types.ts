@@ -105,6 +105,8 @@ export interface HiddenContact {
 }
 
 export interface HiddenContactsSnapshot {
+  /** Device-local contact deletions, cleared by fresh online discovery. */
+  deleted?: string[];
   owner: string;
   contacts: HiddenContact[];
 }

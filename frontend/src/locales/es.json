@@ -1,4 +1,11 @@
 {
+  "contactDeletion": {
+    "title": "¿Eliminar contacto?",
+    "description": "Elimina el contacto y su historial de mensajes de forma permanente en este dispositivo. No se puede deshacer. Si vuelve a detectarse en línea, reaparecerá sin recuperar el historial eliminado.",
+    "delete": "Eliminar contacto",
+    "online": "Este contacto está en línea. Solo se pueden eliminar contactos sin conexión.",
+    "error": "No se pudo completar la eliminación. Es posible que parte del historial local ya se haya eliminado. Comprueba que el contacto siga sin conexión e inténtalo de nuevo."
+  },
   "privacy": {
     "retry": "Reintentar",
     "section": "Privacidad de red",

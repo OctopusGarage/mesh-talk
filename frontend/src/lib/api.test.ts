@@ -332,3 +332,11 @@ describe("chat command mapping", () => {
     });
   });
 });
+
+it("deletes an offline contact under the expected owner", async () => {
+  await contactPolicy.delete("owner", "account");
+  expect(invoke).toHaveBeenCalledWith("delete_contact", {
+    owner: "owner",
+    account: "account",
+  });
+});
