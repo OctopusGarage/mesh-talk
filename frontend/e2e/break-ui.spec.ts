@@ -1,6 +1,7 @@
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./tauri-mock";
+import { enterChatShell } from "./helpers/session";
 import {
   expectDialogFitsViewport,
   expectElementsWithin,
@@ -10,14 +11,7 @@ import {
 const BOB = "acc_bob_bbbb2222";
 
 async function enter(page: Page, mode: string, username = "tester") {
-  await page.goto(`/?data=${mode}`);
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill(username);
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await enterChatShell(page, username, `/?data=${mode}`);
 }
 
 async function dialogOverflow(page: Page, testId: string) {
