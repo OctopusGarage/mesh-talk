@@ -67,11 +67,17 @@ transport and retrieval assumptions. A relay can still delay, withhold,
 delete, or replay opaque events. The recipient's signed-event validation
 prevents forgery or silent alteration, and normal retries handle duplicates.
 
-The relay cannot decrypt the inner event unless its operator is separately
-an authorized recipient and holds that recipient device's private key.
+Operating a relay does not grant the keys needed to decrypt the inner event.
+An operator who is also an authorized recipient can read their own messages;
+an attacker who obtains an endpoint's private key crosses a separate boundary.
 The outer wrapping has no forward secrecy against later compromise of one
 pair's long-term X25519 key. Such a compromise can reveal recorded headers
-and controls for that pair; DM text still has its separate Double Ratchet.
+and controls for that pair. DM text has a separate Double Ratchet, but its
+initial sending chain uses the recipient's permanent key; recorded group
+sender distributions are also sealed to permanent member keys. These paths
+have the retrospective-decryption limitations described in the
+[security policy](../SECURITY.md#known-limitations). They do not allow a relay
+without endpoint secrets to read messages.
 Relay copies of V1 events from earlier clients remain readable until evicted
 and cannot be retroactively hidden. New clients do not query those V1
 conversation IDs from a relay: doing so would disclose the IDs again,
@@ -102,7 +108,15 @@ minute while running. This is an additional maximum-age limit; the existing
 event-count and byte budgets can evict a mailbox sooner. Arrival times are
 stored in a password-encrypted `relay.retention` sidecar. Federation carries
 the earliest arrival time to new relay copies, so a transfer does not restart
-the 30-day clock. Existing mailboxes
+the 30-day clock. An inventory entry for a mailbox not yet held locally stays
+in bounded, connection-local memory. Its arrival time is persisted only with
+the first validated event; disconnecting or supplying rejected events cannot
+leave durable records for nonexistent mailboxes. This requires one durable
+arrival write on first custody of each imported mailbox, rather than persisting
+the whole unvalidated inventory in advance. Later events and duplicates do not
+repeat that write. A newly learned earlier arrival can correct an existing
+mailbox's clock through a bounded metadata rewrite; unchanged hints do not
+rewrite it. Existing mailboxes
 without an arrival record start their 30-day clock on the first upgrade startup
 so the upgrade does not discard queued messages immediately. A sender that
 still holds an event may upload it again after expiry, starting a new mailbox.

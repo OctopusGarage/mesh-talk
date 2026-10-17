@@ -197,19 +197,24 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
         if !federation_trust
             .as_ref()
             .is_some_and(|trusted| trusted.contains(&channel.peer_identity().user_id()))
-            || federation::send_inventory(
-                &mut channel,
-                &store,
-                directory.as_ref(),
-                federation::presence_limit(&first),
-            )
-            .await
-            .is_err()
         {
             return;
         }
+        let Ok(session_store) = federation::send_inventory(
+            &mut channel,
+            &store,
+            directory.as_ref(),
+            federation::presence_limit(&first),
+        )
+        .await
+        else {
+            return;
+        };
+        let session_store = Mutex::new(session_store);
         for _ in 0..MAX_RELAY_ROUNDS {
-            match tokio::time::timeout(RELAY_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
+            match tokio::time::timeout(RELAY_IDLE_TIMEOUT, serve_one(&mut channel, &session_store))
+                .await
+            {
                 Ok(Ok(Served::Handled(_))) => continue,
                 _ => break,
             }

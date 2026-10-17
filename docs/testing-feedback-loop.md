@@ -24,6 +24,103 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+## Local evidence reuse and resource ownership
+
+Local gates use `scripts/validation/stage.mjs` for diagnostics, frontend builds,
+lint/typechecking, unit coverage, workspace tests, and browser runs. An identical
+successful stage on a clean committed HEAD can be reused for up to 24 hours.
+Receipts bind the revision, working directory, platform, tool versions, command
+arguments, relevant environment and required output digests. Base-sensitive local
+preflight also binds the resolved comparison ref. Changed or missing artifacts,
+failed/interrupted stages, dirty sources, and changed inputs require execution.
+`CI=1` and `MESH_VALIDATION_FRESH=1` always execute checks. Advisory and secret
+scans continue to run directly rather than reusing time-sensitive scan verdicts.
+
+`make test` and full health share the same workspace-test stage. Preflight and
+health share frontend static/unit stages. The PR wrapper still invokes preflight;
+its local work can reuse intact evidence, while both required remote platforms
+always execute. An unavailable environment therefore still blocks publication.
+No local receipt replaces a protected GitHub check. Local receipts are trusted
+workspace acceleration, not signed attestations against a hostile local user.
+
+Heavy local stages share a resource lock across Git worktrees, preventing browser,
+coverage and Rust compilation workloads from competing. Node unit tests default
+to two workers and Rust tests to one thread; explicit `VITEST_MAX_WORKERS` and
+`RUST_TEST_THREADS` values override those defaults and invalidate matching evidence.
+Each browser stage owns an available port and private results/report directory.
+The full browser process has a two-hour ceiling; selected/portable processes have
+30 minutes. `MESH_BROWSER_TIMEOUT_SECONDS` can set an explicit 1–7200 second
+ceiling and participates in evidence identity. Individual scenario timeouts remain
+unchanged.
+Coverage cleanup and merging occur inside that stage's exclusive resource window.
+
+Before browser coverage or remote execution, preflight compiles the workspace
+library test executables once and checks selectors against libtest's actual test
+names without executing tests. Invalid filters fail locally with the crate and
+selector. Choose module filters present on the preparing platform for tests whose
+individual names are platform-specific. Remote execution still rejects selectors
+that run zero tests on either guest.
+
+Per-stage logs and atomic success receipts live under `target/validation/`.
+Console output reports queue time, execution time, reuse, and running-stage
+heartbeats. Platform preflight reports each platform's completion immediately and
+prints progress while the other continues. Missing/corrupted evidence is a cache
+miss; it is never a successful verification result.
+
+## CI ownership and browser sharding
+
+The standalone `scripts/check-health.sh` still runs the full local gate before
+requesting review. Hosted workflows divide the same responsibilities so that
+independent checks run concurrently and heavy suites are not repeated by health.
+
+| Owner                                 | Checks                                                                                                                                                                                                                 |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, cache cleanup shell regressions on Linux/macOS/Windows                                                                                        |
+| `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
+| `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; Linux Rust/E2E coverage and eval smoke |
+| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, lite checks, portable browser matrices and scheduled extended scenarios                                                                       |
+| Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
+
+Every existing protected health name now requires both the source scanner job
+and the complete platform static matrix. A failed, cancelled or skipped dependency
+fails the gate. Health runs for every PR base so moving source checks out of CI
+does not leave non-main PRs without them. CI retains the weekly Rust run formerly
+provided by scheduled full health; UI E2E runs the full browser matrices daily.
+A manual health workflow dispatch runs static checks; dispatch CI and UI E2E too
+when complete hosted verification is needed. The local full-health command is
+unchanged. Required CI, health, UI E2E and backend check names remain stable.
+The protected `Full Linux UI regression` name now belongs to the coverage merge
+job, which explicitly fails when its browser shard matrix is unsuccessful.
+
+Full Chromium tests use four Playwright shards per OS, with one worker and zero
+retries per runner. This keeps the existing per-machine rendering budget while
+running all scenarios. Portable/native scenarios and snapshot assertions remain
+in place. Sharding trades more concurrent runner slots and setup work for shorter
+elapsed time; account concurrency limits can reduce the gain.
+
+Each Linux shard uploads raw browser coverage plus its source SHA and shard
+identity. The coverage job generates the unit line map once, then requires all
+four distinct current-source shards before collecting their parts and producing
+one browser LCOV upload. It prefixes filenames so reports from different runners
+cannot overwrite each other and clears old output only after validating every
+input. The final UI gate requires successful browser, coverage, merged-report,
+lite and portable jobs, plus Firefox when selected. Blob reports and failure
+traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
+when browser execution fails.
+
+The Rust build cache maps the workspace root to `target/`, matching
+`cargo metadata --no-deps --format-version 1`. The CI cache has its own build
+configuration key; native release, mutation and sanitizer caches stay separate.
+Cached build output never replaces executing checks on the current revision.
+
+To assess performance after deployment, compare at least several unchanged-scope
+runs with warm caches and a cold-cache run. Record time from PR update to all
+required checks passing, queue delay, slowest browser shard, native build/test
+steps, total runner minutes, and first-attempt failures. The pre-change October 17
+sample had 27–38 minute health jobs and a 31.5 minute full Linux UI job. These are
+baseline observations, not promised speedups; hosted runs must establish the new
+latency and reliability.
+
 ## Automatic platform checks before PR creation
 
 Commit the candidate and use the repository's PR entry point:
@@ -52,8 +149,7 @@ workflow-only diagnostic plan does not install frontend dependencies.
 Verification archives suppress export substitutions and text/filter conversions
 in private Git metadata so the archived bytes match the committed source.
 
-Frontend changes require affected browser specs. Frontend unit coverage runs
-once in the existing local preflight; the two platform guests do not repeat
+Frontend changes require affected browser specs. Frontend unit coverage is a shared local stage; the two platform guests do not repeat
 the whole frontend unit suite. To target another PR base, pass
 `--base origin/release` before `--`; the wrapper uses that same base for
 change selection, coverage and `gh pr create --base release`. A local revision
@@ -66,7 +162,8 @@ before they consume time. Both platforms test an archive of committed HEAD. Work
 isolated from installed applications and post-office services. Both results
 are collected even if one fails. Logs and revision-bound reports remain
 untracked under `target/pr-platform/`; dependency and build caches can be
-reused, but successful verdicts are never reused for another revision.
+reused, but successful verdicts are never reused for another revision. Required
+remote execution is never replaced by local receipts.
 On macOS the preflight holds a temporary `caffeinate -is` assertion until it
 exits, preventing idle/system sleep on AC without changing power settings or
 keeping the display lit. This avoids Docker timer failures during maintenance

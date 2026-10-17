@@ -1116,7 +1116,7 @@ Direct connections use authenticated Noise/TCP. Conversation events retain their
 
 Opaque wrapping uses domain-separated key derivation from the device pair, authenticated encryption and padded size buckets. V3 preserves mailbox identity across trusted relays; legacy opaque wrapping also binds the relay. Recipients validate wrapper integrity, inner signatures, event identity, causal constraints and feature permissions. Production relays reject old clear-header event shapes; there is no automatic downgrade that exposes inner metadata to obtain delivery.
 
-This minimizes readable metadata; it does not provide anonymity or eliminate relationship inference. A trusted federation extends the set of operators that can correlate pseudonymous mailboxes. Opaque wrapping has no forward secrecy against later compromise of a pair's long-term X25519 key; DM text retains its separate ratchet properties. Public presence is signed rather than confidential. See [metadata privacy](post-office-metadata-privacy.md) for the exact cryptographic and migration boundary.
+This minimizes readable metadata; it does not provide anonymity or eliminate relationship inference. A trusted federation extends the set of operators that can correlate pseudonymous mailboxes. Opaque wrapping has no forward secrecy against later compromise of a pair's long-term X25519 key. Conversation encryption has additional bootstrap and group-distribution limits under endpoint-key compromise; see the [security policy](../SECURITY.md#known-limitations). Public presence is signed rather than confidential. See [metadata privacy](post-office-metadata-privacy.md) for the exact cryptographic and migration boundary.
 
 ### Independent clocks and ownership
 

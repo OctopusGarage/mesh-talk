@@ -5,6 +5,8 @@
 
 set -e  # Exit on any error
 
+stage="$(pwd)/scripts/validation/stage.mjs"
+
 # FAST mode (FAST=1, or `check-health.sh --fast`): an optional partial local gate with
 # formatting, clippy, frontend lint/tests, and the in-memory Rust
 # unit slice. It SKIPS the slow, redundant steps (full `cargo test --workspace`, the verbose
@@ -81,7 +83,7 @@ if ! node --test scripts/test-ai-eval.mjs; then
     exit 1
 fi
 
-if ! node --test scripts/diagnostics/*.test.mjs; then
+if ! node "$stage" diagnostics --profile shared -- node --test scripts/diagnostics/*.test.mjs; then
     print_status "error" "Diagnostic regression tests failed."
     exit 1
 fi
@@ -139,7 +141,7 @@ fi
 # runs in Clippy/tests; stale local dist must not hide this dependency.
 if [ "$FAST" != "1" ]; then
     print_status "success" "Building the frontend before Tauri checks..."
-    if ! { cd frontend && npm run build; }; then
+    if ! { cd frontend && node "$stage" frontend-build --profile shared --resource heavy --artifact dist -- npm run build; }; then
         print_status "error" "Frontend build failed."
         exit 1
     fi
@@ -166,7 +168,7 @@ cd ..
 # Run Clippy (Rust linter). MUST mirror CI: --all-targets covers tests/benches/bins'
 # test modules — without it, lints in test code only surface on CI (and break it).
 print_status "success" "Running Rust linter (Clippy)..."
-if ! { cd src-tauri && cargo clippy --workspace --all-targets -- -D warnings; }; then
+if ! { cd src-tauri && node "$stage" rust-clippy --profile shared --resource heavy -- cargo clippy --workspace --all-targets -- -D warnings; }; then
     print_status "error" "Rust linting issues found. Please fix Clippy warnings."
     exit 1
 fi
@@ -238,7 +240,7 @@ fi  # end FAST-skip of scan block
 # Run ESLint (Frontend linter). ESLint 9 uses flat config (eslint.config.js);
 # the `--ext` flag was removed, so run the package script which lints the project.
 print_status "success" "Running frontend linter (ESLint)..."
-if ! { cd frontend && npm run lint; }; then
+if ! { cd frontend && node "$stage" frontend-lint --profile shared -- npm run lint; }; then
     print_status "error" "Frontend linting issues found. Please fix ESLint errors."
     exit 1
 fi
@@ -247,7 +249,7 @@ cd ..
 # Type-check application and E2E sources. Vite and Playwright transpilation alone
 # do not establish that the scenario/helper TypeScript contracts are valid.
 print_status "success" "Checking frontend and E2E TypeScript..."
-if ! { cd frontend && npm run typecheck; }; then
+if ! { cd frontend && node "$stage" frontend-types --profile shared -- npm run typecheck; }; then
     print_status "error" "Frontend or E2E TypeScript errors found."
     exit 1
 fi
@@ -257,10 +259,17 @@ cd ..
 print_status "success" "Running frontend tests..."
 if [ "$FAST" = "1" ]; then
     FRONTEND_TEST_SCRIPT="test"
+    FRONTEND_TEST_STAGE="frontend-tests"
 else
     FRONTEND_TEST_SCRIPT="test:coverage"
+    FRONTEND_TEST_STAGE="frontend-coverage"
 fi
-if ! { cd frontend && npm run "$FRONTEND_TEST_SCRIPT"; }; then
+if [ "$FAST" = "1" ]; then
+    frontend_test_args=()
+else
+    frontend_test_args=(--artifact coverage/lcov.info)
+fi
+if ! { cd frontend && node "$stage" "$FRONTEND_TEST_STAGE" --profile shared --resource heavy "${frontend_test_args[@]}" -- npm run "$FRONTEND_TEST_SCRIPT"; }; then
     print_status "error" "Frontend tests or coverage failed. Please fix the failing gate."
     exit 1
 fi
@@ -289,7 +298,7 @@ if [ "$RUN_UI_E2E" = "1" ]; then
     # Match CI's bounded worker budget; keep failures visible without retries.
     # Parallel local browsers can exhaust a scenario's total time budget while
     # competing for rendering resources, rather than exposing a UI regression.
-    if ! { cd frontend && npx playwright test --project=chromium --workers=1 --retries=0; }; then
+    if ! { cd frontend && node "$stage" browser-full --profile shared --resource heavy --artifact @../target/validation/browser-full.json -- node ../scripts/validation/browser.mjs full; }; then
         print_status "error" "UI E2E failed. Please fix the browser e2e regressions."
         exit 1
     fi
@@ -304,18 +313,17 @@ fi
 # The full `cargo test --workspace` (heavy/integration/e2e) is left to CI.
 if [ "$FAST" = "1" ]; then
     print_status "success" "Running fast Rust unit tests (lib only)..."
-    if ! { cd src-tauri && cargo test -p mesh-talk-core --lib && cargo test -p mesh-talk --lib; }; then
+    if ! { cd src-tauri && node "$stage" core-unit-tests --profile shared --resource heavy -- cargo test -p mesh-talk-core --lib && node "$stage" host-unit-tests --profile shared --resource heavy -- cargo test -p mesh-talk --lib; }; then
         print_status "error" "Rust unit tests failed. Please fix test issues."
         exit 1
     fi
     cd ..
 else
     print_status "success" "Running tests..."
-    if ! { cd src-tauri && cargo test --workspace; }; then
+    if ! node "$stage" workspace-tests --profile shared --resource heavy -- cargo test --workspace; then
         print_status "error" "Tests failed. Please fix test issues."
         exit 1
     fi
-    cd ..
 fi
 
 # Rust security advisories are gated by cargo-deny above (its `advisories` check uses the same
@@ -347,7 +355,7 @@ cd ..
 
 # Build the project
 print_status "success" "Building the project..."
-if ! { cd src-tauri && cargo build --workspace --verbose; }; then
+if ! { cd src-tauri && node "$stage" workspace-build --profile shared --resource heavy -- cargo build --workspace --verbose; }; then
     print_status "error" "Build failed. Please fix build issues."
     exit 1
 fi

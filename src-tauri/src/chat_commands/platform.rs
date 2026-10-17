@@ -224,11 +224,11 @@ fn current_ssid() -> Option<String> {
 /// - `Err(CommandError)` on a real failure (e.g. missing permission) so the UI can prompt.
 ///
 /// Per-platform capture mechanism:
-/// - macOS: uses the built-in interactive `screencapture -i` area/window selector.
+/// - macOS: captures the app window's monitor with `screencapture -x -R`.
 ///   NOTE: macOS screen capture requires the "Screen Recording" permission (TCC). If it is
 ///   not granted, the produced PNG is blank/empty; the user must grant it in
 ///   System Settings → Privacy & Security → Screen Recording.
-/// - Windows: captures the primary display through xcap.
+/// - Windows: captures the app window's monitor through xcap.
 /// - Linux: requests a display image from the desktop Screenshot portal.
 /// All platforms return the capture to the shared select/annotate/send editor.
 #[tauri::command]
@@ -266,6 +266,15 @@ pub async fn capture_screen(
 ) -> Result<Vec<u8>, CommandError> {
     let window = app.get_webview_window("main").map(|w| w.as_ref().window());
 
+    // Resolve the target before hiding: capture and the later overlay use the same display.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let monitor = window
+        .as_ref()
+        .ok_or_else(|| CommandError::Internal("screenshot window unavailable".into()))?
+        .current_monitor()
+        .map_err(|e| CommandError::Internal(format!("cannot query screenshot display: {e}")))?
+        .ok_or_else(|| CommandError::Internal("screenshot display unavailable".into()))?;
+
     if hide_window {
         if let Some(w) = &window {
             let _ = crate::window_visibility::hide(w);
@@ -275,7 +284,11 @@ pub async fn capture_screen(
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     }
 
-    let result = capture_png().await.and_then(|bytes| {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let captured = capture_png(monitor).await;
+    #[cfg(target_os = "linux")]
+    let captured = capture_png().await;
+    let result = captured.and_then(|bytes| {
         if bytes.is_empty() || valid_screenshot_png(&bytes) {
             Ok(bytes)
         } else {
@@ -322,7 +335,7 @@ mod screen_recording {
 const SCREEN_PERMISSION_ERR: &str = "screen-recording-permission";
 
 #[cfg(target_os = "macos")]
-async fn capture_png() -> Result<Vec<u8>, CommandError> {
+async fn capture_png(monitor: tauri::Monitor) -> Result<Vec<u8>, CommandError> {
     // Without the Screen Recording permission, screencapture would just grab the desktop
     // wallpaper. Verify first; if missing, prompt/register the app and bail with a clear
     // signal so the UI tells the user to grant it (and restart) — not a desktop screenshot.
@@ -330,49 +343,64 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
         screen_recording::request_access();
         return Err(CommandError::Internal(SCREEN_PERMISSION_ERR.into()));
     }
-    // The native selector lets the user choose a desktop region. The shared editor starts
-    // with that region selected so annotation follows without a second drag.
-    let tmp = std::env::temp_dir().join(format!(
-        "mesh-talk-shot-{}.png",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let tmp_clone = tmp.clone();
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CommandError> {
+    // Tauri monitor positions and sizes are physical; screencapture regions use logical coordinates.
+    let rectangle = mac_capture_rectangle(
+        monitor.position().x,
+        monitor.position().y,
+        monitor.size().width,
+        monitor.size().height,
+        monitor.scale_factor(),
+    );
+    // Selection and annotation share one frozen capture of the app's current display.
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CommandError> {
+        let tmp = tempfile::Builder::new()
+            .prefix("mesh-talk-shot-")
+            .suffix(".png")
+            .tempfile()
+            .map_err(|e| CommandError::Internal(format!("cannot create screenshot file: {e}")))?;
         let status = std::process::Command::new("screencapture")
-            .arg("-i")
-            .arg(&tmp_clone)
+            .args(["-x", "-R", &rectangle])
+            .arg(tmp.path())
             .status()
             .map_err(|e| CommandError::Internal(format!("screencapture failed: {e}")))?;
         if !status.success() {
-            return Ok(Vec::new());
+            return Err(CommandError::Internal("screencapture failed".into()));
         }
-        match std::fs::read(&tmp_clone) {
-            Err(_) => Ok(Vec::new()),
-            Ok(b) => {
-                let _ = std::fs::remove_file(&tmp_clone);
-                Ok(b)
-            }
-        }
+        std::fs::read(tmp.path())
+            .map_err(|e| CommandError::Internal(format!("cannot read screenshot: {e}")))
     })
     .await
-    .map_err(|e| CommandError::Internal(format!("join error: {e}")))??;
-    Ok(bytes)
+    .map_err(|e| CommandError::Internal(format!("capture task failed: {e}")))?
+}
+
+#[cfg(target_os = "macos")]
+fn mac_capture_rectangle(x: i32, y: i32, width: u32, height: u32, scale: f64) -> String {
+    format!(
+        "{},{},{},{}",
+        (f64::from(x) / scale).round() as i64,
+        (f64::from(y) / scale).round() as i64,
+        (f64::from(width) / scale).round() as u64,
+        (f64::from(height) / scale).round() as u64
+    )
 }
 
 /// The native capture backend returns an image; selection and annotation stay in React.
 #[cfg(target_os = "windows")]
-async fn capture_png() -> Result<Vec<u8>, CommandError> {
-    tokio::task::spawn_blocking(|| {
+async fn capture_png(monitor: tauri::Monitor) -> Result<Vec<u8>, CommandError> {
+    tokio::task::spawn_blocking(move || {
         let monitors = xcap::Monitor::all()
             .map_err(|e| CommandError::Internal(format!("cannot enumerate displays: {e}")))?;
         let monitor = monitors
             .iter()
-            .find(|monitor| monitor.is_primary().unwrap_or(false))
-            .or_else(|| monitors.first())
-            .ok_or_else(|| CommandError::Internal("no display available for screenshot".into()))?;
+            .find(|candidate| {
+                candidate.x().ok() == Some(monitor.position().x)
+                    && candidate.y().ok() == Some(monitor.position().y)
+                    && candidate.width().ok() == Some(monitor.size().width)
+                    && candidate.height().ok() == Some(monitor.size().height)
+            })
+            .ok_or_else(|| {
+                CommandError::Internal("screenshot display no longer available".into())
+            })?;
         let pixels = monitor
             .capture_image()
             .map_err(|e| CommandError::Internal(format!("cannot capture display: {e}")))?;
@@ -453,6 +481,19 @@ mod screenshot_tests {
         assert!(valid_screenshot_png(&[
             137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
         ]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_rectangle_tracks_the_windows_monitor_in_logical_coordinates() {
+        assert_eq!(
+            mac_capture_rectangle(-2880, 0, 2880, 1800, 2.0),
+            "-1440,0,1440,900"
+        );
+        assert_eq!(
+            mac_capture_rectangle(0, 2160, 1920, 1080, 1.0),
+            "0,2160,1920,1080"
+        );
     }
 
     #[cfg(target_os = "linux")]

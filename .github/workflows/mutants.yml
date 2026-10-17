@@ -100,14 +100,15 @@ jobs:
           if-no-files-found: error
 
   # Preserve the stable branch-protection check across matrix size changes.
-  mutation-result:
+  mutation-gate:
     name: mutants
     needs: mutants
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every mutation shard to succeed
+      - name: Require all mutation shards
         env:
-          MUTATION_RESULT: ${{ needs.mutants.result }}
-        run: test "$MUTATION_RESULT" = success
+          SHARDS: ${{ needs.mutants.result }}
+        run: |
+          test "$SHARDS" = success

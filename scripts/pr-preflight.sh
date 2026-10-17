@@ -44,31 +44,53 @@ done <<< "$ui_specs_text"
 # Validate selectors before local work, without starting either environment.
 node scripts/pr-platform/run.mjs --plan --base "$base_ref" "$@" >/dev/null
 
-node --test scripts/diagnostics/*.test.mjs
+# Reuse local work only. Required environments are checked on every invocation.
+if [ "${MESH_VALIDATION_PREFLIGHT:-0}" != 1 ]; then
+    env MESH_VALIDATION_PREFLIGHT=1 node scripts/validation/stage.mjs local-preflight \
+        --context "$base_ref:$(git rev-parse "$base_ref")" \
+        --artifact @target/validation/preflight-artifacts.json --resource preflight \
+        -- bash "$repo_root/scripts/pr-preflight.sh" "$@"
+    if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ]; then
+        echo "The candidate changed before platform execution." >&2
+        exit 1
+    fi
+    platform_resource=platforms
+    if [ -z "${MESH_PR_LINUX_HOST:-}" ]; then platform_resource=heavy; fi
+    MESH_VALIDATION_FRESH=1 node scripts/validation/stage.mjs required-platforms \
+        --resource "$platform_resource" -- node scripts/pr-platform/run.mjs --base "$base_ref" "$@"
+    echo "PR preflight passed for $(git rev-parse --short HEAD). Run ./scripts/check-health.sh for the final full gate."
+    exit 0
+fi
+stage="$repo_root/scripts/validation/stage.mjs"
+
+node "$stage" diagnostics --profile shared -- node --test scripts/diagnostics/*.test.mjs
 typos
+
+if printf '%s\n' "$changed_files" | rg -q '^(Cargo\.(toml|lock)|crates/mesh-talk-core/|src-tauri/src/|src-tauri/tests/|src-tauri/Cargo\.toml)'; then
+    # Tauri validates frontendDist even when listing its test executable.
+    (
+        cd frontend
+        node "$stage" frontend-build --profile shared --resource heavy --artifact dist -- npm run build
+    )
+    node "$stage" rust-selectors --profile shared --resource heavy --artifact target/validation/selector-inventory.json \
+        -- node scripts/validation/selectors.mjs "$@"
+fi
 
 if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
     (
         cd frontend
-        npm run typecheck
-        npm run lint
-        npm run test:coverage
+        node "$stage" frontend-types --profile shared -- npm run typecheck
+        node "$stage" frontend-lint --profile shared -- npm run lint
+        node "$stage" frontend-coverage --profile shared --resource heavy --artifact coverage/lcov.info -- npm run test:coverage
     )
 
     coverage_reports=(frontend/coverage/lcov.info)
     if [ "${#ui_specs[@]}" -gt 0 ]; then
-        # JavaScript template literals belong to Node.
-        # shellcheck disable=SC2016
-        node --input-type=module -e 'import { readdir, unlink } from "node:fs/promises"; const dir="frontend/coverage/e2e-parts"; for (const name of await readdir(dir).catch(() => [])) if (name.endsWith(".json")) await unlink(`${dir}/${name}`);'
-        # Playwright clears its output directory at startup. Keep this run's
-        # traces and HTML report separate from full-health and other preflights.
-        browser_artifacts="$repo_root/target/pr-preflight-playwright/${candidate}-$$"
         (
             cd frontend
-            MESH_TALK_E2E_COVERAGE=1 PLAYWRIGHT_HTML_OUTPUT_DIR="$browser_artifacts/report" \
-                npx playwright test --project=chromium --workers=1 --retries=0 \
-                --output "$browser_artifacts/results" "${ui_specs[@]}"
-            node scripts/merge-e2e-coverage.mjs
+            node "$stage" browser-coverage --profile shared --resource heavy \
+                --artifact coverage/e2e.lcov --artifact @../target/validation/browser-coverage.json \
+                -- node ../scripts/validation/browser.mjs coverage "${ui_specs[@]}"
         )
         coverage_reports+=(frontend/coverage/e2e.lcov)
     fi
@@ -78,9 +100,10 @@ fi
 if printf '%s\n' "$changed_files" | rg -q '^(frontend/e2e/portable-core\.spec\.ts|frontend/e2e/helpers/portable-evidence\.ts|frontend/playwright\.portable\.config\.ts|scripts/evals/browser-report\.mjs|scripts/diagnostics/browser-eval-report\.test\.mjs)$'; then
     (
         cd frontend
-        EVAL_BROWSER=chromium npx playwright test --config playwright.portable.config.ts
+        EVAL_BROWSER=chromium node "$stage" browser-portable --profile shared --resource heavy \
+            --artifact @../target/validation/browser-portable.json \
+            -- node ../scripts/validation/browser.mjs portable
     )
-    EVAL_BROWSER=chromium node scripts/evals/browser-report.mjs frontend/eval-results/portable/chromium/core/results.json
 fi
 
 if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ]; then
@@ -88,8 +111,15 @@ if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain
     exit 1
 fi
 
-# Catch local static, coverage and scenario failures before remote builds.
-# Both platforms still verify the same committed source before publication.
-node scripts/pr-platform/run.mjs --base "$base_ref" "$@"
-
-echo "PR preflight passed for $(git rev-parse --short HEAD). Run ./scripts/check-health.sh for the final full gate."
+# The outer invocation always executes required platform checks after this stage.
+node --input-type=module <<'JS'
+import { readFile, writeFile, access } from 'node:fs/promises';
+const artifacts = [];
+for (const filename of ['frontend/coverage/lcov.info', 'frontend/coverage/e2e.lcov']) {
+  try { await access(filename); artifacts.push(filename); } catch { /* Not selected by this plan. */ }
+}
+for (const mode of ['coverage', 'portable']) {
+  try { artifacts.push(...JSON.parse(await readFile(`target/validation/browser-${mode}.json`, 'utf8'))); } catch { /* Not selected. */ }
+}
+await writeFile('target/validation/preflight-artifacts.json', JSON.stringify(artifacts, null, 2));
+JS

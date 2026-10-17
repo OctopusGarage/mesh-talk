@@ -307,7 +307,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("screenshot-editor")).toBeVisible();
     await expect(page.getByTestId("screenshot-send")).toBeDisabled();
     await expect(
-      page.getByRole("article", { name: /pasted\.png/ }),
+      page.getByRole("article", { name: /screenshot\.png/ }),
     ).toHaveCount(0);
     await page
       .getByTestId("screenshot-canvas")
@@ -316,6 +316,7 @@ test.describe("Mesh-Talk UI flow", () => {
         targetPosition: { x: 80, y: 60 },
       });
     await expect(page.getByTestId("screenshot-send")).toBeEnabled();
+    await page.getByRole("button", { name: "Draw", exact: true }).click();
     await page
       .getByTestId("screenshot-canvas")
       .dragTo(page.getByTestId("screenshot-canvas"), {
@@ -323,9 +324,13 @@ test.describe("Mesh-Talk UI flow", () => {
         targetPosition: { x: 60, y: 45 },
       });
     await page.getByTestId("screenshot-send").click();
+    await expect(page.getByTestId("composer-pending-files")).toContainText(
+      "screenshot.png",
+    );
+    await page.getByTestId("composer-send").click();
     await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
     await expect(
-      page.getByRole("article", { name: /pasted\.png/ }),
+      page.getByRole("article", { name: /screenshot\.png/ }),
     ).toBeVisible();
     const crop = await page.evaluate(() => {
       const bytes = (window as unknown as { __lastWrittenFileBytes?: number[] })
@@ -356,7 +361,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("composer-screenshot")).toBeDisabled();
   });
 
-  test("screenshot stays editable when saving fails", async ({ page }) => {
+  test("screenshot stays staged when sending fails", async ({ page }) => {
     await enterChat(page, "tester", "/?data=screenshot-write-fails");
     await openBobDm(page);
     await revealComposerTools(page);
@@ -370,10 +375,15 @@ test.describe("Mesh-Talk UI flow", () => {
         targetPosition: { x: 80, y: 60 },
       });
     await page.getByTestId("screenshot-send").click();
-    await expect(
-      page.getByTestId("screenshot-editor").getByRole("alert"),
-    ).toContainText("disk full");
-    await expect(page.getByTestId("screenshot-editor")).toBeVisible();
+    await expect(page.getByTestId("composer-pending-files")).toContainText(
+      "screenshot.png",
+    );
+    await page.getByTestId("composer-send").click();
+    await expect(page.getByTestId("composer").getByRole("alert")).toBeVisible();
+    await expect(page.getByTestId("composer-pending-files")).toContainText(
+      "screenshot.png",
+    );
+    await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
   });
 
   test("add an emoji reaction and see the chip", async ({ page }) => {

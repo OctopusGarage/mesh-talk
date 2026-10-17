@@ -177,6 +177,24 @@ impl PostOffice {
     }
 
     fn record_at(&mut self, event: Event, now: SystemTime) -> Result<AppendOutcome, LogError> {
+        self.record_at_with_arrival(event, now, None)
+    }
+
+    fn record_at_with_arrival(
+        &mut self,
+        event: Event,
+        now: SystemTime,
+        origin: Option<u64>,
+    ) -> Result<AppendOutcome, LogError> {
+        if origin.is_some_and(|seen| {
+            seen <= unix_seconds(now).saturating_sub(MAX_RELAY_AGE.as_secs())
+                || seen > unix_seconds(now).saturating_add(300)
+        }) {
+            return Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "federated mailbox arrival is expired or invalid",
+            )));
+        }
         if self
             .next_expiry_secs
             .is_some_and(|expiry| unix_seconds(now) >= expiry)
@@ -186,14 +204,20 @@ impl PostOffice {
         let conv = event.conversation_id;
         let event_bytes = stored_bytes(&event);
         let new_mailbox = !self.first_seen.contains_key(&conv) && !self.log.has(&event.id);
-        let first_seen_secs = unix_seconds(now);
-        if new_mailbox {
-            self.arrivals.append_durable(&MailboxArrival {
-                conversation: conv,
-                first_seen_secs,
-            })?;
-        }
-        let outcome = self.log.append(event)?;
+        let first_seen_secs = origin
+            .unwrap_or_else(|| unix_seconds(now))
+            .min(unix_seconds(now));
+        // Keep arrival metadata durable before the event, but never write it for
+        // rejected input. The log validates once while holding exclusive access.
+        let outcome = self.log.append_with_precommit(event, || {
+            if new_mailbox {
+                self.arrivals.append_durable(&MailboxArrival {
+                    conversation: conv,
+                    first_seen_secs,
+                })?;
+            }
+            Ok(())
+        })?;
         if matches!(outcome, AppendOutcome::Appended) {
             if new_mailbox {
                 self.first_seen.insert(conv, first_seen_secs);
@@ -396,7 +420,7 @@ impl PostOffice {
     ) -> Result<(), LogError> {
         let current = unix_seconds(now);
         let cutoff = current.saturating_sub(MAX_RELAY_AGE.as_secs());
-        let mut changed = false;
+        let mut changes = HashMap::new();
         for entry in inventory {
             if !opaque::RelayMailbox::is_federated_id(&entry.id)
                 || entry.first_seen_secs <= cutoff
@@ -404,15 +428,33 @@ impl PostOffice {
             {
                 continue;
             }
-            let prior = self.first_seen.get(&entry.id).copied().unwrap_or(u64::MAX);
+            // Unknown inventories are session hints, not durable custody. Only
+            // an accepted event may create a mailbox's arrival record.
+            let Some(&prior) = changes
+                .get(&entry.id)
+                .or_else(|| self.first_seen.get(&entry.id))
+            else {
+                continue;
+            };
             if entry.first_seen_secs < prior {
-                self.first_seen.insert(entry.id, entry.first_seen_secs);
-                changed = true;
+                changes.insert(entry.id, entry.first_seen_secs);
             }
         }
-        if changed {
+        if !changes.is_empty() {
+            // Rewrite bounded metadata rather than appending an unbounded stream
+            // of progressively earlier timestamps. Publish only after success so
+            // a failed write remains retryable in this running process.
+            let records = self
+                .first_seen
+                .iter()
+                .map(|(&conversation, &prior)| MailboxArrival {
+                    conversation,
+                    first_seen_secs: changes.get(&conversation).copied().unwrap_or(prior),
+                })
+                .collect::<Vec<_>>();
+            self.arrivals.rewrite(&records)?;
+            self.first_seen.extend(changes);
             self.next_expiry_secs = next_expiry(&self.first_seen);
-            self.rewrite_arrivals()?;
             self.prune_expired_at(now)?;
         }
         Ok(())
@@ -500,6 +542,76 @@ mod tests {
     }
 
     #[test]
+    fn rejected_opaque_uploads_do_not_write_retention_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.log");
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let relay = DeviceIdentity::generate();
+        let mailbox = opaque::RelayMailbox::new(&alice, &bob.public(), &relay.public()).unwrap();
+        let outer = mailbox
+            .wrap(&message(&alice, 1, vec![], 1, b"private"))
+            .unwrap();
+        let mut office = PostOffice::open(&path, "pw", relay).unwrap();
+        office.require_opaque_envelopes();
+        let retention = path.with_extension("retention");
+        let before = std::fs::read(&retention).unwrap();
+        let mut bad_id = outer.clone();
+        bad_id.ciphertext[12] ^= 1;
+        let mut bad_signature = outer.clone();
+        bad_signature.sig[0] ^= 1;
+        for invalid in [bad_id, bad_signature] {
+            assert!(opaque::envelope_shape(&invalid));
+            for _ in 0..8 {
+                assert!(SyncStore::ingest(&mut office, invalid.clone()).is_err());
+            }
+            assert_eq!(std::fs::read(&retention).unwrap(), before);
+            assert_eq!(office.total, 0);
+            assert_eq!(office.bytes, 0);
+            assert!(office.first_seen.is_empty());
+        }
+        assert_eq!(
+            SyncStore::ingest(&mut office, outer.clone()).unwrap(),
+            AppendOutcome::Appended
+        );
+        let accepted = std::fs::read(&retention).unwrap();
+        assert!(accepted.len() > before.len());
+        assert_eq!(
+            SyncStore::ingest(&mut office, outer).unwrap(),
+            AppendOutcome::Duplicate
+        );
+        assert_eq!(std::fs::read(&retention).unwrap(), accepted);
+    }
+
+    #[test]
+    fn rejected_local_events_do_not_create_mailbox_arrivals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.log");
+        let sender = DeviceIdentity::generate();
+        let mut office = PostOffice::open(&path, "pw", DeviceIdentity::generate()).unwrap();
+        let before = std::fs::read(path.with_extension("retention")).unwrap();
+        let missing_parent = message(
+            &sender,
+            2,
+            vec![message(&sender, 1, vec![], 1, b"missing").id],
+            2,
+            b"child",
+        );
+        for _ in 0..8 {
+            assert!(matches!(
+                office.accept(missing_parent.clone()),
+                Err(LogError::MissingParents(_))
+            ));
+        }
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            before
+        );
+        assert!(office.first_seen.is_empty());
+        assert!(office.held_ids(&conv()).is_empty());
+    }
+
+    #[test]
     fn relay_mailbox_expires_at_thirty_days_even_without_new_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("po.log");
@@ -539,6 +651,38 @@ mod tests {
     }
 
     #[test]
+    fn nonexistent_federated_inventory_does_not_persist_arrivals() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("relay.log");
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let identity = DeviceIdentity::generate();
+        let (ed, x) = identity.secret_bytes();
+        let mut office = PostOffice::open_at(&path, "pw", identity, now).unwrap();
+        let before = std::fs::read(path.with_extension("retention")).unwrap();
+        let sender = DeviceIdentity::generate();
+        for _ in 0..16 {
+            let recipient = DeviceIdentity::generate();
+            let mailbox = opaque::RelayMailbox::federated(&sender, &recipient.public()).unwrap();
+            let inventory = [FederatedMailbox {
+                id: mailbox.id(),
+                digest: [0; 32],
+                first_seen_secs: unix_seconds(now) - 60,
+            }];
+            office.adopt_federated_arrivals(&inventory, now).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(path.with_extension("retention")).unwrap(),
+            before
+        );
+        assert!(office.first_seen.is_empty());
+        drop(office);
+        let reopened =
+            PostOffice::open_at(&path, "pw", DeviceIdentity::from_secret_bytes(ed, x), now)
+                .unwrap();
+        assert!(reopened.first_seen.is_empty());
+    }
+
+    #[test]
     fn federated_copy_keeps_the_origin_thirty_day_expiry() {
         let root = tempfile::tempdir().unwrap();
         let alice = DeviceIdentity::generate();
@@ -558,15 +702,27 @@ mod tests {
         .unwrap();
         first.record_at(event.clone(), start).unwrap();
         let inventory = first.federated_inventory();
+        let second_identity = DeviceIdentity::generate();
+        let (ed, x) = second_identity.secret_bytes();
+        let second_path = root.path().join("second");
+        let mut second = PostOffice::open_at(&second_path, "pw", second_identity, later).unwrap();
+        second.adopt_federated_arrivals(&inventory, later).unwrap();
+        second
+            .record_at_with_arrival(event.clone(), later, Some(inventory[0].first_seen_secs))
+            .unwrap();
+        drop(second);
         let mut second = PostOffice::open_at(
-            &root.path().join("second"),
+            &second_path,
             "pw",
-            DeviceIdentity::generate(),
+            DeviceIdentity::from_secret_bytes(ed, x),
             later,
         )
         .unwrap();
-        second.adopt_federated_arrivals(&inventory, later).unwrap();
-        second.record_at(event.clone(), later).unwrap();
+        assert!(second.has(&event.id));
+        assert_eq!(
+            second.first_seen.get(&event.conversation_id),
+            Some(&unix_seconds(start))
+        );
         second
             .prune_expired_at(start + Duration::from_secs(30 * 24 * 60 * 60))
             .unwrap();

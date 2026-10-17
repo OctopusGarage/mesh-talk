@@ -355,28 +355,23 @@ it("retains the editor's originating lease when its send callback outlives a con
     expect.anything(),
   );
 });
-it("cleans edited screenshot staging after owner changes", async () => {
+it("discards screenshot confirmation after the owning account changes", async () => {
   native.invoke.mockResolvedValue([1]);
   await act(async () => {
     await composer.onScreenshot!(false);
   });
-  const path = deferred<string>();
-  native.invoke.mockReturnValue(path.promise);
-  let sending!: unknown;
-  await act(async () => {
-    sending = editor!.onSend(new Uint8Array([1]));
-  });
+  const confirm = editor!.onSend;
   await act(async () =>
     useAuth.setState({ generation: useAuth.getState().generation + 1 }),
   );
-  native.invoke.mockResolvedValue(undefined);
   await act(async () => {
-    path.resolve("/tmp/screen.png");
-    await sending;
+    await confirm(new Uint8Array([1]));
   });
-  expect(native.invoke).toHaveBeenCalledWith("delete_temp_file", {
-    path: "/tmp/screen.png",
-  });
+  expect(composer.stagedScreenshot).toBeNull();
+  expect(native.invoke).not.toHaveBeenCalledWith(
+    "write_temp_file",
+    expect.anything(),
+  );
   expect(useChat.getState().sendFile).not.toHaveBeenCalled();
 });
 it("preserves capture cancellation and permission-specific errors", async () => {
@@ -735,4 +730,85 @@ it("preserves the selected expiry through picker and paste intake after merging 
   } finally {
     now.mockRestore();
   }
+});
+
+it("confirms a screenshot into the composer without writing or sending until explicit send", async () => {
+  native.invoke.mockResolvedValue([1]);
+  await act(async () => {
+    await composer.onScreenshot!(false);
+  });
+  native.invoke.mockClear();
+  await act(async () => {
+    await editor!.onSend(new Uint8Array([137, 80, 78, 71]));
+  });
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+  expect(native.invoke).not.toHaveBeenCalledWith(
+    "write_temp_file",
+    expect.anything(),
+  );
+  expect(composer.stagedScreenshot).toBeInstanceOf(File);
+  expect(composer.stagedScreenshot?.type).toBe("image/png");
+});
+
+it("clears an already staged screenshot when its owning account changes", async () => {
+  native.invoke.mockResolvedValue([1]);
+  await act(async () => {
+    await composer.onScreenshot!(false);
+  });
+  await act(async () => {
+    await editor!.onSend(new Uint8Array([1]));
+  });
+  expect(composer.stagedScreenshot).toBeInstanceOf(File);
+  await act(async () =>
+    useAuth.setState({ generation: useAuth.getState().generation + 1 }),
+  );
+  expect(composer.stagedScreenshot).toBeNull();
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+});
+
+it("admits only one native screenshot acquisition at a time", async () => {
+  const result = deferred<number[]>();
+  native.invoke.mockImplementation((command: string) =>
+    command === "capture_screen" ? result.promise : Promise.resolve(true),
+  );
+  let first!: unknown;
+  await act(async () => {
+    first = composer.onScreenshot!(false);
+  });
+  let second!: unknown;
+  await act(async () => {
+    second = composer.onScreenshot!(true);
+  });
+  const acquisitions = native.invoke.mock.calls.filter(
+    ([command]) => command === "capture_screen",
+  );
+  await act(async () => {
+    result.resolve([1]);
+    await Promise.all([first, second]);
+  });
+  expect(acquisitions).toHaveLength(1);
+  expect(editor).not.toBeNull();
+});
+
+it("does not reopen a cancelled screenshot when an acquisition completes late", async () => {
+  let intake!: ReturnType<typeof useAttachmentIntake>;
+  function Probe() {
+    intake = useAttachmentIntake(i18n.t);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  const result = deferred<number[]>();
+  native.invoke.mockImplementation((command: string) =>
+    command === "capture_screen" ? result.promise : Promise.resolve(true),
+  );
+  let first!: Promise<void>;
+  await act(async () => {
+    first = intake.captureScreenshot(false);
+  });
+  await act(async () => intake.cancelScreenshot());
+  await act(async () => {
+    result.resolve([1]);
+    await first;
+  });
+  expect(intake.screenshotBytes).toBeNull();
 });

@@ -9,7 +9,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
+import { needsCustomWindowControls } from "@/lib/platform";
 import { Composer } from "./Composer";
 import {
   EmptyState,
@@ -593,6 +593,7 @@ export function ConversationView() {
           expiryDurationMs={expiryDurationMs}
           onExpiryDurationChange={setExpiryDurationMs}
           screenshotAvailable={attachments.screenshotAvailable}
+          stagedScreenshot={attachments.stagedScreenshot}
           key={key}
           initialDraft={drafts.current.get(key) ?? ""}
           onDraftChange={(text) => {
@@ -632,7 +633,6 @@ export function ConversationView() {
       {attachments.screenshotBytes && (
         <ScreenshotEditor
           bytes={attachments.screenshotBytes}
-          initialRegion={isMacOverlay()}
           onCancel={attachments.cancelScreenshot}
           onSend={attachments.sendScreenshot}
         />
