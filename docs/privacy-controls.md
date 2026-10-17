@@ -35,8 +35,10 @@ The same **Connection & delivery** page separates:
   off also withholds relay receipts and file decisions; receiving off prevents
   content admission but is not a zero-wire-byte guarantee.
 - **Discover peers through a post office**: opt into public participant introductions.
-- **Physical LAN discovery only**: exclude routed/Tailscale public discovery and
-  bridge directories, while retaining permitted physical-interface disclosure.
+- **Device discovery scope → Local network only**: exclude routed public discovery
+  (including Tailscale and EasyTier) and bridge directories, while retaining
+  permitted physical-interface disclosure. **Local and routed networks** allows
+  these optional discovery sources; post-office discovery stays a separate choice.
 - **Preferred post office**: select a known direct LAN/Tailscale candidate and
   retain alternatives. A known candidate is rechecked when actually connected.
 

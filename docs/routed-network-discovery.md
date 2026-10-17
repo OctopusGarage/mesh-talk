@@ -67,9 +67,11 @@ cached ports. IPv4/IPv6 support follows available sockets and interface scope.
 1. Establish the actual permitted IP route outside Mesh Talk.
 2. Run compatible Mesh Talk nodes and allow the target discovery UDP port plus
    its advertised TCP listener through the relevant ACL/firewall.
-3. With the desktop adapter available, use **Connection → Rescan**. If automatic
-   discovery is unavailable, enter the target endpoint in connection diagnostics.
-   The CLI uses `/probe <ip:discovery-port>`.
+3. In **Settings → Connection & delivery**, select **Device discovery scope →
+   Local and routed networks**. Automatic discovery uses available local VPN
+   clients; **Connection → Rescan** refreshes their inventories. If automatic
+   discovery is unavailable, choose **Add device address…** and enter the other
+   device's IP address or hostname. The CLI uses `/probe <ip:discovery-port>`.
 4. Validate the discovered identity; normal private-contact/group permissions
    still apply. A blocked TCP listener can prevent delivery after discovery.
 
@@ -93,9 +95,9 @@ physical LAN already provides direct reachability to E.
 
 E runs `--post-office --bridge` with its persistent identity/password file and a
 permitted TCP listener. A, B and C each explicitly enable **Use post offices** and
-**Discover peers through a post office**, leave **Physical LAN discovery only**
-off, and permit the required mailbox directions. Bridge discovery defaults to
-off; enabling E alone does not opt its clients in.
+**Discover peers through a post office**, select **Local and routed networks**
+for **Device discovery scope**, and permit the required mailbox directions.
+Bridge discovery defaults to off; enabling E alone does not opt its clients in.
 
 E introduces eligible registered clients using self-signed, freshness- and
 lifetime-bounded presence proofs. A and B can discover C through E's authenticated
