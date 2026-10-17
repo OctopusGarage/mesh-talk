@@ -5,13 +5,15 @@ backend, **React + TypeScript** frontend. No vendor-operated server: LAN peers
 discover each other over signed UDP **multicast** (group `224.0.0.167`, port
 47474), connect directly over a Noise-encrypted TCP
 channel, and store messages as an append-only, hash-linked **event log** that syncs CRDT-style.
-When a peer is offline, an elected **post office** node stores-and-forwards the (still-encrypted)
+When a peer is offline, a peer-operated **post office** node stores-and-forwards the (still-encrypted)
 events. Existing routed networks can supply optional peer discovery; opted-in
 post-office bridges introduce registered peers across sites without merging
 their IP subnets. See [routed discovery](routed-network-discovery.md) and
-[network topologies](network-topologies.md).
+[Network Topology and Communication Architecture](network-design-reference.md)
+for cross-module design contracts, illustrated scenarios and development guardrails;
+[network topologies](network-topologies.md) provides the compact overview.
 
-> The earlier RSA-contact / plaintext-UDP / TCP-relay *legacy* stack has been retired;
+> The earlier RSA-contact / plaintext-UDP / TCP-relay _legacy_ stack has been retired;
 > this serverless stack is the entire product and lives at `/`. The only retained
 > piece outside the node is the auth/session layer (`services/auth_service.rs` + `state.rs`),
 > which `login` uses before starting the node.
@@ -19,6 +21,10 @@ their IP subnets. See [routed discovery](routed-network-discovery.md) and
 ---
 
 ## 1. Process & layers
+
+See the [module ownership and reuse guide](module-boundaries.md) before assigning
+parallel feature work or adding shared business logic. It maps current owners and
+feature-local interfaces across the core, desktop host and frontend.
 
 ```
 React UI ── lib/api/*.ts ──invoke()──▶ Tauri IPC (chat_commands/)
@@ -47,17 +53,35 @@ command names for Tauri registration. Commands clone a node handle from
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
+### Fixed-deadline messages
+
+The composer selects a per-message duration (five minutes by default) and computes
+one UTC expiry timestamp at send time. The timestamp is inside authenticated DM,
+channel, or file-manifest plaintext (`MTEX1` frame), so every recipient device
+receives the same deadline. The sender's local copy remains in history. Recipient
+history, search, and incoming notifications exclude expired content. A one-second
+maintenance task removes recipient plaintext sidecars, suppresses replay through
+account sync, and removes locally managed media. A monotonic observation timer
+also bounds the lifetime by the sender event's intended duration if the local
+wall clock was already wrong when the message arrived. On restart the prior monotonic
+clock anchor cannot be recovered; expiring recipient copies are erased early to
+avoid extending their lifetime after a backward clock change. This is a local
+retention feature: a recipient who controls their device can copy content or
+modify the client, so remote deletion cannot be guaranteed. Older clients do
+not understand the `MTEX1` frame and may keep its decrypted bytes; only updated
+recipient devices enforce expiry.
+
 - **DeviceIdentity** — per device: Ed25519 (sign) + X25519 (DH). `user_id =
-  SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
+SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
 - **Account** (multi-device) — cross-device Ed25519. `account_id =
-  SHA-256("mesh-talk-account-v1" ‖ pub)[:16]`. A **DeviceCertificate** is the account
+SHA-256("mesh-talk-account-v1" ‖ pub)[:16]`. A **DeviceCertificate** is the account
   key's signature over a device key (domain `mesh-talk-device-cert-v1`), binding device→account.
 - **At rest** (`storage/encryption.rs`) — `salt(16) ‖ nonce(12) ‖ AES-256-GCM(secret)`,
   key via **PBKDF2-HMAC-SHA256, 600k rounds**. Used by every store (device/account
   keystore, event log, sent/received logs, ratchet sessions, channel senders, post office).
 - **Transport** (`transport/`, snow) — **Noise_XX_25519_ChaChaPoly_BLAKE2s** with a
   post-handshake identity exchange: each side signs `"mesh-talk-transport-auth-v1" ‖
-  handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
+handshake_hash` and verifies the advertised X25519 == the Noise-authenticated static key
   → binds the Ed25519 identity to the channel. 4-byte length framing, MAX_FRAME 65535.
   Pinned connections check the responder's Noise static key after message two,
   before disclosing the initiator's static key and identity auth; the complete
@@ -68,7 +92,10 @@ command names for Tauri registration. Commands clone a node handle from
   `shared_root = HKDF(DH(me,peer))`; init_alice/init_bob; DH ratchet on each inbound →
   forward secrecy + post-compromise recovery; bounded out-of-order (1000/2000); lower
   `user_id` is the canonical initiator (simultaneous-init tie-break); state encrypted on
-  disk (`node/ratchet_sessions.rs`). The `dm.rs` X3DH sealed-box (no FS) is now used only
+  disk (`node/ratchet_sessions.rs`). The tie-break may replace an initial sending
+  session only before an authenticated receiving chain exists; replayed ciphertext
+  must not reset an established session, including after reload.
+  The `dm.rs` X3DH sealed-box (no FS) is now used only
   to distribute channel keys, seal file manifests and encrypt delivery-control
   metadata (the latter has no forward secrecy and contains no message text).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
@@ -112,16 +139,29 @@ command names for Tauri registration. Commands clone a node handle from
   must create a fresh channel or a future protocol revision must carry a compact
   invitation proof ahead of the backlog.
 - **Multi-device** — `DmEnvelope{route, msg_id, body}` (magic `MTDE1`) carries
-  sender/recipient *account* routing inside the ciphertext; `send_to_account` fans a
+  sender/recipient _account_ routing inside the ciphertext; `send_to_account` fans a
   per-device ratcheted copy to every device of the target account + self-syncs to own
   devices; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
+  Durable enrollment permits only the exact certified Ed25519/X25519 device to
+  adopt the owning account; fresh self-signed presence alone cannot change a
+  pinned account. Startup reconstructs the expected binding and retires old
+  roster presence. Enrollment invalidates pre-transition managed sessions and
+  consumes the code atomically; only its current pairing response channel gets
+  a renewed guard. Interrupted adoption can retry with a new valid code through
+  a restricted incoming pairing-only channel; that exception never serves
+  ordinary sync, calls, attachments or account history before code validation.
   Message history, attachment catch-up, signed account-avatar updates, appearance,
   and contact presentation preferences obey separate device-local switches.
   Appearance and contact records use a versioned, encrypted local store with a
   deterministic revision/device tie-break and clear tombstones. Only certified
   sibling devices exchange these records over the Noise account-sync channel.
+  Successful device-local switch changes invalidate account-history cursors and
+  cached digests through a process-local policy revision. A page interrupted by
+  a switch change, including an off/on toggle, cannot acknowledge skipped data
+  as synchronized; the next pull starts a fresh sweep. Policy revisions do not
+  change the persisted policy or wire format.
   Profile updates use the existing per-peer
   event delivery path; a device with avatar sync disabled defers sibling updates
   until it is re-enabled. The received-profile store retains clear tombstones,
@@ -146,8 +186,8 @@ command names for Tauri registration. Commands clone a node handle from
 ## 3. Event log & sync (`eventlog/`)
 
 - **Event** — content-addressed: `id = SHA-256(domain ‖ content)`; fields `conversation,
-  author (Ed25519 pub, self-certifying), seq, parents (→ hash-linked DAG), lamport,
-  wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadMarker/
+author (Ed25519 pub, self-certifying), seq, parents (→ hash-linked DAG), lamport,
+wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadMarker/
   MembershipChange/KeyRotation/FileManifest (indices frozen for wire stability).
 - **EventLog** (in-memory, `store.rs`) — per-conversation DAG; tracks `heads` (frontier),
   `version` (per-author max seq → equivocation/fork detection), `max_lamport`. `events()`
@@ -165,6 +205,13 @@ command names for Tauri registration. Commands clone a node handle from
   kind 14, one-byte enabled flag). Peers show the signed status in the member list.
   Disabling sharing hides the local channel and channel-file logs from inbound
   reconciliation while preserving incoming pushes and the member's local history.
+  Recovery becomes pull-only; outbound control retries exclude retained third-party
+  events. Own events can be sent only when their parents are already held by the
+  recipient or are eligible own events in the batch. Otherwise the own event waits
+  rather than disclosing third-party ancestry. Public presence does not authorize
+  private channel access: signed membership is replayed even before ChannelBook
+  refresh, and an established genesis-owner pin cannot be replaced by a competing
+  signed root.
   The latest local preference is retried as a control event, so a member that was
   offline when it changed can learn the status after reconnecting.
   Because event-kind indices are positional in bincode, sync preflights the
@@ -211,10 +258,14 @@ command names for Tauri registration. Commands clone a node handle from
   replicas until the channel-file budget evicts older files.
   Direct-message files and inline media keep their existing completion and
   cleanup paths.
-  A public channel's whole-set fingerprint is cached in the durable log and
-  invalidated on append or compaction, so idle anti-entropy probes do not sort
-  and hash the entire channel history every time. Invisible-mode projections
-  continue computing a fingerprint of only the events visible to that peer.
+  The durable log caches its raw conversation digest. A separate, bounded
+  128-entry principal-scoped cache stores only the public authorized projection's
+  fingerprint, count and sync-version requirement. Its key includes that raw
+  digest/count, exact identities/account, established owner/membership, direction,
+  sharing policy and privacy generation/configuration. Append, compaction, book
+  refresh, removal, sharing and privacy changes invalidate reuse; a fresh
+  connection to an unchanged channel avoids cloning ciphertext or replaying history.
+  Invisible-mode projections remain uncached and include only authorized events.
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
@@ -223,11 +274,19 @@ command names for Tauri registration. Commands clone a node handle from
   Dropping the accept-loop future stops scheduling maintenance; an already-running
   blocking rewrite finishes atomically. The log mutex serializes rewrites with appends
   within one Node, but is not shared with a replacement Node opening the same files.
-  Hosts must await consuming `NodeRuntime::stop` before reopening a runtime profile:
+  CLI and desktop share `PreparedParticipant`/`ParticipantRuntime` for discovery,
+  accept, private-route probes, mailbox drain, bridge refresh and pending-file pulls.
+  Preparation binds resources without launching producers; desktop launch remains
+  inside its final session authorization. Profile paths, event callbacks and REPL
+  behavior stay with their host. Extra host tasks are adopted by the shared owner;
+  CLI autosave blocking closures carry retirement permits.
+  Hosts must await consuming `NodeRuntime::stop` (or `ParticipantRuntime::stop`
+  for direct core hosts) before reopening a runtime profile:
   it closes producer admission, aborts and joins the runtime tasks, cancels owned
   accepted connections and private-route probe children and waits for their actual
   termination, and waits for admitted
-  blocking profile rewrites, delivery recovery and peer-cache writes to finish.
+  blocking profile rewrites, delivery recovery, peer-cache writes and file staging
+  to finish.
   Runtime Drop only requests cancellation and cannot provide that retirement barrier.
   This is in-process runtime ownership; external SDK operations and host file staging
   require the host's own lifecycle serialization, and no cross-process lease is implied.
@@ -252,9 +311,10 @@ command names for Tauri registration. Commands clone a node handle from
   works. Sign-out removes both item types. Windows and
   Linux continue using their OS credential stores for remembered sessions.
 
-  New `owner_*` delivery IPC captures the lease before waiting for the runtime
-  lock. `OwnerAdmission` owns capture, checked reads, guarded local acceptance,
-  and detached enqueue lifetime for these commands. Local text/sticker/file
+  `owner_*` delivery IPC and legacy account text/sticker/file sends capture the
+  lease before waiting for the runtime lock. `RuntimeAdmission` owns capture,
+  checked reads, guarded local acceptance and detached producer lifetime.
+  Local text/sticker/file
   enqueue keeps that lifecycle admission through privacy updates and staging.
   Waiting for the privacy gate holds no session guard;
   once admitted, the matching session guard encloses the entire synchronous local
@@ -262,8 +322,19 @@ command names for Tauri registration. Commands clone a node handle from
   append. The grant and later staging/WAL are not one rollback transaction: a
   legitimately admitted grant can remain if the owner changes during staging.
   Admitted host enqueue tasks retain the lifecycle lock even if their IPC caller is
-  cancelled; this does not extend that guarantee to legacy IPC or arbitrary SDK
-  operations. Stable file results include the original card ID and file conversation.
+  cancelled. Legacy account sends retain immediate best-effort transfer and their
+  original results. Their payloads lack an explicit frontend owner, so capture
+  authorizes the host session at IPC entry; it cannot identify an intent created
+  in an earlier frontend session. Privacy commands use this same admission for
+  observations and synchronous commits after the async policy gate. Their guarded
+  core methods enclose policy, proof and route writes plus generation updates and
+  bridge invalidation; they enter host authority outside privacy-state locks.
+  Announcement drain/restore and presence publication remain awaits outside the
+  session guard. A canceled IPC waiter cannot release the lifecycle barrier while
+  its detached privacy operation still runs. Legacy device/channel commands and
+  live settings application retain separate commit-seam limitations; arbitrary
+  SDK handles are not session leases. Stable file results include the original
+  card ID and file conversation.
   Owner-sensitive identity queries atomically inspect session plus runtime; status
   queries accept at most 256 IDs and project only the exact account conversation.
   Own-device synchronization, device-addressed legacy history and incoming rows
@@ -278,18 +349,21 @@ command names for Tauri registration. Commands clone a node handle from
   224.0.0.167, `DEFAULT_DISCOVERY_PORT` 47474 in `transport/net.rs`) joined on every IPv4
   interface, plus a unicast announce/response reply, a /24 unicast scan fallback, a startup
   burst, and periodic re-join. `run_broadcast` re-announces every 2 s; `run_listen` verifies
-  + updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
-  Startup burst and scan times are measured from launch; a manual trigger works during
-  startup. The fallback scan visits each LAN /24 once, omits every local interface address,
-  and excludes Tailscale's 100.64.0.0/10 overlay range.
-  Desktop builds can additionally obtain candidate IPs from an already-running local
-  Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
-  query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
-  these endpoints remain separate from device identity and from Noise authorization.
-  The roster and encrypted route cache retain multiple addresses per device and
-  a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
-  for the protocol, limitations, and cross-network release checks; see
-  [network topologies](network-topologies.md) for the A–F deployment scenarios.
+  - updates the roster; TTL eviction; `devices_of_account()` groups devices by account.
+    Startup burst and scan times are measured from launch; a manual trigger works during
+    startup. The fallback scan visits each LAN /24 once, omits every local interface address,
+    and excludes Tailscale's 100.64.0.0/10 overlay range.
+    Desktop builds can additionally obtain candidate IPs from an already-running local
+    Tailscale client, or a user can enter an address. A rate-limited, identity-free UDP
+    query elicits a fresh nonce-bound signed announce from visible Mesh Talk nodes;
+    these endpoints remain separate from device identity and from Noise authorization.
+    A UDP peer reset or refusal does not stop the listener: Windows can report a
+    departed peer's ICMP port-unreachable response as receive error 10054. Local
+    socket failures remain fatal and are logged with their OS error.
+    The roster and encrypted route cache retain multiple addresses per device and
+    a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
+    for the protocol, limitations, and cross-network release checks; see
+    [network topologies](network-topologies.md) for the A–F deployment scenarios.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
@@ -308,9 +382,18 @@ command names for Tauri registration. Commands clone a node handle from
   Initial text/sticker contacts run concurrently (at most four for a small channel,
   two for a larger one), so a stalled handshake cannot delay another member.
   Membership and key controls contact every routed member with a four-connection
-  concurrency cap and a per-peer deadline. Sync rounds may share one authenticated
-  connection sequentially, but there is no global persistent connection pool or
-  one-socket-per-device invariant; independent operations may dial concurrently.
+  concurrency cap and a per-peer deadline. Newly validated messages wake a
+  dedicated coalesced recovery signal; duplicate processing and empty rounds do
+  not wake it. Identity/channel rotation distributes the bounded three-peer
+  recovery rounds. Sequential-sync operations use a Node-owned authenticated
+  session pool. A shared
+  eight-slot TCP budget covers both directions, handshakes and idle sessions;
+  seven-slot direction limits preserve opposite-direction progress. Idle sessions
+  expire after 15 seconds. Full identity, endpoint, account/role and policy checks
+  prevent cross-principal or stale-policy reuse. One-shot protocols dial fresh;
+  errors and cancellation discard sessions. One idle entry per identity/route
+  does not imply one busy connection per peer. OS backlog, discovery UDP, call
+  media and separate relay processes are outside the Node budget.
   Each channel send emits a debug metric with member count, seeded peer count,
   confirmed member copies, and elapsed milliseconds. The sync layer separately
   logs have-set size, applied and pushed events, and round count. These provide
@@ -319,10 +402,16 @@ command names for Tauri registration. Commands clone a node handle from
   Member copy counts are historical confirmations. To make a current durability
   guarantee, the protocol would need renewable leases or periodic exact probes
   and a policy for peers that permanently leave; the UI does not claim one.
-- **Post office** — deterministic election (lowest-fingerprint peer advertising
-  `post_office`); `drain_from_post_office` every 3 s. Each account may disable
-  relay use in Settings; the default remains enabled. This gates uploads and
-  downloads on that device. New clients wrap signed events for each recipient
+- **Post office** — verified relays are ordered by an optional user preference,
+  then direct LAN reachability, then fingerprint. Introduced recipients favor
+  the relays that reported them; `drain_from_post_office` visits every known
+  mailbox every 3 s. Each account may disable
+  relay use in Settings; the default remains enabled. Independent sending and
+  receiving preferences default to true under that master switch. Core policy
+  gates all opaque messages, file consent, receipts and chunk recovery. Receive
+  opt-out rejects content admission and durable seen state, while the unchanged
+  bidirectional protocol may still return encrypted frames. Disabling sending
+  preserves local queued work and prevents outgoing relay controls as well. New clients wrap signed events for each recipient
   in a pairwise opaque mailbox before relay sync. The relay sees mailbox IDs,
   pseudonymous outer headers, size buckets, and traffic timing, but cannot
   open event headers, channel controls, DM text, or file contents.
@@ -362,10 +451,15 @@ directory, its fresh, self-signed introductions can be polled from that post
 office's opaque mailboxes. This does not mark safety numbers verified, persists
 no bridge permission, and expires with the directory membership. Invisible mode
 does not participate. See [routed network discovery](routed-network-discovery.md).
-For multi-site bridges, clients can pin one hub fingerprint. Site relays each
-publish that hub's signed proof and their own local TCP proxy port; clients
-authenticate the hub end to end and use its single opaque mailbox. A missing
-configured hub pauses relay delivery instead of electing another mailbox.
+For multi-site federation, post offices have equal roles and a shared set of
+trusted identity-pinned seeds. They discover trusted LAN relays, probe routed
+seeds, exchange short-lived signed opt-in presence, and reconcile version-3
+pairwise opaque mailboxes over Noise. The original mailbox arrival time follows
+each federated copy, preserving the 30-day maximum. Clients can prefer a local
+relay and fall back to another reachable relay. New clients also read and write
+legacy relay-specific mailboxes during migration. A legacy `--bridge-peer`
+gateway remains available for old clients. Cross-site continuity requires a
+physical routed path through at least one reachable relay chain.
 The sender's retry worker independently attempts direct delivery before relay
 replication, so either side can initiate recovery when a route returns.
 
@@ -425,11 +519,33 @@ automatic up to 16 MiB; SVG and larger images require approval. The recipient ch
 the first decrypted chunk against the claimed raster signature before durably ingesting it,
 while text and stickers remain ordinary message events. A current sender publishes the
 manifest first, then asks the exact authenticated recipient device for consent before
-synchronizing chunk events. The receiver independently rejects unsolicited chunks at its
+synchronizing chunk events. When the clients cannot connect directly, the recipient
+returns a signed decision through the existing recipient-encrypted pairwise mailbox;
+trusted relay federation carries it without opening it. The decision binds the original
+manifest event, file conversation, complete device identities and known accounts.
+Direct sessions query the same signed control as mailbox delivery using appended,
+optional sync frames; existing frame discriminants remain unchanged. Monotonic
+recipient revisions prevent a delayed acceptance from replacing a newer decline or
+pending decision. Every successful receive-policy write invalidates cached publication,
+even if a decline and reapproval occur between mailbox rounds; reopening refreshes the
+revision. Legacy direct replies have no ordering token: their pending/declined answers
+remain authoritative until a fresh direct answer, rather than allowing an unseen delayed
+mailbox approval to override them. Invalid controls or failed consent persistence fail
+closed without entering the legacy automatic-transfer path. Verified durable saves add the exact final chunk to a
+completion control, allowing the sender to finish delivery through the same path.
+Relay custody remains pending. The receiver independently rejects unsolicited chunks at its
 durable sync gate, including chunk-first delivery from older senders. A channel sender
 publishes the manifest and members pull chunks only after their own consent; automatic
 images retain eager distribution. Decisions bind the signed manifest event and survive
-restart. Identical signed manifests that share the same file conversation are aliases
+restart. Local receive policy remains in `attachment-consent.log`; signed protocol
+controls and authenticated direct observations use the separate encrypted
+`file-consent-controls.log`. `file_consent` owns control validation and exchange,
+`file_consent_store` owns durable revision and replay state, and `FileBook` indexes
+offers by author. Exact manifest lookup avoids sorting all aliases for each offer;
+publication resolves alias policy once per file and excludes channel manifests. Saved
+completion controls require the current owner account, original sender and matching
+sender certificate. A failed control write is retried without blocking unrelated mailbox
+messages. Identical signed manifests that share the same file conversation are aliases
 of one immutable byte stream; one explicit decision covers those aliases while each
 sender's automatic policy is evaluated separately. Exact decisions are retained
 for the account lifetime, so later offers or policy changes cannot silently
@@ -509,18 +625,38 @@ receive-only reconciliation projection; DM bodies prefer the direct sender
 route and fall back to the relay, while controls can be pulled directly or
 through the relay when the original sender is offline.
 
-Immutable file retries retain at most eight authenticated connections across
-complete protocol exchanges, with a ten-second idle limit. A rotating admission
+Immutable file retries use eight scheduling slots and retain at most six
+authenticated connections across complete protocol exchanges, with a ten-second
+idle limit. One outbound connection permit remains available for control work. A rotating admission
 cursor fills available slots; each worker pass runs at most eight round-robin
 file steps before continuing ordinary control work. Clean progress still retained
-at pass end schedules another pass; failed attempts free slots without self-waking.
+at pass end schedules another pass. Fresh work tries the direct recipient first;
+failed routes discard their wire state before advancing to another eligible
+candidate. Exhausted candidates free the slot rather than busy retrying.
 Dialing, fingerprinting, reconciliation and custody checking each have their
 own clean exchange boundary under the same 400 ms operation budget. Each step
 rechecks the current private authorization and exact destination binding; a
 timeout discards the connection and any partial frame, resuming from durable
 remote state on a fresh connection. Only final, target-qualified chunk custody
-retires source file work. The SDK's immediate best-effort flush remains a
-disposable, bounded attempt rather than retaining worker-owned state.
+retires source file work.
+
+Relay file transfers use the same retained scheduler. Legacy and federated
+manifest/chunk mailboxes advance through separate clean exchanges, reusing
+`opaque_relay.rs` for encryption, projection and received-event admission.
+Every upload step rechecks the exact offer consent, destination binding and the
+selected relay's current role, identity/account and send policy. Interrupted
+streams and their partial synchronization state are discarded together.
+Only identifiers and protocol progress survive an exchange; ciphertext payload
+projections are rebuilt temporarily, trading repeated local wrapping work for
+bounded retained memory. Do not combine these exchanges into one whole-file
+deadline: repeated cancellation before the first chunk can starve delivery.
+
+Relay custody releases the connection and active slot but never retires the
+recipient's file destination or confirms delivery. At most 256 volatile,
+ten-second scheduling hints defer redundant relay uploads; eviction permits an
+earlier retry and carries no custody guarantee. The SDK's immediate best-effort
+flush remains a disposable, bounded attempt rather than retaining worker-owned
+state. SDK hosts run the accept loop's delivery worker for eventual retries.
 
 An optional, fixed-size exact-event storage probe follows ordinary reconciliation
 on its disposable connection. New durable nodes and post offices synchronize
@@ -598,6 +734,16 @@ authenticated directly cannot deliver offline through a relay; unknown proofs
 are denied rather than learned from legacy relay event payloads. No new relay
 proof protocol or event format is introduced.
 
+Equal-relay enrollment uses the optional, authoritative versioned public
+`--federation-config` manifest; repeated seed flags remain compatible when no
+file is supplied. Atomic operator mutations serialize through a persistent
+companion lock. Running services use a startup snapshot and require restart
+for enrollment/revocation. See [federation operations](post-office-federation.md).
+Modern directory v3/federation v2 admit up to 1,024 presence entries, while legacy
+requests keep 128. Client refresh streams all eligible relays with eight queries
+in flight and publishes each persisted result immediately; policy generations
+and staged rollback prevent canceled or obsolete introductions from surviving.
+
 ## 5. Frontend (`frontend/`)
 
 **React 19 + TypeScript + Tailwind + shadcn/ui**, state in **zustand**, built with Vite.
@@ -611,7 +757,7 @@ owns cache eviction, deletion protection, exact-ID send completion, and history/
 state transitions. A late accepted ID after intent removal becomes a deletion tombstone;
 completion never recreates an evicted conversation cache.
 `store/chat.ts` exposes the UI-facing state and routes incoming DMs to the sender's
-*account* (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
+_account_ (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
 message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,
 search, and device linking; `features/auth/LoginScreen.tsx` is the only other screen.
 `features/chat/useConversationViewport.ts` owns the virtual list's reading position,
@@ -752,17 +898,17 @@ the UI sends users who suspect compromise to new identity creation.
   `gitleaks.yml`, CodeQL, `dependabot-auto-merge.yml` (Dependabot PRs to `dev`, gated by required checks),
   `glib-0.20-watch.yml` (monthly dep watcher).
 - **Automated bug-finding** (defence in depth — surfaces issues without anyone looking):
-  - *Coverage-guided fuzzing* (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
+  - _Coverage-guided fuzzing_ (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
     untrusted wire and opened-payload decoders; the `decoder_smoke` test is the always-on
     stable complement. See [`fuzz/README.md`](../fuzz/README.md) for the current targets.
-  - *Mutation testing* (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
-  - *Coverage* (Codecov), *clippy `-D warnings`*, *cargo-deny*, *cargo-machete*, *CodeQL*, *gitleaks*.
-  - *Delivery / AI regression smoke* (`make eval-smoke`) keeps core smoke examples,
+  - _Mutation testing_ (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
+  - _Coverage_ (Codecov), _clippy `-D warnings`_, _cargo-deny_, _cargo-machete_, _CodeQL_, _gitleaks_.
+  - _Delivery / AI regression smoke_ (`make eval-smoke`) keeps core smoke examples,
     prompt/agent contracts, local hooks, PR validation, and CI wiring from drifting.
-    *Real model-backed AI eval* (`make ai-eval`, with `AI_EVAL_COMMAND`) scores the stable
-    prompt/workflow cases. *Full real smoke* (`make smoke-full`) runs unit/integration plus
+    _Real model-backed AI eval_ (`make ai-eval`, with `AI_EVAL_COMMAND`) scores the stable
+    prompt/workflow cases. _Full real smoke_ (`make smoke-full`) runs unit/integration plus
     backend and frontend E2E.
-  - *Claude operations* (`.claude/`): `/bug-hunt` fans out read-only `bug-hunter` subagents
+  - _Claude operations_ (`.claude/`): `/bug-hunt` fans out read-only `bug-hunter` subagents
     (adversarial audit, verified findings only) over the core; `code-reviewer` reviews a diff;
     `/e2e` runs the `e2e-runner` over the real multi-process integration suite.
 - **Crypto primitives**: ed25519-dalek and x25519-dalek use `rand_core` 0.6

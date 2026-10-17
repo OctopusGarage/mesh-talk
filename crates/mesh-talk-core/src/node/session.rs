@@ -90,6 +90,15 @@ enum SyncWire {
     UpgradeRequired {
         conversation: ConversationId,
     },
+    SignedFileConsentRequest {
+        file: ConversationId,
+        manifest: EventId,
+    },
+    SignedFileConsentResponse {
+        file: ConversationId,
+        manifest: EventId,
+        control: Option<crate::eventlog::Event>,
+    },
 }
 
 #[cfg(test)]
@@ -114,7 +123,8 @@ pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
             | SyncWire::FpRequest(_)
             | SyncWire::FpRequestV2(_)
             | SyncWire::DurableHaveRequest { .. }
-            | SyncWire::FileConsentRequest { .. })
+            | SyncWire::FileConsentRequest { .. }
+            | SyncWire::SignedFileConsentRequest { .. })
     )
 }
 
@@ -244,6 +254,30 @@ where
             manifest: got_manifest,
             status,
         } if got_file == file && got_manifest == manifest => Ok(status),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+pub(crate) async fn request_signed_file_consent<IO>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    manifest: EventId,
+) -> Result<Option<crate::eventlog::Event>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::SignedFileConsentRequest {
+            file,
+            manifest,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::SignedFileConsentResponse {
+            file: got_file,
+            manifest: got_manifest,
+            control,
+        } if file == got_file && manifest == got_manifest => Ok(control),
         _ => Err(SessionError::UnexpectedMessage),
     }
 }
@@ -646,6 +680,20 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     match decode(bytes)? {
+        SyncWire::SignedFileConsentRequest { file, manifest } => {
+            let control = store
+                .lock()
+                .expect("store mutex not poisoned")
+                .signed_file_consent(&file, &manifest);
+            channel
+                .send(&encode(&SyncWire::SignedFileConsentResponse {
+                    file,
+                    manifest,
+                    control,
+                })?)
+                .await?;
+            Ok(Served::Handled(file))
+        }
         SyncWire::FileConsentRequest { file, manifest } => {
             let status = store
                 .lock()
@@ -757,9 +805,9 @@ where
         | SyncWire::RespHave(_)
         | SyncWire::FpResponse(_)
         | SyncWire::UpgradeRequired { .. } => Err(SessionError::UnexpectedMessage),
-        SyncWire::DurableHaveResponse { .. } | SyncWire::FileConsentResponse { .. } => {
-            Err(SessionError::UnexpectedMessage)
-        }
+        SyncWire::DurableHaveResponse { .. }
+        | SyncWire::FileConsentResponse { .. }
+        | SyncWire::SignedFileConsentResponse { .. } => Err(SessionError::UnexpectedMessage),
     }
 }
 

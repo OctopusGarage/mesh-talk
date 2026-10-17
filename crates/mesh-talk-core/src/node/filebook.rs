@@ -32,6 +32,7 @@ pub struct FileBook {
     emitted: HashSet<EventId>,
     manifest_events: HashMap<ConversationId, HashSet<EventId>>,
     authors: HashMap<ConversationId, HashSet<Author>>,
+    offers_by_author: HashMap<Author, HashMap<ConversationId, HashSet<EventId>>>,
 }
 
 impl FileBook {
@@ -74,8 +75,20 @@ impl FileBook {
             .entry(manifest.file_conv())
             .or_default()
             .insert(author);
+        self.offers_by_author
+            .entry(author)
+            .or_default()
+            .entry(manifest.file_conv())
+            .or_default()
+            .insert(event);
         self.record(manifest);
         true
+    }
+
+    pub(in crate::node) fn has_manifest_event(&self, file: ConversationId, event: EventId) -> bool {
+        self.manifest_events
+            .get(&file)
+            .is_some_and(|ids| ids.contains(&event))
     }
 
     pub(in crate::node) fn manifest_events(&self, conversation: ConversationId) -> Vec<EventId> {
@@ -84,6 +97,19 @@ impl FileBook {
             .into_iter()
             .flatten()
             .copied()
+            .collect()
+    }
+
+    /// Exact offers from one author, without scanning unrelated file history.
+    pub(in crate::node) fn offers_from(
+        &self,
+        author: Author,
+    ) -> Vec<(ConversationId, Vec<EventId>)> {
+        self.offers_by_author
+            .get(&author)
+            .into_iter()
+            .flat_map(|files| files.iter())
+            .map(|(file, events)| (*file, events.iter().copied().collect()))
             .collect()
     }
 
@@ -164,5 +190,10 @@ mod tests {
         assert_eq!(book.manifest_events(conv(1)).len(), 2);
         assert!(book.has_author(conv(1), author));
         assert!(book.has_author(conv(1), Author::from_ed25519([5; 32])));
+        let offers = book.offers_from(author);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].0, conv(1));
+        assert_eq!(offers[0].1, vec![first]);
+        assert!(book.offers_from(Author::from_ed25519([6; 32])).is_empty());
     }
 }

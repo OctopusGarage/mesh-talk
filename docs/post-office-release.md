@@ -29,8 +29,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-post-office-wi
 
 The installer registers a boot-time Scheduled Task, preserves existing relay
 data during updates, and checks the TCP listener. On macOS, copy the verified
-binary to a persistent path and configure a LaunchAgent as described in the
-macOS runbook. The release ZIP is a native binary package, not a desktop app.
+binary to a persistent path, prepare the boot-service configuration, and activate
+the root-owned LaunchDaemon interactively as described in the macOS runbook.
+A LaunchAgent starts only after login and does not provide unattended boot. The release ZIP is a native binary package, not a desktop app.
 
 ## Linux container image
 
@@ -59,7 +60,7 @@ docker run -d --name mesh-talk-post-office --restart unless-stopped \
   --name post-office --port 47475 --discovery-port 47474
 ```
 
-Replace `<tag>` with the release tag, for example `v0.3.2`. Back up the
+Replace `<tag>` with the release tag, for example `v0.4.0`. Back up the
 directory, including its password and keystore, if queued custody matters.
 Check startup with `docker logs mesh-talk-post-office` and confirm clients
 discover its signed post-office announcement. Allow LAN TCP 47475 and signed

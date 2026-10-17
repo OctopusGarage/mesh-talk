@@ -16,17 +16,11 @@ use tokio::sync::Semaphore;
 const MAX_SERVE_ROUNDS: usize = 10_000;
 /// Drop an inbound connection that sends nothing for this long.
 const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Ceiling on concurrently-served inbound connections, so a flood of TCP + Noise handshakes
-/// can't spawn unbounded tasks. Generous for a LAN; excess connections wait for a slot.
-pub(super) const MAX_CONCURRENT_CONNS: usize = 256;
+/// Leave one shared TCP slot available to outbound progress. Excess inbound
+/// streams wait in the OS queue; the Node's shared pool also counts handshakes.
+pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS;
 
 impl Node {
-    /// Enable or disable use of discovered post offices for this node.
-    pub fn set_post_office_enabled(&self, enabled: bool) {
-        self.post_office_enabled
-            .store(enabled, std::sync::atomic::Ordering::Release);
-    }
-
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
     /// peer may be offline, in which case the dial fails.
     pub(in crate::node) async fn deliver_direct(
@@ -37,12 +31,26 @@ impl Node {
         if peer.post_office {
             return Err(SessionError::UnexpectedMessage);
         }
-        let mut channel = self
-            .privacy_dial(peer.addr, &peer.public)
-            .await
+        let mut last_error = SessionError::UnexpectedMessage;
+        for fresh in [false, true] {
+            let mut channel = if fresh {
+                self.privacy_dial(peer.addr, &peer.public).await
+            } else {
+                self.privacy_sync_dial(peer.addr, &peer.public).await
+            }
             .map_err(SessionError::Transport)?;
-        let store = self.sync_store(channel.peer_identity());
-        request_round(&mut channel, &store, conv).await.map(|_| ())
+            let store = self.sync_store(channel.peer_identity());
+            match request_round(&mut channel, &store, conv).await {
+                Ok(_) => {
+                    self.recycle_sync_channel(channel);
+                    return Ok(());
+                }
+                Err(error) => last_error = error,
+            }
+            // A peer can close immediately after the idle liveness check.
+            // Signed idempotent reconciliation safely retries a fresh session.
+        }
+        Err(last_error)
     }
 
     /// Replicate `conv` to the elected post office, if one is known. Returns
@@ -74,29 +82,37 @@ impl Node {
         if targets.is_empty() {
             return Ok(false);
         }
-        let po = {
-            let roster = self.roster.lock().expect("roster mutex not poisoned");
-            self.selected_post_office(&roster)
-        };
-        let Some(po) = po else {
-            return Ok(false);
-        };
-        if !self.relay_allowed(&po.public) {
-            return Ok(false);
-        }
-        let mut channel = self
-            .privacy_dial(po.addr, &po.public)
-            .await
-            .map_err(SessionError::Transport)?;
         let mut uploaded = false;
-        for recipient in targets {
-            if !self.relay_allowed(&po.public) {
+        for recipient in &targets {
+            let candidates = {
+                let roster = self.roster.lock().expect("roster mutex not poisoned");
+                self.post_office_candidates_for(&roster, recipient)
+            };
+            let mut complete = false;
+            for po in candidates {
+                if !self.relay_send_allowed(&po.public) {
+                    continue;
+                }
+                let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
+                    continue;
+                };
+                if !self.relay_send_allowed(&po.public) {
+                    continue;
+                }
+                let Ok(events) = self
+                    .opaque_relay_round(&mut channel, recipient, Some(conv))
+                    .await
+                else {
+                    continue;
+                };
+                self.recycle_sync_channel(channel);
+                uploaded |= !events.is_empty();
+                complete = true;
+                break;
+            }
+            if !complete {
                 return Ok(false);
             }
-            uploaded |= !self
-                .opaque_relay_round(&mut channel, &recipient, Some(conv))
-                .await?
-                .is_empty();
         }
         Ok(uploaded)
     }
@@ -116,7 +132,16 @@ impl Node {
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
             _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
             _ = Arc::clone(&self).run_account_history_loop() => {}
+            _ = Arc::clone(&self).run_expiry_loop() => {}
             _ = self.accept_connections(listener) => {}
+        }
+    }
+
+    async fn run_expiry_loop(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let node = Arc::clone(&self);
+            let _ = tokio::task::spawn_blocking(move || node.prune_expired_received()).await;
         }
     }
 
@@ -139,6 +164,13 @@ impl Node {
             let permit = match Arc::clone(&conns).acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => return, // semaphore closed — shouldn't happen, stop cleanly
+            };
+            let tcp_permits = match self.sessions.inbound().await {
+                Ok(permits) => permits,
+                Err(_) => {
+                    drop(permit);
+                    continue;
+                }
             };
             // Only the (fast) TCP accept runs on the loop; the Noise handshake runs in the
             // spawned task (bounded by HANDSHAKE_TIMEOUT), so a peer that connects then stalls
@@ -163,7 +195,7 @@ impl Node {
                 if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
                     let _ = hook.send(());
                 }
-                if let Ok(channel) = node.privacy_accept(stream).await {
+                if let Ok(channel) = node.privacy_accept_with_permits(stream, tcp_permits).await {
                     node.serve_connection(channel).await;
                 }
             }));
@@ -175,6 +207,16 @@ impl Node {
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
     pub async fn serve_connection(&self, mut channel: SecureChannel<TcpStream>) {
+        if channel.pairing_only() {
+            // A retired account proof can recover an interrupted authorized link,
+            // but can never enter sync, account history, attachments or call IPC.
+            if let Ok(Ok(first)) = tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await
+                && let Some(request) = PairingRequest::decode(&first)
+            {
+                self.serve_pairing(&mut channel, request).await;
+            }
+            return;
+        }
         // A relay may initiate a sync round too. The account preference applies to
         // inbound relay sessions as well as our own upload/drain dials.
         let is_relay = channel.peer_announcement().is_some_and(|a| a.post_office)
@@ -358,6 +400,17 @@ impl Node {
                     Err(_) => continue,
                 }
             };
+            let own_device = self
+                .linked_devices()
+                .iter()
+                .any(|device| device.public.user_id() == event.author.user_id());
+            if !own_device && self.recipient_expired(&plaintext, event.id, event.wall_clock) {
+                self.files
+                    .lock()
+                    .expect("files mutex not poisoned")
+                    .mark_emitted(event.id);
+                continue;
+            }
             let Some(manifest) = super::files::validated_manifest(&plaintext) else {
                 continue;
             };
@@ -544,7 +597,15 @@ impl Node {
             let mut book = self.channels.lock().expect("channels mutex not poisoned");
             book.process(&self.identity, conv, &refs)
         };
+        let has_new_messages = !messages.is_empty();
         for msg in messages {
+            let own_device = self
+                .linked_devices()
+                .iter()
+                .any(|device| device.public.user_id() == msg.from);
+            if !own_device && self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock) {
+                continue;
+            }
             // Persist the decrypted plaintext: the sender-key wire key is single-use,
             // so channel history is served from the received store, not re-opened.
             let _ = self
@@ -560,6 +621,12 @@ impl Node {
                 );
             let _ = self.channel_incoming.send(msg);
         }
+        // ChannelBook returns only newly validated, decryptable messages. A
+        // coalesced domain-specific wake advances bounded background gossip;
+        // repeated processing and empty sync rounds do not create feedback.
+        if has_new_messages {
+            self.channel_recovery_notify.notify_one();
+        }
         if self
             .log
             .lock()
@@ -572,41 +639,43 @@ impl Node {
         }
     }
 
-    /// Pull any DMs held for this node from the elected post office: dial it once,
-    /// then run a sync round for each known peer's DM conversation, surfacing
-    /// anything new. A no-op if no post office is known. Best-effort and
-    /// fail-soft — a dial/round error just ends this drain; the next one retries.
+    /// Pull from every known post office. Mailboxes are relay-specific, so a
+    /// message accepted during failover may remain on the fallback relay after
+    /// the preferred one returns.
     pub async fn drain_from_post_office(&self) {
         if self.cached_peer_snapshot_async().await.is_err() {
             log::warn!("verified discovery cache update failed");
         }
-        let post_office = {
+        let post_offices = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            self.selected_post_office(&roster)
+            self.post_office_candidates(&roster)
         };
-        let Some(po) = post_office else {
-            return;
-        };
-        if !self.relay_allowed(&po.public) {
-            return;
-        }
-        let mut channel = match self.privacy_dial(po.addr, &po.public).await {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        // A pairwise mailbox can contain DMs, channel invitations, controls,
-        // and file chunks, including conversations not known before this pull.
-        for peer in self.historical_dm_peers() {
-            if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+        for po in post_offices {
+            if !self.relay_receive_allowed(&po.public) {
                 continue;
             }
-            if !self.relay_allowed(&po.public)
-                || self
-                    .opaque_relay_round(&mut channel, &peer.public(), None)
-                    .await
-                    .is_err()
-            {
-                return;
+            let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
+                continue;
+            };
+            let mut reusable = true;
+            // A pairwise mailbox can contain DMs, channel invitations,
+            // controls, and file chunks unknown before this pull.
+            for peer in self.historical_dm_peers() {
+                if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+                    continue;
+                }
+                if !self.relay_receive_allowed(&po.public)
+                    || self
+                        .opaque_relay_round(&mut channel, &peer.public(), None)
+                        .await
+                        .is_err()
+                {
+                    reusable = false;
+                    break;
+                }
+            }
+            if reusable {
+                self.recycle_sync_channel(channel);
             }
         }
     }

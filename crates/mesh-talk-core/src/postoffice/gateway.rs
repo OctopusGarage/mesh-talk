@@ -446,11 +446,14 @@ mod tests {
             Arc::clone(&queries),
         ));
         let shared = Arc::new(Mutex::new(None));
-        let gateway = tokio::spawn(run_bridge_gateway(
+        let gateway = tokio::spawn(run_bridge_gateway_on_port(
             Arc::clone(&shared),
             remote_tcp_port.wrapping_add(1),
             remote,
             expected_id,
+            // This test exercises proof withdrawal, not fixed-port binding.
+            // Keep the proxy port reserved by the OS across parallel tests.
+            Some(0),
         ));
         tokio::time::timeout(Duration::from_secs(3), async {
             while shared.lock().unwrap().is_none() {

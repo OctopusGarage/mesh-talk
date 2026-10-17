@@ -1,73 +1,32 @@
-# Project Context for `mesh-talk`
+# Mesh Talk project context
 
-This is the main context file for AI tools. For the authoritative technical reference see
-**[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**; for the domain model see
-**[`CONTEXT.md`](CONTEXT.md)**. The `specifications/` directory holds the
-process and convention docs linked below.
+Mesh Talk is a local-first, end-to-end encrypted desktop messenger with a UI-free
+Rust core, a Tauri host and a React frontend. Direct LAN/routed communication is
+independent of optional peer-operated post offices. Equal trusted relays add
+bounded encrypted custody and opt-in cross-site introductions; no global hub or
+vendor-operated account service is required.
 
-## Project Overview
+## Maintained references
 
-Mesh-Talk is a **serverless, end-to-end-encrypted desktop chat app** (Rust + Tauri 2 +
-React). Peers on the same LAN discover each other over Ed25519-signed UDP multicast announces,
-connect directly over a Noise-encrypted channel, and store messages as an append-only,
-hash-linked event log that syncs CRDT-style. Optional routed discovery finds reachable peers
-beyond the LAN, and an opt-in post-office bridge introduces registered peers across sites.
-An elected "post office" peer stores and forwards encrypted events for offline recipients.
+| Question                                                | Reference                                                            |
+| ------------------------------------------------------- | -------------------------------------------------------------------- |
+| Product overview and first run                          | [README](README.md)                                                  |
+| Communication principles, topology and module contracts | [Network architecture baseline](docs/network-design-reference.md)    |
+| Crypto, protocol, wire compatibility and storage        | [Architecture](docs/ARCHITECTURE.md)                                 |
+| Domain terminology and invariants                       | [Domain model](CONTEXT.md)                                           |
+| Current capabilities and acceptance boundaries          | [Implementation status](specifications/TODO.md)                      |
+| Development commands, agent rules and PR gates          | [Repository guidelines](AGENTS.md) · [Contributing](CONTRIBUTING.md) |
+| Focused tests and escalation triggers                   | [Testing feedback loop](docs/testing-feedback-loop.md)               |
+| Frontend interaction and visual conventions             | [Visual system](frontend/DESIGN.md)                                  |
+| All maintained guides and dated evidence                | [Documentation map](docs/README.md)                                  |
 
-### Technology Stack
-- **Language**: Rust 2024 · **Desktop**: Tauri 2.x · **Frontend**: React 19 + TypeScript + Tailwind + Radix primitives (Vite)
-- **Async**: Tokio · **Serialization**: bincode (wire/at-rest), serde_json (IPC)
-- **Crypto**: Ed25519 + X25519 (dalek with `rand_core` 0.6), Noise_XX (snow), Double Ratchet
-  + sender-key group ratchet, AES-256-GCM + ChaChaPoly, SHA-256/HKDF, PBKDF2-600k at rest
-- **CLI**: clap (the `mesh-talk-node` headless / `--post-office` relay binary)
+## Rules to preserve
 
-### Features
-1:1 DMs + group channels with forward secrecy, file sharing, reactions, replies/threads,
-@mentions, search, multi-device (one account across devices via device linking +
-account-addressed fan-out), system-tray integration, encrypted local storage,
-manual encrypted backup and signed-out recovery, privacy presets and invisible
-mode, routed discovery, optional post-office bridge discovery, and installable
-customization packs.
+- Keep shared policy in its owning core module; UI/IPC consume its results.
+- Separate discovery, direct reachability, authorization, relay custody and recipient confirmation.
+- Preserve full device/account bindings, cryptographic domains and versioned wire contracts.
+- Run affected tests during development; reserve comprehensive gates for explicit requests, PR/review and CI.
+- Update the owning guide when behavior changes. Personal plans and temporary evidence remain untracked.
 
-## AI Tool Compatibility
-
-This spec is designed to be usable by AI coding assistants (Claude Code, Codex, Gemini
-CLI, Copilot, etc.). Conventions for agents live in [`AGENTS.md`](AGENTS.md).
-
-## Key Documentation
-
-- Architecture (authoritative): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Domain model: [`CONTEXT.md`](CONTEXT.md)
-- Frontend visual system: [`frontend/DESIGN.md`](frontend/DESIGN.md)
-- Development conventions: [`specifications/development_conventions.md`](specifications/development_conventions.md)
-- Project structure + tech stack: see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (and the Tech Stack section above)
-- Git standards: [`specifications/git_standards.md`](specifications/git_standards.md)
-- Task completion criteria: [`specifications/task_completion_criteria.md`](specifications/task_completion_criteria.md)
-- Status: [`specifications/TODO.md`](specifications/TODO.md)
-
-## Important Considerations
-
-1. **Forward secrecy** — DMs use a Double Ratchet; channels use a sender-key ratchet that
-   rotates on membership change. Don't weaken these when extending messaging.
-2. **The post office cannot read message content** — it stores ciphertext but sees
-   routing metadata. See [`docs/post-office-metadata-privacy.md`](docs/post-office-metadata-privacy.md).
-3. **Offline delivery** depends on the post office or the recipient coming back online and
-   syncing; there is no central store.
-4. **Crypto RNG compatibility** — the core uses `rand_core` 0.6 directly for its identity APIs;
-   check dalek and `rand_core` compatibility before changing crypto dependencies.
-5. **Dependencies** — `cargo-deny` blocks Rust advisories in the gate; keep advisories clean.
-6. **Device linking** — a one-time code authorizes the link and binds both device keys;
-   backfill runs inside the authenticated Noise channel. The code is the intended
-   out-of-band authorization step, as documented in [`specifications/TODO.md`](specifications/TODO.md).
-
-## Plan Adjustment Guidance
-
-If an implementation plan proves unsuitable during development:
-
-1. **Assess** — document why the current plan is not working.
-2. **Adjust** — modify the approach based on what was learned.
-3. **Update docs** — revise the applicable committed docs (`docs/ARCHITECTURE.md`,
-   `frontend/DESIGN.md`, or the relevant specification). Keep personal plans local.
-4. **Update status** — reflect scope changes in `specifications/TODO.md`.
-5. **Continue** — proceed with the updated plan.
-6. **Capture lessons** — record insights for future reference.
+This entry point provides navigation. Detailed feature inventories, technology
+versions and implementation history belong to their references and Git history.

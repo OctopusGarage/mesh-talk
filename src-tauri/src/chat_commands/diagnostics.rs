@@ -1,5 +1,6 @@
 use super::NodeState;
 use crate::commands::CommandError;
+use mesh_talk_core::discovery::roster::RouteSource;
 use serde::Serialize;
 
 // --- Diagnostics / discovery ------------------------------------------------
@@ -11,6 +12,8 @@ pub struct DiagPeerInfo {
     pub name: String,
     pub ip: String,
     pub tcp_port: u16,
+    /// The shown endpoint belongs to a local gateway, not the peer's host.
+    pub via_gateway: bool,
     pub post_office: bool,
     pub account_id: Option<String>,
     /// Whole seconds since this peer was last heard from.
@@ -44,6 +47,10 @@ pub async fn diag_get_peers(
             name: p.name,
             ip: p.addr.ip().to_string(),
             tcp_port: p.addr.port(),
+            via_gateway: p
+                .routes
+                .iter()
+                .any(|route| route.addr == p.addr && route.source == RouteSource::Gateway),
             post_office: p.post_office,
             account_id: p.account_id,
             last_seen_secs: p.last_seen.elapsed().as_secs(),

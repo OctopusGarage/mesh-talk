@@ -1,5 +1,5 @@
 use super::*;
-use crate::discovery::{Announce, roster::Roster};
+use crate::discovery::Announce;
 use crate::eventlog::{ConversationId, EventId};
 use crate::identity::{account::Account, device::DeviceIdentity};
 use std::{
@@ -8,6 +8,66 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{net::TcpListener, sync::mpsc};
+
+#[tokio::test]
+async fn confirmed_destination_does_not_open_another_relay_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&recipient, &account, "recipient", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = DeviceIdentity::generate();
+    let relay_proof = Announce::new_post_office_with_account(
+        &relay,
+        &Account::generate(),
+        "relay",
+        listener.local_addr().unwrap().port(),
+    );
+    sender.roster.lock().unwrap().update(
+        &relay_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"already confirmed", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    // This store operation is invoked only after exact authenticated receipt
+    // validation; its authorization is exercised by the existing receipt tests.
+    sender
+        .delivery
+        .lock()
+        .unwrap()
+        .mark_delivered_for(id, destination.event.id)
+        .unwrap();
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Delivered));
+    let (result, incoming) = tokio::join!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            sender.replicate_delivery_destination(&destination)
+        ),
+        tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()),
+    );
+    assert!(
+        incoming.is_err(),
+        "confirmed destination opened an unnecessary relay connection"
+    );
+    assert!(matches!(result, Ok(false)));
+}
 
 async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2763,6 +2823,75 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
     }
 }
 
+#[tokio::test]
+async fn accepted_account_file_card_carries_fixed_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 1);
+    let (node, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let path = dir.path().join("secret.txt");
+    std::fs::write(&path, b"secret").unwrap();
+    let deadline = super::node::now_millis() + 300_000;
+    let (id, _) = node
+        .enqueue_file_to_account_progress_expiring_if(
+            &remote.account_id(),
+            &path,
+            crate::file::FileKind::File,
+            |_| {},
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let row = node
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(id)
+        .unwrap()
+        .clone();
+    assert_eq!(crate::expiry::deadline(&row.plaintext), Some(deadline));
+    assert!(crate::file::decode_manifest(&row.plaintext).is_some());
+}
+
+#[tokio::test]
+async fn accepted_account_message_carries_fixed_deadline_inside_encrypted_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 1);
+    let (node, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let deadline = super::node::now_millis() + 300_000;
+    let id = node
+        .enqueue_to_account_expiring_if(
+            &remote.account_id(),
+            b"secret",
+            None,
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let conv =
+        super::conversation::account_conversation_id(&node.account_id(), &remote.account_id());
+    let sent = node.sentlog.lock().unwrap().entries(&conv);
+    let env = super::dm_envelope::DmEnvelope::decode(&sent[0].plaintext).unwrap();
+    assert_eq!(crate::expiry::deadline(&env.body), Some(deadline));
+    assert_eq!(
+        super::queries::decode_account_entry(&sent[0].plaintext).0,
+        id
+    );
+}
+
 fn node(
     dir: &Path,
     identity: DeviceIdentity,
@@ -2845,27 +2974,7 @@ fn node_with_files(
     mpsc::UnboundedReceiver<ReceivedDm>,
     mpsc::UnboundedReceiver<ReceivedFile>,
 ) {
-    let roster = Arc::new(Mutex::new(Roster::default()));
-    roster.lock().unwrap().update(
-        proof,
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        &identity.public().user_id(),
-    );
-    let (tx, rx) = mpsc::unbounded_channel();
-    let (ch, _) = mpsc::unbounded_channel();
-    let (file, files) = mpsc::unbounded_channel();
-    let node = Node::open_with_account(
-        identity,
-        account,
-        roster,
-        tx,
-        ch,
-        file,
-        &dir.join("events.log"),
-        &dir.join("sent.log"),
-        "pw",
-    )
-    .unwrap();
+    let (node, rx, files) = super::test_support::node_with_files(dir, identity, account, proof);
     // Legacy delivery tests exercise the previous automatic-transfer contract.
     // The consent-specific loopback test keeps the new manual default.
     node.set_attachment_global_auto(true).unwrap();
@@ -2874,12 +2983,12 @@ fn node_with_files(
 
 #[tokio::test]
 async fn automatic_receipt_roundtrip_with_both_original_peers_stopped_in_turn() {
-    automatic_offline_roundtrip(false).await;
+    automatic_offline_roundtrip(false, false).await;
 }
 
 #[tokio::test]
 async fn automatic_receipt_reuses_exact_ack_after_relay_eviction() {
-    automatic_offline_roundtrip(true).await;
+    automatic_offline_roundtrip(true, true).await;
 }
 
 #[tokio::test]
@@ -3250,7 +3359,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
     }
 }
 
-async fn automatic_offline_roundtrip(evict: bool) {
+async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -3284,6 +3393,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         relay.clone(),
     )));
     let (a, _) = node(ad.path(), alice, aa, &bp);
+    a.set_bridge_discovery_enabled(bridge_enabled);
     a.roster
         .lock()
         .unwrap()
@@ -3300,13 +3410,26 @@ async fn automatic_offline_roundtrip(evict: bool) {
         crate::postoffice::opaque::RelayMailbox::new(&a.identity, &bp.public(), &pp.public())
             .unwrap();
     let outer_id = mailbox.wrap(&original).unwrap().id;
+    let federated_outer_id =
+        crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public())
+            .unwrap()
+            .wrap(&original)
+            .unwrap()
+            .id;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !relay.lock().unwrap().has(&outer_id) {
+        while !relay.lock().unwrap().has(&outer_id)
+            || (bridge_enabled && !relay.lock().unwrap().has(&federated_outer_id))
+        {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        relay.lock().unwrap().has(&federated_outer_id),
+        bridge_enabled
+    );
     assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     at.abort();
@@ -3611,7 +3734,7 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
 }
 
 #[tokio::test]
-async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects() {
+async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -3690,7 +3813,23 @@ async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects
     recipient_task.abort();
     let _ = recipient_task.await;
 
-    a.flush_file_delivery(card).await;
+    // A stale preferred relay must not strand consented chunks while another
+    // authenticated relay on this LAN is accepting mailbox rounds.
+    let offline_relay = DeviceIdentity::generate();
+    let offline_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let offline_proof = Announce::new_post_office(
+        &offline_relay,
+        "Offline preferred",
+        offline_listener.local_addr().unwrap().port(),
+    );
+    drop(offline_listener);
+    a.roster.lock().unwrap().update(
+        &offline_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &a.user_id(),
+    );
+    a.set_bridge_hub_id(Some(&offline_relay.user_id())).unwrap();
+
     assert!(
         b.read_file(file).is_err(),
         "recipient was offline during upload"
@@ -3709,21 +3848,32 @@ async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects
         &proof.public(),
     )
     .unwrap();
+    let outer_final = mailbox
+        .wrap(a.log.lock().unwrap().get(&final_chunk).unwrap())
+        .unwrap()
+        .id;
+    // The immediate flush API is one bounded best-effort turn. Exercise the
+    // retained production worker until the live fallback actually owns the bytes.
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
+    let custody = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !relay.lock().unwrap().has(&outer_final) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
     assert!(
-        relay.lock().unwrap().has(
-            &mailbox
-                .wrap(
-                    a.log
-                        .lock()
-                        .unwrap()
-                        .events(&file)
-                        .into_iter()
-                        .find(|event| event.id == final_chunk)
-                        .unwrap(),
-                )
-                .unwrap()
-                .id
-        )
+        custody.is_ok(),
+        "live fallback must retain the exact encrypted final chunk"
+    );
+    assert!(
+        b.read_file(file).is_err(),
+        "recipient remains offline throughout upload"
+    );
+    assert!(
+        !a.outgoing_file_progress(card).unwrap().delivered,
+        "relay custody is not recipient completion"
     );
     assert!(!relay.lock().unwrap().has(&final_chunk));
 
@@ -3751,12 +3901,61 @@ async fn consented_file_chunks_reach_an_opaque_relay_before_recipient_reconnects
 #[tokio::test]
 #[ignore = "requires installed mac2015 post office on the same LAN"]
 async fn mac2015_post_office_delivers_file_bytes_after_both_peers_go_offline() {
+    let service = std::env::var("MESH_TALK_E2E_MAC2015_SERVICE").ok();
     installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         "MESH_TALK_E2E_MAC2015_RELAY_ID",
         "mac2015",
-        "launchctl kickstart -k gui/$(id -u)/com.octopusgarage.mesh-talk.post-office",
+        MacRelayService::parse(service.as_deref()).restart_command(),
     )
     .await;
+}
+
+#[derive(Debug, PartialEq)]
+enum MacRelayService {
+    LegacyAgent,
+    System,
+}
+
+impl MacRelayService {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            None | Some("legacy-agent") => Self::LegacyAgent,
+            Some("system") => Self::System,
+            Some(other) => panic!(
+                "invalid MESH_TALK_E2E_MAC2015_SERVICE={other:?}; use system or legacy-agent"
+            ),
+        }
+    }
+
+    fn restart_command(&self) -> &'static str {
+        match self {
+            Self::LegacyAgent => {
+                "launchctl kickstart -k gui/$(id -u)/com.octopusgarage.mesh-talk.post-office"
+            }
+            Self::System => {
+                "sudo -n launchctl kickstart -k system/com.octopusgarage.mesh-talk.post-office"
+            }
+        }
+    }
+}
+
+#[test]
+fn mac_relay_service_selector_preserves_legacy_and_requires_explicit_system() {
+    assert_eq!(MacRelayService::parse(None), MacRelayService::LegacyAgent);
+    assert_eq!(
+        MacRelayService::parse(Some("legacy-agent")),
+        MacRelayService::LegacyAgent
+    );
+    assert_eq!(
+        MacRelayService::parse(Some("system")),
+        MacRelayService::System
+    );
+    assert!(
+        MacRelayService::System
+            .restart_command()
+            .starts_with("sudo -n launchctl")
+    );
+    assert!(std::panic::catch_unwind(|| MacRelayService::parse(Some("typo"))).is_err());
 }
 
 #[tokio::test]
@@ -3879,8 +4078,63 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     assert!(!b.file_ready_to_save(file));
     assert!(b.log.lock().unwrap().events(&file).is_empty());
 
-    // The sender can now upload the encrypted chunks only to the installed relay.
-    a.flush_file_delivery(card).await;
+    // Confirm every encrypted chunk at the relay before removing the only sender.
+    // A best-effort flush turn alone is not a complete-upload barrier.
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &a.identity,
+        &bp.public(),
+        &relay_proof.public(),
+    )
+    .unwrap();
+    let outer_chunks = a
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .into_iter()
+        .map(|event| mailbox.wrap(event).unwrap().id)
+        .collect::<Vec<_>>();
+    assert!(!outer_chunks.is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            a.flush_file_delivery(card).await;
+            let mut channel = a
+                .privacy_dial(
+                    (relay_ip, relay_proof.tcp_port).into(),
+                    &relay_proof.public(),
+                )
+                .await
+                .unwrap();
+            let mut complete = true;
+            for outer in &outer_chunks {
+                if !super::session::request_durable_have(&mut channel, mailbox.id(), *outer)
+                    .await
+                    .unwrap_or(false)
+                {
+                    complete = false;
+                    break;
+                }
+            }
+            if complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("installed relay never confirmed custody of all encrypted chunks");
+    assert!(
+        !a.outgoing_file_progress(card).unwrap().delivered,
+        "relay custody must not claim recipient completion"
+    );
     assert!(!b.file_ready_to_save(file));
     assert!(b.log.lock().unwrap().events(&file).is_empty());
     drop(a);
@@ -3914,6 +4168,21 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     .await
     .expect("installed relay did not redeliver complete file bytes after restart");
     assert_eq!(b.read_file(file).unwrap(), bytes);
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public()),
+        "recovered chunks alone must not record a verified save"
+    );
+    let destination = bd.path().join("recovered.bin");
+    b.save_file(file, &destination).unwrap();
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        Sha256::digest(std::fs::read(&destination).unwrap()),
+        Sha256::digest(&bytes)
+    );
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public()),
+        "verified save must retain exact-file completion while sender remains stopped"
+    );
 }
 
 #[tokio::test]
@@ -5420,4 +5689,441 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     let _ = at.await;
     let _ = bt.await;
     case.finish();
+}
+
+#[tokio::test]
+async fn relay_file_worker_preserves_progress_across_slow_mailbox_exchanges() {
+    retained_relay_file_worker(true, 1).await;
+}
+
+#[tokio::test]
+async fn relay_custody_releases_slots_for_more_than_eight_pending_files() {
+    retained_relay_file_worker(false, 10).await;
+}
+
+async fn retained_relay_file_worker(slow: bool, count: u8) {
+    use crate::eventlog::sync::SyncStore;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    // A stale direct endpoint rejects Noise immediately on every OS. A closed
+    // port can consume the full connect budget on Windows, making this batch
+    // measure SYN/refusal timing instead of retained relay scheduling.
+    let rejecting_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rejecting_listener_port = rejecting_listener.local_addr().unwrap().port();
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", rejecting_listener_port);
+    let rejecting = tokio::spawn(async move {
+        while let Ok((stream, _)) = rejecting_listener.accept().await {
+            drop(stream);
+        }
+    });
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+    let mut recipients = vec![(b, offers, bp)];
+    // Slot fairness needs ten destinations, independently of shared-mailbox
+    // history size. Keep the slow single-file case on its original mailbox.
+    for index in 1..count {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof =
+            Announce::new_with_account(&identity, &account, "Recipient", rejecting_listener_port);
+        let (recipient, _, offers) = node_with_files(
+            &bd.path().join(format!("recipient-{index}")),
+            identity,
+            account,
+            &ap,
+        );
+        a.roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+        recipients.push((recipient, offers, proof));
+    }
+    a.replace_verified_dm_pull_peers(
+        recipients
+            .iter()
+            .map(|(_, _, proof)| proof.user_id.clone())
+            .collect(),
+    );
+    for (recipient, _, _) in &recipients {
+        recipient.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+        recipient.set_attachment_global_auto(false).unwrap();
+        recipient.set_bridge_discovery_enabled(true);
+    }
+    a.set_bridge_discovery_enabled(true);
+    let relay_identity = DeviceIdentity::generate();
+    let keys = relay_identity.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(
+        &relay_identity,
+        "Relay",
+        listener.local_addr().unwrap().port(),
+    );
+    // Observe qualified final-chunk custody while retaining the real relay
+    // admission, durable storage, and reconciliation implementation.
+    struct ObservedRelay {
+        inner: crate::postoffice::PostOffice,
+        final_chunks: Arc<Mutex<std::collections::HashMap<EventId, ConversationId>>>,
+        confirmed_files: Arc<Mutex<std::collections::HashSet<ConversationId>>>,
+        confirmations: Arc<AtomicUsize>,
+    }
+    impl SyncStore for ObservedRelay {
+        fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+            let held = self.inner.durable_have(conversation, id);
+            if held && let Some(file) = self.final_chunks.lock().unwrap().get(id) {
+                self.confirmed_files.lock().unwrap().insert(*file);
+                self.confirmations.fetch_add(1, Ordering::SeqCst);
+            }
+            held
+        }
+        fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+            self.inner.event_ids(conversation)
+        }
+        fn events_excluding(
+            &self,
+            conversation: &ConversationId,
+            have: &std::collections::HashSet<EventId>,
+        ) -> Vec<crate::eventlog::Event> {
+            self.inner.events_excluding(conversation, have)
+        }
+        fn ingest(
+            &mut self,
+            event: crate::eventlog::Event,
+        ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+            self.inner.ingest(event)
+        }
+    }
+    let final_chunks = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let confirmed_files = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let confirmations = Arc::new(AtomicUsize::new(0));
+    let mut office =
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", relay_identity)
+            .unwrap();
+    office.require_opaque_envelopes();
+    let relay = Arc::new(Mutex::new(ObservedRelay {
+        inner: office,
+        final_chunks: final_chunks.clone(),
+        confirmed_files: confirmed_files.clone(),
+        confirmations: confirmations.clone(),
+    }));
+    let delayed = Arc::new(AtomicBool::new(false));
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let sender_identity = a.identity.public();
+    let server = tokio::spawn({
+        let relay = relay.clone();
+        let delayed = delayed.clone();
+        let exchanges = exchanges.clone();
+        async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                let relay = relay.clone();
+                let delayed = delayed.clone();
+                let exchanges = exchanges.clone();
+                let sender_identity = sender_identity.clone();
+                connections.spawn(async move {
+                    let Ok(mut channel) = super::transport::secure_accept(stream, &identity).await
+                    else {
+                        return;
+                    };
+                    let mut delayed_exchanges = 0;
+                    while let Ok(bytes) = channel.recv().await {
+                        if delayed.load(Ordering::SeqCst)
+                            && channel.peer_identity() == &sender_identity
+                            && super::session::requests_response(&bytes)
+                            && delayed_exchanges < 5
+                        {
+                            delayed_exchanges += 1;
+                            exchanges.fetch_add(1, Ordering::SeqCst);
+                            // Five exchanges on EACH new sender connection inject 750ms,
+                            // exceeding the unchanged 400ms whole-attempt budget.
+                            // A reconnect resets this count, so retries cannot consume
+                            // a global delay allowance and then pass without the delay.
+                            // Do not also delay recipient drains or every later chunk
+                            // round: those add load unrelated to retained progress.
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        }
+                        match super::session::serve_wire_bytes(&mut channel, &relay, &bytes).await {
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!("delayed relay error: {error}");
+                                break;
+                            }
+                        }
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        }
+    });
+    for peer in std::iter::once(&a).chain(recipients.iter().map(|(peer, _, _)| peer)) {
+        peer.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &peer.user_id(),
+        );
+    }
+    let mut files = Vec::new();
+    for index in 0..count {
+        let (b, offers, bp) = &mut recipients[usize::from(index)];
+        let source = ad.path().join(format!("relay-{index}.bin"));
+        // Fair scheduling needs more than eight destinations, not large files.
+        // The separate slow case keeps its two-chunk transfer coverage.
+        let size = if slow {
+            crate::file::CHUNK_SIZE + 31
+        } else {
+            31
+        };
+        let bytes = vec![index + 63; size];
+        std::fs::write(&source, &bytes).unwrap();
+        let (card, file) = a
+            .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let offer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                a.flush_delivery(card).await;
+                b.drain_from_post_office().await;
+                if let Ok(offer) = offers.try_recv() {
+                    break offer;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(offer.file_conv, file);
+        b.decide_attachment(file, true).unwrap();
+        b.drain_from_post_office().await;
+        a.drain_from_post_office().await;
+        let final_chunk = {
+            let id = a
+                .delivery
+                .lock()
+                .unwrap()
+                .file_card(card)
+                .unwrap()
+                .final_chunk
+                .unwrap();
+            a.log.lock().unwrap().get(&id).unwrap().clone()
+        };
+        for mailbox in [
+            crate::postoffice::opaque::RelayMailbox::new(
+                &a.identity,
+                &bp.public(),
+                &proof.public(),
+            )
+            .unwrap(),
+            crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap(),
+        ] {
+            final_chunks
+                .lock()
+                .unwrap()
+                .insert(mailbox.wrap(&final_chunk).unwrap().id, file);
+        }
+        files.push((card, file, bytes, b.clone()));
+    }
+    // All offers/consent were reconciled above. Observe only file-worker
+    // connections here, without unrelated proactive history-recovery pulls.
+    a.replace_verified_dm_pull_peers(Vec::new());
+    delayed.store(slow, Ordering::SeqCst);
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
+    let mut recipient_drains = 0;
+    let custody_started = std::time::Instant::now();
+    let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // First require every sender slot to reach qualified relay custody while
+        // recipients stay offline. Recipient polling must not release sender
+        // slots or hide a relay-custody scheduling failure.
+        while !files
+            .iter()
+            .all(|(_, file, _, _)| confirmed_files.lock().unwrap().contains(file))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        eprintln!(
+            "retained relay qualified custody for {count} files after {:?}",
+            custody_started.elapsed()
+        );
+        assert_eq!(
+            recipient_drains, 0,
+            "custody must not need recipient polling"
+        );
+        assert!(
+            files.iter().all(|(_, file, _, b)| {
+                !b.file_ready_to_save(*file) && b.log.lock().unwrap().events(file).is_empty()
+            }),
+            "recipient must remain without chunks until all relay custody is confirmed"
+        );
+        loop {
+            recipient_drains += 1;
+            for (recipient, _, _) in &recipients {
+                recipient.drain_from_post_office().await;
+            }
+            if files
+                .iter()
+                .all(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    let cooldown = if slow && received.is_ok() {
+        let before = confirmations.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        Some((before > 0, before, confirmations.load(Ordering::SeqCst)))
+    } else {
+        None
+    };
+    worker.abort();
+    server.abort();
+    rejecting.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    let _ = rejecting.await;
+    assert!(
+        received.is_ok(),
+        "retained relay worker stranded bytes: custody={}/{} ready={}/{} recipient-drains={} peak-slots={}",
+        confirmed_files.lock().unwrap().len(),
+        files.len(),
+        files
+            .iter()
+            .filter(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
+            .count(),
+        files.len(),
+        recipient_drains,
+        a.file_transfer_peak.load(Ordering::SeqCst)
+    );
+    if let Some((quiet, before, after)) = cooldown {
+        assert!(quiet, "relay must confirm exact final-chunk custody");
+        assert_eq!(
+            after, before,
+            "held relay custody must cool down across normal worker ticks"
+        );
+    }
+    if slow {
+        assert!(exchanges.load(Ordering::SeqCst) >= 5);
+    }
+    assert!(a.file_transfer_peak.load(Ordering::SeqCst) <= 8);
+    for (card, file, bytes, b) in files {
+        assert_eq!(b.read_file(file).unwrap(), bytes);
+        assert!(
+            !a.outgoing_file_progress(card).unwrap().delivered,
+            "relay custody is not recipient completion"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retained_relay_file_exchange_rechecks_signed_consent_and_relay_role() {
+    for revoke_consent in [true, false] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let pd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let bob_account = Account::generate();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
+        let (a, _) = node(ad.path(), alice, aa, &bp);
+        let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+        b.set_attachment_global_auto(false).unwrap();
+        b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+        let identity = DeviceIdentity::generate();
+        let keys = identity.secret_bytes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof =
+            Announce::new_post_office(&identity, "Relay", listener.local_addr().unwrap().port());
+        let relay = Arc::new(Mutex::new(
+            crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", identity).unwrap(),
+        ));
+        let server = tokio::spawn(super::postbox::run_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            listener,
+            relay.clone(),
+        ));
+        for node in [&a, &b] {
+            node.roster.lock().unwrap().update(
+                &proof,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &node.user_id(),
+            );
+        }
+        let source = ad.path().join("revocable.bin");
+        std::fs::write(&source, [91; 64]).unwrap();
+        let (card, file) = a
+            .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        a.flush_delivery(card).await;
+        b.drain_from_post_office().await;
+        assert_eq!(offers.try_recv().unwrap().file_conv, file);
+        b.decide_attachment(file, true).unwrap();
+        for control in b.file_consent_events(&ap.public()).unwrap() {
+            a.accept_file_consent_event(&control, &bp.public()).unwrap();
+        }
+        let card = a.delivery.lock().unwrap().file_card(card).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let mut transfers = std::collections::HashMap::new();
+        // Failed direct dial, authenticated relay dial, then a complete mailbox
+        // fingerprint exchange. The next retained step must recheck authority.
+        for _ in 0..3 {
+            assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        }
+        assert_eq!(transfers.len(), 1);
+        let final_chunk = a
+            .log
+            .lock()
+            .unwrap()
+            .get(&card.final_chunk.unwrap())
+            .unwrap()
+            .clone();
+        let outer = crate::postoffice::opaque::RelayMailbox::new(
+            &a.identity,
+            &bp.public(),
+            &proof.public(),
+        )
+        .unwrap()
+        .wrap(&final_chunk)
+        .unwrap()
+        .id;
+        assert!(!relay.lock().unwrap().has(&outer));
+        if revoke_consent {
+            b.decide_attachment(file, false).unwrap();
+            for control in b.file_consent_events(&ap.public()).unwrap() {
+                a.accept_file_consent_event(&control, &bp.public()).unwrap();
+            }
+        } else {
+            let ordinary = Announce::new(
+                &DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                "No longer a relay",
+                proof.tcp_port,
+            );
+            a.roster.lock().unwrap().update(
+                &ordinary,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &a.user_id(),
+            );
+        }
+        assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        assert!(
+            transfers.is_empty(),
+            "invalid retained relay socket must be discarded"
+        );
+        assert!(
+            !relay.lock().unwrap().has(&outer),
+            "authority ended before any chunk upload"
+        );
+        assert!(!a.outgoing_file_progress(card.id).unwrap().delivered);
+        server.abort();
+        let _ = server.await;
+    }
 }

@@ -3,17 +3,58 @@ param(
     [string]$StagedBinary,
     [string]$Root = 'D:\ProgramData\MeshTalk\PostOffice',
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
-    [string]$Name = 'post-office'
+    [string]$Name = 'post-office',
+    [switch]$Bridge,
+    [string]$BridgePeer,
+    [ValidatePattern('^[0-9A-Fa-f]{32}$')]
+    [string]$BridgePeerId,
+    [ValidateRange(1, 65535)]
+    [int]$BridgeProxyPort = 47476,
+    [ValidateRange(1, 65535)]
+    [int]$DiscoveryPort = 47478,
+    [ValidateRange(1, 65535)]
+    [int]$LanAnnouncePort = 47474,
+    [string[]]$FederationPeer = @(),
+    [string]$FederationConfig
 )
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'MeshTalk-PostOffice'
+$Root = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Root)
+$Root = [System.IO.Path]::GetFullPath($Root)
 $binary = Join-Path $Root 'mesh-talk-node.exe'
 $data = Join-Path $Root 'data'
 $passwordFile = Join-Path $data 'password'
 
+if ([bool]$BridgePeer -ne [bool]$BridgePeerId) {
+    throw 'BridgePeer and BridgePeerId must be supplied together'
+}
+if ($BridgePeer -and $BridgeProxyPort -eq 47475) {
+    throw 'The bridge proxy port must differ from the local relay port 47475'
+}
+foreach ($seed in $FederationPeer) {
+    if ($seed -notmatch '^[0-9A-Fa-f]{32}@.+:[0-9]+$') {
+        throw "Invalid federation peer: $seed"
+    }
+}
+
 if (-not (Test-Path -LiteralPath $StagedBinary -PathType Leaf)) {
     throw "Staged Windows binary is missing: $StagedBinary"
+}
+
+if ($FederationConfig -and $FederationPeer.Count -gt 0) {
+    throw 'FederationConfig conflicts with FederationPeer'
+}
+if ($FederationConfig) {
+    if (-not (Test-Path -LiteralPath $FederationConfig -PathType Leaf)) {
+        throw "Federation config must be an existing public manifest: $FederationConfig"
+    }
+    $FederationConfig = (Resolve-Path -LiteralPath $FederationConfig).ProviderPath
+    # The staged node owns schema, endpoint, and bound validation. No installation
+    # state has been changed if the public manifest or the binary is incompatible.
+    $StagedBinary = (Resolve-Path -LiteralPath $StagedBinary).ProviderPath
+    & $StagedBinary federation --file $FederationConfig list | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Staged node rejected the federation config' }
 }
 
 # SYSTEM runs the boot task; Administrators can maintain and back up the data.
@@ -67,6 +108,16 @@ if (-not (Test-Path -LiteralPath $passwordFile)) {
 }
 Assert-RelayAcls
 
+if ($FederationConfig) {
+    # Keep the public manifest after staging cleanup without touching private state.
+    $persistentConfig = Join-Path $data 'federation.conf'
+    if (-not [string]::Equals($FederationConfig, $persistentConfig, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $FederationConfig -Destination "$persistentConfig.next" -Force
+        Move-Item -LiteralPath "$persistentConfig.next" -Destination $persistentConfig -Force
+    }
+    $FederationConfig = $persistentConfig
+}
+
 $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existing) {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -74,17 +125,32 @@ if ($existing) {
 }
 Copy-Item -LiteralPath $StagedBinary -Destination $binary -Force
 
-$arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47475 --discovery-port 47474' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name
+$arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47475 --discovery-port {3} --lan-announce-port {4}' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name, $DiscoveryPort, $LanAnnouncePort
+if ($BridgePeer) {
+    $arguments += ' --bridge --bridge-peer "{0}" --bridge-peer-id "{1}" --bridge-proxy-port {2}' -f $BridgePeer, $BridgePeerId.ToLowerInvariant(), $BridgeProxyPort
+} elseif ($Bridge -or $FederationConfig -or $FederationPeer.Count -gt 0) {
+    $arguments += ' --bridge'
+}
+if ($FederationConfig) {
+    $arguments += ' --federation-config "{0}"' -f $FederationConfig
+}
+foreach ($seed in $FederationPeer) {
+    $arguments += ' --federation-peer "{0}"' -f $seed
+}
 $action = New-ScheduledTaskAction -Execute $binary -Argument $arguments -WorkingDirectory $Root
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
-foreach ($rule in @(
+$firewallRules = @(
     @{ Name = 'MeshTalk PostOffice TCP 47475'; Protocol = 'TCP'; Port = 47475 },
-    @{ Name = 'MeshTalk PostOffice UDP 47474'; Protocol = 'UDP'; Port = 47474 }
-)) {
+    @{ Name = "MeshTalk PostOffice UDP $DiscoveryPort"; Protocol = 'UDP'; Port = $DiscoveryPort }
+)
+if ($BridgePeer) {
+    $firewallRules += @{ Name = "MeshTalk PostOffice Bridge TCP $BridgeProxyPort"; Protocol = 'TCP'; Port = $BridgeProxyPort }
+}
+foreach ($rule in $firewallRules) {
     if (-not (Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Port -RemoteAddress LocalSubnet -Profile Any | Out-Null
     }
@@ -103,6 +169,19 @@ do {
 } while ((Get-Date) -lt $deadline)
 if (-not $listener -or (Get-ScheduledTask -TaskName $taskName).State -ne 'Running') {
     throw 'Post-office task did not start a TCP 47475 listener within 30 seconds'
+}
+if ($BridgePeer) {
+    $proxyDeadline = (Get-Date).AddSeconds(45)
+    do {
+        $proxy = Get-NetTCPConnection -State Listen -LocalPort $BridgeProxyPort -ErrorAction SilentlyContinue |
+            Where-Object { $_.OwningProcess -eq $listener.OwningProcess } |
+            Select-Object -First 1
+        if ($proxy) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $proxyDeadline)
+    if (-not $proxy) {
+        throw "Bridge gateway did not bind TCP $BridgeProxyPort within 45 seconds"
+    }
 }
 Write-Output "Installed $binary"
 Write-Output "Data $data"

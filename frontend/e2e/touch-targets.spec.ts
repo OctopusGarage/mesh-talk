@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
@@ -69,6 +70,7 @@ test("settings switches keep a compact track inside a usable touch target", asyn
 }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   const wallpaper = page.getByTestId("settings-wallpaper");
   const bounds = await wallpaper.boundingBox();
   expect(bounds?.width).toBeGreaterThanOrEqual(44);

@@ -123,8 +123,9 @@ pub fn handle_datagram(
 /// went offline or changed IP) don't linger and misdirect fan-out / post-office picks.
 const PEER_TTL: Duration = Duration::from_secs(30);
 
-/// Listen for announces on `socket`, feeding the roster, until the socket errors
-/// (e.g. the task is aborted on shutdown). Also evicts stale peers each iteration —
+/// Listen for announces on `socket`, feeding the roster, until a fatal socket
+/// error or task cancellation. Peer reset/refusal errors are transient and do not
+/// end discovery. Also evicts stale peers each iteration —
 /// after every datagram (busy network) and on a `PEER_TTL` recv timeout (silent
 /// network) — so a roster never grows unbounded or retains dead endpoints.
 ///
@@ -173,6 +174,16 @@ async fn run_listen_with_visibility(
     .await;
 }
 
+fn retryable_udp_receive_error(error: &std::io::Error) -> bool {
+    // Unconnected UDP sockets may surface ICMP errors from an earlier send as
+    // receive errors (notably WSAECONNRESET 10054 on Windows). A departed peer
+    // does not invalidate the local discovery socket or its other peers.
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
 async fn run_listen_with_routed(
     socket: Arc<UdpSocket>,
     roster: Arc<Mutex<Roster>>,
@@ -186,6 +197,9 @@ async fn run_listen_with_routed(
     loop {
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, source))) => {
+                if !visibility.accepts_source(source) {
+                    continue;
+                }
                 if let Some(routed) = &routed {
                     if let Some(nonce) = query::decode_query(&buf[..n]) {
                         let allowed = routed
@@ -231,8 +245,18 @@ async fn run_listen_with_routed(
                         .await;
                 }
             }
-            Ok(Err(_)) => break, // socket error — end the loop (shutdown)
-            Err(_) => {}         // recv timed out → fall through to evict
+            Ok(Err(error)) if retryable_udp_receive_error(&error) => {
+                log::debug!("discovery ignored a transient UDP peer error: {error}");
+            }
+            Ok(Err(error)) => {
+                log::warn!(
+                    "discovery UDP listener stopped: {error}; kind={:?}, os_error={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
+                break;
+            }
+            Err(_) => {} // recv timed out → fall through to evict
         }
         roster
             .lock()
@@ -448,9 +472,17 @@ async fn scan_once_with_visibility(
     discovery_port: u16,
     visibility: &DiscoveryVisibility,
 ) {
-    let targets = scan_targets_for_interfaces(&ipv4_interface_addrs())
+    let interfaces = if visibility.physical_lan_only() {
+        visibility.physical_ipv4_addrs()
+    } else {
+        ipv4_interface_addrs()
+    };
+    let targets = scan_targets_for_interfaces(&interfaces)
         .into_iter()
-        .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port));
+        .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port))
+        // A /24 fallback scan can exceed the real interface netmask. Skip
+        // disallowed targets instead of ending the scan before another LAN.
+        .filter(|target| visibility.accepts_source(*target));
     let _ = scan_addresses(socket, bytes, targets, visibility).await;
 }
 
@@ -631,6 +663,83 @@ mod privacy_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn udp_peer_reset_and_refusal_are_retryable_but_local_socket_failures_are_fatal() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::ConnectionReset, ErrorKind::ConnectionRefused] {
+            assert!(
+                retryable_udp_receive_error(&Error::from(kind)),
+                "peer error {kind:?} must not stop discovery"
+            );
+        }
+        for kind in [
+            ErrorKind::InvalidInput,
+            ErrorKind::PermissionDenied,
+            ErrorKind::NotConnected,
+        ] {
+            assert!(
+                !retryable_udp_receive_error(&Error::from(kind)),
+                "local socket failure {kind:?} must remain fatal"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_listener_survives_icmp_reset_from_a_stopped_udp_peer() {
+        let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let listen_addr = listener.local_addr().unwrap();
+        let departed = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let departed_addr = departed.local_addr().unwrap();
+        drop(departed);
+        // Windows reports the ICMP port-unreachable reply as WSAECONNRESET on
+        // this same unconnected socket's next recv_from, not as a send failure.
+        listener
+            .send_to(b"departed-peer", departed_addr)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), listener.readable())
+            .await
+            .expect("Windows should deliver the closed peer's ICMP error")
+            .unwrap();
+
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        let own = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let task = tokio::spawn(run_listen(
+            Arc::clone(&listener),
+            Arc::clone(&roster),
+            own.user_id(),
+            shared_announce(&Announce::new(&own, "local", 1)),
+            sender.local_addr().unwrap().port(),
+        ));
+        let received = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                sender
+                    .send_to(&encode(&Announce::new(&peer, "live", 4000)), listen_addr)
+                    .await
+                    .unwrap();
+                if roster.lock().unwrap().get(&peer.user_id()).is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let exited = task.is_finished();
+        task.abort();
+        let _ = task.await;
+        assert!(
+            received.is_ok(),
+            "fresh signed announces were lost after the UDP peer reset"
+        );
+        assert!(
+            !exited,
+            "discovery listener exited after a transient peer reset"
+        );
+    }
+
     use super::*;
     use crate::identity::device::DeviceIdentity;
     use std::net::{IpAddr, Ipv4Addr};

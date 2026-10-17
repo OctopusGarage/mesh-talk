@@ -7,9 +7,28 @@ pub struct PeerInfo {
     pub name: String,
     pub addr: String,
     pub post_office: bool,
+    /// True when this device has a directly discovered LAN route.
+    pub discovered_on_lan: bool,
+    /// A known direct application route, including routed/Tailscale discovery.
+    /// Actual connectivity and pinned identity are rechecked during transport.
+    pub directly_reachable: bool,
     /// The account this device belongs to (devices sharing it are one user's). The
     /// UI keys conversations by this so a multi-device contact is one conversation.
     pub account_id: Option<String>,
+}
+
+impl From<mesh_talk_core::discovery::PeerRecord> for PeerInfo {
+    fn from(peer: mesh_talk_core::discovery::PeerRecord) -> Self {
+        Self {
+            discovered_on_lan: peer.has_lan_route(),
+            directly_reachable: peer.has_direct_route(),
+            user_id: peer.public.user_id(),
+            name: peer.name,
+            addr: peer.addr.to_string(),
+            post_office: peer.post_office,
+            account_id: peer.account_id,
+        }
+    }
 }
 
 /// File metadata for a history line that represents a file/media message. Lets the UI
@@ -96,4 +115,33 @@ pub struct ChannelMemberInfo {
 pub struct ChannelMembersInfo {
     pub owner: String,
     pub members: Vec<ChannelMemberInfo>,
+}
+
+#[cfg(test)]
+mod peer_route_tests {
+    use super::*;
+    use mesh_talk_core::{
+        discovery::{Announce, Roster},
+        identity::{account::Account, device::DeviceIdentity},
+    };
+
+    #[test]
+    fn peer_info_preserves_direct_routed_and_gateway_provenance() {
+        let device = DeviceIdentity::generate();
+        let proof =
+            Announce::new_post_office_with_account(&device, &Account::generate(), "Relay", 47475);
+        let mut roster = Roster::default();
+        roster.update_gateway(&proof, "192.168.1.2".parse().unwrap(), 47476, "self");
+        roster.mark_authenticated(&device.public(), "192.168.1.2:47476".parse().unwrap());
+        let gateway = PeerInfo::from(roster.get(&device.user_id()).unwrap().clone());
+        assert!(!gateway.directly_reachable);
+        assert!(!gateway.discovered_on_lan);
+        roster.update_routed(&proof, "100.101.1.2".parse().unwrap(), "self");
+        let routed = PeerInfo::from(roster.get(&device.user_id()).unwrap().clone());
+        assert!(routed.directly_reachable);
+        assert!(!routed.discovered_on_lan);
+        let json = serde_json::to_value(&routed).unwrap();
+        assert_eq!(json["directly_reachable"], true);
+        assert_eq!(json["discovered_on_lan"], false);
+    }
 }

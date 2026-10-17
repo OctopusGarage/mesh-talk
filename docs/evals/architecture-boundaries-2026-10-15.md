@@ -12,6 +12,17 @@ The protocol/host/UI layering is mostly legible. The initial audit found a runti
 
 **Host follow-up:** `79414ff` moved node startup, event publication, and startup-error redaction from the auth IPC module into `runtime_bootstrap.rs`. Login, linked-account adoption, and recovery call the same startup entry point. The subsequent linked-account change put the session/runtime transition in `linked_account.rs` while retaining the Tauri command as a thin adapter. Existing replaced-session coverage, a focused current-session adoption test, and strict host Clippy passed. This closes the R2 ownership warning and moves this architecture rubric to **95/100** (one remaining UI hotspot warning); it is not a whole-project health score.
 
+**Sidebar follow-up (2026-10-16):** The sidebar now composes row presentation,
+shared section rendering, pure list/people projection, virtual navigation,
+resize lifecycle and utilities from feature-local modules. Store/dialog privacy
+projection also has one shared owner. The IPC import guard now covers nested
+relative imports. A TypeScript AST scan of 137 production frontend modules found
+531 runtime import/re-export edges, 55 type-only edges and no runtime cycles;
+this excludes dynamic imports and is not a protocol correctness proof. The
+remaining settings/conversation/diagnostics opportunities are recorded in the
+maintained [module ownership guide](../module-boundaries.md). The broad UI warning
+remains partially open; no new whole-repository health score is claimed.
+
 ## Module Dependency Graph
 
 ```mermaid

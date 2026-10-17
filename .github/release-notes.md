@@ -1,25 +1,23 @@
-## Mesh-Talk __TAG__
+## Mesh-Talk `__TAG__`
 
 End-to-end-encrypted LAN messenger (Rust + Tauri 2 + React). No central server or
 sign-up — peers on the same local network discover each other over signed broadcasts and chat
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### What's new in v0.3.2
+### Release highlights
 
-- Recover missed channel messages from available group members after reconnecting, even when
-  the original sender has gone offline.
-- Share encrypted channel history and retained attachments among group members by default,
-  with a visible per-member option to disable replica sharing.
-- Bound sender fanout for larger channels and retry delivery until enough member copies are
-  confirmed. Small channels continue direct delivery.
-- Restrict automatic direct-message catch-up to contacts whose safety number you manually
-  verified. Incoming direct messages can still arrive by direct push.
-- Improve offline recovery and delivery status while keeping file transfers separate from
-  message propagation.
-- Add pairwise opaque post-office mailboxes, a per-account relay preference, separate
-  native relay packages, and a Linux container image published with the verified release.
-
+- Recover authorized group history and retained attachments from sharing members,
+  with bounded larger-group fanout and per-member sharing controls.
+- Keep durable retry, exact recipient confirmation, file consent, byte integrity
+  and completion as separate recoverable states.
+- Exchange eligible signed presence and opaque encrypted mailboxes among equal,
+  explicitly trusted post offices; no global hub is required.
+- Separate per-device public discovery and relay send/receive controls, including
+  physical-LAN-only discovery and direct LAN/Tailscale relay preference/fallback.
+- Harden certified device linking and category-controlled sibling replay across
+  restarts without relaxing account or group authority.
+- Provide signed native relay packages and a verified Linux container image.
 
 ### Downloads
 
@@ -30,14 +28,14 @@ The macOS zip contains a DMG; the app is inside that DMG.
 
 Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Lite shows emoji fallbacks for built-in Noto stickers without bundling their animations. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
 
-| Platform | Asset |
-|----------|-------|
-| macOS (Apple Silicon) | `mesh-talk___TAG___macos_arm64.zip` |
-| macOS (Intel) | `mesh-talk___TAG___macos_x86_64.zip` |
-| Windows (x64) | `mesh-talk___TAG___windows_x86_64.zip` |
-| Windows (ARM64) | `mesh-talk___TAG___windows_arm64.zip` |
-| Linux (x64) | `mesh-talk___TAG___linux_x86_64.zip` |
-| Linux (ARM64) | `mesh-talk___TAG___linux_aarch64.zip` |
+| Platform              | Asset                                  |
+| --------------------- | -------------------------------------- |
+| macOS (Apple Silicon) | `mesh-talk___TAG___macos_arm64.zip`    |
+| macOS (Intel)         | `mesh-talk___TAG___macos_x86_64.zip`   |
+| Windows (x64)         | `mesh-talk___TAG___windows_x86_64.zip` |
+| Windows (ARM64)       | `mesh-talk___TAG___windows_arm64.zip`  |
+| Linux (x64)           | `mesh-talk___TAG___linux_x86_64.zip`   |
+| Linux (ARM64)         | `mesh-talk___TAG___linux_aarch64.zip`  |
 
 ### Post-office relay downloads
 
@@ -59,10 +57,12 @@ independently verifiable. Replace `<os>_<arch>` with your platform (e.g. `macos_
 For lite, append `_lite` after `<os>_<arch>` in the examples.
 
 **1. Checksum** — unzip, then in the extracted folder:
+
 - macOS / Linux: `shasum -a 256 -c SHA256SUMS`
 - Windows (PowerShell): `Get-FileHash .\<file> -Algorithm SHA256` and compare to `SHA256SUMS`
 
 **2. Cosign signature** (Sigstore keyless — proves the zip is the one CI produced):
+
 ```sh
 cosign verify-blob \
   --bundle mesh-talk___TAG___<os>_<arch>.zip.bundle \
@@ -72,6 +72,7 @@ cosign verify-blob \
 ```
 
 **3. SLSA build provenance** (proves it was built by this repo's CI from tag `__TAG__`):
+
 ```sh
 gh attestation verify mesh-talk___TAG___<os>_<arch>.zip --repo OctopusGarage/mesh-talk
 ```

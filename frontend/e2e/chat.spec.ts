@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
@@ -265,6 +266,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("composer-send").click();
     const link = page.getByRole("link", { name: "https://example.com" });
     await expect(link).toBeVisible();
+    const appUrl = page.url();
     await link.click();
     await expect
       .poll(() =>
@@ -273,7 +275,7 @@ test.describe("Mesh-Talk UI flow", () => {
         ),
       )
       .toEqual(["https://example.com"]);
-    await expect(page).toHaveURL(/localhost/);
+    await expect(page).toHaveURL(appUrl);
   });
 
   test("emoji picker inserts into the composer", async ({ page }) => {
@@ -624,6 +626,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.locator("html")).toHaveClass(/dark/);
 
     await openSidebarMenuAction(page, "sidebar-nav-settings");
+    await selectSettingsCategory(page, "appearance");
     await expect(page.getByTestId("theme-picker")).toBeVisible();
 
     await page.getByTestId("theme-light").click();

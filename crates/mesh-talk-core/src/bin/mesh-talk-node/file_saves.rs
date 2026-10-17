@@ -1,7 +1,7 @@
 //! Bounded CLI autosaves: a durable file card can precede its immutable chunks.
 use mesh_talk_core::{
     eventlog::ConversationId,
-    node::{FileProgress, Node, ReceiveDecision, ReceivedFile},
+    node::{FileProgress, Node, ParticipantWork, ReceiveDecision, ReceivedFile},
 };
 use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::mpsc, task::JoinSet};
@@ -71,6 +71,7 @@ pub(super) async fn run(
     directory: PathBuf,
     mut incoming: mpsc::UnboundedReceiver<ReceivedFile>,
     emit: impl Fn(&str) + Send + Sync + 'static,
+    work: ParticipantWork,
 ) {
     let mut queue = PendingSaves::default();
     let mut saves = JoinSet::new();
@@ -89,7 +90,7 @@ pub(super) async fn run(
                 if saves.is_empty() && !queue.pending.is_empty() {
                     let candidates: Vec<_> = queue.pending.iter().filter(|(_, saving)| !saving).map(|(file, _)| file.file_conv).collect();
                     let checking_node = node.clone();
-                    saves.spawn_blocking(move || {
+                    if !work.spawn(&mut saves, move || {
                         let mut ready = false;
                         let states = candidates.into_iter().map(|file| {
                             let state = checking_node.file_progress(file).map(|mut progress| {
@@ -101,7 +102,7 @@ pub(super) async fn run(
                             (file, state)
                         }).collect();
                         SaveWork::Readiness(states)
-                    });
+                    }) { break; }
                 }
             }
             saved = saves.join_next(), if !saves.is_empty() => {
@@ -109,10 +110,10 @@ pub(super) async fn run(
                     Some(Ok(SaveWork::Readiness(states))) => {
                         if let Some(file) = queue.take_ready(|file| states.iter().find(|(id, _)| *id == file).map(|(_, state)| *state).unwrap_or(Some(FileProgress { done: 0, total: 1 }))) {
                             let saving_node = node.clone(); let destination = directory.clone();
-                            saves.spawn_blocking(move || {
+                            if !work.spawn(&mut saves, move || {
                                 let result = saving_node.save_file_into_dir(file.file_conv, &destination);
                                 SaveWork::Saved(file, result)
-                            });
+                            }) { break; }
                         }
                     }
                     Some(Ok(SaveWork::Saved(file, result))) => {
@@ -157,6 +158,20 @@ mod tests {
             media: false,
         }
     }
+    async fn participant(node: Arc<Node>) -> mesh_talk_core::node::ParticipantRuntime {
+        mesh_talk_core::node::PreparedParticipant::prepare(
+            node,
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+            Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false)),
+            mesh_talk_core::node::ParticipantConfig {
+                discovery_port: 0,
+                candidate_source: None,
+            },
+        )
+        .unwrap()
+        .launch("Test")
+    }
+
     fn complete(_: ConversationId) -> Option<FileProgress> {
         Some(FileProgress { done: 1, total: 1 })
     }
@@ -240,9 +255,17 @@ mod tests {
         let destination = bd.path().join("downloads");
         std::fs::create_dir(&destination).unwrap();
         let (output, mut printed) = mpsc::unbounded_channel();
-        let runner = tokio::spawn(run(b.clone(), destination.clone(), incoming, move |line| {
-            let _ = output.send(line.to_owned());
-        }));
+        let owner = participant(b.clone()).await;
+        let work = owner.blocking_work();
+        let runner = tokio::spawn(run(
+            b.clone(),
+            destination.clone(),
+            incoming,
+            move |line| {
+                let _ = output.send(line.to_owned());
+            },
+            work,
+        ));
         let success = tokio::time::timeout(Duration::from_secs(3), printed.recv())
             .await
             .unwrap()
@@ -267,6 +290,7 @@ mod tests {
         let _ = runner.await;
         let _ = at.await;
         let _ = bt.await;
+        owner.stop().await;
     }
 
     #[test]
@@ -403,9 +427,17 @@ mod tests {
         std::fs::write(&blocked, []).unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
         let (output, mut printed) = mpsc::unbounded_channel();
-        let runner = tokio::spawn(run(node, blocked, rx, move |line| {
-            let _ = output.send(line.to_owned());
-        }));
+        let owner = participant(node.clone()).await;
+        let work = owner.blocking_work();
+        let runner = tokio::spawn(run(
+            node,
+            blocked,
+            rx,
+            move |line| {
+                let _ = output.send(line.to_owned());
+            },
+            work,
+        ));
         tx.send(entry.clone()).unwrap();
         let failure = tokio::time::timeout(Duration::from_secs(2), printed.recv())
             .await
@@ -420,5 +452,6 @@ mod tests {
         );
         runner.abort();
         let _ = runner.await;
+        owner.stop().await;
     }
 }

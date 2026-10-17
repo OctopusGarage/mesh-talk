@@ -5,8 +5,11 @@ Home (build 26200). Its `MeshTalk-PostOffice` Scheduled Task runs the headless
 relay as `SYSTEM` at boot. The binary is
 `D:\ProgramData\MeshTalk\PostOffice\mesh-talk-node.exe`; its keystore, password
 file, `relay.log`, and `node.lock` are in the `data` subdirectory. TCP 47475
-serves peers; signed UDP multicast discovery uses 47474. Firewall rules allow
-these ports from `LocalSubnet` on all network profiles.
+serves peers; its dedicated signed-query UDP port is 47478 and it announces
+to clients on the shared LAN port 47474. The optional legacy gateway listens
+on TCP 47476. The equal-relay federation uses the same trusted seed list as
+mac2015 and mac-mini. Firewall rules allow the relay listener ports from
+`LocalSubnet` on all network profiles.
 
 The task passes `--password-file`, never a password argument. The installer
 creates a random password on the Windows host only on first installation and
@@ -18,21 +21,44 @@ whole data directory if durable custody matters.
 
 ## Build, install, and update
 
-On an Apple Silicon Mac with Rust 1.99 and MinGW installed:
+On an Apple Silicon Mac with the project-compatible stable Rust toolchain and MinGW installed:
 
 ```bash
-rustup target add --toolchain 1.99.0-aarch64-apple-darwin x86_64-pc-windows-gnu
-RUSTC="$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/rustc" \
+rustup target add --toolchain stable x86_64-pc-windows-gnu
+RUSTC="$(rustup which --toolchain stable rustc)" \
   CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
-  "$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin/bin/cargo" \
+  cargo \
   build --release --target x86_64-pc-windows-gnu \
   -p mesh-talk-core --bin mesh-talk-node
 scp target/x86_64-pc-windows-gnu/release/mesh-talk-node.exe \
   windows10:'D:/mesh-talk-node.next.exe'
 scp scripts/install-post-office-windows.ps1 \
   windows10:'D:/install-post-office-windows.ps1'
-ssh windows10 'powershell -NoProfile -ExecutionPolicy Bypass -File D:\install-post-office-windows.ps1 -StagedBinary D:\mesh-talk-node.next.exe -Name windows10-post-office'
+scp relays.conf windows10:'D:/mesh-talk-relays.conf'
 ```
+
+Then run this in a PowerShell session on Windows (working directory D:):
+
+```powershell
+& 'D:\install-post-office-windows.ps1' `
+  -StagedBinary 'D:\mesh-talk-node.next.exe' `
+  -Name 'windows10-post-office' `
+  -DiscoveryPort 47478 -LanAnnouncePort 47474 `
+  -FederationConfig 'D:\mesh-talk-relays.conf'
+```
+
+Create `relays.conf` with the [shared federation workflow](post-office-federation.md)
+and distribute the same public pins to every relay. The installer validates it
+before changes and persists it at
+`D:\ProgramData\MeshTalk\PostOffice\data\federation.conf`. Keep both LAN and
+Tailscale endpoints for a relay where appropriate; each pins the same identity.
+`-FederationConfig` conflicts with inline `-FederationPeer` entries. Enrollment
+and revocation require restarting all affected services after distribution;
+editing a file does not hot-revoke a running connection.
+
+`-LanAnnouncePort 47474` also listens on the shared LAN discovery port. The
+dedicated port remains available for routed signed queries when shared-port
+multicast reaches only one local process.
 
 Run those commands for a first install and for each update. The installer
 advertises the name `post-office` by default; pass `-Name <your-relay-name>`
@@ -40,14 +66,18 @@ to choose a distinct LAN display name. On first install,
 the script creates the random password and the first task start creates the
 keystore; on update, it stops an
 existing task, replaces only the binary, checks ACLs, registers the boot task,
-starts it, and waits for the TCP listener. It preserves the data directory and
-identity. The CLI reclaims a `node.lock` from a terminated process on Windows;
-it refuses a lock held by a live process.
+starts it, and waits for the TCP listener and, when configured, the bridge
+proxy. It preserves the data directory and identity. `-Bridge` alone enables a
+local directory; `-BridgePeer` plus `-BridgePeerId` authenticate a signed remote relay
+and enable the gateway. The manifest names mutually trusted equals. Participating clients enable bridge
+discovery and choose an eligible directly reachable preferred post office in Settings. If it is offline, another
+verified local post office can accept messages. The CLI reclaims a `node.lock` from a
+terminated process on Windows; it refuses a lock held by a live process.
 
 ## Check and operate
 
 ```bash
-ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47475 | Select-Object LocalAddress,LocalPort,OwningProcess"'
+ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47475,47476 | Select-Object LocalAddress,LocalPort,OwningProcess"'
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).Principal.UserId; icacls D:\ProgramData\MeshTalk\PostOffice\data\password; icacls D:\ProgramData\MeshTalk\PostOffice\data\identity.keystore"'
 ssh windows10 'powershell -NoProfile -Command "Get-Content D:\ProgramData\MeshTalk\PostOffice\data\node.lock"'
 ssh windows10 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice"'
@@ -90,12 +120,27 @@ channel event after the sender stops and the relay restarts. The second checks
 an offline file offer, then an exact byte roundtrip after the sender returns.
 The ignored Rust test separately proves that encrypted file chunks themselves
 survive on the installed Windows relay while both peers are offline, then
-arrive intact after a relay restart with the sender stopped. Recipient consent
-still needs a brief direct connection to the sender before those chunks are
-uploaded. The third command checks election against a disposable second relay.
+arrive intact after a relay restart with the sender stopped. These older
+harnesses obtain consent during a brief direct sender-recipient connection;
+that overlap is their test sequence, not a current protocol requirement. The
+third command checks election against a disposable second relay.
+
+Current bridge clients return signed, exact-offer consent and verified-save
+completion through version-3 encrypted federated opaque mailboxes. Those
+controls need no direct sender-recipient route or simultaneous online overlap.
+Each client must eventually reach an eligible relay, and file chunks are
+uploaded only after the sender learns authenticated consent. Reachable trusted
+federation and retained bytes remain necessary. Installed-federation mode in
+`scripts/e2e-four-machine-tailnet.py` separately checks cross-relay bytes and
+SHA-256.
 
 Routing metadata remains exposed to the relay, including authenticated device
 connections, mailbox activity, timing, and size buckets. See
 [relay metadata privacy](post-office-metadata-privacy.md) for the exact fields.
-Other relays do not replicate custody; only the elected relay has its queued
-events.
+Legacy relay-specific mailboxes do not replicate. Version-3 federation can
+copy opaque events among reachable trusted relays, but this opportunistic
+reconciliation does not guarantee replicated custody. Federation extends
+mailbox correlation to those trusted peers; unreachable paths, retention,
+eviction, or relay withholding/deletion can still prevent delivery. The privacy
+guide also explains why clients cannot guarantee remote removal from every
+relay queue.

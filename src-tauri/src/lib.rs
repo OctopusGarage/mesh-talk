@@ -29,6 +29,7 @@ pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
 pub mod recovery;
+mod runtime_admission;
 mod runtime_bootstrap;
 pub mod services;
 pub mod session_store;

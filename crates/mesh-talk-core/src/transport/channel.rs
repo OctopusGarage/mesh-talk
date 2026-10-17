@@ -21,6 +21,9 @@ pub struct SecureChannel<S> {
     peer: VerifiedPeer,
     io_admission: Option<IoAdmission>,
     sent_frame_bytes: u64,
+    connection_permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    host_generation: Option<u64>,
+    pairing_only: bool,
 }
 
 #[derive(Clone)]
@@ -103,6 +106,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             peer,
             io_admission: None,
             sent_frame_bytes: 0,
+            connection_permits: Vec::new(),
+            host_generation: None,
+            pairing_only: false,
         })
     }
 
@@ -194,7 +200,33 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             peer,
             io_admission: None,
             sent_frame_bytes: 0,
+            connection_permits: Vec::new(),
+            host_generation: None,
+            pairing_only: false,
         })
+    }
+
+    pub(crate) fn retain_connection_permits(
+        &mut self,
+        permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        self.connection_permits = permits;
+    }
+
+    pub(crate) fn set_host_generation(&mut self, generation: u64) {
+        self.host_generation = Some(generation);
+    }
+
+    pub(crate) fn host_generation(&self) -> Option<u64> {
+        self.host_generation
+    }
+
+    pub(crate) fn restrict_to_pairing(&mut self) {
+        self.pairing_only = true;
+    }
+
+    pub(crate) fn pairing_only(&self) -> bool {
+        self.pairing_only
     }
 
     /// The cryptographically authenticated identity of the peer.
@@ -265,6 +297,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             return Err(TransportError::AdmissionDenied);
         }
         self.session.decrypt(&ct)
+    }
+}
+
+impl SecureChannel<tokio::net::TcpStream> {
+    pub(crate) fn tcp_peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.stream.peer_addr()
+    }
+
+    /// A reusable session has no unsolicited bytes. EOF, pending frames and
+    /// socket errors all require a fresh handshake rather than nonce reuse.
+    pub(crate) fn idle_tcp_alive(&self) -> bool {
+        let mut byte = [0u8; 1];
+        matches!(self.stream.try_read(&mut byte), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
     }
 }
 

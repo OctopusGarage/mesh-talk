@@ -1,5 +1,222 @@
 # Architecture health assessments
 
+## Current architecture-health loop — 2026-10-16
+
+**Current maintained result: 95/100 (Round 3). The architecture goal is achieved;
+release/PR gates are separate and must pass before merge.**
+
+The current loop starts at **85/100** at `cc303ec`. It uses five equally weighted
+architecture dimensions for the whole repository's structure, with deeper
+inspection of recent lifecycle, UI, networking and delivery changes. The goal is
+an evidence-supported **95/100** under this same rubric. Earlier assessments
+below use different scopes or rules and are historical context, not a numerical
+time series.
+
+| Dimension                           |   Baseline | Evidence at baseline                                                                                     |
+| ----------------------------------- | ---------: | -------------------------------------------------------------------------------------------------------- |
+| Module depth                        |      17/20 | Deep storage, sync and settings modules; intake and acceptance callers still carry lifecycle sequencing. |
+| Locality and reuse                  |      16/20 | Shared roster/relay policy; independent CLI/runtime lifecycle and host admission implementations.        |
+| Dependency direction and ownership  |      18/20 | UI-free core and enforced IPC adapter direction; authority contracts vary across host commands.          |
+| Interface-level testability         |      17/20 | Real persistence/loopback/retirement tests; sparse intake and diagnostic lifecycle characterization.     |
+| Maintainability and AI navigability |      17/20 | Domain and ownership guides; conversation and diagnostic rendering mix independent responsibilities.     |
+| **Total**                           | **85/100** | Reviewer judgment with medium confidence.                                                                |
+
+Per-dimension anchors remain fixed: 0 absent, 5 fragmented, 10 mixed, 15 strong
+with notable friction, 20 consistently strong in the inspected evidence. Scores
+between anchors are qualitative judgments, not coverage percentages or points
+automatically earned for moving files. This review does not certify security,
+performance, remote CI status or native-platform compatibility.
+
+### Round 1: lifecycle ownership and runtime admission — 92/100
+
+| Dimension                           |   Baseline |    Round 1 | Evidence and remaining deduction                                                                                                                                                      |
+| ----------------------------------- | ---------: | ---------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Module depth                        |      17/20 |      19/20 | Diagnostic and attachment modules absorb lifecycle obligations from their rendering callers; outgoing acceptance still spans several owners.                                          |
+| Locality and reuse                  |      16/20 |      18/20 | Intake sources share staging/lease rules; runtime/session validation has one implementation. CLI/desktop task assembly and asynchronous admission still diverge.                      |
+| Dependency direction and ownership  |      18/20 |      18/20 | Shared synchronous admission is proven, but unconverted asynchronous command families retain different authority contracts.                                                           |
+| Interface-level testability         |      17/20 |      18/20 | Mounted intake/diagnostic and registered IPC regressions establish the corrected lifetimes; asynchronous host seams and some cancellation behavior remain less characterized.         |
+| Maintainability and AI navigability |      17/20 |      19/20 | Rendering delegates acquisition/observation lifetimes to feature-local owners; host admission and snapshot limits are documented. Participant assembly remains a shared-edit hotspot. |
+| **Total**                           | **85/100** | **92/100** | Same five-dimension rubric; medium confidence; goal remains active.                                                                                                                   |
+
+An independent read-only reassessment proposed 93/100. The maintained ledger
+conservatively retains dependency direction/ownership at 18, since the baseline's
+uneven asynchronous authority contracts remain open. No score increase is
+credited merely for defining a new module or passing an unrelated suite.
+
+- `8a2293f` concentrates diagnostic refreshes, serial polling, bounded activity
+  history and native action continuations in a feature-local controller. A
+  failing mounted regression demonstrated late Finder reveal after closure;
+  the controller suppresses follow-up native effects and stale publication.
+  Another regression covers feedback expiry while a later rescan is pending.
+- `082318c` moves existing owner-command admission into `runtime_admission.rs`
+  and reuses it for all five linked-device sync/preference commands. A failing
+  registered-command test demonstrated a mismatched session changing the old
+  runtime's sync policy. The shared module captures before the runtime wait
+  and holds matching session authority through synchronous operations. Queued
+  same-owner replacement, logout and app-lock rejection preserve persisted
+  policy/preference bytes. Existing delivery cancellation/commit checks remain.
+
+- `0453dcc` concentrates picker/drop/paste/screenshot acquisition in
+  `attachments/useAttachmentIntake.ts`. Deferred staging now removes abandoned
+  temporary files; screenshot edits retain their origin. Composer consumes
+  explicit handoff progress, preserving unsent and concurrently pasted files.
+  Review caught and corrected abandoned-batch resend suppression. Retired native
+  listeners ignore late callbacks and consume registration failure.
+- `ea1c381` captures the entry session lease before an owner-scoped runtime
+  lookup waits. A failing regression demonstrated queued work adopting a new
+  generation of the same owner. Both admission and runtime lookup now reuse
+  one session/installation check. The test uses the production installation
+  interface and verifies queued and fresh lookups reject a stale installation.
+
+Verification executed for these commits:
+
+```sh
+cd frontend
+npm test -- src/features/chat/attachments src/features/chat/ConversationView.test.ts src/features/chat/clipboardFiles.test.ts src/features/chat/diagnostics src/features/chat/DiagnosticsDialog.test.ts src/features/chat/useSerialPoll.test.ts src/lib/moduleBoundaries.test.ts src/lib/rosterProjection.test.ts src/features/chat/settings/model.test.ts
+npm run typecheck
+npm run build
+cd ..
+cargo test -p mesh-talk --lib owner_commands::tests -- --nocapture
+cargo test -p mesh-talk --lib chat_commands::sync::tests
+cargo test -p mesh-talk --lib owner_scoped_node_handle -- --nocapture
+cargo clippy -p mesh-talk --all-targets -- -D warnings
+```
+
+The combined focused frontend slice passed **67 tests across 9 files**; host
+slices passed **12 + 1 + 2 tests**. Changed frontend files passed ESLint and
+Prettier, including the maintained documentation; Rust formatting and strict
+host Clippy passed. The production build retains its existing >700 kB main-chunk
+warning. Specification and code-quality reviews passed for all slices. The
+static frontend inventory is 149 production modules, 568 runtime edges and 66
+type-only edges, with no detected static runtime cycle. Dynamic imports and
+native/plugin behavior are outside that graph. No full-suite, full E2E or
+physical-machine gate ran.
+
+Host scope remains limited: unconverted legacy asynchronous commands, privacy
+and settings need their actual commit seams characterized. A shared check around
+an arbitrary future cannot prevent that future's side effects. CLI/desktop
+participant lifecycle duplication and outgoing acceptance sequencing remain
+open. A resolved file-send promise still does not expose intent-cap refusal;
+store ownership and durable recipient confirmation remain separate facts.
+The existing early-cancellation `Promise<void>` behavior also needs a real
+Composer scenario for same-conversation runtime invalidation before claiming
+that every canceled batch retains its unsent files.
+
+Next: shared owned participant lifecycle, preserving host-specific bootstrap and
+retirement guarantees; then characterize remaining asynchronous host commit
+seams and conditional delivery acceptance consolidation. The goal stays active
+until the fixed rubric supports at least 95/100.
+
+### Round 2: shared participant ownership and legacy account acceptance — 94/100
+
+| Dimension                           |    Round 1 |    Round 2 | Evidence and remaining deduction                                                                                                                                                 |
+| ----------------------------------- | ---------: | ---------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Module depth                        |      19/20 |      19/20 | The participant owner absorbs common producer assembly and retirement from desktop and CLI; acceptance still coordinates distinct crypto, transaction and authority owners.      |
+| Locality and reuse                  |      18/20 |      19/20 | One network lifetime owns discovery, accept, private routes, mailbox drain, bridge refresh and file pulls. Remaining host command families retain separate authority sequencing. |
+| Dependency direction and ownership  |      18/20 |      18/20 | Legacy account text/sticker/file sends now use the actual guarded grant/WAL seam. Device/channel sends, privacy and settings need further authority characterization.            |
+| Interface-level testability         |      18/20 |      19/20 | Public enqueue cancellation, real registered IPC and CLI process tests cover producer lifetimes and session changes; remaining asynchronous seams remain open.                   |
+| Maintainability and AI navigability |      19/20 |      19/20 | Shared participant ownership and host-specific responsibilities are documented; large delivery/channel paths still require tracing distinct owners.                              |
+| **Total**                           | **92/100** | **94/100** | Independent specification and quality reviews passed; same fixed rubric, medium confidence. Goal remains active.                                                                 |
+
+`PreparedParticipant` binds resources without launching work; desktop launch stays
+inside its authorization callback. `ParticipantRuntime` owns common producers and
+adopted host tasks. Explicit stop closes work admission, aborts/joins tasks and
+drains blocking work. Drop requests cancellation only. CLI profile paths, fixed
+ports, REPL behavior and post-office mode remain host policy.
+
+A specification review found that adopted CLI file sends could leave blocking
+staging running after stop returned. A public enqueue regression reproduced this
+failure. Staging now holds its retirement permit inside the actual writer, as do
+CLI autosaves. Retirement waits even after its async caller is canceled and
+subsequent staging admission is rejected.
+
+Legacy account text/sticker/file sends capture the entry session and reuse
+`RuntimeAdmission` at local grants and durable acceptance. Failing registered IPC
+regressions demonstrated mismatched-session text and file sends succeeding before
+the fix. Tests also cover same-owner replacement, real logout during a privacy
+grant wait, original results/history and preservation of ordinary source files.
+Immediate best-effort flush behavior and persisted/wire formats are unchanged.
+Legacy payloads still cannot identify an intent created before IPC entry.
+
+Parent verification:
+
+```sh
+cargo test -p mesh-talk --lib owner_commands::tests -- --nocapture
+cargo test -p mesh-talk-core --lib participant_runtime_tests -- --nocapture
+cargo test -p mesh-talk-core --lib node::runtime -- --nocapture
+cargo test -p mesh-talk-core --test two_node_cli participant_cli -- --test-threads=1
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+These passed **17 host + 4 participant + 31 runtime + 2 CLI process tests**.
+The implementation worker also passed 25 CLI binary tests and focused routed-DM
+and file process assertions. Documentation formatting and diff checks passed.
+No full gate or remote CI claim is made at this checkpoint.
+
+No extra delivery sequencing abstraction was added: `DeliveryStore` and
+`accept_outgoing_transaction` already own durable begin/recovery. DM sealing,
+file staging/quota and host authorization have distinct obligations; moving them
+behind a forwarding helper alone would not deepen the module. Next, characterize
+and consolidate the remaining privacy authority seam before reassessment.
+
+### Round 3: privacy commit authority — 95/100
+
+| Dimension                           |    Round 2 |    Round 3 | Evidence and remaining deduction                                                                                                                                                                       |
+| ----------------------------------- | ---------: | ---------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Module depth                        |      19/20 |      19/20 | Privacy waits and synchronous commits share one implementation; live settings still leaves callers coordinating later effects.                                                                         |
+| Locality and reuse                  |      19/20 |      19/20 | Privacy now reuses host admission rather than its own generation recipe; device/channel and live settings coordination remains separate.                                                               |
+| Dependency direction and ownership  |      18/20 |      19/20 | Actual privacy writes and invalidation are enclosed by session/installation authority; canceled IPC retains lifecycle ownership. Remaining device/channel/settings contracts prevent full consistency. |
+| Interface-level testability         |      19/20 |      19/20 | Registered IPC, persisted-byte, callback-scope and cancellation assertions cover corrected privacy lifetimes. Other asynchronous families remain less characterized.                                   |
+| Maintainability and AI navigability |      19/20 |      19/20 | Shared admission and documented lock ordering make privacy authority traceable; heterogeneous legacy paths remain.                                                                                     |
+| **Total**                           | **94/100** | **95/100** | Independent specification and quality reviews passed; same fixed rubric, medium confidence. Architecture goal achieved.                                                                                |
+
+The failing baseline allowed registered `get_privacy` while the app was locked.
+Privacy commands now capture shared admission before waiting and check observations
+and responses against the current session and runtime installation. Detached
+execution keeps the lifecycle barrier even if the IPC waiter is canceled.
+
+Core `set_invisible_guarded`, `set_allowed_guarded` and
+`initiate_contact_guarded` enter host authority after the async privacy gate and
+outside synchronous privacy-state locks. The supplied commit encloses actual
+policy/proof/route writes, generation updates and synchronous bridge invalidation.
+Network announcement drain/restore and private presence publication remain awaits
+outside session authority. Legacy `*_if` APIs delegate while retaining validation
+ordering, public formats and existing behavior. The commit callback contract
+requires exactly one invocation under authority and propagation of its result.
+
+Verification:
+
+```sh
+cargo test -p mesh-talk-core --lib node::privacy_runtime::tests --features fast-test-kdf -- --nocapture
+cargo test -p mesh-talk --lib owner_commands::tests -- --nocapture
+cargo test -p mesh-talk --lib privacy_commands::tests -- --nocapture
+cargo test -p mesh-talk --lib privacy -- --nocapture
+cargo test -p mesh-talk-core --lib guarded_privacy_commits -- --nocapture
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+The implementation checks passed **43 core + 20 owner + 2 privacy IPC tests**;
+independent parent checks passed **7 affected host tests + 1 core commit-scope
+test**. Real registered scenarios reject app lock, stale installation, queued
+same-owner replacement and logout during all three policy-gate waits without
+changing persisted privacy/proof/route bytes. Callback-scope coverage checks that
+writes/generation changes occur before authority exits and that authority is
+entered without holding a privacy-state lock. Cancellation coverage verifies
+that retirement cannot pass a still-running privacy operation.
+
+The independent reviewer supports raising ownership from 18 to 19 for removing
+this concrete check/commit and cancellation gap. No points are awarded merely
+for moving files or adding methods. The other four dimensions stay at 19, with
+explicit residual deductions. No extra delivery abstraction is justified by size
+alone: existing WAL/recovery ownership remains intact.
+
+**Stop condition:** the optimization loop ends at this checkpoint. The score is
+not a claim that all bugs are eliminated or that security, performance, native
+compatibility or remote CI is certified. PR preparation and full local/remote
+gates follow separately; failures in those gates must still be resolved.
+
 ## Optimization series — 2026-10-15
 
 The repository-wide starting assessment was **90/100**: module depth 22/25,
@@ -16,13 +233,13 @@ unchanged. A focused assembler regression covers incomplete records, overflow,
 and a complete page; existing linked-device backfill and process tests exercise
 the path end to end.
 
-| Dimension | Starting | Round 1 | Round 2 | Round 3 | Round 4 | Evidence |
-|---|---:|---:|---:|---:|---:|---|
-| Module depth | 22/25 | 23/25 | 23/25 | 23/25 | 23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly belongs to the directory module. |
-| Seam integrity | 23/25 | 23/25 | 23/25 | 23/25 | 24/25 | Host settings and periodic retention use one owner-scoped `NodeState` interface rather than duplicating runtime/session checks. |
-| Test surface | 24/25 | 24/25 | 24/25 | 24/25 | 24/25 | Focused page, bridge, settings, and host ownership regressions; full-round bridge refresh still lacks one isolated test interface. |
-| Locality | 21/25 | 22/25 | 23/25 | 24/25 | 24/25 | Account completion, gateway consistency, Settings dialog lifetime, and host account ownership each have one owner. |
-| **Total** | **90/100** | **92/100** | **93/100** | **94/100** | **95/100** | Same equal-weight rubric; reviewer judgment with medium confidence. |
+| Dimension      |   Starting |    Round 1 |    Round 2 |    Round 3 |    Round 4 | Evidence                                                                                                                           |
+| -------------- | ---------: | ---------: | ---------: | ---------: | ---------: | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Module depth   |      22/25 |      23/25 |      23/25 |      23/25 |      23/25 | The Account page module owns bounded record assembly and scanning; bridge response assembly belongs to the directory module.       |
+| Seam integrity |      23/25 |      23/25 |      23/25 |      23/25 |      24/25 | Host settings and periodic retention use one owner-scoped `NodeState` interface rather than duplicating runtime/session checks.    |
+| Test surface   |      24/25 |      24/25 |      24/25 |      24/25 |      24/25 | Focused page, bridge, settings, and host ownership regressions; full-round bridge refresh still lacks one isolated test interface. |
+| Locality       |      21/25 |      22/25 |      23/25 |      24/25 |      24/25 | Account completion, gateway consistency, Settings dialog lifetime, and host account ownership each have one owner.                 |
+| **Total**      | **90/100** | **92/100** | **93/100** | **94/100** | **95/100** | Same equal-weight rubric; reviewer judgment with medium confidence.                                                                |
 
 Verification: `cargo test -p mesh-talk-core --lib node::account_sync`,
 `cargo test -p mesh-talk-core --lib account_history_backfills_to_a_linked_device`,
@@ -74,13 +291,13 @@ confidence, not a repository-wide static-analysis metric. The earlier 90/100
 in this document covered only four selected refactors; the 86/100 baseline
 reassessed the wider hot paths before the three rounds below.
 
-| Dimension | Broad baseline | Current | Evidence |
-|---|---:|---:|---|
-| Module depth | 22/25 | 24/25 | `NodeState` owns host lifecycle tickets and retirement; `DeliveryStore` prepares the outgoing manifest transaction and derives File cards; conversation state settles sends behind one transition interface. |
-| Seam integrity | 21/25 | 24/25 | Host commands delegate lifecycle changes to `NodeState`; send/receive file paths share store-owned card construction; frontend send orchestration delegates cache, deletion, and intent completion rules to `conversationState.ts`. |
-| Test surface | 23/25 | 24/25 | Existing registered-command and Node runtime tests exercise the host and file interfaces; new public store-action tests cover late accepted sends after cache eviction and authoritative file metadata arriving before acceptance. |
-| Locality | 20/25 | 23/25 | Lifecycle ordering, card identity, and exact-ID completion each have one owner, leaving callers to coordinate IPC or network work. |
-| **Total** | **86/100** | **95/100** | Equal weights; same rubric in each round. |
+| Dimension      | Broad baseline |    Current | Evidence                                                                                                                                                                                                                            |
+| -------------- | -------------: | ---------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Module depth   |          22/25 |      24/25 | `NodeState` owns host lifecycle tickets and retirement; `DeliveryStore` prepares the outgoing manifest transaction and derives File cards; conversation state settles sends behind one transition interface.                        |
+| Seam integrity |          21/25 |      24/25 | Host commands delegate lifecycle changes to `NodeState`; send/receive file paths share store-owned card construction; frontend send orchestration delegates cache, deletion, and intent completion rules to `conversationState.ts`. |
+| Test surface   |          23/25 |      24/25 | Existing registered-command and Node runtime tests exercise the host and file interfaces; new public store-action tests cover late accepted sends after cache eviction and authoritative file metadata arriving before acceptance.  |
+| Locality       |          20/25 |      23/25 | Lifecycle ordering, card identity, and exact-ID completion each have one owner, leaving callers to coordinate IPC or network work.                                                                                                  |
+| **Total**      |     **86/100** | **95/100** | Equal weights; same rubric in each round.                                                                                                                                                                                           |
 
 ## Rounds
 

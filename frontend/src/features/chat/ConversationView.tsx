@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { AnimatePresence, motion } from "framer-motion";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   ChevronDown,
   CircleAlert,
@@ -24,12 +22,6 @@ import {
   messageRowKey,
   useConversationViewport,
 } from "./useConversationViewport";
-import {
-  IMAGE_EXTENSIONS,
-  VIDEO_EXTENSIONS,
-  isImage,
-  isVideo,
-} from "@/lib/mediaTypes";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
 import { PendingChannelInvite } from "./PendingChannelInvite";
@@ -48,33 +40,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { chat as chatApi } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
 import { rosterProjection } from "@/lib/rosterProjection";
 import { mentionsName } from "@/lib/mentions";
 import { formatDay } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
-import {
-  convKey,
-  displayName,
-  useChat,
-  captureChatOwnership,
-  type ChatMessage,
-} from "@/store/chat";
+import { convKey, displayName, useChat, type ChatMessage } from "@/store/chat";
+import { useAttachmentIntake } from "./attachments/useAttachmentIntake";
 import type { ReactionInfo } from "@/lib/types";
-
-function captureComposer() {
-  const lease = captureChatOwnership();
-  const active = useChat.getState().active;
-  const key = active ? convKey(active) : null;
-  return () =>
-    lease.current() &&
-    key !== null &&
-    useChat.getState().active !== null &&
-    convKey(useChat.getState().active!) === key;
-}
 
 /** A quiet centered date separator between days in the message log. */
 function DaySeparator({ label }: { label: string }) {
@@ -101,8 +75,11 @@ export function ConversationView() {
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
   const retry = useChat((s) => s.retry);
-  const sendFile = useChat((s) => s.sendFile);
-  const setError = useChat((s) => s.setError);
+  const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(
+    300_000,
+  );
+  const expiresAtSend = () =>
+    expiryDurationMs === null ? null : Date.now() + expiryDurationMs;
   const toggleReaction = useChat((s) => s.toggleReaction);
   const openConversation = useChat((s) => s.open);
   const deleteMessage = useChat((s) => s.deleteMessage);
@@ -114,24 +91,10 @@ export function ConversationView() {
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
   useEffect(() => setMemberProfile(null), [active?.id]);
-  const [screenshotBytes, setScreenshotBytes] = useState<Uint8Array | null>(
-    null,
-  );
-  const [screenshotAvailable, setScreenshotAvailable] = useState(false);
-  useEffect(() => {
-    let active = true;
-    void chatApi.screenshotAvailable().then(
-      (available) => {
-        if (active) setScreenshotAvailable(available);
-      },
-      () => {
-        if (active) setScreenshotAvailable(false);
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, []);
+  const attachments = useAttachmentIntake(t, {
+    expiresAtSend,
+    onHandoff: () => setExpiryDurationMs(300_000),
+  });
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
   const myId = useChat((s) => s.myId);
@@ -171,67 +134,6 @@ export function ConversationView() {
     historyError,
     searchTarget,
   );
-
-  // Native (Tauri) drag-and-drop: dropping file(s) onto the conversation sends them there.
-  // The webview drag-drop event is global, so we subscribe once and read the latest
-  // active conversation / sendFile through refs (avoids re-subscribing on every change).
-  const [dragOver, setDragOver] = useState(false);
-  const activeRef = useRef(active);
-  const archivedRef = useRef(false);
-  const sendFileRef = useRef(sendFile);
-  const setErrorRef = useRef(setError);
-  activeRef.current = active;
-  archivedRef.current =
-    active?.kind === "channel" &&
-    channels.some(
-      (channel) =>
-        channel.channel_id === active.id &&
-        (channel.archived ||
-          channel.dissolved ||
-          channel.left ||
-          channel.pending_invite),
-    );
-  sendFileRef.current = sendFile;
-  setErrorRef.current = setError;
-  useEffect(() => {
-    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      const p = event.payload;
-      if (p.type === "over") {
-        setDragOver(activeRef.current != null && !archivedRef.current);
-      } else if (p.type === "leave") {
-        setDragOver(false);
-      } else if (p.type === "drop") {
-        setDragOver(false);
-        if (!activeRef.current || archivedRef.current) return;
-        const lease = captureChatOwnership();
-        const key = convKey(activeRef.current);
-        const current = () =>
-          lease.current() &&
-          useChat.getState().active != null &&
-          convKey(useChat.getState().active!) === key;
-        void (async () => {
-          for (const path of p.paths) {
-            if (!current()) return;
-            try {
-              // An image/video dropped here is sent as MEDIA (inline preview) — same as the
-              // image button; any other file is a generic attachment. (`isImage`/`isVideo`
-              // match the path's extension.)
-              const media = isImage(path) || isVideo(path);
-              await sendFileRef.current(path, media);
-            } catch (e) {
-              if (current())
-                setErrorRef.current(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }
-        })();
-      }
-    });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
-  }, [t]);
 
   const [reply, setReply] = useState<{
     key: string;
@@ -298,36 +200,6 @@ export function ConversationView() {
     [active, members],
   );
 
-  // Route picked/pasted media bytes through the normal file-send pipeline: write to a temp
-  // file, then send the path. `name` (the picker has one) is kept so the real filename +
-  // extension survive to the chat list and the inline preview.
-  const sendImageBytes = async (
-    bytes: Uint8Array,
-    ext: string,
-    name?: string,
-  ) => {
-    const lease = captureComposer();
-    if (!lease()) return false;
-    try {
-      const tempPath = await chatApi.writeTempFile(
-        Array.from(bytes),
-        ext,
-        name,
-      );
-      if (!lease()) {
-        await chatApi.deleteTempFile(tempPath).catch(() => {});
-        return false;
-      }
-      // Image button / paste / screenshot → media intent (inline preview).
-      await sendFile(tempPath, true);
-      return true;
-    } catch (e) {
-      if (lease())
-        setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
-      throw e;
-    }
-  };
-
   if (!active) {
     return (
       <main
@@ -391,7 +263,7 @@ export function ConversationView() {
       onClickCapture={() => useChat.getState().markActiveRead()}
     >
       <AnimatePresence>
-        {dragOver && (
+        {attachments.dragOver && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -718,7 +590,9 @@ export function ConversationView() {
         </div>
       ) : (
         <Composer
-          screenshotAvailable={screenshotAvailable}
+          expiryDurationMs={expiryDurationMs}
+          onExpiryDurationChange={setExpiryDurationMs}
+          screenshotAvailable={attachments.screenshotAvailable}
           key={key}
           initialDraft={drafts.current.get(key) ?? ""}
           onDraftChange={(text) => {
@@ -734,139 +608,33 @@ export function ConversationView() {
           myName={myName}
           replyTo={replyTo}
           prefill={prefill?.key === key ? prefill : null}
-          onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
+          onSendSticker={(id, fallback) => {
+            void sendSticker(id, fallback, expiresAtSend());
+            setExpiryDurationMs(300_000);
+          }}
           onCancelReply={() => setReply(null)}
-          onAttach={async () => {
-            const current = captureComposer();
-            if (!current()) return;
-            try {
-              const path = await openFileDialog({ multiple: false });
-              // Attach button → generic attachment (lands in the received-files tray).
-              if (current() && typeof path === "string")
-                await sendFile(path, false);
-            } catch (e) {
-              if (current())
-                setError(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }}
-          onAttachDirectory={async () => {
-            const current = captureComposer();
-            if (!current()) return;
-            try {
-              const path = await openFileDialog({
-                directory: true,
-                multiple: false,
-              });
-              if (current() && typeof path === "string")
-                await sendFile(path, false);
-            } catch (e) {
-              if (current())
-                setError(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }}
-          onImage={async () => {
-            const current = captureComposer();
-            if (!current()) return;
-            // Image button → the NATIVE file dialog (a JS `<input type=file>` is flaky in
-            // WKWebView and silently no-ops), filtered to media, sent with `media: true` so it
-            // previews inline. Path-based, so no multi-MB bytes round-trip over IPC.
-            try {
-              const path = await openFileDialog({
-                multiple: false,
-                filters: [
-                  {
-                    name: "Images & Video",
-                    extensions: [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS],
-                  },
-                ],
-              });
-              if (current() && typeof path === "string")
-                await sendFile(path, true);
-            } catch (e) {
-              if (current())
-                setError(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }}
+          onAttach={attachments.attachFile}
+          onAttachDirectory={attachments.attachDirectory}
+          onImage={attachments.pickMedia}
           onSend={(t) => {
-            const accepted = admitText(t, replyTo?.id ?? null);
+            const accepted = admitText(t, replyTo?.id ?? null, expiresAtSend());
             if (accepted) {
+              setExpiryDurationMs(300_000);
               setReply(null);
               setPrefill(null);
             }
             return accepted;
           }}
-          onPasteFiles={async (files) => {
-            const current = captureComposer();
-            for (const file of files) {
-              if (!current()) return;
-              try {
-                // The temp-file IPC accepts at most 64 MiB. Reject before materializing a
-                // large File as a JSON byte array in the webview.
-                if (file.size > 64 * 1024 * 1024)
-                  throw new Error(
-                    "Copied file exceeds 64 MB; use Attach instead",
-                  );
-                const ext =
-                  file.name.split(".").pop() ||
-                  file.type.split("/")[1] ||
-                  "bin";
-                const path = await chatApi.writeTempFile(
-                  Array.from(new Uint8Array(await file.arrayBuffer())),
-                  ext,
-                  file.name || undefined,
-                );
-                if (!current()) return;
-                await sendFile(
-                  path,
-                  file.type.startsWith("image/") ||
-                    isImage(file.name) ||
-                    isVideo(file.name),
-                );
-              } catch (e) {
-                if (current())
-                  setError(
-                    t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                  );
-                throw e;
-              }
-            }
-          }}
-          onScreenshot={async (hideWindow) => {
-            const current = captureComposer();
-            if (!current()) return;
-            try {
-              const bytes = await chatApi.captureScreen(hideWindow);
-              // Empty bytes = the user cancelled the capture: send nothing.
-              if (current() && bytes.length > 0) setScreenshotBytes(bytes);
-            } catch (e) {
-              if (!current()) return;
-              const msg = errorMessage(e);
-              // The backend returns this sentinel when macOS Screen Recording isn't granted
-              // (otherwise screencapture silently yields only the desktop wallpaper).
-              setError(
-                msg.includes("screen-recording-permission")
-                  ? t("screenshot.permission")
-                  : t("screenshot.failed", { error: msg }),
-              );
-            }
-          }}
+          onPasteFiles={attachments.pasteFiles}
+          onScreenshot={attachments.captureScreenshot}
         />
       )}
-      {screenshotBytes && (
+      {attachments.screenshotBytes && (
         <ScreenshotEditor
-          bytes={screenshotBytes}
+          bytes={attachments.screenshotBytes}
           initialRegion={isMacOverlay()}
-          onCancel={() => setScreenshotBytes(null)}
-          onSend={async (bytes) => {
-            await sendImageBytes(bytes, "png");
-            setScreenshotBytes(null);
-          }}
+          onCancel={attachments.cancelScreenshot}
+          onSend={attachments.sendScreenshot}
         />
       )}
       <MemberProfileDialog

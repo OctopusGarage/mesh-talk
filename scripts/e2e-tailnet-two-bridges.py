@@ -164,11 +164,11 @@ def main(host, windows_host=None):
             if windows_host:
                 windows_dir = windows_ssh(
                     windows_host,
-                    f"$path = Join-Path $env:TEMP 'mesh-talk-two-bridges-{base}'; "
+                    f"$path = Join-Path 'D:\\' 'mesh-talk-two-bridges-{base}'; "
                     "New-Item -ItemType Directory -Force -Path $path | Out-Null; "
                     "Write-Output $path",
                 ).stdout.strip().replace("\\", "/")
-                if not re.match(r"^[A-Za-z]:/.*mesh-talk-two-bridges-\d+$", windows_dir):
+                if not re.match(r"^D:/mesh-talk-two-bridges-\d+$", windows_dir):
                     raise AssertionError("Unexpected Windows temporary directory")
                 subprocess.run([
                     "scp", "-q", str(windows_binary),

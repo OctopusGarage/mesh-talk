@@ -43,6 +43,22 @@ const { chatState, policyState } = vi.hoisted(() => ({
   },
 }));
 
+// Substitute only virtualization layout: keep the real section and row rendering.
+vi.mock("react-virtuoso", () => ({
+  Virtuoso: ({
+    data,
+    itemContent,
+  }: {
+    data: unknown[];
+    itemContent: (index: number, item: unknown) => React.ReactNode;
+  }) =>
+    createElement(
+      "div",
+      { "data-testid": "virtual-section" },
+      data.map((item, index) => itemContent(index, item)),
+    ),
+}));
+
 vi.mock("@/store/chat", () => ({
   useChat: (selector: (state: typeof chatState) => unknown) =>
     selector(chatState),
@@ -194,4 +210,40 @@ it("shows a left channel status ahead of its last message", () => {
   const html = renderToStaticMarkup(createElement(Sidebar));
   expect(html).toContain('aria-label="Study, Left channel"');
   expect(html).not.toContain("Old message");
+});
+
+it.each([81, 82])(
+  "preserves account order, preview and navigation positions with %i contacts",
+  (count) => {
+    chatState.accounts = Array.from({ length: count }, (_, index) => ({
+      account_id: `person-${index}`,
+      names: [`Person ${index}`],
+      device_count: 1,
+    }));
+    chatState.channels = [
+      { channel_id: "group", name: "Study", owner: "me", member_count: 3 },
+    ];
+    chatState.favorites = {
+      "person-0": { pinned: true, custom_alias: "First" },
+    };
+    const html = renderToStaticMarkup(createElement(Sidebar));
+    expect(html).toContain('data-nav-position="1"');
+    expect(html).toContain(`data-nav-position="${count + 1}"`);
+    expect(html).toContain('aria-label="First, Offline"');
+    expect(html).toContain('aria-label="Study, 3 members"');
+    expect(html.includes('data-testid="virtual-section"')).toBe(count === 82);
+    expect(html.indexOf('conversation-row-person-1"')).toBeLessThan(
+      html.indexOf('conversation-row-group"'),
+    );
+  },
+);
+
+it("does not reveal contact rows before the visibility policy has loaded", () => {
+  policyState.loaded = false;
+  try {
+    const html = renderToStaticMarkup(createElement(Sidebar));
+    expect(html).not.toContain('data-testid="conversation-row-alice"');
+  } finally {
+    policyState.loaded = true;
+  }
 });

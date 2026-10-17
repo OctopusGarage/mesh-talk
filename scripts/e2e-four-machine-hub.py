@@ -137,10 +137,10 @@ def run():
             z_id = FOUR.identity(z, "node")
 
             windows_dir = FOUR.windows(
-                f"$path = Join-Path $env:TEMP 'mesh-talk-hub-e2e-{base}'; "
+                f"$path = Join-Path 'D:\\' 'mesh-talk-hub-e2e-{base}'; "
                 "New-Item -ItemType Directory -Force -Path $path | Out-Null; Write-Output $path"
             ).splitlines()[-1].strip().replace("\\", "/")
-            if not re.match(r"^[A-Za-z]:/.*mesh-talk-hub-e2e-\d+$", windows_dir):
+            if not re.match(r"^D:/mesh-talk-hub-e2e-\d+$", windows_dir):
                 raise AssertionError(f"Unexpected Windows temp directory: {windows_dir}")
             subprocess.run(["scp", "-q", str(FOUR.WINDOWS),
                             f"{FOUR.WINDOWS_HOST}:{windows_dir}/mesh-talk-node.exe"],

@@ -1,0 +1,44 @@
+{
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-TRAY-001",
+      "name": "native tray menu presents useful actions and an accurate unread summary",
+      "subject_file": "src-tauri/src/tray.rs",
+      "min_score": 0.85,
+      "scenario": "Review the native tray menu implementation. Users need to open or hide the window, see an unread summary, and reach existing diagnostics, settings, and About dialogs. Judge source behavior only; do not claim a native visual or interaction test ran.",
+      "rubric": [
+        "The native menu groups primary access, utility actions, and window or lifecycle actions with separators and clear labels.",
+        "Unread title, tooltip, and menu summary handle zero, singular, and large counts without showing message previews or contact names.",
+        "Navigation actions show and focus the main window before emitting their known destination, while hide and quit retain their explicit behavior.",
+        "Unread updates use the same registered tray and retained native menu item; the menu remains owned for the app lifetime."
+      ]
+    },
+    {
+      "id": "MT-TRAY-002",
+      "name": "tray navigation works independently of the sidebar popover",
+      "subject_file": "frontend/src/features/chat/sidebar/SidebarUtilities.tsx",
+      "min_score": 0.85,
+      "scenario": "A tray event arrives while the signed-in sidebar overflow menu is closed, or while a different utility dialog is open. Verify all three destinations can open from the always-mounted component without stacking utility dialogs. Ignore unrelated sidebar presentation.",
+      "rubric": [
+        "The listener is registered in an always-mounted utility component, and settings, diagnostics, and About dialog instances are outside the conditional popover content.",
+        "Each known destination opens its matching dialog and closes other utility dialogs; unknown destinations leave state unchanged.",
+        "The event listener is cleaned up on unmount, including when asynchronous registration finishes after unmount.",
+        "The sidebar About action still opens the same controlled dialog. Do not infer native window activation or signed-out navigation behavior from this frontend source."
+      ]
+    },
+    {
+      "id": "MT-TRAY-003",
+      "name": "About supports a controlled tray entry without adding a second trigger",
+      "subject_file": "frontend/src/features/chat/AboutDialog.tsx",
+      "min_score": 0.85,
+      "scenario": "The always-mounted utility component controls About from a tray action or sidebar action. Review controlled open and close behavior, optional trigger rendering, and preservation of the existing About content.",
+      "rubric": [
+        "Controlled open and onOpenChange support opening and dismissing the dialog, with local state available for existing standalone callers.",
+        "The trigger can be hidden without hiding the dialog content, so the external sidebar trigger does not produce a duplicate button.",
+        "Version data loads when opened, and the existing update panel and project or license links remain available.",
+        "About does not register a tray listener inside conditionally mounted popover content."
+      ]
+    }
+  ]
+}

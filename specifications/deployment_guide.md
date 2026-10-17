@@ -18,10 +18,12 @@ This guide provides instructions for deploying Mesh-Talk on different platforms 
 Before deploying Mesh-Talk, ensure you have the following tools installed:
 
 ### Rust Toolchain
+
 - Rust compiler and Cargo (latest stable version)
 - Installation: https://www.rust-lang.org/tools/install
 
 ### Node.js and npm
+
 - Node.js 22 or newer (the version used by CI)
 - npm (comes with Node.js)
 - Installation: https://nodejs.org/
@@ -29,14 +31,17 @@ Before deploying Mesh-Talk, ensure you have the following tools installed:
 ### Platform-Specific Dependencies
 
 #### macOS
+
 - Xcode Command Line Tools: `xcode-select --install`
 - Additional dependencies will be automatically handled by Tauri
 
 #### Windows
+
 - Visual Studio Build Tools or Visual Studio Community
 - WebView2 Runtime (usually pre-installed on Windows 10+)
 
 #### Linux
+
 - Development packages for GTK and WebKit
 - For Debian/Ubuntu builds: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf`
 
@@ -52,11 +57,13 @@ verification, and a persistent Docker Engine setup.
 ### Building the node
 
 1. Navigate to the project root directory:
+
    ```bash
    cd mesh-talk
    ```
 
 2. Build the node binary (the bin lives in the `mesh-talk-core` crate):
+
    ```bash
    cargo build --release -p mesh-talk-core --bin mesh-talk-node
    ```
@@ -75,6 +82,7 @@ verification, and a persistent Docker Engine setup.
 ```
 
 Parameters:
+
 - `--keystore`: path to the encrypted identity keystore (created if absent) — **required**
 - `--password` or `--password-file`: password that encrypts the keystore and
   relay log — **one is required**. A service should use a private regular file
@@ -84,17 +92,27 @@ Parameters:
   identity and ciphertext unreadable.
 - `--name`: this node's display name on the LAN — **required**
 - `--port`: TCP port for peer connections (default: OS-assigned)
-- `--discovery-port`: UDP discovery port (default: 47474; must match across peers)
+- `--discovery-port`: UDP discovery port (default: 47474; local discovery shares a port, while routed probing can target an explicit remote port)
 - `--post-office`: run in relay mode (stores-and-forwards recipient-encrypted
   opaque event wrappers for offline peers)
 
-Desktop users can turn off use of discovered relays in **Settings → Privacy & security →
-Use post-office relays**. The account-scoped preference is on by default and takes
+Desktop users can turn off use of discovered relays in **Settings → Connection & delivery →
+Use post-office relays**. The per-device preference is on by default and takes
 effect on the running node. Turning it off stops that device's relay uploads and
 downloads, so offline delivery may wait until a peer is reachable directly.
-Several relay machines may advertise on the same LAN; clients select the
-lowest-fingerprint available relay. These are standbys, not replicated
-storage; a sender must retry when election changes. The production relay rejects old
+Several relays may advertise on one LAN. Clients support a preferred directly
+reachable LAN/Tailscale relay with eligible alternatives; an alternative must have
+a surviving onward route for cross-site delivery. Independent mailbox-only relays
+do not replicate automatically. Equal bridge relays can reconcile eligible opaque
+mailboxes after explicit enrollment through a shared public trust manifest. See
+[the federation deployment workflow](../docs/post-office-federation.md).
+
+**Settings → Connection & delivery** also exposes independent relay sending/receiving,
+public bridge discovery and physical-LAN-only discovery. Master-off overrides relay
+data/directory participation without erasing saved preferences. See
+[the settings contract](../docs/network-design-reference.md#4-settings-and-deployment-configuration).
+
+The production relay rejects old
 clear-header uploads. It cannot read the inner event or channel names, but
 its authenticated connections and timing can reveal communication patterns.
 Pending events stored only in the older clear-header format require the
@@ -108,6 +126,7 @@ firewall must permit UDP 47474 (multicast 224.0.0.167) and the chosen TCP port.
 ### Installing the node system-wide
 
 #### macOS/Linux
+
 ```bash
 sudo cp target/release/mesh-talk-node /usr/local/bin/
 ```
@@ -122,6 +141,7 @@ when that user logs out. See the [macOS relay service runbook](../docs/post-offi
 for the deployed `mac2015` paths and health commands.
 
 #### Windows
+
 Copy the `mesh-talk-node.exe` file to a directory in your PATH, or add the target directory to your PATH environment variable.
 For an always-on relay, install it as a `SYSTEM` Scheduled Task with a private
 password file and LAN-scoped firewall rules. See the
@@ -135,11 +155,13 @@ The GUI version of Mesh-Talk provides a desktop application with a graphical int
 ### Building the GUI Version
 
 1. Navigate to the project root directory:
+
    ```bash
    cd mesh-talk
    ```
 
 2. Install frontend dependencies:
+
    ```bash
    cd frontend
    npm install
@@ -163,6 +185,7 @@ packs later and use the same app identity. See
 You can customize the build with the following options:
 
 - Build for a specific platform:
+
   ```bash
   cargo tauri build --target x86_64-apple-darwin    # macOS
   cargo tauri build --target x86_64-pc-windows-msvc # Windows
@@ -190,15 +213,19 @@ checksums and verification artifacts:
 ### macOS
 
 #### Prerequisites
+
 - Xcode Command Line Tools
 
 #### Installation
+
 1. Download the `.dmg` file or use the `.app` bundle
 2. Drag the Mesh-Talk application to your Applications folder
 3. Launch from Applications or Spotlight search
 
 #### Code Signing (for distribution)
+
 For distribution outside the App Store, you may need to code sign the application:
+
 ```bash
 # This requires an Apple Developer account
 codesign --force --deep --sign "Developer ID Application: YOUR_NAME" /path/to/mesh-talk.app
@@ -207,10 +234,12 @@ codesign --force --deep --sign "Developer ID Application: YOUR_NAME" /path/to/me
 ### Windows
 
 #### Prerequisites
+
 - Windows 10 or higher
 - WebView2 Runtime (usually pre-installed)
 
 #### Installation
+
 1. Download the `.msi` installer
 2. Run the installer and follow the installation wizard
 3. Launch from the Start menu
@@ -218,17 +247,20 @@ codesign --force --deep --sign "Developer ID Application: YOUR_NAME" /path/to/me
 ### Linux
 
 #### Prerequisites
+
 - A distribution with the Tauri 2 WebKit/GTK runtime dependencies
 
 #### Installation Options
 
 ##### Using .deb Package (Debian/Ubuntu)
+
 ```bash
 sudo dpkg -i mesh-talk_x.x.x_amd64.deb
 sudo apt-get install -f  # Fix any dependency issues
 ```
 
 ##### Using AppImage
+
 1. Download the `.AppImage` file
 2. Make it executable:
    ```bash
@@ -237,6 +269,7 @@ sudo apt-get install -f  # Fix any dependency issues
 3. Run directly or move to `/usr/local/bin/` for system-wide access
 
 #### System Integration
+
 The `.deb` package adds a desktop launcher; inspect the package contents if you
 need its exact installed paths on your distribution.
 
@@ -245,7 +278,9 @@ need its exact installed paths on your distribution.
 ### Common Build Issues
 
 #### Missing Dependencies
+
 If you encounter missing dependencies during build:
+
 ```bash
 # macOS
 xcode-select --install
@@ -258,13 +293,17 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
 ```
 
 #### Rust Compilation Errors
+
 Update your Rust toolchain:
+
 ```bash
 rustup update
 ```
 
 #### Node.js Version Issues
+
 Ensure you're using a compatible Node.js version:
+
 ```bash
 node --version  # CI uses Node.js 22
 ```
@@ -272,11 +311,13 @@ node --version  # CI uses Node.js 22
 ### Runtime Issues
 
 #### Application Won't Start
+
 1. Check that all prerequisites are installed
 2. Verify the application has necessary permissions
 3. Check system logs for error messages
 
 #### Network Discovery Not Working
+
 1. Ensure UDP port 47474 (multicast group 224.0.0.167) is not blocked by firewall
 2. For automatic LAN discovery, check that nodes share a local network segment;
    for routed or bridged discovery, check the configured network path and client
@@ -286,9 +327,11 @@ node --version  # CI uses Node.js 22
    entitlement so the OS permits multicast
 
 #### Local Storage Issues
+
 Mesh-Talk keeps protocol and account data as encrypted files under `~/.mesh-talk`.
 Optional installed packs are kept separately in the webview's IndexedDB, and some
 UI preferences use local storage. If an encrypted account store appears corrupt:
+
 1. Close the application
 2. Back up and remove the affected per-account directory under `~/.mesh-talk/accounts/`
 3. Restart the application to re-create the stores (history not held by a peer/post office is lost)
@@ -296,17 +339,20 @@ UI preferences use local storage. If an encrypted account store appears corrupt:
 ### Platform-Specific Troubleshooting
 
 #### macOS
+
 - If Gatekeeper prevents the app from opening:
   - Right-click the app and select "Open"
   - See the first-run instructions in the root README for an unsigned build
 
 #### Windows
+
 - If WebView2 is missing:
   - Download and install from https://developer.microsoft.com/en-us/microsoft-edge/webview2/
 - If SmartScreen blocks the installer:
   - Click "More info" and then "Run anyway"
 
 #### Linux
+
 - If the AppImage won't run:
   - Install FUSE: `sudo apt install fuse`
   - Or run with: `./mesh-talk.AppImage --no-sandbox`
@@ -314,6 +360,7 @@ UI preferences use local storage. If an encrypted account store appears corrupt:
 ## Support
 
 For additional help, please:
+
 1. Check the project documentation
 2. Search existing issues on the project's GitHub repository
 3. Create a new issue with detailed information about your problem

@@ -49,10 +49,10 @@ export default tseslint.config(
         "error",
         {
           patterns: [
-            "@/store/*",
-            "@/features/*",
-            "../../store/*",
-            "../../features/*",
+            "@/store/**",
+            "@/features/**",
+            "**/store/**",
+            "**/features/**",
           ],
         },
       ],

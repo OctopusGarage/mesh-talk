@@ -19,6 +19,7 @@ pub(crate) mod bridge_directory;
 pub(crate) mod call;
 pub(crate) mod channel;
 pub(crate) mod channel_custody;
+mod channel_projection_cache;
 pub(crate) mod channel_senders;
 pub(crate) mod channels;
 pub(crate) mod conversation;
@@ -30,9 +31,16 @@ pub(crate) mod delivery_store;
 pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
+pub(crate) mod expiry_policy;
 mod file_completion;
+mod file_consent;
+mod file_consent_store;
+#[cfg(test)]
+mod file_consent_tests;
 pub(crate) mod filebook;
 pub(crate) mod files;
+#[cfg(test)]
+mod group_chain_tests;
 pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;
@@ -41,6 +49,9 @@ pub(crate) mod name_directory;
 pub(crate) mod node;
 mod opaque_relay;
 pub(crate) mod pairing;
+mod participant_runtime;
+#[cfg(test)]
+mod participant_runtime_tests;
 pub(crate) mod peer_directory;
 pub(crate) mod postbox;
 pub(crate) mod privacy;
@@ -59,12 +70,16 @@ pub(crate) mod recall;
 pub(crate) mod received_log;
 pub(crate) mod recovered_sent_ids;
 pub(crate) mod recovery;
+mod relay_policy;
 pub(crate) mod runtime;
 mod runtime_work;
 mod search;
 pub(crate) mod sentlog;
 pub(crate) mod serving;
 pub(crate) mod session;
+mod session_pool;
+#[cfg(test)]
+mod test_support;
 pub(crate) mod transport;
 pub(crate) mod wire;
 
@@ -91,13 +106,16 @@ pub use node::{
     SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
+pub use participant_runtime::{
+    ParticipantConfig, ParticipantRuntime, ParticipantWork, PreparedParticipant,
+};
 pub use postbox::{
     elected_post_office, run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
-    run_relay_accept_loop,
+    run_federated_relay_accept_loop_with_directory, run_relay_accept_loop,
 };
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{ReactionPayload, ReactionView, aggregate};
 pub use received_log::{ReceivedEntry, ReceivedLog};
-pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents};
+pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeNetworkOptions};

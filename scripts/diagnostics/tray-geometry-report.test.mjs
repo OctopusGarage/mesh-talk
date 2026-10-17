@@ -17,7 +17,7 @@ function evidence() {
   return { applicationPid: 42, windowId: "123", rounds: [0, 1, 2].map(() => ({
     target: geometry, before: { ...geometry, mapped: true }, hidden: { mapped: false },
     after: { ...geometry, mapped: true }, applicationPid: 42, windowId: "123",
-    tray: { ownerPid: 42, label: "Show", clicked: true },
+    tray: { ownerPid: 42, label: "Open Mesh-Talk", clicked: true },
   })) };
 }
 test("valid native rounds with unchanged geometry are observations, not proof on every desktop", () => {

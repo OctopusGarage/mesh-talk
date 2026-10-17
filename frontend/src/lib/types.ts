@@ -29,6 +29,10 @@ export interface PeerInfo {
   name: string;
   addr: string;
   post_office: boolean;
+  /** Directly discovered LAN route; absent only with an older desktop backend. */
+  discovered_on_lan?: boolean;
+  /** Known direct application route; transport rechecks connectivity and identity. */
+  directly_reachable?: boolean;
   account_id: string | null;
 }
 
@@ -137,6 +141,7 @@ export interface DiagPeerInfo {
   name: string;
   ip: string;
   tcp_port: number;
+  via_gateway?: boolean;
   post_office: boolean;
   account_id: string | null;
   last_seen_secs: number;
@@ -183,9 +188,12 @@ export interface AppSettings {
   calls_enabled: boolean;
   /** Use an available LAN post-office relay for offline delivery. */
   post_office_enabled: boolean;
+  post_office_send_enabled: boolean;
+  post_office_receive_enabled: boolean;
+  physical_lan_only: boolean;
   /** Share public presence through an opt-in post-office bridge. */
   bridge_discovery_enabled: boolean;
-  /** Full fingerprint of the shared cross-site post-office hub (empty = normal election). */
+  /** Preferred directly reachable post-office fingerprint; empty selects automatically with eligible alternatives. */
   bridge_hub_id: string;
   /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */
   ringtone: string;

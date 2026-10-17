@@ -688,9 +688,9 @@
           <div class="section__head reveal">
             <h2>Across LANs, when you choose.</h2>
             <p>
-              For a group spread across sites, an opt-in post-office bridge
-              introduces registered peers through pinned relays. Participating
-              devices can exchange encrypted DMs through a shared mailbox.
+              For a group spread across sites, equal post offices exchange
+              signed presence from opted-in devices and forward encrypted
+              mailboxes through reachable, identity-pinned relay paths.
             </p>
           </div>
           <div
@@ -712,19 +712,18 @@
             </div>
             <div class="bridge__site">
               <span class="bridge__label">LAN Y</span>
-              <strong>Pinned relay and local peers</strong>
-              <p>
-                Opted-in devices exchange encrypted DMs through one mailbox.
-              </p>
+              <strong>Local peers and post office</strong>
+              <p>Either relay can hold and forward encrypted messages.</p>
             </div>
           </div>
           <p class="bridge__note">
-            This introduces participating devices; it does not join IP subnets,
-            replicate mailboxes, or establish cross-network calls and file
-            transfer.
+            Relays synchronize encrypted mailboxes while a path exists and
+            retain bounded copies when it fails. Message and file payloads stay
+            encrypted; calls need their own live signaling and media paths.
+            Relays do not join IP subnets.
             <a
-              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/network-topologies.md"
-              >See supported topologies</a
+              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/network-design-reference.md"
+              >Read the communication architecture</a
             >
             and
             <a

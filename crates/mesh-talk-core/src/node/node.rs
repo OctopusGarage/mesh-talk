@@ -253,6 +253,9 @@ type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) sessions: super::session_pool::SessionPool,
+    pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
+    pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
@@ -269,6 +272,8 @@ pub struct Node {
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     /// Host preference. Relay selection and every relay dial consult this live flag.
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
+    pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
+    pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
     /// Session-only IDs of relay envelopes already processed. Losing this cache
     /// on restart causes a safe re-download, never a lost inner event.
     pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
@@ -301,6 +306,10 @@ pub struct Node {
     pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
     pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
+    pub(in crate::node) channel_projection_cache:
+        Mutex<super::channel_projection_cache::ChannelProjectionCache>,
+    #[cfg(test)]
+    pub(in crate::node) channel_projection_replays: std::sync::atomic::AtomicUsize,
     /// Fixed read-only summaries recovered from previous devices at open time.
     pub(in crate::node) archived_channels: Vec<ChannelSummary>,
     /// Public author of the device that produced a restored local history.
@@ -330,6 +339,8 @@ pub struct Node {
     pub(in crate::node) pending_files: Mutex<HashSet<ConversationId>>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
     pub(in crate::node) attachment_consent: Mutex<super::attachment_consent::AttachmentConsent>,
+    /// Durable pairwise file-consent controls, separate from local receive policy.
+    pub(in crate::node) file_consent: Mutex<super::file_consent_store::FileConsentStore>,
     /// Durable chat-media store under `<account_dir>/media`: the plaintext bytes of
     /// image/screenshot/video messages, copied here on send + receive-complete so the
     /// inline preview loads from a durable source that survives chunk prune + restart.
@@ -344,6 +355,7 @@ pub struct Node {
     /// Last authenticated recipient answer for each outgoing manifest destination.
     pub(in crate::node) outgoing_file_consents:
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
+    pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
     /// Exact device fingerprints the host user has safety-number verified for
@@ -351,9 +363,12 @@ pub struct Node {
     pub(in crate::node) verified_dm_pull_peers: Mutex<HashSet<UserId>>,
     /// Ephemeral identities introduced by an explicitly enabled bridge relay.
     pub(in crate::node) bridge_dm_pull_peers: Mutex<HashMap<UserId, std::time::Instant>>,
+    pub(in crate::node) physical_lan_only: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
+    pub(in crate::node) bridge_refresh: tokio::sync::Mutex<()>,
+    pub(in crate::node) bridge_generation: std::sync::atomic::AtomicU64,
     pub(in crate::node) delivery_control_ids:
         Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
     pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
@@ -470,6 +485,7 @@ impl Node {
             profiles_res,
             recalls_res,
             consent_res,
+            consent_controls_res,
             origin_res,
             contacts_res,
             recovered_ids_res,
@@ -502,6 +518,12 @@ impl Node {
                     password,
                 )
             });
+            let h_consent_controls = s.spawn(|| {
+                super::file_consent_store::FileConsentStore::open(
+                    &dir.join("file-consent-controls.log"),
+                    password,
+                )
+            });
             let h_origin = s.spawn(|| {
                 super::recovery::load_recovery_origins(&dir.join("recovery-origin.log"), password)
             });
@@ -530,6 +552,7 @@ impl Node {
                 h_profiles.join(),
                 h_recalls.join(),
                 h_consent.join(),
+                h_consent_controls.join(),
                 h_origin.join(),
                 h_contacts.join(),
                 h_recovered_ids.join(),
@@ -554,6 +577,7 @@ impl Node {
             });
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
             .unwrap_or_else(|e| std::panic::resume_unwind(e))?
             .into_iter()
@@ -688,6 +712,8 @@ impl Node {
             password,
         )?;
         let node = Arc::new(Self {
+            expiry_clock_start: (std::time::Instant::now(), now_millis()),
+            expiry_first_seen: Mutex::new(HashMap::new()),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
@@ -732,6 +758,9 @@ impl Node {
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
+            channel_projection_cache: Mutex::new(Default::default()),
+            #[cfg(test)]
+            channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             channel_last_send: Mutex::new(None),
             emitted: Mutex::new(emitted),
@@ -739,21 +768,29 @@ impl Node {
             files: Mutex::new(files),
             pending_files: Mutex::new(HashSet::new()),
             attachment_consent: Mutex::new(attachment_consent),
+            file_consent: Mutex::new(file_consent),
             media,
             dm_ratchet: Mutex::new(dm_ratchet),
             delivery: Mutex::new(delivery),
             outgoing_file_acks: Mutex::new(HashMap::new()),
             outgoing_file_consents: Mutex::new(HashMap::new()),
+            channel_recovery_notify: tokio::sync::Notify::new(),
             delivery_notify: tokio::sync::Notify::new(),
             delivery_status_notify: tokio::sync::Notify::new(),
             verified_dm_pull_peers: Mutex::new(HashSet::new()),
             bridge_dm_pull_peers: Mutex::new(HashMap::new()),
+            physical_lan_only: std::sync::atomic::AtomicBool::new(false),
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
             bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
+            bridge_refresh: tokio::sync::Mutex::new(()),
+            sessions: super::session_pool::SessionPool::default(),
+            bridge_generation: std::sync::atomic::AtomicU64::new(0),
             delivery_control_ids: Mutex::new(delivery_control_ids),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
+            post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
+            post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
             opaque_seen: Mutex::new(HashMap::new()),
             preferred_routes: Mutex::new(HashMap::new()),
             received: Mutex::new(received),
@@ -761,6 +798,8 @@ impl Node {
             recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(HashMap::new()),
         });
+        node.prune_expired_received_on_open()
+            .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         node.queue_approved_incomplete_files();
         Ok(node)
     }

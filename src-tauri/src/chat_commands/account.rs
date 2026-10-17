@@ -13,17 +13,7 @@ pub async fn my_id(state: tauri::State<'_, NodeState>) -> Result<String, Command
 pub async fn list_peers(state: tauri::State<'_, NodeState>) -> Result<Vec<PeerInfo>, CommandError> {
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt
-        .peers()
-        .into_iter()
-        .map(|p| PeerInfo {
-            user_id: p.public.user_id(),
-            name: p.name,
-            addr: p.addr.to_string(),
-            post_office: p.post_office,
-            account_id: p.account_id,
-        })
-        .collect())
+    Ok(rt.peers().into_iter().map(PeerInfo::from).collect())
 }
 
 #[tauri::command]

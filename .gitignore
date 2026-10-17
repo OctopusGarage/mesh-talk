@@ -63,6 +63,9 @@ pnpm-lock.yaml
 # Temporary files
 tmp/
 temp/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
 
 # OS generated files
 Thumbs.db

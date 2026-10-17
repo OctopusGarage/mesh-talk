@@ -67,6 +67,7 @@ impl Write for ChecksumWriter<'_> {
 
 pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
     use bincode::Options;
+    let (_, bytes) = crate::expiry::split(bytes)?;
     if bytes.len() > crate::transport::MAX_PLAINTEXT {
         return None;
     }
@@ -426,8 +427,34 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
+        self.send_file_to_account_progress_if(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            |accept| accept(),
+        )
+        .await
+    }
+
+    /// Legacy immediate-send policy with authorization at the same grant and
+    /// durable-acceptance seams used by queued account delivery.
+    pub async fn send_file_to_account_progress_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<ConversationId, NodeError> {
         let (id, file) = self
-            .enqueue_file_to_account_progress(target_account_id, path, kind, on_progress)
+            .enqueue_file_to_account_progress_if(
+                target_account_id,
+                path,
+                kind,
+                on_progress,
+                authorize,
+            )
             .await?;
         self.flush_delivery(id).await;
         self.flush_file_delivery(id).await;
@@ -471,8 +498,29 @@ impl Node {
         path: &Path,
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_to_account_progress_expiring_if(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            None,
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn enqueue_file_to_account_progress_expiring_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         authorize(&mut || Ok(()))?;
         let dests = self.account_fanout_targets(target_account_id);
         if !dests
@@ -485,11 +533,6 @@ impl Node {
             .await?;
 
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
-        // Record the outgoing file ONCE under the account conversation (the UI's host
-        // conversation for this contact), so it shows as our own message in account
-        // history. The per-device manifest events below each get a distinct event id; we
-        // record the first that lands (its id keys the durable store) rather than once per
-        // device — which would duplicate the bubble.
         let account_conv = super::conversation::account_conversation_id(
             &self.account.account_id(),
             target_account_id,
@@ -499,6 +542,7 @@ impl Node {
             account_conv,
             Some(target_account_id.to_owned()),
             &manifest,
+            expires_at_ms,
             &mut authorize,
         )?;
         Ok((id, file_conv))
@@ -511,7 +555,7 @@ impl Node {
         target_account: Option<String>,
         manifest: &FileManifestV3,
     ) -> Result<crate::eventlog::EventId, NodeError> {
-        self.accept_staged_manifest_if(peers, host, target_account, manifest, &mut |accept| {
+        self.accept_staged_manifest_if(peers, host, target_account, manifest, None, &mut |accept| {
             accept()
         })
     }
@@ -522,15 +566,17 @@ impl Node {
         host: ConversationId,
         target_account: Option<String>,
         manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         let own = self.identity.public();
         let author = Author::from_ed25519(own.ed25519_pub);
         let clock = super::node::now_millis();
-        let plaintext = outgoing_manifest_bytes(manifest);
+        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
         let mut destinations = Vec::with_capacity(peers.len());
         {
             let log = self.log.lock().expect("log lock not poisoned");
@@ -618,6 +664,19 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
+        self.send_file_channel_progress_expiring(channel, path, kind, on_progress, None)
+            .await
+    }
+
+    pub async fn send_file_channel_progress_expiring(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+    ) -> Result<ConversationId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let state = book
@@ -628,6 +687,7 @@ impl Node {
             }
         }
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         // Publish our sender-key distribution before the first seal (see
         // `send_channel_message_reply`).
         let (members, already_distributed) = {
@@ -647,13 +707,16 @@ impl Node {
                 .state_mut(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
             state
-                .seal_sender_message(&outgoing_manifest_bytes(&manifest))
+                .seal_sender_message(&crate::expiry::wrap(
+                    &outgoing_manifest_bytes(&manifest),
+                    expires_at_ms,
+                ))
                 .map_err(|e| NodeError::File(format!("manifest sealing failed: {e}")))?
         };
         // Persist our advanced sending chain (see `send_channel_message_reply`).
         self.persist_my_senders(channel);
         let seq = self.append_event(channel, EventKind::FileManifest, sealed)?;
-        self.record_sent_manifest(channel, channel, seq, &manifest)?;
+        self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)?;
         // A file/folder manifest is an offer. Members pull its chunks only after
         // their own receive policy permits it; pushing the chunk conversation here
         // would transmit the bytes before they could approve. Inline media keeps
@@ -675,11 +738,20 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        let permit = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| NodeError::File("participant runtime is stopping".into()))?;
         let node = Arc::clone(self);
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || node.stage_file(&path, kind, on_progress))
-            .await
-            .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
+        // The async sender may be aborted during retirement. Keep admission in
+        // the actual writer, whose blocking operation cannot be canceled.
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            node.stage_file(&path, kind, on_progress)
+        })
+        .await
+        .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
     }
 
     /// Stream `path` from disk, sealing each `CHUNK_SIZE` piece (deterministic-nonce v2
@@ -828,6 +900,7 @@ impl Node {
         event_conv: ConversationId,
         seq: u64,
         manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
     ) -> Result<(), NodeError> {
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         // Resolve the just-appended manifest event's content-addressed id + wall-clock.
@@ -845,7 +918,7 @@ impl Node {
         };
         self.remember_sent_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id)
             .map_err(NodeError::Log)?;
-        let plaintext = outgoing_manifest_bytes(manifest);
+        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
         self.received_files
             .lock()
             .expect("received_files mutex not poisoned")
@@ -937,6 +1010,9 @@ impl Node {
     /// How many chunks of `file_conv` we hold vs. how many the manifest expects.
     /// `None` if the manifest hasn't synced yet. Drives resume + progress in the UI.
     pub fn file_progress(&self, file_conv: ConversationId) -> Option<FileProgress> {
+        if self.expired_received_file(file_conv) {
+            return None;
+        }
         let total = self
             .files
             .lock()
@@ -983,6 +1059,9 @@ impl Node {
     /// chunks have synced, or verification fails. For large files prefer
     /// [`Node::save_file`], which streams to disk.
     pub fn read_file(&self, file_conv: ConversationId) -> Result<Vec<u8>, NodeError> {
+        if self.expired_received_file(file_conv) {
+            return Err(NodeError::File("file expired".into()));
+        }
         let manifest = self
             .files
             .lock()
@@ -1036,6 +1115,9 @@ impl Node {
         file_conv: ConversationId,
         dir: &Path,
     ) -> Result<std::path::PathBuf, NodeError> {
+        if self.expired_received_file(file_conv) {
+            return Err(NodeError::File("file expired".into()));
+        }
         let manifest = self
             .files
             .lock()
@@ -1070,6 +1152,9 @@ impl Node {
         dest: &Path,
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(), NodeError> {
+        if self.expired_received_file(file_conv) {
+            return Err(NodeError::File("file expired".into()));
+        }
         self.save_file_progress_inner(file_conv, dest, on_progress, true)
     }
 

@@ -34,3 +34,22 @@ it("shows a discovered peer's account avatar in Diagnostics", () => {
   expect(html).toContain("Alice");
   expect(html).toContain('src="data:image/png;base64,AAAA"');
 });
+
+it("labels a post-office proxy address as a gateway route", () => {
+  const html = renderToStaticMarkup(
+    createElement(PeerRow, {
+      p: {
+        user_id: "relay-device",
+        account_id: "relay-account",
+        name: "mac2015-post-office",
+        ip: "192.168.3.16",
+        tcp_port: 47476,
+        post_office: true,
+        via_gateway: true,
+        last_seen_secs: 0,
+      },
+    }),
+  );
+  expect(html).toContain("via gateway");
+  expect(html).toContain("192.168.3.16:47476");
+});

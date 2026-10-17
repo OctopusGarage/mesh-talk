@@ -65,10 +65,16 @@ pub struct AppSettings {
     /// Whether this account uses discovered post-office relays. Defaults on for existing users.
     #[serde(default = "default_true")]
     pub post_office_enabled: bool,
+    #[serde(default = "default_true")]
+    pub post_office_send_enabled: bool,
+    #[serde(default = "default_true")]
+    pub post_office_receive_enabled: bool,
+    #[serde(default)]
+    pub physical_lan_only: bool,
     /// Share public presence with an opted-in post-office bridge. Defaults off.
     #[serde(default)]
     pub bridge_discovery_enabled: bool,
-    /// Full device fingerprint of the shared bridge hub. Empty means normal election.
+    /// Preferred relay fingerprint. Other verified relays remain available for failover.
     #[serde(default)]
     pub bridge_hub_id: String,
     /// The incoming-call ringtone id (see frontend `lib/ringtones.ts`). A cosmetic UI
@@ -110,6 +116,9 @@ impl Default for AppSettings {
             retention_days: 0,
             calls_enabled: false,
             post_office_enabled: true,
+            post_office_send_enabled: true,
+            post_office_receive_enabled: true,
+            physical_lan_only: false,
             bridge_discovery_enabled: false,
             bridge_hub_id: String::new(),
             ringtone: default_ringtone(),
@@ -161,6 +170,9 @@ struct AccountSettings {
     retention_days: u32,
     calls_enabled: bool,
     post_office_enabled: bool,
+    post_office_send_enabled: bool,
+    post_office_receive_enabled: bool,
+    physical_lan_only: bool,
     bridge_discovery_enabled: bool,
     bridge_hub_id: String,
     ringtone: String,
@@ -186,6 +198,9 @@ impl From<&AppSettings> for AccountSettings {
             retention_days: value.retention_days,
             calls_enabled: value.calls_enabled,
             post_office_enabled: value.post_office_enabled,
+            post_office_send_enabled: value.post_office_send_enabled,
+            post_office_receive_enabled: value.post_office_receive_enabled,
+            physical_lan_only: value.physical_lan_only,
             bridge_discovery_enabled: value.bridge_discovery_enabled,
             bridge_hub_id: value.bridge_hub_id.clone(),
             ringtone: value.ringtone.clone(),
@@ -210,6 +225,9 @@ impl AccountSettings {
             retention_days: self.retention_days,
             calls_enabled: self.calls_enabled,
             post_office_enabled: self.post_office_enabled,
+            post_office_send_enabled: self.post_office_send_enabled,
+            post_office_receive_enabled: self.post_office_receive_enabled,
+            physical_lan_only: self.physical_lan_only,
             bridge_discovery_enabled: self.bridge_discovery_enabled,
             bridge_hub_id: self.bridge_hub_id.clone(),
             ringtone: self.ringtone.clone(),
@@ -455,11 +473,16 @@ fn preserve_login_bookkeeping(
 }
 
 /// Apply the persisted relay preferences in the same order at startup and after a save.
-pub(crate) fn apply_relay_settings(
+pub(crate) async fn apply_relay_settings(
     node: &mesh_talk_core::node::Node,
     settings: &AppSettings,
 ) -> Result<(), &'static str> {
+    node.set_post_office_permissions(
+        settings.post_office_send_enabled,
+        settings.post_office_receive_enabled,
+    );
     node.set_post_office_enabled(settings.post_office_enabled);
+    node.set_physical_lan_only(settings.physical_lan_only).await;
     let hub_result = node.set_bridge_hub_id(
         (!settings.bridge_hub_id.is_empty()).then_some(settings.bridge_hub_id.as_str()),
     );
@@ -478,6 +501,7 @@ async fn apply_running_settings(
 ) {
     if let Some(node) = node_state.node_for_owner(session, owner).await {
         apply_relay_settings(&node, settings)
+            .await
             .expect("settings fingerprint validated before persistence");
     }
     if let Some(cutoff) = retention_cutoff_ms(settings.retention_days)
@@ -679,6 +703,9 @@ mod tests {
             s.post_office_enabled,
             "existing accounts keep relay delivery enabled"
         );
+        assert!(s.post_office_send_enabled);
+        assert!(s.post_office_receive_enabled);
+        assert!(!s.physical_lan_only);
         assert!(!s.bridge_discovery_enabled, "bridge discovery defaults off");
         assert!(s.bridge_hub_id.is_empty(), "no hub is pinned by default");
     }
@@ -690,6 +717,9 @@ mod tests {
         let bob_path = config_store::account_path(root.path(), "bob", SETTINGS_FILE).unwrap();
         let alice = AccountSettings {
             post_office_enabled: false,
+            post_office_send_enabled: false,
+            post_office_receive_enabled: true,
+            physical_lan_only: true,
             bridge_discovery_enabled: true,
             bridge_hub_id: "0123456789abcdef0123456789abcdef".into(),
             ..AccountSettings::default()
@@ -698,6 +728,9 @@ mod tests {
         let saved: AccountSettings = config_store::read_account(&alice_path);
         let other: AccountSettings = config_store::read_account(&bob_path);
         assert!(!saved.post_office_enabled);
+        assert!(!saved.post_office_send_enabled);
+        assert!(saved.post_office_receive_enabled);
+        assert!(saved.physical_lan_only);
         assert!(saved.bridge_discovery_enabled);
         assert_eq!(saved.bridge_hub_id, "0123456789abcdef0123456789abcdef");
         assert!(other.post_office_enabled);

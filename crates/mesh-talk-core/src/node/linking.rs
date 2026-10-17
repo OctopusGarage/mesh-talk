@@ -128,6 +128,33 @@ impl Node {
         })
     }
 
+    /// Recovery after a joiner disconnects before saving its adopted secret.
+    /// This permits only an inbound, pairing-only handshake; a valid current
+    /// one-time code is still required before any account data is released.
+    pub(in crate::node) fn pairing_retry_allowed(
+        &self,
+        public: &PublicIdentity,
+        announce: Option<&crate::discovery::Announce>,
+    ) -> bool {
+        let pending = self.pending_link.lock().expect("pending_link mutex");
+        if pending
+            .as_ref()
+            .is_none_or(|pl| now_millis().saturating_sub(pl.created_at_ms) > PAIRING_TTL_MS)
+        {
+            return false;
+        }
+        let Some(announce) = announce.filter(|a| a.public() == *public && a.valid_presence())
+        else {
+            return false;
+        };
+        self.privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned")
+            .as_ref()
+            .is_some_and(|state| state.proofs.retired_link_binding(announce))
+    }
+
     /// Linker side: handle a pairing request on an inbound (authenticated) channel.
     /// Releases the account secret only if a code is pending AND the request both
     /// proves it and binds the authenticated channel peer. Clears the code on success.
@@ -166,19 +193,76 @@ impl Node {
                 return;
             }
         }
-        let cert = self.account.certify(&req.joiner.ed25519_pub);
-        if self
-            .account_devices
-            .lock()
-            .expect("account_devices mutex not poisoned")
-            .insert(super::account_devices::AccountDevice {
-                public: req.joiner.clone(),
-                certificate: cert.clone(),
-            })
-            .is_err()
-        {
+        // Serialize durable enrollment with privacy changes. A second request
+        // authenticated before the transition cannot enroll under a stale guard.
+        let transition = self.privacy.gate.write().await;
+        if !channel.io_admitted() {
             return;
         }
+        let cert = {
+            let mut pending = self.pending_link.lock().expect("pending_link mutex");
+            if pending.as_ref().is_none_or(|pl| {
+                now_millis().saturating_sub(pl.created_at_ms) > PAIRING_TTL_MS
+                    || !pl.code.verify(&my_ed, &req.joiner.ed25519_pub, &req.tag)
+            }) {
+                return;
+            }
+            let cert = self.account.certify(&req.joiner.ed25519_pub);
+            if self
+                .account_devices
+                .lock()
+                .expect("account_devices mutex not poisoned")
+                .insert(super::account_devices::AccountDevice {
+                    public: req.joiner.clone(),
+                    certificate: cert.clone(),
+                })
+                .is_err()
+            {
+                return;
+            }
+            // Enrollment is durable first: after a crash, privacy initialization
+            // reconstructs this exact permitted transition from AccountDevices.
+            {
+                let mut state = self
+                    .privacy
+                    .state
+                    .write()
+                    .expect("privacy lock not poisoned");
+                if let Some(state) = state.as_mut()
+                    && state
+                        .proofs
+                        .authorize_linked_device(
+                            super::account_devices::AccountDevice {
+                                public: req.joiner.clone(),
+                                certificate: cert.clone(),
+                            },
+                            &self.account_id(),
+                        )
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            // Old public presence belongs to the retired account. A fresh signed
+            // own-account announce must establish the adopted device's new endpoint.
+            self.roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .authorize_linked_account(&req.joiner, &cert);
+            // Retire every pre-enrollment I/O guard, including inbound connections
+            // retained by the other device. Only this one-shot pairing exchange may
+            // finish under the new generation; ordinary retries require new auth.
+            let generation = self
+                .privacy
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .wrapping_add(1);
+            self.sessions.clear();
+            self.guard_channel(channel, generation);
+            *pending = None; // atomically consume this exact authorized code
+            cert
+        };
+        drop(transition);
         let resp = PairingResponse {
             account_secret: self.account.secret_bytes(),
             account_ed25519_pub: self.account.public().ed25519_pub,
@@ -186,13 +270,6 @@ impl Node {
         };
         if channel.send(&resp.encode()).await.is_err() {
             return;
-        }
-        {
-            let _operation = self.privacy.gate.read().await;
-            if !channel.io_admitted() {
-                return;
-            }
-            self.stop_linking(); // single-use
         }
         // Backfill: stream our account history so the new device starts populated,
         // then an empty frame as terminator. Best-effort — failures just mean the
@@ -313,6 +390,11 @@ impl Node {
             if envelope.route.sender_account != r.from
                 || *super::conversation::account_conversation_id(own, other).as_bytes() != r.conv
                 || envelope.msg_id != r.event_id
+            {
+                continue;
+            }
+            if envelope.route.sender_account != own
+                && self.recipient_expired(&envelope.body, EventId::new(r.event_id), r.wall_clock)
             {
                 continue;
             }

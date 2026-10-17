@@ -295,6 +295,7 @@ pub async fn send_channel_message(
     channel_id: String,
     text: String,
     reply_to: Option<String>,
+    expires_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
     let id = parse_channel_id(&channel_id)?;
     let reply = match reply_to {
@@ -302,7 +303,7 @@ pub async fn send_channel_message(
         None => None,
     };
     let node = state.node_handle().await?;
-    node.send_channel_message_reply(id, text.as_bytes(), reply)
+    node.send_channel_message_reply_expiring(id, text.as_bytes(), reply, expires_at_ms)
         .await
         .map_err(CommandError::from)
 }

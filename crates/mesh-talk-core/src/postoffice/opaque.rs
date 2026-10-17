@@ -13,6 +13,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 const DOMAIN: &[u8] = b"mesh-talk-post-office-opaque-v2";
+const FEDERATED_DOMAIN: &[u8] = b"mesh-talk-post-office-opaque-v3";
+const FEDERATED_ID_PREFIX: &[u8; 4] = b"MTF3";
 const BUCKETS: [usize; 6] = [512, 2048, 8192, 32768, 57344, 61440];
 const MAX_INNER_BYTES: usize = BUCKETS[5] - 4;
 const _: () = assert!(BUCKETS[5] + 28 + 1024 < crate::transport::MAX_PLAINTEXT);
@@ -60,6 +62,24 @@ impl RelayMailbox {
         other: &PublicIdentity,
         relay: &PublicIdentity,
     ) -> Result<Self, MailboxError> {
+        Self::derive(me, other, Some(relay))
+    }
+
+    /// A pairwise mailbox whose ciphertext can be reconciled by any relay in
+    /// the federation. The signed inner event remains readable only by peers.
+    pub fn federated(me: &DeviceIdentity, other: &PublicIdentity) -> Result<Self, MailboxError> {
+        Self::derive(me, other, None)
+    }
+
+    pub fn is_federated_id(id: &ConversationId) -> bool {
+        id.as_bytes().starts_with(FEDERATED_ID_PREFIX)
+    }
+
+    fn derive(
+        me: &DeviceIdentity,
+        other: &PublicIdentity,
+        relay: Option<&PublicIdentity>,
+    ) -> Result<Self, MailboxError> {
         let me_public = me.public();
         if me_public == *other {
             return Err(MailboxError::InvalidPeer);
@@ -80,18 +100,28 @@ impl RelayMailbox {
             (other, &me_public)
         };
         let mut context = Vec::with_capacity(DOMAIN.len() + 160);
-        context.extend_from_slice(DOMAIN);
+        context.extend_from_slice(if relay.is_some() {
+            DOMAIN
+        } else {
+            FEDERATED_DOMAIN
+        });
         context.extend_from_slice(&first.x25519_pub);
         context.extend_from_slice(&first.ed25519_pub);
         context.extend_from_slice(&second.x25519_pub);
         context.extend_from_slice(&second.ed25519_pub);
-        context.extend_from_slice(&relay.ed25519_pub);
+        if let Some(relay) = relay {
+            context.extend_from_slice(&relay.ed25519_pub);
+        }
         let hk = Hkdf::<Sha256>::new(Some(&context), &shared);
         shared.zeroize();
         let mut material = [0u8; 160];
         hk.expand(b"mailbox-keys", &mut material)
             .expect("fixed HKDF output length");
-        let id = ConversationId::new(material[..32].try_into().unwrap());
+        let mut id_bytes: [u8; 32] = material[..32].try_into().unwrap();
+        if relay.is_none() {
+            id_bytes[..4].copy_from_slice(FEDERATED_ID_PREFIX);
+        }
+        let id = ConversationId::new(id_bytes);
         let key = material[32..64].try_into().unwrap();
         let nonce_key = material[64..96].try_into().unwrap();
         let signer = DeviceIdentity::from_secret_bytes(
@@ -341,6 +371,51 @@ mod tests {
         assert!(other_relay.open(&wrapped).is_err());
         assert!(envelope_shape(&wrapped));
         assert!(!envelope_shape(&event));
+    }
+
+    #[test]
+    fn federated_mailbox_is_shared_across_relays_but_private_to_pair() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let carol = DeviceIdentity::generate();
+        let relay_a = DeviceIdentity::generate();
+        let relay_b = DeviceIdentity::generate();
+        let event = Event::new(
+            &alice,
+            ConversationId::new([11; 32]),
+            1,
+            vec![],
+            1,
+            42,
+            EventKind::Message,
+            b"encrypted inner event".to_vec(),
+        );
+        let sent = RelayMailbox::federated(&alice, &bob.public()).unwrap();
+        let received = RelayMailbox::federated(&bob, &alice.public()).unwrap();
+        let other_pair = RelayMailbox::federated(&alice, &carol.public()).unwrap();
+        let outer = sent.wrap(&event).unwrap();
+
+        assert_eq!(sent.id(), received.id());
+        assert_eq!(received.open(&outer).unwrap(), event);
+        assert_ne!(sent.id(), other_pair.id());
+        assert_ne!(
+            sent.id(),
+            RelayMailbox::new(&alice, &bob.public(), &relay_a.public())
+                .unwrap()
+                .id()
+        );
+        assert_ne!(
+            sent.id(),
+            RelayMailbox::new(&alice, &bob.public(), &relay_b.public())
+                .unwrap()
+                .id()
+        );
+        assert!(RelayMailbox::is_federated_id(&sent.id()));
+        assert!(!RelayMailbox::is_federated_id(
+            &RelayMailbox::new(&alice, &bob.public(), &relay_a.public())
+                .unwrap()
+                .id()
+        ));
     }
 
     #[test]

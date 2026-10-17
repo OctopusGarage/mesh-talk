@@ -1,4 +1,5 @@
 import { test as base, expect } from "@playwright/test";
+import type { PeerInfo } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -74,12 +75,13 @@ export const test = base.extend({
         CHANNEL.name = "Barcelona × Argentina";
       }
 
-      const peers = [
+      const peers: PeerInfo[] = [
         {
           user_id: BOB.device_id,
           name: BOB.name,
           addr: "192.168.1.20:47100",
           post_office: false,
+          discovered_on_lan: true,
           account_id: BOB.account_id,
         },
         {
@@ -87,16 +89,35 @@ export const test = base.extend({
           name: CAROL.name,
           addr: "192.168.1.30:47100",
           post_office: false,
+          discovered_on_lan: true,
           account_id: CAROL.account_id,
         },
       ];
       if (dataMode === "post-office") {
         peers.push({
-          user_id: "device_relay_4444",
+          user_id: "44444444444444444444444444444444",
           name: "relay node",
           addr: "192.168.1.50:47100",
           post_office: true,
+          discovered_on_lan: true,
           account_id: "acc_relay_eeee5555",
+        });
+        peers.push({
+          user_id: "55555555555555555555555555555555",
+          name: "remote relay node",
+          addr: "192.168.1.50:47477",
+          post_office: true,
+          discovered_on_lan: false,
+          account_id: "acc_relay_ffff6666",
+        });
+        peers.push({
+          user_id: "66666666666666666666666666666666",
+          name: "Tailscale relay node",
+          addr: "100.101.1.50:47475",
+          post_office: true,
+          discovered_on_lan: false,
+          directly_reachable: true,
+          account_id: "acc_relay_aaaa7777",
         });
       }
 
@@ -116,6 +137,7 @@ export const test = base.extend({
           name,
           addr: "192.168.1.40:47100",
           post_office: false,
+          discovered_on_lan: true,
         });
         accounts.push({
           account_id: accountId,
@@ -214,6 +236,7 @@ export const test = base.extend({
             name,
             addr: `192.168.1.${40 + i}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         });
@@ -243,6 +266,7 @@ export const test = base.extend({
             name: `Colleague ${String(i + 1).padStart(4, "0")}`,
             addr: `10.0.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         }
@@ -259,6 +283,7 @@ export const test = base.extend({
             name,
             addr: `10.1.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         }
@@ -503,6 +528,9 @@ export const test = base.extend({
         retention_days: 0,
         calls_enabled: false,
         post_office_enabled: true,
+        post_office_send_enabled: true,
+        post_office_receive_enabled: true,
+        physical_lan_only: false,
         bridge_discovery_enabled: false,
         ringtone: "classic",
         privacy_level: "balanced",
@@ -1108,6 +1136,11 @@ export const test = base.extend({
           },
           clear_saved_session: ok,
           media_migration_warning: () => false,
+
+          // Synthetic recovery fixture; never use this key outside browser tests.
+          prepare_backup_key: () =>
+            "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+          backup_status: () => null,
 
           // settings
           get_app_settings: () => appSettings,

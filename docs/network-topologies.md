@@ -1,137 +1,200 @@
-# Network topologies: LAN, routed peers, and post offices
+# Network topology and data-flow baseline
 
-This guide maps the A–F examples discussed during routed discovery development to the behavior implemented on this branch. **Seeing a Mesh Talk peer is different from having a direct network route to it.** A post office can introduce opted-in peers and carry recipient-encrypted events without joining their LANs.
+**Status:** review baseline for `perf/optimization-series-20261015` on 2026-10-16. This describes the current implementation and separates code behavior from physical-network evidence. It is not a claim that every combination below passed an end-to-end test.
 
-## Terms and shared assumptions
+For the architectural baseline, module contracts and full scenario catalog, start with [Network Topology and Communication Architecture](network-design-reference.md). The [network design Q&A](network-design-qa.md#recommended-design-baseline-for-review) answers focused questions. This guide summarizes the implemented paths and labels environmental and acceptance boundaries separately.
 
-| Term | Meaning here |
-| --- | --- |
-| LAN discovery | Mesh Talk's signed multicast discovery among devices on the same LAN. Routers and Tailscale do not forward that multicast as a Mesh Talk feature. |
-| Routed discovery | A bounded, identity-free unicast query to a candidate IP, followed by a signed Mesh Talk response. On desktop, an already-running Tailscale client can supply candidate IPs on a best-effort basis. A user can also enter an endpoint. The headless CLI can use `/probe <ip:discovery-port>`. |
-| Post office | A Mesh Talk node started with `--post-office` that stores and forwards opaque, recipient-encrypted events for offline delivery. This role alone does **not** introduce peers across LANs. |
-| Bridge directory | An additional post-office feature enabled with `--bridge`. It introduces only devices that opt in, register their own signed public presence over a Noise-authenticated connection, and remain active. |
-| Gateway | A post office configured with `--bridge-peer` and the other relay's full Mesh Talk fingerprint. It exposes the remote relay's signed identity on a local TCP port and forwards encrypted TCP bytes to that relay. It is not an IP router. |
+Mesh Talk discovers **devices**, synchronizes signed events, and optionally stores recipient-encrypted events at post offices. Seeing a peer does not establish a direct route. A post office is an application relay, not an IP router, LAN multicast repeater, group member, or WebRTC media relay.
 
-For the examples below, A and B are on LAN X, C and D are on LAN Y, E is a post office on LAN X, and F is a post office on LAN Y. All named clients run compatible Mesh Talk versions, are publicly visible, and have the needed application ports allowed. A discovery response proves a device's Mesh Talk key; it does not mean the user has manually verified its safety number or authorized every conversation.
+**Interpret the diagrams as application paths.** A solid local edge means directly reachable UDP/TCP; a Tailscale edge connects only the named machines and does not merge their LANs. Dotted relay edges require the client switches, direct reachability to that relay, and mutual relay trust where federation is shown. Relays synchronize eligible opted-in presence over authenticated sessions, not by broadcasting all LAN devices. A directory introduction gives an identity and possible relay path, never membership or a guaranteed direct TCP route.
 
-| Topology | Tailscale members | Post offices | Bridge opt-in | Cross-LAN result |
-| --- | --- | --- | --- | --- |
-| 1. Only A ↔ C | A, C | None required | None | A and C discover and message each other directly; B and D remain local-only. |
-| 2. One shared E | E, C | E with `--bridge` | A, B, C | A, B, C discover one another and exchange encrypted messages through E when no direct path exists; D remains local-only. |
-| 3. E ↔ F | E, F | E and F with `--bridge` and pinned peers | A, B, C, D | After directory convergence, all four clients discover one another. Cross-LAN messages use one elected mailbox through the other relay's gateway when no direct route exists. |
-| 4. Shared hub D | D, G, H | D is the bridge hub; G/H each pin D | Opted-in clients on X/Y/Z | Clients pin D's fingerprint. G/H expose D's signed identity through local gateway ports, so all three sites share D's directory and opaque mailbox. Another local post office C on X does not split cross-site delivery. |
+## Network and data planes
 
-### 1. A and C use Tailscale; B and D do not
-
-```text
-LAN X                         existing Tailscale path                         LAN Y
-B ⇄ A  ──────────────────────────────────────────────────────────────────  C ⇄ D
-    Mesh Talk direct Noise/TCP between A and C
+```mermaid
+flowchart LR
+  A[Client A] -- "signed UDP discovery" --> B[Client B]
+  A -- "direct Noise/TCP event sync" --> B
+  A -- "opaque mailbox over Noise/TCP" --> E[Relay E]
+  E <-- "trusted Noise/TCP federation" --> F[Relay F]
+  F -- "opaque mailbox over Noise/TCP" --> B
+  A -. "separate WebRTC ICE media path" .-> B
 ```
 
-Assuming LAN discovery works and the desktop Tailscale candidate adapter finds the other endpoint:
+| Plane                    | How it works                                                                                                                                                                                                      | Reachability and limits                                                                                                                                    |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LAN discovery            | Signed IPv4 announce to `224.0.0.167:47474` about every 2 s, first-sight unicast reply, and bounded local `/24` unicast fallback. A relay on a dedicated discovery port can also use `--lan-announce-port 47474`. | Same reachable LAN/application UDP scope. Mesh Talk does not forward multicast over routers or Tailscale. The fallback excludes Tailscale's overlay range. |
+| Routed discovery         | Identity-free UDP query to a candidate endpoint; nonce-bound signed response. Desktop may get candidate IPs from an existing Tailscale client; manual endpoint and CLI `/probe` are alternatives.                 | Requires a known/reachable UDP endpoint. A response gives a verified device identity and TCP address, not chat permission.                                 |
+| Direct data              | Noise-authenticated TCP sync reconciles signed event IDs. DMs, group events, controls, file manifests and approved chunks use event paths.                                                                        | Both devices need a TCP route and normal membership/privacy admission.                                                                                     |
+| Client ↔ relay           | Noise-authenticated opt-in directory registration/query and pairwise opaque mailbox upload/drain. New opted-in public clients use relay-independent v3 mailboxes plus legacy relay-bound copies.                  | Client needs a reachable, permitted relay. A directory additionally needs client opt-in and relay `--bridge`.                                              |
+| Relay ↔ relay            | Trusted LAN discovery or identity-pinned routed seed probe, then Noise-authenticated exchange of short-lived signed opt-in presence and v3 encrypted mailbox inventory/events.                                    | Both need `--post-office --bridge`, mutual trust, and an actual UDP/TCP path. No LAN subnet or plaintext is replicated.                                    |
+| Calls and linked devices | Calls negotiate a separate WebRTC ICE media path. Pairing and sibling history/settings catch-up use authenticated device-to-device sync.                                                                          | DM success does not prove media or full linked-device sync across sites.                                                                                   |
 
-| Client | Mesh Talk peers it can discover automatically |
-| --- | --- |
-| A | B and C |
-| B | A |
-| C | A and D |
-| D | C |
+“Channel” means a Mesh Talk **group conversation**, not a separate network port. A relay can carry sealed events for its members without appearing in the group's member list or changing membership.
 
-A and C can exchange messages directly over their Tailscale IPs. A does **not** learn D through C, and B does **not** learn C through A. Neither A nor C forwards LAN discovery, messages, or arbitrary traffic for the other LAN. No post office is needed for this live direct path; an ordinary post office may still provide its existing offline-delivery service where reachable. On the headless CLI, Tailscale inventory is not automatic; use an explicit probe or endpoint.
+## Switch and configuration matrix
 
-### 2. E on LAN X is the only bridge-enabled post office
+| Control                                                                                                | Default                | When on                                                                                                                                                                                                | When off / unavailable                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Client **Use post offices** (`post_office_enabled`)                                                    | On                     | Upload/drain encrypted mailboxes through known relays. Direct traffic remains possible.                                                                                                                | This client's relay upload/drain and bridge directory participation stop; core clears relay introductions. Direct LAN/routed delivery remains.                                                               |
+| Client **Send / Receive through post offices**                                                         | Both on                | Independent per-device mailbox publication and content admission under the master switch.                                                                                                              | Send-off withholds relay receipts and file decisions; receive-off discards content before application admission. Direct P2P is independent.                                                                  |
+| Client **Physical LAN discovery only**                                                                 | Off                    | Restricts discovery to recognized physical interface subnets and scoped IPv6 link-local peers; suppresses public directories and overlay probes.                                                       | Default permits physical LAN and actual direct routed/Tailscale discovery. Neither mode creates an IP firewall.                                                                                              |
+| Client **Discover peers through a post office** (`bridge_discovery_enabled`; CLI `--bridge-discovery`) | Off                    | Public device registers its signed presence, receives opt-in introductions and uses v3 federated mailboxes.                                                                                            | No new bridge introductions or v3 participation. Local introductions clear; remote registrations expire in about 45 s. Known-peer legacy mailboxes can still work if relay use is on.                        |
+| Client **Preferred post office** (`bridge_hub_id`; CLI `--bridge-hub-id`)                              | Automatic              | A verified relay is preferred, with reachable alternatives retained. Recipient-specific directory provenance can reorder delivery candidates.                                                          | Automatic order favors a directly discovered LAN relay, then fingerprint. It is not a global hub election.                                                                                                   |
+| Client **Invisible mode**                                                                              | Off                    | No public bridge registration; private explicit authorization rules apply.                                                                                                                             | Public presence follows the other controls.                                                                                                                                                                  |
+| Client **Calls** (`calls_enabled`)                                                                     | Off                    | Exposes the call UI/signaling path; media still depends on WebRTC ICE reachability.                                                                                                                    | Messaging and event sync are unaffected.                                                                                                                                                                     |
+| Channel **Share a copy** (`ChannelReplica`)                                                            | On per accepted member | The member can answer authorized channel and retained attachment sync requests.                                                                                                                        | The member keeps receiving pushes/history but does not serve its local channel copy to others. Mixed old/new clients can reject the versioned replica-control exchange; upgrade all members before using it. |
+| Relay `--post-office`                                                                                  | Off                    | Advertises role and serves durable opaque mailboxes.                                                                                                                                                   | Ordinary device; no relay service.                                                                                                                                                                           |
+| Relay `--bridge`                                                                                       | Off                    | Adds opt-in directory and allows federation.                                                                                                                                                           | Mailbox-only service for already known peers; no cross-site directory/federation.                                                                                                                            |
+| Relay `--federation-peer <full-id>@<ip>:<udp-port>`                                                    | None                   | Pins a trusted identity and routed discovery seed. Use the same trusted set on all federated relays. Multiple LAN/Tailscale endpoints may name one identity; trusted local relays are also discovered. | Tailscale presence or LAN co-location alone does not authorize federation.                                                                                                                                   |
+| Legacy `--bridge-peer` + `--bridge-peer-id`                                                            | Off                    | Compatibility gateway to one pinned remote relay for old clients.                                                                                                                                      | Equal-relay federation needs no gateway or elected hub.                                                                                                                                                      |
 
-```text
-LAN X                                              LAN Y
-A ─┐
-   ├── E (`--post-office --bridge`) ══ Tailscale ══ C ── D
-B ─┘      authenticated directory + opaque mailbox
+The relay flags configure a **service**; client switches govern an **individual device**. A relay's `--bridge` never opts every client on its LAN into public presence. A selected relay can fail over only to a relay the client can actually reach.
+
+## Scenario matrix
+
+Assume visible compatible clients, signed identities and permitted application ports unless stated otherwise. A and B are on LAN X; C and D are on LAN Y; E and F are relays. “Discover” means roster introduction, not manual safety-number verification.
+
+| Scenario                           | Conditions                                                               | Visibility and data path                                                                                                                                 | Boundary                                                                                                         |
+| ---------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 1. Same LAN, no relay              | LAN UDP/TCP works; relay use either state.                               | A↔B discover by LAN announce and sync directly; authorized group members can recover signed events from one another.                                     | No offline post-office custody.                                                                                  |
+| 2. Same LAN, mailbox-only relay    | E has `--post-office`; clients' relay use on; bridge off.                | A↔B still discover directly. E can hold opaque mail for known offline identities.                                                                        | E does not introduce new peers. Custody is not recipient receipt.                                                |
+| 3. Same LAN, two bridge relays     | E/F have `--post-office --bridge`, mutual trust; clients opt in.         | Clients can register with reachable relays and use either reachable mailbox. Federation reconciles v3 events. Local peers still favor direct delivery.   | Separate service listener ports may be needed on one host.                                                       |
+| 4. Two LANs, no routed link        | No client or relay IP path between sites.                                | A↔B and C↔D work locally only.                                                                                                                           | Switches cannot create a physical route.                                                                         |
+| 5. Two LANs, only A↔C on Tailscale | A/C have reachable overlay UDP/TCP; no relay needed.                     | A↔C can discover by routed query and sync directly; local pairs still work.                                                                              | B cannot discover C through A; A cannot discover D through C. Ordinary clients do not bridge LANs.               |
+| 6. One shared bridge relay         | E on X; C reaches E over Tailscale; A/B/C opt in.                        | E introduces A/B/C. Without a direct client path, their encrypted events use E's mailbox.                                                                | D does not join through C; it needs its own E route/opt-in or a relay on Y. E is a single cross-site dependency. |
+| 7. One relay per LAN               | E/F have trusted routed link; A/B/C/D opt in with reachable local relay. | Relays exchange current signed presence and v3 encrypted mailbox events. Clients discover opted-in remote peers and use local/known relays for delivery. | Neither relay creates direct A↔C TCP reachability; legacy relay-bound mailboxes do not federate.                 |
+| 8. Several relays, three sites     | X has E/G; Y has F; Z has H; some routed relay links exist.              | Equal relays gossip opt-in presence and v3 mailboxes over reachable trusted edges. Client can prefer E and fall back to reachable G.                     | If G has no route beyond X when E fails, cross-site delivery waits for another routed edge.                      |
+| 9. Switch-off/privacy variant      | Physical topology otherwise like 7.                                      | Bridge-off client is absent from cross-site directory; relay-use-off client stops mailbox I/O; `--bridge`-off relay supplies only mailbox service.       | Invisible mode uses separate explicit permission/private-route rules.                                            |
+
+### 1–3. Same LAN: direct sync with optional custody
+
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[Client A] <-- "signed UDP; direct Noise/TCP" --> B[Client B]
+    E[Relay E]
+    F[Optional relay F]
+    A -. "mailbox upload" .-> E
+    E -. "drain" .-> B
+    E <-. "trusted federation" .-> F
+  end
 ```
 
-Only E and C need a mutually reachable routed path. A and B reach E locally; C discovers E over Tailscale or an explicit endpoint. A, B, and C must each enable **Discover peers through a post office** (CLI: `--bridge-discovery`) and keep post-office relays enabled. E does not need `--bridge-peer` in this topology.
+Direct delivery is attempted independently of relay custody. Group/channel events are sent to authorized members; member anti-entropy can recover missed events. E and F never become group members. With no relay, delivery waits for a later direct route or another authorized member with the event.
 
-E accepts each client's own signed presence over an authenticated TCP session and returns the current participants' signed proofs. A/B see C; C sees A/B. Introduced clients are stored as *post-office routes*, not as fabricated direct client IPs. If A/B and C cannot connect directly, their messages are uploaded to E's opaque mailbox and drained by the recipient. Same-LAN A↔B and C↔D traffic can continue on direct routes.
+### 4–5. Separate LANs, with or without direct Tailscale clients
 
-D sees C on LAN Y but cannot automatically see A/B, and A/B cannot see D. C is **not** a subnet router or bridge-directory proxy. To include D, it must itself reach E and opt in, or LAN Y needs the F topology below. If E is unavailable, new cross-LAN introductions and delivery pause; existing roster entries may remain briefly, and pending outgoing messages remain queued locally for retry.
-
-### 3. E and F connect the two LANs
-
-```text
-LAN X                                                    LAN Y
-A ─┐                                                   ┌─ C
-   ├── E ═════ pinned Tailscale endpoint ═════ F ─────┤
-B ─┘    `--post-office --bridge` on both relays          └─ D
-       one elected opaque mailbox; other relay is a gateway
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[Client A] --- B[Client B]
+  end
+  subgraph Y[LAN Y]
+    C[Client C] --- D[Client D]
+  end
+  A <-- "optional Tailscale: routed query + Noise/TCP" --> C
 ```
 
-Only E and F need Tailscale. A/B reach E on LAN X; C/D reach F on LAN Y. Both relays run `--post-office --bridge`, and **each** has one configured `--bridge-peer <other-tailnet-IP>:<discovery-port>` plus the other relay's full 32-character Mesh Talk fingerprint in `--bridge-peer-id`. All four clients enable bridge discovery and post-office use. E and F must listen on different TCP ports, for example E on 47475 and F on 47476; the gateway binds the remote relay's signed TCP port locally. The relays' UDP discovery and TCP ports must be reachable over the existing routed path.
+Remove the A↔C edge for scenario 4: the LANs remain isolated. Adding it gives only A and C a direct path. Tailscale provides IP reachability to its members; Mesh Talk does not route B's packets through A or forward multicast.
 
-After both relay proofs and client registrations converge, A, B, C, and D each see the other three clients. The implementation elects the lowest-fingerprint post office from the verified roster. Clients on its LAN connect to it directly; clients on the other LAN connect to the elected relay's signed identity through their local gateway. The gateway forwards TCP bytes, while Noise authenticates the *remote relay*. The elected relay holds the opaque mailbox; the other relay does not copy its queued events. Direct A↔B and C↔D LAN routes remain preferred when available. The three-machine E2E test checks all 12 directed A/B/C/D message paths.
+### 6. One relay reachable from both sites
 
-This is a two-relay topology with **one pinned remote relay per relay instance**. It is not an arbitrary multi-relay mesh, subnet router, mailbox replication scheme, or high-availability cluster. If the elected relay or the inter-relay path fails, new cross-LAN introductions and delivery pause; previously seen peers may remain in the roster briefly. Local direct LAN paths can still work.
-
-### 4. Three or more sites with one explicit hub
-
-```text
-LAN X:  clients ── C (ordinary local post office)
-                 └─ D (shared bridge hub) ⇐ Tailscale ⇒ G ── clients: LAN Y
-                                        ⇐ Tailscale ⇒ H ── clients: LAN Z
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[Client A] --- E[Bridge relay E]
+    B[Client B] --- E
+  end
+  subgraph Y[LAN Y]
+    C[Client C] --- D[Client D]
+  end
+  C <-- "Tailscale: directory and mailbox over Noise/TCP" --> E
 ```
 
-D runs `--post-office --bridge` and has a stable keystore. G and H each run `--post-office --bridge` with **one** `--bridge-peer` endpoint pointing to D and `--bridge-peer-id` set to D's full fingerprint. They do not connect to each other. C can continue serving local devices, but each cross-site client pins D with `--bridge-hub-id <D-fingerprint>` (desktop: **Shared bridge hub fingerprint**) and enables bridge discovery. This makes D the sole directory and mailbox for those clients even if C has the lowest fingerprint on LAN X. A gateway client first registers with its local post office to learn D's signed proof and local TCP proxy port, then registers with D through that proxy. It refreshes the local gateway route while using D's directory.
+Only opted-in A, B and C register self-signed public presence with E. D's LAN association with C is insufficient: D must contact E independently or use a local relay on Y. E can carry sealed channel events for authorized members, but cannot grant membership.
 
-Example relay flags, using site-specific discovery endpoints and persistent identities:
+### 7. Federated relays on two LANs
 
-```sh
-# LAN X: D; C may run separately with --post-office (and optionally --bridge).
-mesh-talk-node --keystore d.keystore --password-file d.pass --name D --post-office --bridge --port 47475
-
-# LAN Y: G; repeat on LAN Z for H with its own keystore and D's reachable endpoint.
-mesh-talk-node --keystore g.keystore --password-file g.pass --name G --post-office --bridge \
-  --bridge-peer <D-tailnet-IP>:47474 --bridge-peer-id <D-full-fingerprint> \
-  --bridge-proxy-port 0
-
-# Every participating CLI client; the desktop setting accepts the same fingerprint.
-mesh-talk-node --keystore client.keystore --password-file client.pass --name Client \
-  --bridge-discovery --bridge-hub-id <D-full-fingerprint>
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[Client A] --> E[Relay E]
+    B[Client B] --> E
+  end
+  subgraph Y[LAN Y]
+    F[Relay F] --> C[Client C]
+    F --> D[Client D]
+  end
+  E <-- "Tailscale/routed: signed discovery + Noise federation" --> F
 ```
 
-Discover each site's local post office with LAN multicast or `/probe <site-relay-IP>:47474`. Clients on LAN X also need to discover D directly. `--bridge-proxy-port 0` asks the OS for a free local TCP port, so G and H need not match D's signed TCP port or each other's ports. The directory carries that route separately from D's signed identity, and Noise still authenticates D end to end. If D is unavailable, pinned clients keep outgoing work queued and do not silently switch cross-site mailboxes to C/G/H. Once D and the route return, delivery resumes. Each gateway has one pinned upstream; a larger deployment adds more site gateways that pin D, within the directory's 128-member limit.
+1. Each opted-in client registers signed public presence with a reachable local relay. Relays exchange current proofs; registrations expire after roughly 45 s without renewal.
+2. Directory introductions supply verified identities and relay routes, **not** fabricated direct remote client IPs.
+3. A sender tries a real direct route if available, then uploads recipient-encrypted events to a reachable relay. E/F reconcile v3 pairwise mailbox sets. Recipients periodically drain known relays and apply the normal validation/decryption gate.
+4. Only the recipient's validated delivery receipt marks a tracked message Delivered. A TCP session or relay custody alone does not.
 
-This joins **opted-in Mesh Talk discovery and encrypted message delivery**, not arbitrary LAN multicast or IP traffic. D does not replicate mailboxes to C/G/H. Calls, linked-device catch-up, and cross-site file bytes still need their own reachable or consented paths.
+Federation preserves the original mailbox arrival time, so copying does not reset its **30-day maximum** retention clock. Event-count/byte caps can evict whole mailboxes earlier. Local user history retention is separate.
 
-### Required reachability and setup
+### 8. Equal relays, fallback and physical partitions
 
-| Topology | Application ports that must be reachable | Relay flags |
-| --- | --- | --- |
-| A ↔ C direct | A and C: discovery UDP 47474 and each other's signed Mesh Talk TCP listening port over the routed path; LAN multicast for A/B and C/D. | None required. |
-| E shared by A/B/C | A/B → E on LAN X and C → E over the routed path: discovery UDP 47474 and E's signed TCP listening port. | E: `--post-office --bridge --port 47475`; no `--bridge-peer`. |
-| E ↔ F | A/B → E and C/D → F locally; E ↔ F over the routed path: discovery UDP 47474 and **both** relay TCP ports. E must be able to bind F's TCP port locally, and F must be able to bind E's locally. | E/F: `--post-office --bridge`, distinct `--port` values, and reciprocal `--bridge-peer` plus `--bridge-peer-id`. |
-| Shared hub D | Each site client → its local relay; G/H → D over the routed path: discovery UDP 47474 and D's signed TCP port. The local proxy port on G/H must be reachable by that site's clients. | D: `--post-office --bridge`; G/H: `--post-office --bridge --bridge-peer <D-address>:47474 --bridge-peer-id <D-fingerprint> --bridge-proxy-port 0`; clients: bridge discovery plus D's hub fingerprint. |
+```mermaid
+flowchart LR
+  subgraph X[LAN X]
+    A[Client A] --> E[Preferred relay E]
+    A -. "fallback" .-> G[Local relay G]
+    E --- G
+  end
+  subgraph Y[LAN Y]
+    F[Relay F] --> C[Client C]
+  end
+  subgraph Z[LAN Z]
+    H[Relay H] --> D[Client D]
+  end
+  E <-- "routed link" --> F
+  F <-- "routed link" --> H
+  G -. "only if physically reachable" .-> F
+```
 
-The port numbers are examples; use each relay's signed listening port if configured differently. To configure E/F, start each once to obtain its persistent Mesh Talk fingerprint, stop it, then restart it with the other relay's Tailscale IP, discovery port, and full fingerprint. Keep each relay's keystore and password file so its pinned identity does not change. The [routed discovery guide](routed-network-discovery.md#two-lans-with-one-post-office-on-each-lan) has the concrete E/F flag examples. Mesh Talk never installs, logs into, or modifies Tailscale.
+All relays have equal protocol roles and share a trusted seed set; there is no elected global hub. A preferred relay is a soft choice among directly reachable authenticated candidates. If E fails, A can upload to online G. Immediate cross-site delivery needs an actual G→F link or another reachable relay chain. Otherwise ciphertext waits locally or at a reachable relay for reconciliation after a path returns, subject to expiry and capacity. An explicit preference remains first; among alternatives, a relay that reported a recipient may take priority for that destination. Relay custody is never a recipient delivery receipt. Later operations can favor healthy E again. This is per-operation preference recovery, not global primary election or an instantaneous failback deadline.
 
-## Configuration and security boundaries
+### 9. Off switches and invisible devices
 
-- **Client choice:** Bridge discovery is off by default and unavailable in invisible mode. Post-office use is a separate setting, on by default; bridge discovery requires it. Enabling bridge discovery shares this device's public signed presence with the relay's other current participants and permits automatic mailbox recovery for those introduced peers. Disabling it immediately clears local bridge introductions; remote registration expires without renewal after 45 seconds.
-- **Relay choice:** `--post-office` alone provides store-and-forward service. Add `--bridge` for the opt-in directory. Add a pinned `--bridge-peer` and `--bridge-peer-id` on *both* E and F only for the two-relay topology. E/F may be headless CLI nodes; they do not need the desktop Tailscale inventory adapter.
-- **Multi-site hub:** Configure every participating client with D's full fingerprint. Each site's gateway pins D independently and may use `--bridge-proxy-port 0` for an assigned local port. The hub does not need a gateway peer. A configured hub is never replaced by a different post office for mailbox delivery.
-- **Identity:** A Tailscale IP, tailnet node name, directory entry, or gateway address is an address hint, not Mesh Talk identity or permission. Discovery proofs are signed, relays are pinned by full fingerprints, and connections use Noise identity binding. Manual safety-number verification remains a separate user action.
-- **Transport:** Tailscale decides whether its overlay uses a direct link or DERP. Mesh Talk does not manage Tailscale, route IP packets between LANs, or provide a general TCP proxy to clients. WebRTC calls have a separate ICE media path; discovery and message success do not establish cross-network call support.
-- **Linked devices:** Pairing and subsequent synchronization of available history, attachments, and settings require an authenticated connection between the two devices. The post-office bridge can introduce siblings and carry encrypted messages, but its gateway forwards only to the remote relay. If siblings have no direct reachable route, pairing and catch-up wait for one; E/F do not proxy those streams between clients.
-- **Files and outage behavior:** The direct A↔C Tailscale test covers a consented file transfer. The two-relay test covers discovery and encrypted DMs, **not** end-to-end file bytes or calls across both gateways. Existing post-office file delivery still requires the recipient-consent flow described in the [macOS relay test](post-office-macos-service.md#cross-machine-delivery-test). Mailboxes do not replicate between E and F.
+```mermaid
+flowchart LR
+  A[Visible A] -- "LAN discovery" --> B[Visible B]
+  A -. "relay use ON" .-> E[Post office E]
+  E -. "A bridge ON + E bridge ON" .-> R[Remote opted-in peers]
+  I[Invisible I] -. "explicit private authorization" .-> E
+```
 
-## What has been verified
+Dotted paths require the named switches. Turning bridge discovery off clears this device's directory introductions, without disabling direct LAN discovery or every legacy mailbox. Turning post-office use off stops this device's relay upload/drain. Invisible mode does not register public bridge presence; see [privacy controls](privacy-controls.md).
 
-| Rig | Observed result | Boundary of that result |
-| --- | --- | --- |
-| `python3 scripts/e2e-tailnet-macos.py mac2015` | Signed routed discovery, two-way DMs, consented file transfer with matching SHA-256, and desktop automatic Tailscale inventory discovery. | Two Macs; WebRTC and forced DERP were not tested. |
-| `python3 scripts/e2e-tailnet-bridge.py mac2015 --windows-host windows10` | A/current Mac and B/Windows exchange LAN messages; C/mac2015 exchanges messages with both through E; a queued C→B DM survives E's same-identity restart. | One bridge; D is not part of this rig. |
-| `python3 scripts/e2e-tailnet-two-bridges.py mac2015 --windows-host windows10` | A/current Mac, B/Windows, C/D/mac2015 discover one another through E/F; all 12 directed encrypted DM paths pass. | Discovery scopes are isolated by test ports. The machines share one physical LAN, so this does not prove a two-site firewall, WAN, forced DERP, cross-gateway file transfer, or relay failover. |
-| `python3 scripts/e2e-four-machine-tailnet.py` | On 2026-10-15, A/current Mac, B/Windows, E/mac2015, and F/C/D/mac-mini passed four-client discovery and all 12 directed encrypted DMs through E/F. Direct mac2015↔mac-mini and current Mac↔Windows Tailscale pairs passed signed discovery, two-way Noise DMs, and consented 4 KiB file transfers with matching SHA-256. The desktop runtime automatically discovered Windows through its Tailscale inventory. | Four physical machines, but C/D share mac-mini with F. Distinct discovery ports isolate scopes; this is not proof of separate LAN Y client hosts, forced DERP, WebRTC media, relay failover, or cross-relay file bytes. |
-| `python3 scripts/e2e-four-machine-hub.py` | On 2026-10-15, C/D/X ran on mac2015, G on the current Mac, H/Z on mac-mini, and Y on Windows. The script chose D with a higher fingerprint than C, pinned all clients to D, verified gateway routes with dynamic proxy ports, and passed all six directed encrypted DMs among X/Y/Z. A Y→Z message stayed queued during D's outage and arrived after its same-identity restart. | Four physical machines and three isolated discovery scopes. G→D used LAN IP because the current Mac and mac2015 are in different Tailscale accounts; H→D used Tailscale. The scopes share physical LAN infrastructure, so this does not prove three independent LANs, forced DERP, file bytes, calls, or high availability. |
-| `make e2e` | Backend process tests cover direct/routed DM, bridge introductions, offline relay delivery, channel and file CLI transfer, restart history, and a large-directory case. | Local process tests complement the cross-machine rigs. |
-| `cargo test -p mesh-talk-core --test bridge_cross_lan three_sites_share_one_pinned_hub -- --ignored` | Seven local processes model three isolated discovery scopes: hub D and local C on X, gateways G/H on Y/Z, and one client per site. All clients discover the other sites and exchange encrypted DMs through D, using dynamically assigned gateway proxy ports. | Local loopback simulation; it does not prove a physical three-site Tailscale deployment or high availability. |
+## Synchronization by feature
 
-For protocol details and command examples, see [routed network discovery](routed-network-discovery.md). For what a relay can observe, see [post-office metadata privacy](post-office-metadata-privacy.md).
+| Feature              | Direct LAN/routed path                                                                                                 | Relay/federation path                                                                                                            | Do not infer                                                                                                   |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 1:1 text/controls    | Noise/TCP event sync, durable retry and authenticated recipient receipts.                                              | Opaque pairwise mailboxes; v3 copies move among trusted relays for opted-in public clients.                                      | Relay custody is not recipient receipt; a directory route is not direct TCP.                                   |
+| Group/channel events | Signed membership, per-sender encryption, direct fanout and authorized member anti-entropy when replica sharing is on. | Recipient-sealed events can use relays; relays are not group members.                                                            | Discovery does not join a group. Invitations, acceptance, replica version and routes to members still matter.  |
+| Files/folders        | Manifest and consent, encrypted chunk events, integrity verification.                                                  | Exact-offer signed consent and verified-save completion use encrypted pairwise mailboxes; chunks retry ordered relay candidates. | A card receipt is not file completion; large files/folders and physical outage recovery need their own checks. |
+| Linked devices       | Pairing, history and settings sync need an authenticated sibling connection.                                           | Ordinary sealed messages/introductions may be relayed.                                                                           | Federation does not replace full sibling sync.                                                                 |
+| Calls                | Signaling uses a fresh live direct Noise/TCP connection; media uses WebRTC ICE.                                        | Not used for current call signaling or media.                                                                                    | Directory visibility does not establish a live call path or TURN service.                                      |
+
+## Evidence and review questions
+
+The implementation seams for a row-by-row review are [signed discovery](../crates/mesh-talk-core/src/discovery/service.rs), [client bridge registration](../crates/mesh-talk-core/src/node/bridge_client.rs), [relay selection](../crates/mesh-talk-core/src/node/postbox.rs), [opaque client mailboxes](../crates/mesh-talk-core/src/node/opaque_relay.rs), [relay federation](../crates/mesh-talk-core/src/postoffice/federation.rs), [channel delivery](../crates/mesh-talk-core/src/node/channels.rs), [retention](../crates/mesh-talk-core/src/postoffice/mod.rs), and the [desktop relay settings](../src-tauri/src/settings.rs).
+
+The [architecture reference](ARCHITECTURE.md#4-networking--delivery-discovery-node-postoffice), [routed discovery guide](routed-network-discovery.md) and [relay metadata guide](post-office-metadata-privacy.md) give protocol details. Targeted code/tests cover signed routed discovery, bridge opt-in, relay fallback, federation presence/mailbox reconciliation, 30-day copy expiry, channel delivery and consented files. Earlier `scripts/e2e-tailnet-macos.py`, `scripts/e2e-four-machine-tailnet.py` and `scripts/e2e-four-machine-hub.py` rigs exercised direct or legacy gateway paths; they do not prove every new federation combination.
+
+A four-machine live encrypted cross-LAN DM with Windows preferred passed after federation deployment. On 2026-10-16, disposable clients on the current Mac, Windows10 and mac-mini completed all 12 directed encrypted DMs with mutually pinned disposable relays and again with the installed mac2015 and mac-mini relays. A four-member channel on the installed federation delivered a message from each site to all other members. A consented current-Mac→mac-mini file crossed both installed relays and saved with matching SHA-256. The installed mac2015 and Windows relays each separately delivered an offline DM and private-channel event. This does **not** prove an independent ordinary client host on mac-mini's LAN, three independent physical sites or native WebView media. A relay and client running on mac-mini itself are not equivalent to testing a separate host there.
+
+Additional physical acceptance now verifies preferred-relay outage through Windows→mac2015→mac-mini, recipient confirmation, a consented 130 KB file after sender restart, and bridge partition/recovery. Public SDK pairing and ongoing sibling history synchronization pass over mac2015↔mac-mini Tailscale. Chromium↔Edge calls verify real Tailscale ICE/DTLS and backend Noise signaling with synthetic capture. See the [reference evidence tracker](network-design-reference.md#implementation-and-evidence-tracker) for exact boundaries and observations.
+
+| Design decision                                                                             | Current baseline and useful check                                                                                                                            |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Must remote ordinary clients opt in to public bridge discovery?                             | Yes, per device. Test an opted-out client beside an opted-in client on LAN Y.                                                                                |
+| Must preferred-relay failure fall back locally?                                             | Yes for mailbox transport. Select E, stop it, and check G custody plus recipient receipt when G has a cross-site route.                                      |
+| What happens if G has no route after E fails?                                               | Queue ciphertext and reconcile when a routed edge returns; UI must not claim recipient delivery from custody alone.                                          |
+| Do group events, file bytes, calls and sibling sync meet the desired cross-site experience? | Test each separately with an independent client host on mac-mini's LAN. DM success is insufficient evidence.                                                 |
+| Is a common pinned relay seed set acceptable to operate?                                    | Equal protocol roles still require trust bootstrap and routable addresses. Shared-manifest enrollment and whole-identity revocation implement this boundary. |
+
+Use this as a discussion baseline: record a desired difference here, then compare the relevant implementation path and test it on a topology that isolates the physical networks.

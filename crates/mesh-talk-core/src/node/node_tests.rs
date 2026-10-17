@@ -215,6 +215,52 @@ fn post_office_use_can_be_disabled_and_reenabled() {
     assert!(node.relay_allowed(&relay));
 }
 
+#[test]
+fn disabling_post_office_use_clears_bridge_introductions() {
+    let dir = tempfile::tempdir().unwrap();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::clone(&roster),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(
+        &remote,
+        &crate::identity::account::Account::generate(),
+        "Remote",
+        47475,
+    );
+    node.set_bridge_discovery_enabled(true);
+    roster.lock().unwrap().update_relayed(
+        &proof,
+        "127.0.0.1:47500".parse().unwrap(),
+        &node.user_id(),
+    );
+    node.bridge_dm_pull_peers
+        .lock()
+        .unwrap()
+        .insert(proof.user_id.clone(), std::time::Instant::now());
+    assert!(node.bridge_directory_allowed());
+    assert!(node.verified_dm_pull_peer(&proof.user_id));
+
+    node.set_post_office_enabled(false);
+
+    assert!(!node.bridge_directory_allowed());
+    assert!(!node.verified_dm_pull_peer(&proof.user_id));
+    assert!(roster.lock().unwrap().get(&proof.user_id).is_none());
+    assert!(node.bridge_dm_pull_peers.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn invisible_mode_clears_bridge_presence_and_recovery_permission() {
     let dir = tempfile::tempdir().unwrap();
@@ -265,6 +311,214 @@ async fn invisible_mode_clears_bridge_presence_and_recovery_permission() {
     node.set_invisible(true).await.unwrap();
     assert!(!node.verified_dm_pull_peer(&proof.user_id));
     assert!(roster.lock().unwrap().get(&proof.user_id).is_none());
+}
+
+#[tokio::test]
+async fn channel_file_card_carries_fixed_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_rx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_rx,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("ttl", vec![]).await.unwrap();
+    let path = dir.path().join("secret.txt");
+    std::fs::write(&path, b"secret").unwrap();
+    let deadline = super::now_millis() + 300_000;
+    node.send_file_channel_progress_expiring(
+        channel,
+        &path,
+        crate::file::FileKind::File,
+        |_| {},
+        Some(deadline),
+    )
+    .await
+    .unwrap();
+    let rows = node.received_files.lock().unwrap().entries(&channel);
+    assert_eq!(
+        crate::expiry::deadline(&rows.last().unwrap().plaintext),
+        Some(deadline)
+    );
+}
+
+#[tokio::test]
+async fn channel_message_carries_fixed_deadline_in_sender_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_rx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_rx,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("ttl", vec![]).await.unwrap();
+    let deadline = super::now_millis() + 300_000;
+    node.send_channel_message_reply_expiring(channel, b"hello", None, Some(deadline))
+        .await
+        .unwrap();
+    let sent = node.sentlog.lock().unwrap().entries(&channel);
+    assert_eq!(
+        crate::expiry::deadline(&sent.last().unwrap().plaintext),
+        Some(deadline)
+    );
+}
+
+#[test]
+fn expired_incoming_account_message_is_hidden_from_history() {
+    use crate::eventlog::EventId;
+    use crate::node::conversation::account_conversation_id;
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let peer = crate::identity::account::Account::generate().account_id();
+    let own = node.account_id();
+    let conv = account_conversation_id(&own, &peer);
+    let body = MessageBody::new(b"expired secret".to_vec(), None).encode();
+    let deadline = super::now_millis().saturating_sub(1);
+    let env = crate::node::DmEnvelope::new(
+        peer.clone(),
+        own,
+        [7; 32],
+        crate::expiry::wrap(&body, Some(deadline)),
+    );
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conv,
+            peer.clone(),
+            deadline.saturating_sub(1),
+            &env.encode(),
+            EventId::new([8; 32]),
+        )
+        .unwrap();
+    assert!(node.account_history(&peer, 20).is_empty());
+    assert_eq!(node.prune_expired_received().unwrap(), 1);
+    assert!(node.received.lock().unwrap().entries(&conv).is_empty());
+}
+
+#[test]
+fn restart_erases_unexpired_recipient_copy_without_erasing_sender_copy() {
+    use crate::node::conversation::account_conversation_id;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let secret = identity.secret_bytes();
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open(
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("node.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open();
+    let peer = crate::identity::account::Account::generate().account_id();
+    let own = node.account_id();
+    let conv = account_conversation_id(&own, &peer);
+    let deadline = super::now_millis() + 3_600_000;
+    for (from, id) in [(peer.clone(), [13; 32]), (own.clone(), [14; 32])] {
+        let body = crate::expiry::wrap(
+            &MessageBody::new(b"secret".to_vec(), None).encode(),
+            Some(deadline),
+        );
+        let env = crate::node::DmEnvelope::new(
+            from.clone(),
+            if from == own {
+                peer.clone()
+            } else {
+                own.clone()
+            },
+            id,
+            body,
+        );
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conv,
+                from,
+                super::now_millis(),
+                &env.encode(),
+                crate::eventlog::EventId::new(id),
+            )
+            .unwrap();
+    }
+    drop(node);
+    let reopened = open();
+    let rows = reopened.received.lock().unwrap().entries(&conv);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].from, own);
+    assert!(
+        reopened
+            .account_suppression
+            .lock()
+            .unwrap()
+            .contains(conv, crate::eventlog::EventId::new([13; 32]))
+    );
+}
+
+#[test]
+fn monotonic_observation_bounds_expiry_even_with_a_future_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let id = crate::eventlog::EventId::new([91; 32]);
+    let deadline = super::now_millis() + 3_600_000;
+    let wire = crate::expiry::wrap(b"secret", Some(deadline));
+    assert!(!node.recipient_expired(&wire, id, deadline - 10));
+    node.expiry_first_seen.lock().unwrap().insert(
+        id,
+        std::time::Instant::now() - std::time::Duration::from_millis(20),
+    );
+    assert!(node.recipient_expired(&wire, id, deadline - 10));
 }
 
 #[test]
@@ -1364,15 +1618,20 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
     bob_node.replace_verified_dm_pull_peers(vec![alice_uid.clone()]);
 
     // Bob drains from the PO (retry to absorb the relay's async ingest).
-    let mut received = None;
-    for _ in 0..25 {
-        bob_node.drain_from_post_office().await;
-        if let Ok(dm) = tokio::time::timeout(Duration::from_millis(200), bob_rx.recv()).await {
-            received = dm;
-            break;
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut received = None;
+        for _ in 0..25 {
+            bob_node.drain_from_post_office().await;
+            if let Ok(dm) = tokio::time::timeout(Duration::from_millis(200), bob_rx.recv()).await {
+                received = dm;
+                break;
+            }
         }
-    }
-    let received = received.expect("Bob received the held DM from the post office");
+        received
+    })
+    .await
+    .expect("post-office drain must finish within the receive budget")
+    .expect("Bob received the held DM from the post office");
     assert_eq!(received.from, alice_uid);
     assert_eq!(received.from_name, "Alice");
     assert_eq!(received.text, b"held-hello");
@@ -1432,6 +1691,280 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         po_store.lock().unwrap().held_ids(&mailbox.id()),
         held_before
     );
+}
+
+#[tokio::test]
+async fn preferred_post_office_fails_over_and_fallback_mailbox_is_drained_after_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let preferred = DeviceIdentity::generate();
+    let fallback = DeviceIdentity::generate();
+    let alice_uid = alice.user_id();
+    let bob_uid = bob.user_id();
+
+    let offline_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let preferred_addr = offline_listener.local_addr().unwrap();
+    drop(offline_listener);
+    let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = bob_listener.local_addr().unwrap();
+    drop(bob_listener);
+    let fallback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fallback_addr = fallback_listener.local_addr().unwrap();
+    let (fallback_ed, fallback_x) = fallback.secret_bytes();
+    let fallback_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("fallback.log"), "pw", fallback).unwrap(),
+    ));
+    let fallback_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(fallback_ed, fallback_x),
+        fallback_listener,
+        Arc::clone(&fallback_store),
+    ));
+
+    let make_roster = |self_uid: &str, other: &DeviceIdentity, other_addr: SocketAddr| {
+        let mut roster = Roster::default();
+        for (proof, addr) in [
+            (Announce::new(other, "peer", other_addr.port()), other_addr),
+            (
+                Announce::new_post_office(&preferred, "preferred", preferred_addr.port()),
+                preferred_addr,
+            ),
+            (
+                Announce::new_post_office(
+                    &DeviceIdentity::from_secret_bytes(fallback_ed, fallback_x),
+                    "fallback",
+                    fallback_addr.port(),
+                ),
+                fallback_addr,
+            ),
+        ] {
+            roster.update(&proof, addr.ip(), self_uid);
+        }
+        Arc::new(Mutex::new(roster))
+    };
+    let alice_roster = make_roster(&alice_uid, &bob, bob_addr);
+    let bob_roster = make_roster(&bob_uid, &alice, bob_addr);
+    let open = |name: &str, identity, roster| {
+        let (dm, receiver) = mpsc::unbounded_channel();
+        let (channels, _) = mpsc::unbounded_channel();
+        let (files, _) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm,
+            channels,
+            files,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, receiver)
+    };
+    let (alice_node, _) = open("alice", alice, alice_roster);
+    let (bob_node, mut bob_rx) = open("bob", bob, bob_roster);
+    alice_node
+        .set_bridge_hub_id(Some(&preferred.user_id()))
+        .unwrap();
+    bob_node
+        .set_bridge_hub_id(Some(&preferred.user_id()))
+        .unwrap();
+    alice_node
+        .send_dm(&bob_uid, b"fallback-delivery")
+        .await
+        .unwrap();
+
+    let fallback_mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &alice_node.identity,
+        &bob_node.identity.public(),
+        &DeviceIdentity::from_secret_bytes(fallback_ed, fallback_x).public(),
+    )
+    .unwrap();
+    assert!(
+        !fallback_store
+            .lock()
+            .unwrap()
+            .held_events(&fallback_mailbox.id())
+            .is_empty(),
+        "the fallback relay must take custody while preferred is offline"
+    );
+
+    // Bring the preferred relay back before Bob drains. Reading only the
+    // preferred mailbox would strand the message already held by fallback.
+    let preferred_listener = TcpListener::bind(preferred_addr).await.unwrap();
+    let (preferred_ed, preferred_x) = preferred.secret_bytes();
+    let preferred_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("preferred.log"), "pw", preferred).unwrap(),
+    ));
+    let preferred_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(preferred_ed, preferred_x),
+        preferred_listener,
+        preferred_store,
+    ));
+    bob_node.replace_verified_dm_pull_peers(vec![alice_uid]);
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut received = None;
+        for _ in 0..10 {
+            bob_node.drain_from_post_office().await;
+            if let Ok(dm) = bob_rx.try_recv() {
+                received = Some(dm);
+                break;
+            }
+        }
+        received
+    })
+    .await
+    .expect("fallback mailbox drain must finish within the receive budget");
+    assert_eq!(
+        received.expect("fallback mailbox drained").text,
+        b"fallback-delivery"
+    );
+    preferred_task.abort();
+    fallback_task.abort();
+}
+
+#[tokio::test]
+async fn alternate_federated_relay_delivers_when_preferred_is_offline() {
+    use crate::postoffice::federation::FederationDirectory;
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let preferred = DeviceIdentity::generate();
+    let fallback = DeviceIdentity::generate();
+    let remote = DeviceIdentity::generate();
+    let alice_id = alice.user_id();
+    let bob_id = bob.user_id();
+    let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let preferred_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let fallback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fallback_addr = fallback_listener.local_addr().unwrap();
+    let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = remote_listener.local_addr().unwrap();
+    let duplicate = |identity: &DeviceIdentity| {
+        let (ed, x) = identity.secret_bytes();
+        DeviceIdentity::from_secret_bytes(ed, x)
+    };
+    let fallback_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("fallback.log"), "pw", duplicate(&fallback)).unwrap(),
+    ));
+    let remote_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("remote.log"), "pw", duplicate(&remote)).unwrap(),
+    ));
+    let fallback_directory = FederationDirectory::new();
+    let fallback_task = tokio::spawn(
+        crate::node::postbox::run_federated_relay_accept_loop_with_directory(
+            duplicate(&fallback),
+            fallback_listener,
+            Arc::clone(&fallback_store),
+            Arc::new(HashSet::from([remote.user_id()])),
+            fallback_directory.clone(),
+        ),
+    );
+    let remote_task = tokio::spawn(
+        crate::node::postbox::run_federated_relay_accept_loop_with_directory(
+            duplicate(&remote),
+            remote_listener,
+            Arc::clone(&remote_store),
+            Arc::new(HashSet::from([fallback.user_id()])),
+            FederationDirectory::new(),
+        ),
+    );
+
+    let mut alice_roster = Roster::default();
+    for (proof, addr) in [
+        (Announce::new(&bob, "Bob", bob_addr.port()), bob_addr),
+        (
+            Announce::new_post_office(&preferred, "preferred", preferred_addr.port()),
+            preferred_addr,
+        ),
+        (
+            Announce::new_post_office(&fallback, "fallback", fallback_addr.port()),
+            fallback_addr,
+        ),
+    ] {
+        alice_roster.update(&proof, addr.ip(), &alice_id);
+    }
+    let mut bob_roster = Roster::default();
+    bob_roster.update(
+        &Announce::new(&alice, "Alice", bob_addr.port()),
+        bob_addr.ip(),
+        &bob_id,
+    );
+    bob_roster.update(
+        &Announce::new_post_office(&remote, "remote", remote_addr.port()),
+        remote_addr.ip(),
+        &bob_id,
+    );
+    let open = |name: &str, identity, roster| {
+        let (dm, rx) = mpsc::unbounded_channel();
+        let (channels, _) = mpsc::unbounded_channel();
+        let (files, _) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            Arc::new(Mutex::new(roster)),
+            dm,
+            channels,
+            files,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, rx)
+    };
+    let (alice_node, _) = open("alice", alice, alice_roster);
+    let (bob_node, mut bob_rx) = open("bob", bob, bob_roster);
+    alice_node.set_bridge_discovery_enabled(true);
+    bob_node.set_bridge_discovery_enabled(true);
+    alice_node
+        .set_bridge_hub_id(Some(&preferred.user_id()))
+        .unwrap();
+    bob_node.replace_verified_dm_pull_peers(vec![alice_id]);
+
+    alice_node
+        .send_dm(&bob_id, b"remote-failover")
+        .await
+        .unwrap();
+    assert!(
+        !fallback_store
+            .lock()
+            .unwrap()
+            .federated_inventory()
+            .is_empty()
+    );
+    assert!(
+        remote_store
+            .lock()
+            .unwrap()
+            .federated_inventory()
+            .is_empty()
+    );
+    bob_node.drain_from_post_office().await;
+    assert!(
+        bob_rx.try_recv().is_err(),
+        "no cross-site route has run yet"
+    );
+    fallback_directory
+        .sync_with_relay(remote_addr, &fallback, &remote.public(), &fallback_store)
+        .await
+        .unwrap();
+    assert!(
+        !remote_store
+            .lock()
+            .unwrap()
+            .federated_inventory()
+            .is_empty()
+    );
+    bob_node.drain_from_post_office().await;
+    assert_eq!(bob_rx.try_recv().unwrap().text, b"remote-failover");
+
+    fallback_task.abort();
+    remote_task.abort();
 }
 
 #[tokio::test]

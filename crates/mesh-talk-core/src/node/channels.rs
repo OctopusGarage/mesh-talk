@@ -211,6 +211,7 @@ impl Node {
         loop {
             let discovered = tokio::select! {
                 _ = changes.notified() => true,
+                _ = self.channel_recovery_notify.notified() => true,
                 _ = tick.tick() => false,
             };
             if let Err(error) = self.auto_enroll_one_channel_sibling().await {
@@ -741,8 +742,26 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
     ) -> Result<(), NodeError> {
-        self.send_channel_body(channel, MessageBody::new(text.to_vec(), reply_to).encode())
+        self.send_channel_message_reply_expiring(channel, text, reply_to, None)
             .await
+    }
+
+    pub async fn send_channel_message_reply_expiring(
+        &self,
+        channel: ConversationId,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<(), NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.send_channel_body(
+            channel,
+            crate::expiry::wrap(
+                &MessageBody::new(text.to_vec(), reply_to).encode(),
+                expires_at_ms,
+            ),
+        )
+        .await
     }
 
     /// Send an animated sticker to a channel: `sticker_id` is the bundled sticker's
@@ -753,9 +772,24 @@ impl Node {
         sticker_id: &str,
         fallback: &[u8],
     ) -> Result<(), NodeError> {
+        self.send_sticker_channel_expiring(channel, sticker_id, fallback, None)
+            .await
+    }
+
+    pub async fn send_sticker_channel_expiring(
+        &self,
+        channel: ConversationId,
+        sticker_id: &str,
+        fallback: &[u8],
+        expires_at_ms: Option<u64>,
+    ) -> Result<(), NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         self.send_channel_body(
             channel,
-            MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
+            crate::expiry::wrap(
+                &MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
+                expires_at_ms,
+            ),
         )
         .await
     }
@@ -941,23 +975,33 @@ impl Node {
         event_id: EventId,
         peer: &PeerRecord,
     ) -> u64 {
-        let Ok(mut conn) = self.privacy_dial(peer.addr, &peer.public).await else {
+        let Ok(mut conn) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
             return 0;
         };
+        let before = conn.sent_frame_bytes();
         let store = self.sync_store(conn.peer_identity());
-        if request_round(&mut conn, &store, channel).await.is_ok()
-            && matches!(
-                request_durable_have(&mut conn, channel, event_id).await,
-                Ok(true)
-            )
-        {
-            let _ = self
-                .channel_custody
-                .lock()
-                .expect("channel_custody mutex not poisoned")
-                .confirm(event_id, &peer.public.user_id());
+        let reusable = if request_round(&mut conn, &store, channel).await.is_ok() {
+            match request_durable_have(&mut conn, channel, event_id).await {
+                Ok(held) => {
+                    if held {
+                        let _ = self
+                            .channel_custody
+                            .lock()
+                            .expect("channel_custody mutex not poisoned")
+                            .confirm(event_id, &peer.public.user_id());
+                    }
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        let bytes = conn.sent_frame_bytes().saturating_sub(before);
+        if reusable {
+            self.recycle_sync_channel(conn);
         }
-        conn.sent_frame_bytes()
+        bytes
     }
 
     /// Periodically verify one old claim without first syncing the missing
@@ -1024,10 +1068,12 @@ impl Node {
         };
         let Some(peer) = peer else { return };
         let check = async {
-            let mut conn = self.privacy_dial(peer.addr, &peer.public).await.ok()?;
-            request_durable_have(&mut conn, channel, event_id)
+            let mut conn = self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
+            let held = request_durable_have(&mut conn, channel, event_id)
                 .await
-                .ok()
+                .ok()?;
+            self.recycle_sync_channel(conn);
+            Some(held)
         };
         if matches!(
             tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, check).await,
@@ -1155,9 +1201,11 @@ impl Node {
         stream::iter(targets)
             .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| async move {
                 let _ = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                    if let Ok(mut ch) = self.privacy_dial(peer.addr, &peer.public).await {
+                    if let Ok(mut ch) = self.privacy_sync_dial(peer.addr, &peer.public).await {
                         let store = self.sync_store(ch.peer_identity());
-                        let _ = request_round(&mut ch, &store, channel).await;
+                        if request_round(&mut ch, &store, channel).await.is_ok() {
+                            self.recycle_sync_channel(ch);
+                        }
                     }
                 })
                 .await;
@@ -1212,18 +1260,30 @@ impl Node {
         if peers.is_empty() {
             return;
         }
-        let start = (cursor / channel_count) % peers.len();
+        // Identity/channel-specific rotation spreads simultaneous gossip wakes
+        // across replicas while the cursor still visits every known member.
+        let own = self.identity.public();
+        let rotation = usize::from(u16::from_le_bytes([
+            own.ed25519_pub[0] ^ channel_id.as_bytes()[0],
+            own.ed25519_pub[1] ^ channel_id.as_bytes()[1],
+        ]));
+        let start = rotation.wrapping_add(cursor / channel_count) % peers.len();
         for offset in 0..peers.len().min(CHANNEL_RECOVERY_PEERS_PER_TICK) {
             let peer = &peers[(start + offset) % peers.len()];
             let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                let Ok(mut conn) = self.privacy_dial(peer.addr, &peer.public).await else {
+                let Ok(mut conn) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
                     return None;
                 };
-                let store = self.sync_store(conn.peer_identity());
-                request_round(&mut conn, &store, *channel_id)
-                    .await
-                    .ok()
-                    .map(|report| report.applied)
+                // Recovery fetches retained history; it must not turn an
+                // outbound connection into a sharing-preference bypass.
+                let store = if self.shares_replica(channel_id) {
+                    self.sync_store(conn.peer_identity())
+                } else {
+                    self.pull_sync_store(conn.peer_identity())
+                };
+                let report = request_round(&mut conn, &store, *channel_id).await.ok()?;
+                self.recycle_sync_channel(conn);
+                Some(report.applied)
             })
             .await;
             if let Ok(Some(applied)) = result {

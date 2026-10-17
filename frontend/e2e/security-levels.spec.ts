@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { expect, test } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
@@ -7,13 +8,15 @@ test("privacy presets remain editable and manual lock requires reauthentication"
 }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
-  await page.getByLabel("Privacy level").selectOption("strict");
+  await selectSettingsCategory(page, "privacy");
+  await page.getByLabel("Device privacy preset").selectOption("strict");
+  await page.getByRole("button", { name: "Apply preset", exact: true }).click();
   await expect(page.getByLabel("Automatic lock")).toHaveValue("60");
   await expect(
     page.getByRole("switch", { name: "Lock when hidden" }),
   ).toHaveAttribute("aria-checked", "true");
   await page.getByRole("switch", { name: "Lock when hidden" }).click();
-  await expect(page.getByLabel("Privacy level")).toHaveValue("custom");
+  await expect(page.getByLabel("Device privacy preset")).toHaveValue("custom");
   await page.getByRole("dialog").press("Escape");
 
   await openSidebarMenuAction(page, "sidebar-lock");

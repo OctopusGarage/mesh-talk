@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
@@ -27,6 +28,7 @@ test("a missing bundled ZIP does not hide an installed sticker pack", async ({
   ).toBeVisible();
   await page.keyboard.press("Escape");
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page
     .getByTestId("pack-manager-theme")
     .getByRole("button", { name: "Remove Barcelona" })
@@ -34,10 +36,12 @@ test("a missing bundled ZIP does not hide an installed sticker pack", async ({
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
   await page.unroute("**/builtin-packs/nature.zip");
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-nature")).toBeVisible();
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
 });
@@ -47,6 +51,7 @@ test("default build preinstalls a theme and keeps its removal after restart", as
 }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   const manager = page.getByTestId("pack-manager-theme");
   await expect(page.getByTestId("theme-barcelona")).toBeVisible();
   await page.getByTestId("theme-barcelona").click();
@@ -56,6 +61,7 @@ test("default build preinstalls a theme and keeps its removal after restart", as
   );
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-barcelona")).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -71,6 +77,7 @@ test("default build preinstalls a theme and keeps its removal after restart", as
   );
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
 });
 

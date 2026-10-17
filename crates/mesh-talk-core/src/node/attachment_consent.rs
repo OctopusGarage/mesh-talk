@@ -36,6 +36,7 @@ pub struct AttachmentConsent {
     decisions: HashMap<EventId, (bool, u64)>,
     next_sequence: u64,
     writes: usize,
+    generation: u64,
 }
 
 impl AttachmentConsent {
@@ -50,6 +51,7 @@ impl AttachmentConsent {
             decisions: HashMap::new(),
             next_sequence: 0,
             writes: 0,
+            generation: 0,
         };
         for record in records {
             store.apply(record);
@@ -62,6 +64,7 @@ impl AttachmentConsent {
     }
 
     fn apply(&mut self, record: Record) {
+        self.generation = self.generation.wrapping_add(1);
         match record {
             Record::Global(auto) => self.global_auto = auto,
             Record::Contact { account, auto } => match auto {
@@ -112,6 +115,10 @@ impl AttachmentConsent {
         // exceed COMPACT_AFTER; using its size here would rewrite on every send.
         self.writes = 0;
         Ok(())
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Whether generic attachments are received automatically by default.
@@ -192,7 +199,7 @@ impl Node {
         }
     }
 
-    fn incoming_offer(
+    pub(in crate::node) fn incoming_offer(
         &self,
         file: ConversationId,
         event_id: Option<EventId>,
@@ -200,7 +207,14 @@ impl Node {
     ) -> Option<(bool, String, EventId, PublicIdentity)> {
         let (manifest, mut ids) = {
             let files = self.files.lock().expect("files lock not poisoned");
-            (files.manifest(&file)?.clone(), files.manifest_events(file))
+            (
+                files.manifest(&file)?.clone(),
+                match event_id {
+                    Some(id) if files.has_manifest_event(file, id) => vec![id],
+                    Some(_) => return None,
+                    None => files.manifest_events(file),
+                },
+            )
         };
         if manifest.file_conv() != file {
             return None;

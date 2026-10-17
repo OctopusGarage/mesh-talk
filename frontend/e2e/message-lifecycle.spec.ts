@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
@@ -108,8 +109,12 @@ test("clear chat history (from the history dialog) empties the conversation", as
 test("retention setting persists", async ({ page }) => {
   await enterBobDm(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "history");
   const sel = page.getByTestId("settings-retention-select");
   await expect(sel).toBeVisible();
   await sel.selectOption("30");
+  await page
+    .getByRole("button", { name: "Delete older history", exact: true })
+    .click();
   await expect(sel).toHaveValue("30");
 });

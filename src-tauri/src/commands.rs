@@ -840,6 +840,47 @@ mod tests {
     }
 
     #[test]
+    fn owner_scoped_node_handle_rejects_same_owner_replacement_while_queued() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+        let fixture = AuthFixture::new("settings-node-generation");
+        let session = fixture.app_state.session();
+        let current = session.get().unwrap();
+        let owner = current.user.user_id.clone();
+        tauri::async_runtime::block_on(async {
+            // Bind this manually opened fixture through the production install
+            // interface before checking the installation's session generation.
+            let runtime = fixture.node.0.lock().await.take().unwrap();
+            let authority = crate::chat_commands::RuntimeAuthority::request(
+                session.clone(),
+                session.capture().unwrap(),
+                fixture.node.clone(),
+            )
+            .unwrap();
+            assert!(authority.begin().await.unwrap().install(runtime).await);
+            let guard = fixture.node.0.lock().await;
+            let pending = fixture.node.node_for_owner(session, &owner);
+            tokio::pin!(pending);
+            // Poll the real interface into its runtime wait, without sleeps.
+            poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            session.publish("replacement".into(), current.user, current.password);
+            drop(guard);
+            assert!(
+                pending.await.is_none(),
+                "queued work must not adopt a new session lease"
+            );
+            assert!(
+                fixture.node.node_for_owner(session, &owner).await.is_none(),
+                "same-owner replacement must not authorize the prior installation"
+            );
+        });
+    }
+
+    #[test]
     fn owner_scoped_node_handle_requires_matching_session_and_runtime() {
         let fixture = AuthFixture::new("settings-node-owner");
         let alice_owner = fixture

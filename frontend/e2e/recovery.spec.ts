@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { test, expect } from "./tauri-mock";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
@@ -27,14 +28,24 @@ test.beforeEach(async ({ page }) => {
         }
       ).__TAURI_INTERNALS__;
       const original = ipc.invoke;
+      let created = false;
       ipc.invoke = async (command, args) => {
         if (command === "plugin:dialog|open") return "/tmp/account.mtbackup";
         if (command === "plugin:dialog|save")
           return "/tmp/new-account.mtbackup";
         if (command === "prepare_backup_key") return key;
-        if (command === "backup_status") return null;
-        if (command === "create_backup")
+        if (command === "backup_status")
+          return created
+            ? {
+                destination: "/tmp/new-account.mtbackup",
+                preview: backup,
+                archive_bytes: 2048,
+              }
+            : null;
+        if (command === "create_backup") {
+          created = true;
           return { recovery_key: key, preview: backup, archive_bytes: 2048 };
+        }
         if (command === "inspect_backup") {
           if (args.recoveryKey !== key)
             throw new Error("Incorrect recovery key or damaged backup");
@@ -61,6 +72,7 @@ test("export asks for the key challenge before writing the backup", async ({
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "history");
   await page
     .getByRole("button", { name: "Create encrypted backup" })
     .last()
@@ -70,9 +82,10 @@ test("export asks for the key challenge before writing the backup", async ({
   await page.getByTestId("recovery-key-check").fill("22222222-77777777");
   await page.getByTestId("recovery-export").click();
   await expect(page.getByText("Backup saved and verified")).toBeVisible();
-  await expect(page.getByText(/Last backup:/)).toContainText(
-    "new-account.mtbackup",
-  );
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByTestId("settings-page-history").getByText(/Last backup:/),
+  ).toContainText("new-account.mtbackup");
 });
 
 test("restore verifies the archive, shows its limits, and offers a fresh identity if needed", async ({

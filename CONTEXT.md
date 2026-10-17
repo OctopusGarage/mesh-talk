@@ -13,27 +13,33 @@ CLI (`mesh-talk-node`, with a `--post-office` relay mode) drives the same core.
 The protocol core lives in the `mesh-talk-core` crate (`crates/mesh-talk-core/src/`); the
 Tauri app (`src-tauri/src/`) is a thin shell over it.
 
-| Layer | Path | Responsibility |
-|-------|------|----------------|
-| **Frontend** | `frontend/src/` (React + TS) | UI; talks to the backend only via Tauri commands + events. |
-| **IPC** | `src-tauri/src/commands.rs`, `src-tauri/src/chat_commands/` | Auth (login/register/logout) + messaging commands. |
-| **Node** | `crates/mesh-talk-core/src/node/` | Orchestrates identity + discovery + transport + event log + DM/channel/file crypto. |
-| **Crypto** | `crates/mesh-talk-core/src/{identity,transport,ratchet,channel}/`, `dm.rs` | Keys, Noise channel, Double Ratchet, sender-key group ratchet. |
-| **Data/sync** | `crates/mesh-talk-core/src/{eventlog,discovery,postoffice,file}/` | Event DAG + sync, signed discovery, store-and-forward relay, file chunks. |
-| **Storage** | `crates/mesh-talk-core/src/storage/` | At-rest encryption (PBKDF2 + AES-GCM) + the auth keystore. |
+| Layer         | Path                                                                       | Responsibility                                                                      |
+| ------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| **Frontend**  | `frontend/src/` (React + TS)                                               | UI; talks to the backend only via Tauri commands + events.                          |
+| **IPC**       | `src-tauri/src/commands.rs`, `src-tauri/src/chat_commands/`                | Auth (login/register/logout) + messaging commands.                                  |
+| **Node**      | `crates/mesh-talk-core/src/node/`                                          | Orchestrates identity + discovery + transport + event log + DM/channel/file crypto. |
+| **Crypto**    | `crates/mesh-talk-core/src/{identity,transport,ratchet,channel}/`, `dm.rs` | Keys, Noise channel, Double Ratchet, sender-key group ratchet.                      |
+| **Data/sync** | `crates/mesh-talk-core/src/{eventlog,discovery,postoffice,file}/`          | Event DAG + sync, signed discovery, store-and-forward relay, file chunks.           |
+| **Storage**   | `crates/mesh-talk-core/src/storage/`                                       | At-rest encryption (PBKDF2 + AES-GCM) + the auth keystore.                          |
 
 ## Entities
 
-| Entity | Description |
-|--------|-------------|
-| **Device** | A running instance: Ed25519 (sign) + X25519 (DH) identity; `user_id` = hash of its key. |
-| **Account** | A user's cross-device handle (Ed25519); devices are bound to it by a certificate. |
-| **Peer** | Another device found via signed UDP announce; tracked in the roster, grouped by account. |
-| **Event** | Content-addressed, signed log entry (Message / React / FileManifest / MembershipChange / KeyRotation / …) in a per-conversation hash-linked DAG. |
-| **Conversation** | A 1:1 DM (device-pair or account-pair) or a channel; history is the event log. |
-| **Outgoing intent** | A user's attempt to send text, a sticker, or a file to a Conversation. It can be pending or failed before acceptance assigns a stable Event ID. |
-| **Post office** | A peer that stores and forwards recipient-encrypted events for offline delivery; optional bridge mode maintains a short-lived directory of opted-in peers. |
-| **Recovery archive** | A user-created encrypted snapshot (`.mtbackup`) unlocked with a separate recovery key; restore keeps the account identity but creates a new device identity. |
+| Entity                  | Description                                                                                                                                                                                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Device**              | A running instance: Ed25519 (sign) + X25519 (DH) identity; `user_id` = hash of its key.                                                                                                                                                                              |
+| **Account**             | A user's cross-device handle (Ed25519); devices are bound to it by a certificate.                                                                                                                                                                                    |
+| **Participant runtime** | The shared lifetime of one initialized Node’s discovery, accept, relay-drain, bridge-refresh and file-pull producers. Hosts own profile bootstrap and adopt their extra tasks; explicit stop joins producers and drains admitted blocking work before profile reuse. |
+| **Peer**                | Another device learned through verified LAN/routed discovery or eligible relay introduction; tracked by device identity and grouped by account.                                                                                                                      |
+| **Event**               | Content-addressed, signed log entry (Message / React / FileManifest / MembershipChange / KeyRotation / …) in a per-conversation hash-linked DAG.                                                                                                                     |
+| **Conversation**        | A 1:1 DM (device-pair or account-pair) or a channel; history is the event log.                                                                                                                                                                                       |
+| **Outgoing intent**     | A user's attempt to send text, a sticker, or a file to a Conversation. It can be pending or failed before acceptance assigns a stable Event ID.                                                                                                                      |
+| **Post office**         | An equal relay that temporarily holds opaque recipient-encrypted events; bridge mode adds opted-in presence and explicitly trusted federation.                                                                                                                       |
+| **Recovery archive**    | A user-created encrypted snapshot (`.mtbackup`) unlocked with a separate recovery key; restore keeps the account identity but creates a new device identity.                                                                                                         |
+
+The [network architecture baseline](docs/network-design-reference.md) defines route
+provenance, direct reachability, per-device relay permissions, custody and exact
+recipient confirmation. These are separate concepts; UI/IPC consume core policy
+rather than infer reachability or human identity from an address/name.
 
 ## Key invariants
 
@@ -44,6 +50,9 @@ Tauri app (`src-tauri/src/`) is a thin shell over it.
 - DM crypto is forward-secret (Double Ratchet); channels use a per-sender sender-key ratchet
   that rotates on membership change.
 - A device never registers itself as a peer (self-filter by `user_id`).
+- Post offices remain infrastructure, excluded from person/group pickers.
+- Relay custody is not recipient confirmation; a receipt retires only its exact destination.
+- Public presence opt-in is independent of private/group authorization and relay data directions.
 - Restoring an archive never copies old device keys or ratchets and does not revoke an old device.
 
 ## What Mesh-Talk does NOT own

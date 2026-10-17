@@ -185,6 +185,16 @@ impl Node {
         {
             let received = self.received.lock().expect("received mutex not poisoned");
             for e in received.entries_ref(&conv) {
+                let envelope = super::DmEnvelope::decode(&e.plaintext);
+                let inner = envelope
+                    .as_ref()
+                    .map_or(e.plaintext.as_slice(), |env| env.body.as_slice());
+                if e.from != my_account
+                    && !own_devices.contains(&e.from)
+                    && self.recipient_expired(inner, e.event_id, e.wall_clock)
+                {
+                    continue;
+                }
                 let (from_me, who, body, id) = if matches!(scope, SearchScope::Account(_)) {
                     let (id, body) = decode_account_entry(&e.plaintext);
                     let from_me = e.from == my_account;

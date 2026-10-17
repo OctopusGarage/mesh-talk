@@ -3,110 +3,11 @@
 use crate::{
     chat_commands::{HistoryItem, NodeState},
     commands::CommandError,
-    state::{AppState, SessionLease},
+    runtime_admission::RuntimeAdmission,
+    state::AppState,
 };
-use mesh_talk_core::{
-    eventlog::EventId,
-    node::{NodeError, NodeRuntime},
-};
+use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
-use std::{future::Future, pin::Pin};
-
-type OwnerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CommandError>> + Send + 'a>>;
-
-/// The owner captured at IPC entry, together with the only authority allowed to
-/// run synchronous producers against the installed runtime. Detached enqueues
-/// retain the lifecycle guard even if the caller cancels its IPC future.
-struct OwnerAdmission {
-    app: AppState,
-    node: NodeState,
-    lease: SessionLease,
-}
-
-impl OwnerAdmission {
-    fn capture(app: &AppState, node: &NodeState, owner: &str) -> Result<Self, CommandError> {
-        let lease = app
-            .session()
-            .capture()
-            .map_err(CommandError::Authorization)?;
-        if lease.owner() != owner {
-            return Err(CommandError::Authorization("session owner mismatch".into()));
-        }
-        if app.app_lock().is_locked() {
-            return Err(CommandError::Authorization("app locked".into()));
-        }
-        #[cfg(test)]
-        if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
-            let _ = entered.send("owner-entry");
-        }
-        Ok(Self {
-            app: app.clone(),
-            node: node.clone(),
-            lease,
-        })
-    }
-
-    fn authorized<T>(
-        &self,
-        runtime: &NodeRuntime,
-        operation: impl FnOnce() -> Result<T, CommandError>,
-    ) -> Result<T, CommandError> {
-        self.app
-            .session()
-            .matching(&self.lease, |_| {
-                if self.app.app_lock().is_locked() {
-                    return Err(CommandError::Authorization("app locked".into()));
-                }
-                if runtime.host_account_id() != Some(self.lease.owner()) {
-                    return Err(CommandError::Authorization("runtime owner mismatch".into()));
-                }
-                self.node.check_installation(&self.lease)?;
-                operation()
-            })
-            .map_err(CommandError::Authorization)?
-    }
-
-    async fn read<T>(
-        &self,
-        operation: impl FnOnce(&NodeRuntime) -> Result<T, CommandError>,
-    ) -> Result<T, CommandError> {
-        let guard = self.node.0.lock().await;
-        let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        self.authorized(runtime, || operation(runtime))
-    }
-
-    fn authorize_accept(
-        &self,
-        runtime: &NodeRuntime,
-        accept: &mut dyn FnMut() -> Result<(), NodeError>,
-    ) -> Result<(), NodeError> {
-        // The session guard encloses each synchronous producer (local grant and WAL),
-        // not just a preceding check. No session guard crosses an async policy wait.
-        let result = self
-            .authorized(runtime, || Ok(accept()))
-            .map_err(|error| NodeError::Authorization(error.to_string()))?;
-        #[cfg(test)]
-        if result.is_ok()
-            && let Some(entered) = self.app.owner_command_captured.lock().unwrap().as_ref()
-        {
-            let _ = entered.send("owner-authorized");
-        }
-        result
-    }
-
-    async fn detached<T: Send + 'static>(
-        self,
-        operation: impl for<'a> FnOnce(&'a NodeRuntime, &'a Self) -> OwnerFuture<'a, T> + Send + 'static,
-    ) -> Result<T, CommandError> {
-        let guard = self.node.0.clone().lock_owned().await;
-        tokio::spawn(async move {
-            let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-            operation(runtime, &self).await
-        })
-        .await
-        .map_err(|_| CommandError::Internal("enqueue operation terminated".into()))?
-    }
-}
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
     let bytes: [u8; 32] = hex::decode(input)
@@ -137,9 +38,9 @@ pub async fn owner_node_identity(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<NodeIdentity, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     admission
-        .read(|runtime| {
+        .with_runtime(|runtime| {
             Ok(NodeIdentity {
                 owner,
                 device_id: runtime.user_id().into(),
@@ -155,10 +56,11 @@ pub async fn owner_enqueue_text(
     account: String,
     text: String,
     reply_to: Option<String>,
+    expires_at_ms: Option<u64>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     let reply = reply_to.as_deref().map(parse_id).transpose()?;
     admission
@@ -166,9 +68,13 @@ pub async fn owner_enqueue_text(
             Box::pin(async move {
                 let id = runtime
                     .handle()
-                    .enqueue_to_account_if(&account, text.as_bytes(), reply, |accept| {
-                        admission.authorize_accept(runtime, accept)
-                    })
+                    .enqueue_to_account_expiring_if(
+                        &account,
+                        text.as_bytes(),
+                        reply,
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
                     .await
                     .map_err(CommandError::from)?;
                 Ok(hex::encode(id.as_bytes()))
@@ -183,20 +89,22 @@ pub async fn owner_enqueue_sticker(
     account: String,
     sticker_id: String,
     fallback: String,
+    expires_at_ms: Option<u64>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
                 let id = runtime
                     .handle()
-                    .enqueue_sticker_to_account_if(
+                    .enqueue_sticker_to_account_expiring_if(
                         &account,
                         &sticker_id,
                         fallback.as_bytes(),
+                        expires_at_ms,
                         |accept| admission.authorize_accept(runtime, accept),
                     )
                     .await
@@ -221,11 +129,12 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
     path: String,
     media: bool,
     progress_key: Option<String>,
+    expires_at_ms: Option<u64>,
     handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<AcceptedFile, CommandError> {
-    let admission = match OwnerAdmission::capture(&app, &node, &owner) {
+    let admission = match RuntimeAdmission::capture(&app, &node, &owner) {
         Ok(admission) => admission,
         Err(error) => {
             crate::chat_commands::cleanup_pasted_file(&handle, &path);
@@ -242,6 +151,8 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
         progress_key.unwrap_or_else(|| account.clone()),
         "prepare",
     );
+    #[cfg(test)]
+    let progress_hook = app.owner_file_progress_hook.clone();
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
@@ -250,11 +161,9 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                 } else {
                     mesh_talk_core::file::FileKind::File
                 };
-                #[cfg(test)]
-                let progress_hook = admission.app.owner_file_progress_hook.clone();
                 let result = runtime
                     .handle()
-                    .enqueue_file_to_account_progress_if(
+                    .enqueue_file_to_account_progress_expiring_if(
                         &account,
                         std::path::Path::new(&path),
                         kind,
@@ -268,6 +177,7 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                                 }
                             }
                         },
+                        expires_at_ms,
                         |accept| admission.authorize_accept(runtime, accept),
                     )
                     .await;
@@ -291,10 +201,10 @@ pub async fn owner_account_history<R: tauri::Runtime>(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<Vec<HistoryItem>, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     let history = admission
-        .read(|runtime| {
+        .with_runtime(|runtime| {
             Ok(runtime
                 .account_history(&account, limit.min(500))
                 .into_iter()
@@ -331,7 +241,7 @@ pub async fn owner_delivery_statuses(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<Vec<MessageStatus>, CommandError> {
-    let admission = OwnerAdmission::capture(&app, &node, &owner)?;
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     if ids.len() > 256 {
         return Err(CommandError::InvalidInput(
@@ -343,7 +253,7 @@ pub async fn owner_delivery_statuses(
         .map(|id| parse_id(id))
         .collect::<Result<Vec<_>, _>>()?;
     admission
-        .read(|runtime| {
+        .with_runtime(|runtime| {
             Ok(runtime
                 .handle()
                 .account_delivery_statuses(&account, &ids)
@@ -451,9 +361,9 @@ mod tests {
         }
 
         fn create(authenticated: bool) -> Self {
-            // These probes deliberately hold a synchronous privacy-state writer.
-            // Background readers can block indefinitely until the test releases it;
-            // isolate them so low-core runners can still execute registered logout.
+            // Isolate background producers from deliberately stalled legacy
+            // privacy callbacks, including regressions that retain a state writer,
+            // so low-core runners can still execute registered logout.
             let background = authenticated.then(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
@@ -491,18 +401,31 @@ mod tests {
             let node = NodeState::empty();
             let app = tauri::test::mock_builder()
                 .manage(app_state.clone())
+                .manage(app_state.app_lock().clone())
                 .manage(node.clone())
                 .manage(crate::settings::SettingsState::isolated(
                     root.path().join("settings.json"),
                 ))
                 .invoke_handler(tauri::generate_handler![
+                    crate::chat_commands::send_file_to_account,
+                    crate::chat_commands::send_to_account,
+                    crate::chat_commands::send_sticker,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_sticker,
                     super::owner_enqueue_file,
                     super::owner_account_history,
                     super::owner_delivery_statuses,
-                    crate::commands::logout
+                    crate::chat_commands::get_device_sync_policy,
+                    crate::chat_commands::get_device_sync_status,
+                    crate::chat_commands::set_device_sync_category,
+                    crate::chat_commands::get_account_preferences,
+                    crate::chat_commands::set_account_preference,
+                    crate::commands::logout,
+                    crate::privacy_commands::get_privacy,
+                    crate::privacy_commands::set_invisible,
+                    crate::privacy_commands::set_privacy_allowed,
+                    crate::privacy_commands::initiate_privacy_contact
                 ])
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
                 .unwrap();
@@ -562,6 +485,21 @@ mod tests {
                 1,
             ));
             account.account_id()
+        }
+
+        fn sync_documents(&self) -> [Vec<u8>; 2] {
+            let guard = self.node.0.blocking_lock();
+            let runtime = guard.as_ref().unwrap();
+            let directory = self
+                .root
+                .path()
+                .join("accounts")
+                .join(runtime.host_account_id().unwrap());
+            [
+                format!("account-sync-policy-{}.log", runtime.account_id()),
+                "account-preferences.log".into(),
+            ]
+            .map(|name| std::fs::read(directory.join(name)).unwrap())
         }
 
         fn announce_peer(&self, announce: mesh_talk_core::discovery::Announce) {
@@ -856,9 +794,153 @@ mod tests {
     }
 
     #[test]
+    fn registered_sync_mutations_reject_a_different_session_before_persisting() {
+        let fixture = Fixture::new();
+        let before = fixture.sync_documents();
+        fixture
+            .app_state
+            .session()
+            .set("b".into(), user("bob"), "pw".into());
+        for (command, body) in [
+            (
+                "set_device_sync_category",
+                serde_json::json!({"category":"history", "enabled":false}),
+            ),
+            (
+                "set_account_preference",
+                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+            ),
+        ] {
+            let result = fixture.invoke(command, body);
+            assert!(
+                result.is_err(),
+                "{command} accepted a mismatched runtime owner: {result:?}"
+            );
+            assert_eq!(result.unwrap_err()["kind"], "authorization");
+        }
+        let guard = fixture.node.0.blocking_lock();
+        let node = guard.as_ref().unwrap().handle();
+        assert!(node.device_sync_policy().history);
+        assert!(
+            node.account_preferences(mesh_talk_core::node::SyncCategory::Appearance)
+                .is_empty()
+        );
+        drop(guard);
+        assert_eq!(fixture.sync_documents(), before);
+    }
+
+    #[test]
+    fn legacy_account_sends_preserve_null_results_and_durable_history() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        for (command, body) in [
+            (
+                "send_to_account",
+                serde_json::json!({"account":account,"text":"legacy text","replyTo":null}),
+            ),
+            (
+                "send_sticker",
+                serde_json::json!({"convId":account,"stickerId":"wave","fallback":"hello","isChannel":false}),
+            ),
+        ] {
+            assert_eq!(
+                fixture.invoke(command, body).unwrap(),
+                serde_json::Value::Null
+            );
+        }
+        let path = fixture.root.path().join("legacy-file.txt");
+        std::fs::write(&path, b"legacy file content").unwrap();
+        let file_conv = fixture
+            .invoke(
+                "send_file_to_account",
+                serde_json::json!({"account":account,"path":path,"media":false}),
+            )
+            .unwrap();
+        let bytes = hex::decode(file_conv.as_str().unwrap()).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert!(
+            path.exists(),
+            "ordinary user source files must remain intact"
+        );
+        let runtime = fixture.node.0.blocking_lock();
+        assert_eq!(
+            runtime
+                .as_ref()
+                .unwrap()
+                .account_history(&account, 10)
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn legacy_account_sends_reject_a_runtime_from_another_session() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let path = fixture.root.path().join("must-not-stage.txt");
+        std::fs::write(&path, b"old runtime must not stage this file").unwrap();
+        fixture
+            .app_state
+            .session()
+            .set("bob-token".into(), user("bob"), "pw".into());
+        for (command, body) in [
+            (
+                "send_file_to_account",
+                serde_json::json!({"account":account,"path":path,"media":false}),
+            ),
+            (
+                "send_to_account",
+                serde_json::json!({"account":account,"text":"must not send","replyTo":null}),
+            ),
+            (
+                "send_sticker",
+                serde_json::json!({"convId":account,"stickerId":"wave","fallback":"hello","isChannel":false}),
+            ),
+        ] {
+            let result = fixture.invoke(command, body);
+            assert_eq!(result.unwrap_err()["kind"], "authorization", "{command}");
+        }
+        let runtime = fixture.node.0.blocking_lock();
+        assert!(
+            runtime
+                .as_ref()
+                .unwrap()
+                .account_history(&account, 10)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn registered_commands_queued_behind_lifecycle_lock_reject_same_owner_new_generation() {
         let fixture = Fixture::new();
+        let before = fixture.sync_documents();
         let cases = [
+            ("get_device_sync_policy", serde_json::json!({})),
+            ("get_device_sync_status", serde_json::json!({})),
+            (
+                "set_device_sync_category",
+                serde_json::json!({"category":"history", "enabled":false}),
+            ),
+            (
+                "get_account_preferences",
+                serde_json::json!({"category":"appearance"}),
+            ),
+            (
+                "set_account_preference",
+                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+            ),
+            (
+                "send_file_to_account",
+                serde_json::json!({"account":"11".repeat(16),"path":"unused","media":false}),
+            ),
+            (
+                "send_to_account",
+                serde_json::json!({"account":"11".repeat(16),"text":"queued","replyTo":null}),
+            ),
+            (
+                "send_sticker",
+                serde_json::json!({"convId":"11".repeat(16),"stickerId":"wave","fallback":"hello","isChannel":false}),
+            ),
             ("owner_node_identity", serde_json::json!({"owner":"alice"})),
             (
                 "owner_account_history",
@@ -900,12 +982,197 @@ mod tests {
             assert_eq!(error["kind"], "authorization", "queued {command}");
             *fixture.app_state.owner_command_captured.lock().unwrap() = None;
         }
+        let guard = fixture.node.0.blocking_lock();
+        let node = guard.as_ref().unwrap().handle();
+        assert!(node.device_sync_policy().history);
+        assert!(
+            node.account_preferences(mesh_talk_core::node::SyncCategory::Appearance)
+                .is_empty()
+        );
+        drop(guard);
+        assert_eq!(fixture.sync_documents(), before);
+    }
+
+    #[test]
+    fn registered_sync_mutations_queued_before_logout_or_lock_do_not_write() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let before = fixture.sync_documents();
+        let commands = [
+            (
+                "set_device_sync_category",
+                serde_json::json!({"category":"history", "enabled":false}),
+            ),
+            (
+                "set_account_preference",
+                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+            ),
+        ];
+        for lock in [false, true] {
+            for (command, body) in &commands {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("a".into(), user("alice"), "pw".into());
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+                let lifecycle = fixture.node.0.blocking_lock();
+                let webview = fixture.webview.clone();
+                let command = *command;
+                let body = body.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                entered_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if lock {
+                    crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                } else {
+                    fixture.app_state.session().clear();
+                }
+                drop(lifecycle);
+                let error = pending.join().unwrap().unwrap_err();
+                assert_eq!(
+                    error["kind"], "authorization",
+                    "queued {command}, lock={lock}"
+                );
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
+        }
+        let guard = fixture.node.0.blocking_lock();
+        let node = guard.as_ref().unwrap().handle();
+        assert!(node.device_sync_policy().history);
+        assert!(
+            node.account_preferences(mesh_talk_core::node::SyncCategory::Appearance)
+                .is_empty()
+        );
+        drop(guard);
+        assert_eq!(fixture.sync_documents(), before);
+    }
+
+    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 4] {
+        [
+            ("get_privacy", serde_json::json!({"owner":"alice"})),
+            (
+                "set_invisible",
+                serde_json::json!({"owner":"alice","invisible":true}),
+            ),
+            (
+                "set_privacy_allowed",
+                serde_json::json!({"owner":"alice","account":account,"allowed":true}),
+            ),
+            (
+                "initiate_privacy_contact",
+                serde_json::json!({"owner":"alice","account":account}),
+            ),
+        ]
+    }
+
+    fn privacy_documents(fixture: &Fixture, owner: &str) -> [Vec<u8>; 3] {
+        ["privacy.policy", "peer-proofs", "peer-routes"].map(|name| {
+            std::fs::read(fixture.root.path().join("accounts").join(owner).join(name)).unwrap()
+        })
+    }
+
+    #[test]
+    fn registered_privacy_commands_reject_app_lock_and_stale_installation_without_writes() {
+        use tauri::Manager;
+        for locked in [true, false] {
+            let fixture = Fixture::new();
+            let account = fixture.offline_peer();
+            fixture
+                .node
+                .0
+                .blocking_lock()
+                .as_ref()
+                .unwrap()
+                .handle()
+                .cached_peer_snapshot()
+                .unwrap();
+            let before = privacy_documents(&fixture, "alice");
+            if locked {
+                crate::app_lock::lock_app(
+                    fixture.webview.state::<AppState>(),
+                    fixture.webview.state::<crate::app_lock::AppLock>(),
+                )
+                .unwrap();
+            } else {
+                fixture.node.next_lifecycle_ticket();
+            }
+            for (command, body) in privacy_requests(&account) {
+                assert!(
+                    fixture.invoke(command, body).is_err(),
+                    "{command} accepted locked={locked}"
+                );
+                assert_eq!(
+                    privacy_documents(&fixture, "alice"),
+                    before,
+                    "{command} wrote locked={locked}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn registered_privacy_commands_queued_before_same_owner_generation_change_do_not_write() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        fixture
+            .node
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .handle()
+            .cached_peer_snapshot()
+            .unwrap();
+        let before = privacy_documents(&fixture, "alice");
+        for (command, body) in privacy_requests(&account) {
+            let (entered, captured) = std::sync::mpsc::channel();
+            *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+            let lifecycle = fixture.node.0.blocking_lock();
+            let webview = fixture.webview.clone();
+            let pending = std::thread::spawn(move || invoke(&webview, command, body));
+            captured
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            fixture
+                .app_state
+                .session()
+                .set("replacement".into(), user("alice"), "pw".into());
+            drop(lifecycle);
+            assert!(
+                pending.join().unwrap().is_err(),
+                "{command} accepted old generation"
+            );
+            assert_eq!(
+                privacy_documents(&fixture, "alice"),
+                before,
+                "{command} wrote old generation"
+            );
+            *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+        }
+    }
+
+    #[test]
+    fn registered_privacy_mutations_reject_logout_while_waiting_for_policy_gate() {
+        for command in [
+            "set_invisible",
+            "set_privacy_allowed",
+            "initiate_privacy_contact",
+        ] {
+            registered_logout_during_local_grant_wait(command);
+        }
     }
 
     fn registered_logout_during_local_grant_wait(command: &'static str) {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        // Routing also consults the held state synchronously. Keep only one
-        // deliberate blocker on Tauri's shared IPC pool, leaving logout runnable.
+        // Keep only one deliberately blocked legacy callback on Tauri's shared
+        // IPC pool, leaving registered logout runnable while the gate is held.
         // Ordinary tests and product work remain concurrent.
         static GRANT_WAIT_PROBES: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _probe = GRANT_WAIT_PROBES.lock().unwrap();
@@ -945,7 +1212,7 @@ mod tests {
         *fixture.app_state.owner_file_progress_hook.lock().unwrap() = Some(Box::new(move || {
             produced.fetch_add(1, Ordering::SeqCst);
         }));
-        // Public legacy authorization owns the actual privacy gate and state lock.
+        // Public legacy authorization owns the actual serialized privacy gate.
         // Its own mutation is rejected when released, isolating the enqueue producer.
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -971,6 +1238,20 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
         let body = match command {
+            "set_invisible" => serde_json::json!({"owner":owner,"invisible":true}),
+            "set_privacy_allowed" => {
+                serde_json::json!({"owner":owner,"account":account,"allowed":true})
+            }
+            "initiate_privacy_contact" => serde_json::json!({"owner":owner,"account":account}),
+            "send_file_to_account" => {
+                serde_json::json!({"account":account,"path":path,"media":false})
+            }
+            "send_to_account" => {
+                serde_json::json!({"account":account,"text":"pending grant","replyTo":null})
+            }
+            "send_sticker" => {
+                serde_json::json!({"convId":account,"stickerId":"wave","fallback":"hello","isChannel":false})
+            }
             "owner_enqueue_text" => {
                 serde_json::json!({"owner":owner,"account":account,"text":"pending grant","replyTo":null})
             }
@@ -991,7 +1272,27 @@ mod tests {
                 Err(_) => return false,
             }
         };
-        let authorized = wait_phase("owner-authorized");
+        let privacy = matches!(
+            command,
+            "set_invisible" | "set_privacy_allowed" | "initiate_privacy_contact"
+        );
+        let authorized = wait_phase(if privacy {
+            "owner-entry"
+        } else {
+            "owner-authorized"
+        });
+        if privacy {
+            // Capture precedes the runtime mutex. Wait until the detached IPC
+            // owns that mutex and is queued behind the actual core policy gate.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while fixture.node.0.try_lock().is_ok() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "privacy never retained lifecycle"
+                );
+                std::thread::yield_now();
+            }
+        }
         let webview = fixture.webview.clone();
         let logout = std::thread::spawn(move || invoke(&webview, "logout", serde_json::json!({})));
         let published = wait_phase("logout-published");
@@ -1047,7 +1348,12 @@ mod tests {
             std::io::ErrorKind::PermissionDenied
         );
         assert_eq!(logout_result.unwrap(), serde_json::json!({"success":true}));
-        assert_eq!(result.unwrap_err()["kind"], "authorization");
+        let error = result.unwrap_err();
+        if privacy {
+            assert_eq!(error, serde_json::json!("Could not update network privacy"));
+        } else {
+            assert_eq!(error["kind"], "authorization");
+        }
         assert!(history_empty);
         assert!(reopened_empty && reopened_policy == policy);
         assert!(
@@ -1060,6 +1366,20 @@ mod tests {
         );
         assert_eq!(staged, 0);
         assert!(log_unchanged);
+    }
+
+    #[test]
+    fn registered_legacy_file_logout_while_grant_waits_rejects_without_side_effects() {
+        registered_logout_during_local_grant_wait("send_file_to_account");
+    }
+
+    #[test]
+    fn registered_legacy_text_logout_while_grant_waits_rejects_without_side_effects() {
+        registered_logout_during_local_grant_wait("send_to_account");
+    }
+    #[test]
+    fn registered_legacy_sticker_logout_while_grant_waits_rejects_without_side_effects() {
+        registered_logout_during_local_grant_wait("send_sticker");
     }
 
     #[test]
@@ -1097,6 +1417,7 @@ mod tests {
                 target,
                 path.to_string_lossy().into_owned(),
                 false,
+                None,
                 None,
                 handle.clone(),
                 handle.state::<AppState>(),

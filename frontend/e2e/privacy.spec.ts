@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 const bob = "b".repeat(32);
@@ -51,6 +52,7 @@ async function settings(page: import("@playwright/test").Page) {
   await page.getByTestId("login-password").fill("a strong password");
   await page.getByTestId("login-submit").click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "connection");
 }
 test("profile presence waits for the node before loading visibility", async ({
   page,
@@ -119,6 +121,7 @@ test("invisible mode requires confirmation and survives reload", async ({
   await expect(page.getByTestId("chat-shell")).toBeVisible();
   await expect(ownPresence).toHaveAttribute("aria-label", "offline");
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "connection");
   await expect(page.getByTestId("invisible-switch")).toHaveAttribute(
     "aria-checked",
     "true",
