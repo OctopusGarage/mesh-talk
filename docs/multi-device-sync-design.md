@@ -14,6 +14,12 @@ for sequencing and acceptance criteria. [Architecture](ARCHITECTURE.md) and the
 
 ## Recommendation and alternatives
 
+**Confirmed priority: messages and files.** The first release covers personal
+messages/files, their replication across linked devices, and authorized group
+messages/files in the combined scenario. New synchronization of read positions,
+drafts and other preferences is outside this release. Existing profile,
+appearance and contact synchronization remains supported.
+
 Extend Mesh Talk's existing authenticated account replication. Make its existing
 self-addressed DM a permanent **Saved Messages** conversation, independent of
 discovery. Use typed account-private records for settings and other application
@@ -399,8 +405,9 @@ device. These constraints follow from the inspected shared-root model and the
 - Preserve existing privacy generations, host ownership, group consent, expiry,
   sender-key behavior, message recall and delivery-receipt eligibility. Personal
   replication acknowledgements are not receipts from another person.
-- Release personal text/history and policy correctness first, then self files and
-  opted-in private state. Extended custody and authority V2 are separate milestones
+- Implement personal text/history and policy correctness before self files, but
+  require both messages and files before calling the first release complete.
+  New private-state categories, extended custody and authority V2 are separate milestones
   with their own protocol/security reviews and acceptance evidence.
 
 ## Decisions proposed for the first rollout
@@ -408,8 +415,10 @@ device. These constraints follow from the inspected shared-root model and the
 Use the defaults in the category table; treat exclusions as transfer/storage
 choices; preserve existing history access for verified siblings and accepted group
 members; retain local deletion scope; do not introduce central infrastructure or
-a general CRDT. Add private read state before draft synchronization because drafts
-require conflict UI. Require a real retained source for offline history; promise no
+a general CRDT. Deliver messages and files first, including file metadata,
+optional byte downloads and accurate availability reporting. Read positions,
+drafts and new preference categories remain optional future work, not part of the
+confirmed scope. Require a real retained source for offline history; promise no
 indefinite archive. Keep identity-preserving revocation outside the compatible
 release and accurately retain current rekey recovery.
 

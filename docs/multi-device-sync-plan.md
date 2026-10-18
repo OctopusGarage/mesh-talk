@@ -4,8 +4,8 @@
 > work packages in sequence. Each package should be reviewed and committed before
 > starting the next. No application implementation is authorized by this document.
 
-**Goal:** Make personal messaging and selective account synchronization reliable
-across trusted devices while preserving existing group and messaging behavior.
+**Goal:** Make messages and files synchronize reliably across trusted devices and
+authorized groups, including personal messaging, while preserving existing behavior.
 
 **Architecture:** Extend the existing account-addressed DM, delivery WAL and bounded
 account-history reconciliation. Add explicit policy decisions and versioned typed
@@ -25,8 +25,15 @@ and root `plans/` for local, untracked work.
 
 ## Scope, order and completion boundaries
 
-Work packages 1–4 deliver compatible personal messaging and a coherent existing
-selection contract. Packages 5–6 add opted-in application state. Packages 7–8
+**Confirmed first-release scope: messages and files.** Work packages 1–4 are all
+required: local/offline personal messages, consistent selection, Saved Messages,
+and personal files with optional byte downloads. Validate messages and files in
+self-only, group-only and combined scenarios. A text-only milestone does not
+complete this release.
+
+Packages 5–6 describe optional future application state and are outside the
+confirmed implementation scope. Preserve existing preference/profile behavior;
+do not expand its scope as part of this release. Packages 7–8
 cover stronger availability and identity-preserving device management as separate
 protocol/security projects. Package 9 defines the release gate for each selected
 milestone; the first release need not wait for the authority migration, but cannot
