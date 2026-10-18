@@ -87,6 +87,7 @@ test("default build preinstalls a theme and keeps its removal after restart", as
 test("installing a group pack cannot replace a personal pack with the same ID", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["players"]);
   const files = unzipSync(
     readFileSync(resolve("../site/market/packs/clubs.zip")),
   );
@@ -121,6 +122,7 @@ test("installing a group pack cannot replace a personal pack with the same ID", 
 });
 
 test("installs a channel avatar library from ZIP", async ({ page }) => {
+  await seedMarketPacks(page, ["clubs"]);
   await enterChat(page);
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
   await page.getByRole("button", { name: "Change group photo" }).click();
@@ -148,6 +150,7 @@ test("installs a channel avatar library from ZIP", async ({ page }) => {
 });
 
 test("installs a verified marketplace download", async ({ page }) => {
+  await seedMarketPacks(page, ["players"]);
   const catalog = JSON.parse(
     readFileSync(resolve("../site/market/catalog.json"), "utf8"),
   ) as { id: string }[];
@@ -250,6 +253,7 @@ test("rejects a catalog entry with an external download URL", async ({
 test("rejects a marketplace ZIP whose contents differ from its listing", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["players"]);
   const catalog = JSON.parse(
     readFileSync(resolve("../site/market/catalog.json"), "utf8"),
   ) as { id: string; name: string }[];

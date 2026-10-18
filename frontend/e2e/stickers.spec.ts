@@ -24,6 +24,7 @@ async function enterBobDm(page: Page) {
   await expect(page.getByTestId("chat-shell")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+  await waitForPackBootstrap(page);
 }
 
 test.use({ viewport: { width: 1100, height: 800 } });
@@ -111,7 +112,6 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
   manifest.name = "Imported Noto";
   files["manifest.json"] = strToU8(JSON.stringify(manifest));
   await enterBobDm(page);
-  await waitForPackBootstrap(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
