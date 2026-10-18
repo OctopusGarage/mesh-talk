@@ -19,6 +19,7 @@ export function FileSettings({
       </p>
       {s && (
         <SettingsRow
+          id="setting-download-folder"
           icon={<FolderOpen className="h-4 w-4" />}
           title={t("settings.downloadFolder")}
           desc={
@@ -40,6 +41,7 @@ export function FileSettings({
           }
           control={
             <Button
+              id="setting-download-folder"
               variant="secondary"
               size="sm"
               disabled={c.saving}

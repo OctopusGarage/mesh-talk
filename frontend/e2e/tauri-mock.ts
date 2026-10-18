@@ -622,7 +622,7 @@ export const test = base.extend({
         name: p.name,
         ip: p.addr.split(":")[0],
         tcp_port: 47100,
-        post_office: false,
+        post_office: p.post_office,
         account_id: p.account_id,
         last_seen_secs: i === 0 ? 3 : 90,
       }));

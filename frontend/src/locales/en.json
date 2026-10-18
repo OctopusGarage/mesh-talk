@@ -930,5 +930,20 @@
     "description": "Notes and files across your devices",
     "saved": "Saved on this device",
     "fileCardSaved": "File card saved on this device"
+  },
+  "help": {
+    "title": "Help",
+    "description": "Version {{version}} · Available offline",
+    "search": "Search help",
+    "clearSearch": "Clear search",
+    "topicCount_one": "{{count}} topic",
+    "topicCount_other": "{{count}} topics",
+    "topics": "Help topics",
+    "noResults": "No matching topics. Try a shorter phrase, or clear your search to browse all guides.",
+    "englishFallback": "Articles are currently available in English. Search also recognizes common Chinese terms.",
+    "openSettings": "Open {{category}}",
+    "openDiagnostics": "Open Connection",
+    "online": "Read online",
+    "linkFailed": "The link could not be opened. Try again or open the online manual in your browser."
   }
 }

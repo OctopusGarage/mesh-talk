@@ -930,5 +930,20 @@
     "description": "デバイス間で共有するメモとファイル",
     "saved": "このデバイスに保存済み",
     "fileCardSaved": "ファイル情報をこのデバイスに保存済み"
+  },
+  "help": {
+    "title": "ヘルプ",
+    "description": "バージョン {{version}} · オフラインで利用可能",
+    "search": "ヘルプを検索",
+    "clearSearch": "検索をクリア",
+    "topicCount_one": "{{count}} 件のトピック",
+    "topicCount_other": "{{count}} 件のトピック",
+    "topics": "ヘルプのトピック",
+    "noResults": "一致するトピックがありません。短い語句で検索するか、検索をクリアしてすべてのガイドをご覧ください。",
+    "englishFallback": "記事は現在英語で提供されています。一般的な中国語の検索語にも対応しています。",
+    "openSettings": "{{category}}を開く",
+    "openDiagnostics": "接続診断を開く",
+    "online": "オンラインで読む",
+    "linkFailed": "リンクを開けませんでした。再試行するか、ブラウザーでオンラインマニュアルを開いてください。"
   }
 }

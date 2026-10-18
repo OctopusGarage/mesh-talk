@@ -356,6 +356,8 @@ for (const viewport of [
       test(`settings layout supports ${theme} theme and ${language} locale at ${viewport.width}x${viewport.height}`, async ({
         page,
       }, testInfo) => {
+        // Each case captures every category; keep the ordinary assertion deadlines.
+        test.setTimeout(90_000);
         await page.setViewportSize(viewport);
         await enterChat(page);
         await openSidebarMenuAction(page, "sidebar-nav-settings");

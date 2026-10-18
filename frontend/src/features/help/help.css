@@ -1,0 +1,200 @@
+.help-dialog {
+  width: calc(100vw - 2rem);
+  max-width: 64rem;
+  height: min(48rem, calc(100vh - 2rem));
+  height: min(48rem, calc(100dvh - 2rem));
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+.help-reader {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  min-height: 0;
+  gap: 1.5rem;
+}
+.help-index {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  border-right: 1px solid hsl(var(--border));
+  padding-right: 1rem;
+}
+.help-search {
+  width: 100%;
+  height: 2.5rem;
+  border: 1px solid hsl(var(--input));
+  border-radius: 0.375rem;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  padding: 0.5rem 2.25rem;
+  font-size: 0.8125rem;
+  outline: none;
+}
+.help-search::-webkit-search-cancel-button {
+  display: none;
+}
+.help-search::placeholder {
+  color: hsl(var(--muted-foreground));
+}
+.help-search:focus-visible {
+  box-shadow: 0 0 0 2px hsl(var(--ring));
+}
+.help-clear {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.375rem;
+  color: hsl(var(--muted-foreground));
+}
+.help-clear:hover {
+  color: hsl(var(--foreground));
+}
+.help-clear:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: -2px;
+}
+.help-results {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.25rem;
+}
+.help-result {
+  display: block;
+  width: 100%;
+  border-radius: 0.375rem;
+  padding: 0.625rem 0.75rem;
+  margin-bottom: 0.25rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.help-result:hover,
+.help-result[aria-current] {
+  background: hsl(var(--accent));
+}
+.help-result:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: -2px;
+}
+.help-reading-pane {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.help-language-note {
+  border-bottom: 1px solid hsl(var(--border));
+  padding-bottom: 0.75rem;
+  margin-bottom: 0.75rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+.help-article {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0.25rem 0.75rem 1.5rem 0.125rem;
+  font-size: 0.875rem;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+  outline: none;
+}
+.help-article:focus-visible {
+  box-shadow: inset 0 0 0 1px hsl(var(--ring));
+  border-radius: 0.25rem;
+}
+.help-article h1 {
+  font-family: var(--font-display, inherit);
+  font-size: 1.5rem;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin-bottom: 1rem;
+}
+.help-article h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 1.75rem 0 0.625rem;
+}
+.help-article h3 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.5rem;
+}
+.help-article p {
+  margin: 0.75rem 0;
+  max-width: 70ch;
+}
+.help-article ul,
+.help-article ol {
+  padding-left: 1.375rem;
+  margin: 0.75rem 0;
+}
+.help-article ul {
+  list-style: disc;
+}
+.help-article ol {
+  list-style: decimal;
+}
+.help-article li {
+  padding-left: 0.25rem;
+  margin: 0.5rem 0;
+}
+.help-article a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.help-article a:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 3px;
+}
+.help-article code {
+  font-size: 0.8125rem;
+  background: hsl(var(--muted));
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+}
+.help-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  padding-top: 0.75rem;
+  border-top: 1px solid hsl(var(--border));
+}
+.help-actions button {
+  white-space: normal;
+  height: auto;
+  min-height: 2rem;
+}
+@media (max-width: 639px) {
+  .help-reader {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(7rem, 32%) minmax(0, 1fr);
+    gap: 1rem;
+  }
+  .help-index {
+    border-right: 0;
+    border-bottom: 1px solid hsl(var(--border));
+    padding-right: 0;
+    padding-bottom: 0.5rem;
+  }
+  .help-result {
+    padding: 0.375rem 0.5rem;
+  }
+  .help-result > span + span {
+    display: none;
+  }
+  .help-article h1 {
+    font-size: 1.25rem;
+  }
+}

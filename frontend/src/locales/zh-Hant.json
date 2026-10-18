@@ -930,5 +930,20 @@
     "description": "在你的裝置之間同步筆記和檔案",
     "saved": "已儲存在此裝置上",
     "fileCardSaved": "檔案資訊已儲存在此裝置上"
+  },
+  "help": {
+    "title": "說明",
+    "description": "版本 {{version}} · 可離線閱讀",
+    "search": "搜尋使用說明",
+    "clearSearch": "清除搜尋",
+    "topicCount_one": "{{count}} 個主題",
+    "topicCount_other": "{{count}} 個主題",
+    "topics": "說明主題",
+    "noResults": "找不到相關主題。請嘗試更簡短的關鍵字，或清除搜尋以瀏覽所有指南。",
+    "englishFallback": "說明文章目前為英文，也支援常用中文關鍵字搜尋。",
+    "openSettings": "開啟{{category}}",
+    "openDiagnostics": "開啟連線診斷",
+    "online": "線上閱讀",
+    "linkFailed": "無法開啟連結。請重試，或在瀏覽器中開啟線上手冊。"
   }
 }

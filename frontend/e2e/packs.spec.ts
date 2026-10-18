@@ -5,7 +5,7 @@ import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 import { revealComposerTools } from "./helpers/session";
-import { seedMarketPacks, waitForPacks } from "./helpers/packs";
+import { seedMarketPacks, waitForPackBootstrap } from "./helpers/packs";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
 test.skip(process.env.MESH_TALK_VARIANT === "lite", "Default build only");
@@ -52,7 +52,7 @@ test("default build preinstalls a theme and keeps its removal after restart", as
   await enterChat(page);
   // Exercise the real bundled installer and await its completion, including
   // image validation, before checking the installed theme.
-  await waitForPacks(page);
+  await waitForPackBootstrap(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
   const manager = page.getByTestId("pack-manager-theme");
@@ -306,7 +306,7 @@ test("rejects an image that has a PNG signature but cannot be decoded", async ({
     "images/broken.png": new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0]),
   });
   await enterChat(page);
-  await waitForPacks(page);
+  await waitForPackBootstrap(page);
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
   await page.getByText(/Choose from gallery/).click();

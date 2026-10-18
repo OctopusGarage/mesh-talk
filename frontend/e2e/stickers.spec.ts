@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
-import { waitForPacks } from "./helpers/packs";
+import { waitForPackBootstrap } from "./helpers/packs";
 
 const BOB = { account: "acc_bob_bbbb2222" };
 
@@ -111,7 +111,7 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
   manifest.name = "Imported Noto";
   files["manifest.json"] = strToU8(JSON.stringify(manifest));
   await enterBobDm(page);
-  await waitForPacks(page);
+  await waitForPackBootstrap(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
