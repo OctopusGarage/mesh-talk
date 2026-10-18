@@ -567,9 +567,9 @@
   "linkDevice": {
     "syncTitle": "在本裝置上同步",
     "historySync": "訊息歷史",
-    "historySyncDescription": "與已連結的裝置分享及接收私訊與頻道訊息歷史。",
+    "historySyncDescription": "與已連結裝置分享及接收現有私訊、群組訊息與檔案資訊。",
     "attachmentsSync": "附件",
-    "attachmentsSyncDescription": "從已連結的裝置複製可用的舊附件和已驗證的檔案資料。",
+    "attachmentsSyncDescription": "與已連結裝置分享及下載現有檔案內容。檔案資訊也隨訊息歷史同步。",
     "profileSync": "帳戶頭像",
     "profileSyncDescription": "接收已連結裝置上的頭像變更。",
     "appearanceSync": "外觀",
@@ -605,7 +605,8 @@
     "rotateIdentity": "輪替至全新的帳號身分。",
     "rekey": "重設金鑰",
     "rekeyed": "已重設金鑰。新帳號：{{id}}…",
-    "rekeyFailed": "重設金鑰失敗：{{error}}"
+    "rekeyFailed": "重設金鑰失敗：{{error}}",
+    "legacyFileMetadata": "升級此已連結裝置，以便單獨同步檔案資訊而不下載檔案。"
   },
   "webrtcTest": {
     "trigger": "語音/視訊自我檢測",
@@ -910,5 +911,11 @@
     "endpointHint": "這是最後已知的網絡路徑，可能指向中繼節點；它不表示地理位置。",
     "view": "查看資料",
     "viewNamed": "查看{{name}}的資料"
+  },
+  "personal": {
+    "title": "收藏訊息",
+    "description": "在你的裝置之間同步筆記和檔案",
+    "saved": "已儲存在此裝置上",
+    "fileCardSaved": "檔案資訊已儲存在此裝置上"
   }
 }

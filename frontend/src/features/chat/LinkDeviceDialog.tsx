@@ -426,6 +426,9 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
                     {shortId(device.device_id, 8)}
                   </span>{" "}
                   <span>{t(`linkDevice.syncPhase.${device.phase}`)}</span>
+                  {device.legacy_file_metadata && (
+                    <p>{t("linkDevice.legacyFileMetadata")}</p>
+                  )}
                   {device.pending_attachments > 0 && (
                     <span>
                       {" "}

@@ -44,6 +44,99 @@ it("old roster identity failure cannot undo newer readiness", async () => {
   expect(useChat.getState().ready).toBe(true);
 });
 
+it("refreshes imported history when the runtime projection changes", async () => {
+  let revision = 1;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: revision,
+      });
+    if (command === "owner_account_history")
+      return Promise.resolve([
+        {
+          id: "synced",
+          from_me: true,
+          text: "from my other device",
+          who: "me",
+          wall_clock: 1,
+        },
+      ]);
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "account", id: "friend", name: "Friend" },
+  });
+  await useChat.getState().refreshRoster();
+  revision = 2;
+  await useChat.getState().refreshRoster();
+  expect(useChat.getState().messages["account:friend"]?.[0]?.id).toBe("synced");
+  const calls = invoke.mock.calls.filter(
+    ([name]) => name === "owner_account_history",
+  ).length;
+  await useChat.getState().refreshRoster();
+  expect(
+    invoke.mock.calls.filter(([name]) => name === "owner_account_history"),
+  ).toHaveLength(calls);
+});
+
+it("retries an imported-history refresh after history is temporarily unavailable", async () => {
+  let historyCalls = 0;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: 7,
+      });
+    if (command === "owner_account_history") {
+      if (++historyCalls === 1)
+        return Promise.reject(new Error("temporarily unavailable"));
+      return Promise.resolve([
+        { id: "synced", from_me: true, text: "note", who: "me", wall_clock: 1 },
+      ]);
+    }
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "account", id: "friend", name: "Friend" },
+  });
+  await useChat.getState().refreshRoster();
+  await useChat.getState().refreshRoster();
+  expect(useChat.getState().messages["account:friend"]?.[0]?.id).toBe("synced");
+  expect(historyCalls).toBe(2);
+});
+
+it("ignores an old owner's history revision response", async () => {
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementation((command: string) =>
+    command === "owner_node_identity"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve([]),
+  );
+  useChat.setState({
+    active: { kind: "account", id: "friend", name: "Friend" },
+  });
+  const refreshing = useChat.getState().refreshRoster();
+  useAuth.setState((state) => ({ generation: state.generation + 1 }));
+  finish({
+    owner: "host",
+    device_id: "me",
+    account_id: "myacct",
+    history_revision: 9,
+  });
+  await refreshing;
+  expect(useChat.getState().historyRevision).toBeNull();
+  expect(
+    invoke.mock.calls.some(([command]) => command === "owner_account_history"),
+  ).toBe(false);
+});
+
 it("keeps unchanged discovery snapshots referentially stable", async () => {
   invoke.mockImplementation((command: string) => {
     if (command === "owner_node_identity")
@@ -351,6 +444,7 @@ const reset = () =>
   useChat.setState({
     runEpoch: 0,
     identityEpoch: 0,
+    historyRevision: null,
     bootBusy: false,
     bootRequest: 0,
     intents: {},

@@ -7,16 +7,22 @@ import type { ChatMessage } from "@/store/chat";
 export function DeliveryFooter({
   message,
   isChannel,
+  isPersonal = false,
   showTime = true,
 }: {
   message: ChatMessage;
   isChannel: boolean;
+  isPersonal?: boolean;
   showTime?: boolean;
 }) {
   const { t } = useTranslation();
   const tooltip = useId();
   const delivery =
-    message.fromMe && !isChannel && !message.pending && !message.failed
+    message.fromMe &&
+    !isChannel &&
+    !isPersonal &&
+    !message.pending &&
+    !message.failed
       ? message.delivery
       : undefined;
   const label = delivery ? t(`message.delivery.${delivery}`) : "";
@@ -38,7 +44,19 @@ export function DeliveryFooter({
       : t(
           `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
         );
-  if (!showTime && !message.pending && !delivery && custody === undefined)
+  const saved =
+    isPersonal &&
+    message.fromMe &&
+    !!message.id &&
+    !message.pending &&
+    !message.failed;
+  if (
+    !showTime &&
+    !message.pending &&
+    !delivery &&
+    custody === undefined &&
+    !saved
+  )
     return null;
   return (
     <span className="mt-1 flex items-center gap-1 px-1 text-xs tabular-nums text-muted-foreground">
@@ -46,6 +64,11 @@ export function DeliveryFooter({
         <span data-testid="message-time">{formatTime(message.wallClock)}</span>
       )}
       {message.pending && <span>{` · ${t("message.sending")}`}</span>}
+      {saved && (
+        <span data-personal-saved>
+          {t(message.file ? "personal.fileCardSaved" : "personal.saved")}
+        </span>
+      )}
       {delivery && (
         <span
           className="group relative inline-flex items-center gap-1"

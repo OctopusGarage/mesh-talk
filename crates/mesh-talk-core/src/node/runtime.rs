@@ -677,6 +677,11 @@ impl NodeRuntime {
             .await
     }
 
+    /// Process-local revision for durable account history projection refreshes.
+    pub fn account_history_revision(&self) -> u64 {
+        self.node.account_history_revision()
+    }
+
     /// Account-level conversation history with `peer_account_id`.
     pub fn account_history(&self, peer_account_id: &str, limit: usize) -> Vec<HistoryEntry> {
         self.node.account_history(peer_account_id, limit)

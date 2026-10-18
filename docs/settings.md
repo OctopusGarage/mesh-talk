@@ -25,6 +25,29 @@ participate in linked-device synchronization when its category is enabled. Each
 page names its scope, with exceptions beside the affected control. Backup does
 not export the device's settings; see [backup and recovery](backup-recovery.md).
 
+## Saved Messages and linked devices
+
+**Saved Messages** is always available after the account is ready, including when
+no peers are online. Text, stickers and file cards use the account's ordinary
+conversation history. Acceptance saves them locally; it does not promise that
+another device has received them. Personal messages do not expire automatically.
+
+In **Link a device**, **Message history** controls sharing and receiving available
+messages and file information with certified devices on your account.
+**Attachments** independently permits sharing and downloading the available file
+bytes. Both endpoints must permit the relevant category. Turning these off does
+not disable conversations with other people or groups.
+
+Upgraded devices can synchronize file cards without downloading their contents.
+Older devices retain their existing attachment-coupled metadata behavior; the
+linked-device status explains when an upgrade is needed. Choosing no history
+before linking requires a source device supporting that choice; an older source
+must be upgraded rather than transferring history first.
+
+Synchronization resumes when a trusted source is reachable and still retains the
+selected data. Local retention and deletion can remove that source; this feature
+is not an unlimited cloud archive. A local save remains useful while offline.
+
 ## Network preferences and effective behavior
 
 Saved preferences and current permission are separate facts. Disabling post

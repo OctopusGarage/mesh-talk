@@ -293,6 +293,7 @@ pub struct Node {
     pub(in crate::node) account_preferences: Mutex<super::account_preferences::AccountPreferences>,
     pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
+    pub(in crate::node) account_history_revision: std::sync::atomic::AtomicU64,
     pub(in crate::node) account_sync_status:
         Mutex<std::collections::HashMap<String, super::account_sync::DeviceSyncStatus>>,
     /// One-time pairing code while in "link a device" mode (linker side). Set by
@@ -736,6 +737,7 @@ impl Node {
             account_preferences: Mutex::new(account_preferences),
             account_file_proofs: Mutex::new(account_file_proofs),
             account_sync_notify: tokio::sync::Notify::new(),
+            account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             profiles: Mutex::new(profiles),
             profile_incoming: profile_tx,
@@ -994,6 +996,11 @@ impl Node {
         {
             return Err(NodeError::Channel("channel is dissolved".into()));
         }
+        let independent_profile = kind == EventKind::Profile
+            && self.linked_devices().iter().any(|device| {
+                super::conversation::dm_conversation_id(&self.identity.public(), &device.public)
+                    == channel
+            });
         // Accepted immutable intents reserve their author's sequence even before
         // installation. Serialize every local allocation with that reservation.
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
@@ -1001,7 +1008,12 @@ impl Node {
             .map_err(NodeError::Log)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
-        let (parents, lamport) = log.prepare(&channel);
+        let (mut parents, lamport) = log.prepare(&channel);
+        if independent_profile {
+            // Signed profile leaves must remain ingestible while sibling content
+            // categories are paused. The event log permits sparse author sequences.
+            parents.clear();
+        }
         let seq = log
             .version_vector(&channel)
             .get(&self_author)

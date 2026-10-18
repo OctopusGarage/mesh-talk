@@ -160,6 +160,7 @@ async function pollUntilReady(
           identityEpoch: replacedScope
             ? state.identityEpoch + 1
             : state.identityEpoch,
+          historyRevision: identity.history_revision ?? null,
           myId: identity.device_id,
           myAccountId: acct,
           unread,
@@ -197,6 +198,7 @@ const isChannelConv = (c: Conversation) => c.kind === "channel";
 
 export interface ChatState {
   identityEpoch: number;
+  historyRevision: number | null;
   bootBusy: boolean;
   bootRequest: number;
   intents: Record<string, SendIntent>;
@@ -295,6 +297,7 @@ export interface ChatState {
 function emptySessionData() {
   return {
     identityEpoch: 0,
+    historyRevision: null,
     bootBusy: false,
     bootRequest: 0,
     intents: {},
@@ -667,6 +670,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           ...(rosterChanged ? { peers, accounts, channels } : {}),
           ...(resolved.length ? { unread, pendingUnknownUnread } : {}),
         });
+      }
+      // Imports are durable before this process-local revision advances. Reuse
+      // the owner-scoped poll so an open conversation updates without notifications.
+      if (identity.history_revision !== undefined) {
+        const changed = get().historyRevision !== identity.history_revision;
+        const loaded = !changed || !get().active || (await get().reload());
+        if (!lease.current() || get().rosterRequest !== request) return;
+        if (loaded) set({ historyRevision: identity.history_revision });
       }
       // Cache each channel's members for the composite group avatar (best-effort per
       // channel; a single failure just leaves that channel's montage on its fallback).

@@ -8134,3 +8134,200 @@ async fn setting_an_oversized_avatar_is_rejected() {
         "oversize must be rejected"
     );
 }
+
+#[tokio::test]
+async fn sibling_history_policy_retains_ciphertext_and_replays_without_network() {
+    use crate::identity::account::Account;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = personal_message_node(
+        &dir.path().join("source"),
+        DeviceIdentity::generate(),
+        Account::from_secret_bytes(account.secret_bytes()),
+    );
+    let receiver = personal_message_node(
+        &dir.path().join("receiver"),
+        DeviceIdentity::generate(),
+        account,
+    );
+    for (owner, other) in [(&source, &receiver), (&receiver, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(crate::node::account_devices::AccountDevice {
+                public: other.identity.public(),
+                certificate: owner.account.certify(&other.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        add_account_peer(
+            &owner.roster,
+            &other.identity,
+            &other.account,
+            "sibling",
+            9,
+            &owner.user_id(),
+        );
+    }
+    let target = source.account_id();
+    let id = source
+        .enqueue_to_account(&target, b"retained while paused", None)
+        .await
+        .unwrap();
+    let destination = source
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    receiver
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    receiver
+        .log
+        .lock()
+        .unwrap()
+        .append(destination.event.clone())
+        .unwrap();
+    receiver.emit_new_messages(destination.event.conversation_id);
+    assert!(
+        receiver.account_history(&target, 10).is_empty(),
+        "paused sibling text must remain ciphertext"
+    );
+    assert!(
+        !receiver
+            .emitted
+            .lock()
+            .unwrap()
+            .contains(&destination.event.id)
+    );
+    receiver
+        .set_device_sync_category(SyncCategory::History, true)
+        .unwrap();
+    assert_eq!(
+        receiver.account_history(&target, 10).len(),
+        1,
+        "reenable must replay retained text even without a reachable source"
+    );
+    source
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    assert!(
+        !source.delivery_destination_allowed(&destination),
+        "queued sibling text must pause"
+    );
+    assert!(
+        source.account_fanout_targets(&target).is_empty(),
+        "new sibling text must pause"
+    );
+    use crate::eventlog::sync::SyncStore;
+    let view = source.serve_sync_store(&receiver.identity.public());
+    assert!(
+        view.lock()
+            .unwrap()
+            .events_excluding(
+                &destination.event.conversation_id,
+                &std::collections::HashSet::new()
+            )
+            .is_empty(),
+        "ordinary sync must not bypass source history policy"
+    );
+    let outsider = DeviceIdentity::generate();
+    let outside_account = Account::generate();
+    add_account_peer(
+        &source.roster,
+        &outsider,
+        &outside_account,
+        "outside",
+        9,
+        &source.user_id(),
+    );
+    let external = source
+        .enqueue_to_account(
+            &outside_account.account_id(),
+            b"ordinary DM remains live",
+            None,
+        )
+        .await
+        .unwrap();
+    let outside_destination = source
+        .delivery
+        .lock()
+        .unwrap()
+        .message(external)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    assert!(source.delivery_destination_allowed(&outside_destination));
+}
+
+#[tokio::test]
+async fn sibling_file_retry_uses_attachment_category_independently_of_history() {
+    use crate::identity::account::Account;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = personal_message_node(
+        &dir.path().join("source"),
+        DeviceIdentity::generate(),
+        Account::from_secret_bytes(account.secret_bytes()),
+    );
+    let sibling = personal_message_node(
+        &dir.path().join("sibling"),
+        DeviceIdentity::generate(),
+        account,
+    );
+    source
+        .account_devices
+        .lock()
+        .unwrap()
+        .insert(crate::node::account_devices::AccountDevice {
+            public: sibling.identity.public(),
+            certificate: source
+                .account
+                .certify(&sibling.identity.public().ed25519_pub),
+        })
+        .unwrap();
+    add_account_peer(
+        &source.roster,
+        &sibling.identity,
+        &sibling.account,
+        "sibling",
+        9,
+        &source.user_id(),
+    );
+    let event = crate::eventlog::Event::new(
+        &source.identity,
+        crate::node::conversation::dm_conversation_id(
+            &source.identity.public(),
+            &sibling.identity.public(),
+        ),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::FileManifest,
+        vec![1],
+    );
+    let destination = crate::node::delivery_store::DeliveryDestination {
+        device: sibling.identity.public(),
+        account: Some(source.account_id()),
+        event,
+        receipt_eligible: false,
+    };
+    assert!(
+        !source.delivery_destination_allowed(&destination),
+        "default bytes-off must pause old sibling file retries"
+    );
+    source
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    source
+        .set_device_sync_category(SyncCategory::Attachments, true)
+        .unwrap();
+    assert!(
+        source.delivery_destination_allowed(&destination),
+        "files-only mode remains allowed"
+    );
+}

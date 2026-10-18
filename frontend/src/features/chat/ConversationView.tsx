@@ -16,7 +16,7 @@ import {
   StartupFailureState,
   UnlockingState,
 } from "./ConversationStates";
-import { ChannelHeader, DmHeader } from "./ConversationHeaders";
+import { ChannelHeader, DmHeader, PersonalHeader } from "./ConversationHeaders";
 import { ScreenshotEditor } from "./ScreenshotEditor";
 import {
   messageRowKey,
@@ -71,6 +71,8 @@ export function ConversationView() {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
+  const myAccountId = useChat((s) => s.myAccountId);
+  const isPersonal = active?.kind === "account" && active.id === myAccountId;
   const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
@@ -79,7 +81,9 @@ export function ConversationView() {
     300_000,
   );
   const expiresAtSend = () =>
-    expiryDurationMs === null ? null : Date.now() + expiryDurationMs;
+    isPersonal || expiryDurationMs === null
+      ? null
+      : Date.now() + expiryDurationMs;
   const toggleReaction = useChat((s) => s.toggleReaction);
   const openConversation = useChat((s) => s.open);
   const deleteMessage = useChat((s) => s.deleteMessage);
@@ -98,7 +102,6 @@ export function ConversationView() {
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
   const myId = useChat((s) => s.myId);
-  const myAccountId = useChat((s) => s.myAccountId);
   const members = useChat((s) => s.members);
   const peers = useChat((s) => s.peers);
   const roster = rosterProjection(peers);
@@ -252,7 +255,9 @@ export function ConversationView() {
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
-  const headerName = displayName(favorites, active.id, active.name);
+  const headerName = isPersonal
+    ? t("personal.title")
+    : displayName(favorites, active.id, active.name);
 
   return (
     // min-w-0 lets this flex child shrink below its content's intrinsic width, so a wide
@@ -302,7 +307,9 @@ export function ConversationView() {
         data-titlebar-inset
         className="flex min-h-[68px] items-center gap-3 border-b bg-card px-5 py-2.5"
       >
-        {isChannel ? (
+        {isPersonal ? (
+          <PersonalHeader />
+        ) : isChannel ? (
           <ChannelHeader
             id={active.id}
             name={headerName}
@@ -322,7 +329,8 @@ export function ConversationView() {
         {isChannel && !archived && !pendingInvite ? (
           <MembersDialog key={key} dissolved={dissolved} />
         ) : (
-          active.kind === "account" && (
+          active.kind === "account" &&
+          !isPersonal && (
             <>
               <AttachmentReceiveSettings key={active.id} account={active.id} />
               <CallButtons accountId={active.id} name={headerName} />
@@ -466,6 +474,7 @@ export function ConversationView() {
                     grouped={grouped}
                     showTime={showTime}
                     isChannel={isChannel}
+                    isPersonal={isPersonal}
                     readOnly={readOnly}
                     authorAvatarId={authorAccount ?? m.who}
                     authorName={authorName}
@@ -590,8 +599,8 @@ export function ConversationView() {
         </div>
       ) : (
         <Composer
-          expiryDurationMs={expiryDurationMs}
-          onExpiryDurationChange={setExpiryDurationMs}
+          expiryDurationMs={isPersonal ? null : expiryDurationMs}
+          onExpiryDurationChange={isPersonal ? undefined : setExpiryDurationMs}
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
           key={key}

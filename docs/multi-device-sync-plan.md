@@ -15,14 +15,58 @@ private records, keeping group authorization and account authority separate.
 **Tech stack:** Rust/Tokio, existing encrypted record logs and Noise transport,
 Tauri IPC, React/TypeScript/Zustand, current Rust and Vitest/Playwright tooling.
 
-**Status:** Implementation in progress, based on code inspection at `762525d` on
-2026-10-18. Unchecked steps remain proposed and unverified. This is an
-architecture-level implementation plan, not a drop-in patch. Interface sketches
-describe proposed additions rather than existing callable APIs. The
+**Status:** The messages-and-files implementation is complete, based on code
+inspection at `762525d` on 2026-10-18. Executed validation is recorded below;
+unchecked broader proposal steps are not claimed verified. The original
+architecture-level checklists and interface sketches remain a baseline rather
+than a list of existing callable APIs. The
 [design](multi-device-sync-design.md) defines behavior and security boundaries;
 the [research](research/multi-device-sync-patterns.md) records source evidence.
 The plan lives here because repository instructions reserve `docs/superpowers/`
 and root `plans/` for local, untracked work.
+
+## Implementation record (2026-10-18)
+
+The first release extends the existing account reconciliation instead of adding
+new typed private-state records. The detailed checklists below preserve the
+original proposal; unchecked items must not be read as executed test evidence.
+
+- Package 1 is committed in `6916c43`: durable zero-peer personal messages,
+  restart recovery, capacity isolation and certified-sibling catch-up.
+- Packages 2–4 are implemented and independently reviewed:
+  authenticated pre-transfer history selection; live/backfill policy gates;
+  versioned file metadata/bytes selection; signed personal file routes and
+  encrypted local retention; permanent Saved Messages and truthful local labels.
+- Automatic projection refresh uses the existing owner-scoped device poll and a
+  process-local durable-import revision. It adds no persisted cursor or protocol
+  frame. Own-device copies do not create external DM notifications.
+- Frontend validation: 117 focused tests across seven files; four personal-message
+  Playwright scenarios; 20 visual scenarios with updated macOS baselines. Final
+  core validation: **102 focused tests pass**, including real TCP pairing,
+  three-sibling file catch-up after the original source stops, policy changes,
+  retained ciphertext after restart with no discovery, invalid proofs, local
+  clear, interrupted transfers, group files and avatar compatibility. The focused host test
+  `registered_identity_query_returns_actual_matching_runtime_and_rejects_replacement_session`
+  passes, including serialization of the history revision and owner replacement
+  rejection.
+- The four personal-message browser scenarios also pass in Linux Docker and
+  Windows. Compact OLED baselines were captured on each platform. Windows
+  Microsoft YaHei uses the installed OS default; the Segoe UI reference uses
+  the same Windows browser with that fallback selected in a disposable UI copy.
+  No production font configuration changed. These UI-only checks are not the
+  committed-candidate PR preflight. Both Linux and Windows also pass all 20
+  visual comparisons without updating snapshots in the comparison run.
+
+Executed local checks also include Rust formatting, frontend Prettier,
+TypeScript, ESLint, the production frontend build, documentation typos and
+`git diff --check`. Workspace `cargo clippy --all-targets -- -D warnings`
+also passes with no diagnostics. The full
+workspace test suite, comprehensive health gate and committed-candidate PR
+preflight have not run for this task; they remain required before a PR/release.
+
+No private drafts/read-state synchronization, new cloud service, secure device
+revocation or indefinite offline custody is included. Existing signed account
+preferences remain intact. Availability still depends on reachable retained data.
 
 ## Scope, order and completion boundaries
 

@@ -151,10 +151,30 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   invitation proof ahead of the backlog.
 - **Multi-device** — `DmEnvelope{route, msg_id, body}` (magic `MTDE1`) carries
   sender/recipient _account_ routing inside the ciphertext; `send_to_account` fans a
-  per-device ratcheted copy to every device of the target account + self-syncs to own
-  devices; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
+  per-device ratcheted copy to eligible devices of the target account and to own
+  devices when linked-message history is enabled; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
+  Self-account sends also work with no known siblings: the delivery WAL accepts a
+  durable local projection without reserving a remote queue slot. Saved Messages
+  reuses the self-account conversation and logical message IDs. Personal file
+  cards retain encrypted managed content and a detached signed manifest proof
+  (`MTPFM1`) binding the exact expiry-wrapped manifest digest to that conversation.
+  The proof is evidence, not an event grafted into the event-log DAG.
+  Account-history protocol `MTAHS2` separates file cards from file bytes and
+  supports personal file proofs; `MTAHS1` retains its frozen legacy encoding and
+  attachment-coupled cards. Pairing request `MTPQ2` authenticates the requested
+  history choice before transfer; strict no-history enrollment never falls back
+  to the legacy request. Source and receiver policy revisions guard each page
+  and final attachment commit. History-off pauses sibling message decryption;
+  retained encrypted events can be processed after re-enabling. Ordinary external
+  messages and group membership authorization remain independent. Signed sibling
+  profile updates are independent DAG leaves, so withholding message/file
+  ancestors does not stall an enabled avatar category. Reconciliation compares
+  event ID sets and supports sparse author sequences.
+  Durable imported projections advance a process-local history revision exposed
+  by the owner-scoped identity command. The existing UI poll refreshes the open
+  conversation on change; own-device copies do not generate incoming DM alerts.
   Durable enrollment permits only the exact certified Ed25519/X25519 device to
   adopt the owning account; fresh self-signed presence alone cannot change a
   pinned account. Startup reconstructs the expected binding and retires old

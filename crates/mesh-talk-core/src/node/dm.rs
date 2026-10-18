@@ -18,8 +18,10 @@ impl Node {
         self.routing_peers()
             .into_iter()
             .filter(|p| {
-                p.account_id.as_deref() == Some(target_account_id)
-                    || p.account_id.as_deref() == Some(my_account.as_str())
+                (p.account_id.as_deref() == Some(target_account_id)
+                    && target_account_id != my_account)
+                    || (p.account_id.as_deref() == Some(my_account.as_str())
+                        && self.device_sync_policy().history)
             })
             .filter(|p| p.public.user_id() != me)
             .filter(|p| seen.insert(p.public.user_id()))

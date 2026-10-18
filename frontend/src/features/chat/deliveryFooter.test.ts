@@ -15,13 +15,14 @@ const base: ChatMessage = {
   replyTo: null,
   delivery: "awaiting",
 };
-const render = (m: ChatMessage, isChannel = false) =>
+const render = (m: ChatMessage, isChannel = false, isPersonal = false) =>
   renderToStaticMarkup(
     createElement(MessageBubble, {
       m,
       parent: null,
       showAuthor: false,
       isChannel,
+      isPersonal,
       reactions: [],
       selfReactionId: "me",
       myName: "Me",
@@ -35,6 +36,38 @@ const render = (m: ChatMessage, isChannel = false) =>
   );
 
 describe("automatic delivery footer", () => {
+  it("distinguishes personal file metadata from bytes and external upload progress", async () => {
+    await i18n.changeLanguage("en");
+    const html = render(
+      {
+        ...base,
+        file: {
+          fileConv: "personal-file",
+          name: "note.txt",
+          size: 12,
+          mime: "text/plain",
+          media: false,
+        },
+      },
+      false,
+      true,
+    );
+    expect(html).toContain("File card saved on this device");
+    expect(html).not.toContain('role="progressbar"');
+    expect(html).not.toContain("data-delivery=");
+  });
+  it("labels personal messages as locally saved without claiming external delivery", async () => {
+    await i18n.changeLanguage("en");
+    const html = render(base, false, true);
+    expect(html).toContain("Saved on this device");
+    expect(html).not.toContain("data-delivery=");
+    expect(render({ ...base, pending: true }, false, true)).not.toContain(
+      "Saved on this device",
+    );
+    expect(render({ ...base, failed: true }, false, true)).not.toContain(
+      "Saved on this device",
+    );
+  });
   it("renders accessible static awaiting/delivered for text, sticker and file cards", async () => {
     await i18n.changeLanguage("en");
     for (const m of [

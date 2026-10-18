@@ -211,9 +211,10 @@ impl Node {
             // A retired account proof can recover an interrupted authorized link,
             // but can never enter sync, account history, attachments or call IPC.
             if let Ok(Ok(first)) = tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await
-                && let Some(request) = PairingRequest::decode(&first)
+                && let Some((request, history)) = PairingRequest::decode_selected(&first)
             {
-                self.serve_pairing(&mut channel, request).await;
+                self.serve_pairing_selected(&mut channel, request, history)
+                    .await;
             }
             return;
         }
@@ -245,33 +246,48 @@ impl Node {
         if is_relay && !self.relay_allowed(channel.peer_identity()) {
             return;
         }
-        if let Some(req) = PairingRequest::decode(&first) {
+        if let Some((req, history)) = PairingRequest::decode_selected(&first) {
             if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
                 return;
             }
-            self.serve_pairing(&mut channel, req).await;
-            return;
-        }
-        if let Some(super::account_sync_wire::AccountHistoryFrame::Request {
-            account_id,
-            cursor,
-            known_digest,
-            wanted,
-            ..
-        }) = super::account_sync_wire::AccountHistoryFrame::decode(&first)
-        {
-            self.serve_account_history(&mut channel, &account_id, cursor, known_digest, wanted)
+            self.serve_pairing_selected(&mut channel, req, history)
                 .await;
             return;
         }
-        if let Some(super::account_sync_wire::AccountHistoryFrame::AttachmentRequest {
-            account_id,
-            file_conv,
-            ..
-        }) = super::account_sync_wire::AccountHistoryFrame::decode(&first)
+        if let Some((
+            version,
+            super::account_sync_wire::AccountHistoryFrame::Request {
+                account_id,
+                cursor,
+                known_digest,
+                wanted,
+                ..
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            self.serve_account_history(
+                &mut channel,
+                version,
+                &account_id,
+                cursor,
+                known_digest,
+                wanted,
+            )
+            .await;
+            return;
+        }
+        if let Some((
+            version,
+            super::account_sync_wire::AccountHistoryFrame::AttachmentRequest {
+                account_id,
+                file_conv,
+                ..
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
         {
             self.serve_account_attachment(
                 &mut channel,
+                version,
                 &account_id,
                 crate::eventlog::event::ConversationId::new(file_conv),
             )
@@ -363,6 +379,14 @@ impl Node {
                 .expect("files mutex not poisoned")
                 .is_emitted(&event.id)
             {
+                continue;
+            }
+            if !is_channel
+                && self
+                    .historical_author(event.author.ed25519_pub())
+                    .is_some_and(|proof| self.certified_sibling(&proof.public()))
+            {
+                // Sibling file metadata and bytes use the category-negotiated account path.
                 continue;
             }
             // NB: we mark emitted only AFTER a successful open+decode (below), so a
@@ -706,10 +730,16 @@ impl Node {
                 .collect()
         };
         for event in candidates {
-            let Some(proof) = self.historical_author(event.author.ed25519_pub()) else {
-                continue;
-            };
-            let _ = self.accept_dm_event(&event, &proof, &mut delivery);
+            if let Some(proof) = self.historical_author(event.author.ed25519_pub()) {
+                let _ = self.accept_dm_event(&event, &proof, &mut delivery);
+            } else if let Some(device) = self
+                .linked_devices()
+                .into_iter()
+                .find(|device| device.public.ed25519_pub == *event.author.ed25519_pub())
+            {
+                let _ =
+                    self.accept_dm_event_with_author(&event, &device.public, None, &mut delivery);
+            }
         }
         drop(delivery);
         // A recall may arrive before its target is viewed. Persist verified

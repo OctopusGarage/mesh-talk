@@ -6,6 +6,7 @@ use super::sentlog::SentEntry;
 use super::session::SessionError;
 use super::*;
 use crate::eventlog::{ConversationId, Event, EventId, LogError};
+use crate::identity::device::PublicIdentity;
 
 // Owned by the delivery loop: cancellation drops every retained channel. Keep
 // eight scheduling slots, at most six retained sockets (one outbound permit
@@ -544,9 +545,27 @@ impl Node {
         &self,
         destination: &DeliveryDestination,
     ) -> bool {
-        !self
-            .delivery_suspended
-            .load(std::sync::atomic::Ordering::Acquire)
+        let sibling_allowed = if self.certified_sibling(&destination.device) {
+            let policy = self.device_sync_policy();
+            match destination.event.kind {
+                crate::eventlog::EventKind::Message => {
+                    destination.event.conversation_id
+                        == super::delivery_receipt::delivery_conversation_id(
+                            &self.identity.public(),
+                            &destination.device,
+                        )
+                        || policy.history
+                }
+                crate::eventlog::EventKind::FileManifest => policy.attachments,
+                _ => true,
+            }
+        } else {
+            true
+        };
+        sibling_allowed
+            && !self
+                .delivery_suspended
+                .load(std::sync::atomic::Ordering::Acquire)
             && self
                 .historical_author(&destination.device.ed25519_pub)
                 .is_some_and(|p| {
@@ -560,10 +579,26 @@ impl Node {
         proof: &crate::discovery::Announce,
         store: &mut DeliveryStore,
     ) -> Option<()> {
-        let peer = proof.public();
+        self.accept_dm_event_with_author(event, &proof.public(), Some(proof), store)
+    }
+
+    pub(in crate::node) fn accept_dm_event_with_author(
+        &self,
+        event: &Event,
+        public: &PublicIdentity,
+        proof: Option<&crate::discovery::Announce>,
+        store: &mut DeliveryStore,
+    ) -> Option<()> {
+        let peer = public.clone();
+        let sibling = self.certified_sibling(&peer);
+        // Offline replay can use the already persisted exact sibling certificate.
+        // Receipt and control processing still require the real signed announcement.
+        if proof.is_none() && !sibling {
+            return None;
+        }
         let own = self.identity.public();
         if event.conversation_id == super::delivery_receipt::delivery_conversation_id(&own, &peer) {
-            self.process_delivery_control(event, proof, store);
+            self.process_delivery_control(event, proof?, store);
             return None;
         }
         if event.conversation_id != super::conversation::dm_conversation_id(&own, &peer)
@@ -573,6 +608,9 @@ impl Node {
             || event.ciphertext.len() > 256 * 1024
             || event.parents.len() > 1024
         {
+            return None;
+        }
+        if sibling && !self.device_sync_policy().history {
             return None;
         }
         store
@@ -588,6 +626,10 @@ impl Node {
             return None;
         }
         let account = self.account_id();
+        let sender_account = match proof {
+            Some(proof) => proof.account_id(),
+            None => Some(account.clone()),
+        };
         let (conversation, from, _body) = if plain.starts_with(b"MTDE1") {
             let env = DmEnvelope::decode(&plain)?;
             let valid_account = |id: &str| {
@@ -598,7 +640,7 @@ impl Node {
             };
             if !valid_account(&env.route.sender_account)
                 || !valid_account(&env.route.recipient_account)
-                || proof.account_id().as_deref() != Some(env.route.sender_account.as_str())
+                || sender_account.as_deref() != Some(env.route.sender_account.as_str())
                 || (env.route.sender_account != account && env.route.recipient_account != account)
             {
                 return None;
@@ -625,15 +667,18 @@ impl Node {
             wall_clock: event.wall_clock,
             plaintext: plain,
         };
-        let payload = super::delivery_receipt::ReceiptPayload::prepare(
-            &own,
-            &account,
-            proof,
-            event,
-            &received,
-            super::node::now_millis(),
-        );
+        let payload = proof.and_then(|proof| {
+            super::delivery_receipt::ReceiptPayload::prepare(
+                &own,
+                &account,
+                proof,
+                event,
+                &received,
+                super::node::now_millis(),
+            )
+        });
         let receipt = if let Some(payload) = payload {
+            let proof = proof?;
             if store.has_receipt_for(conversation, event.id) {
                 return None;
             }
@@ -702,6 +747,14 @@ impl Node {
             .expect("log lock not poisoned")
             .sync()
             .ok()?;
+        // Hold policy through durable acceptance; accepted WAL recovery remains unconditional.
+        let policy = self
+            .account_sync_policy
+            .lock()
+            .expect("account sync policy mutex not poisoned");
+        if sibling && !policy.current().history {
+            return None;
+        }
         store
             .begin(DeliveryTransaction::Incoming {
                 sender: peer.clone(),
@@ -711,6 +764,7 @@ impl Node {
                 receipt,
             })
             .ok()?;
+        drop(policy);
         if self.recover_delivery(store).is_err() {
             log::warn!("accepted incoming delivery awaits local recovery");
             return None;
@@ -817,6 +871,7 @@ impl Node {
                     .is_none_or(|tx| tx.id() != id)
             });
             if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
+                self.note_account_history_change();
                 if file {
                     if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
                         let fresh = {
@@ -851,16 +906,18 @@ impl Node {
                                 .lock()
                                 .expect("pending files lock not poisoned")
                                 .insert(manifest.file_conv());
-                            let _ = self.file_incoming.send(ReceivedFile {
-                                conv: original_conv,
-                                is_channel: false,
-                                from: sender.user_id(),
-                                name: manifest.name().to_owned(),
-                                size: manifest.size(),
-                                mime: manifest.mime().to_owned(),
-                                file_conv: manifest.file_conv(),
-                                media: super::media_store::manifest_is_media(&manifest),
-                            });
+                            if !self.certified_sibling(&sender) {
+                                let _ = self.file_incoming.send(ReceivedFile {
+                                    conv: original_conv,
+                                    is_channel: false,
+                                    from: sender.user_id(),
+                                    name: manifest.name().to_owned(),
+                                    size: manifest.size(),
+                                    mime: manifest.mime().to_owned(),
+                                    file_conv: manifest.file_conv(),
+                                    media: super::media_store::manifest_is_media(&manifest),
+                                });
+                            }
                         }
                     }
                 } else if self
@@ -881,12 +938,14 @@ impl Node {
                     let from_name = self
                         .historical_author(&sender.ed25519_pub)
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
-                    let _ = self.incoming.send(ReceivedDm {
-                        from: sender.user_id(),
-                        from_name,
-                        text: body.text,
-                        reply_to: body.reply_to,
-                    });
+                    if !self.certified_sibling(&sender) {
+                        let _ = self.incoming.send(ReceivedDm {
+                            from: sender.user_id(),
+                            from_name,
+                            text: body.text,
+                            reply_to: body.reply_to,
+                        });
+                    }
                 }
             }
             if installed?.is_none() {

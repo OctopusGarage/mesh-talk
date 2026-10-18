@@ -567,9 +567,9 @@
   "linkDevice": {
     "syncTitle": "在本设备上同步",
     "historySync": "消息历史",
-    "historySyncDescription": "与已关联的设备共享和接收私信与频道消息历史。",
+    "historySyncDescription": "与已关联设备共享和接收现有私聊、群聊消息及文件信息。",
     "attachmentsSync": "附件",
-    "attachmentsSyncDescription": "从已关联的设备复制可用的旧附件和已验证的文件数据。",
+    "attachmentsSyncDescription": "与已关联设备共享和下载现有文件内容。文件信息也随消息历史同步。",
     "profileSync": "账户头像",
     "profileSyncDescription": "接收已关联设备上的头像更改。",
     "appearanceSync": "外观",
@@ -605,7 +605,8 @@
     "rotateIdentity": "轮换到一个全新的账户身份。",
     "rekey": "重置密钥",
     "rekeyed": "已重置密钥。新账户：{{id}}…",
-    "rekeyFailed": "重置密钥失败：{{error}}"
+    "rekeyFailed": "重置密钥失败：{{error}}",
+    "legacyFileMetadata": "升级此已关联设备，以便单独同步文件信息而不下载文件。"
   },
   "webrtcTest": {
     "trigger": "语音/视频自检",
@@ -910,5 +911,11 @@
     "endpointHint": "这是最后已知的网络路径，可能指向中继节点；它不表示地理位置。",
     "view": "查看资料",
     "viewNamed": "查看{{name}}的资料"
+  },
+  "personal": {
+    "title": "收藏消息",
+    "description": "在你的设备之间同步笔记和文件",
+    "saved": "已保存在此设备上",
+    "fileCardSaved": "文件信息已保存在此设备上"
   }
 }

@@ -1,11 +1,14 @@
 # Personal messaging and cross-device synchronization: proposed design
 
-**Status: proposal, not implemented.** Researched and inspected on 2026-10-18
+**Status: baseline design; first-release implementation is tracked in the
+[implementation record](multi-device-sync-plan.md#implementation-record-2026-10-18).**
+Researched and inspected on 2026-10-18
 against `762525d86f81c4fcbf2ae3dd5f90b02f30f5f0de`. The inspection was scoped
 to account/device identity, linking, DM delivery, account history, channel
 enrollment, files, preference replication, desktop IPC, and conversation/settings
-presentation. Existing test bodies were inspected; this research task did not
-execute application tests or establish new runtime guarantees.
+presentation. The original research inspected existing test bodies without executing them.
+Subsequent implementation and executed validation are recorded separately in the
+plan; optional private-state and authority changes below remain proposals.
 
 Read the [primary-source research](research/multi-device-sync-patterns.md) for
 product comparisons and evidence, and the [implementation plan](multi-device-sync-plan.md)

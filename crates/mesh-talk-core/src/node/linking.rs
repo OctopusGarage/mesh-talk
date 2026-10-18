@@ -58,28 +58,28 @@ impl Node {
         self.initiate_device(peer_public)
             .await
             .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
-        let mut channel = self
-            .privacy_dial(addr, peer_public)
+        let (wanted, wanted_revision) = self.device_sync_policy_snapshot();
+        let (mut channel, resp) = match self
+            .pairing_response(addr, peer_public, &code, Some(wanted.history))
             .await
-            .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
-        let tag = code.authenticator(
-            &peer_public.ed25519_pub,
-            &self.identity.public().ed25519_pub,
-        );
-        let req = PairingRequest {
-            joiner: self.identity.public(),
-            tag,
+        {
+            Ok(exchange) => exchange,
+            Err(_) if !wanted.history || !self.device_sync_policy().history => {
+                return Err(NodeError::Channel(
+                    "pairing without history requires a peer upgrade supporting history selection"
+                        .into(),
+                ));
+            }
+            Err(error) => {
+                if self.device_sync_policy_snapshot().1 != wanted_revision {
+                    return Err(error);
+                }
+                // A legacy responder closes on the unknown V2 first frame without
+                // consuming the code. Retry once on a fresh pinned connection.
+                self.pairing_response(addr, peer_public, &code, None)
+                    .await?
+            }
         };
-        channel
-            .send(&req.encode())
-            .await
-            .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
-        let resp_bytes = channel
-            .recv()
-            .await
-            .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
-        let resp = PairingResponse::decode(&resp_bytes)
-            .ok_or_else(|| NodeError::Channel("pairing rejected".into()))?;
         // Verify the returned cert really binds THIS device to THAT account.
         if !resp.cert.verify()
             || resp.cert.device_ed25519_pub != self.identity.public().ed25519_pub
@@ -92,12 +92,20 @@ impl Node {
         let mut backfill = Vec::new();
         let mut backfill_bytes = 0usize;
         loop {
+            if self.device_sync_policy_snapshot().1 != wanted_revision {
+                break;
+            }
             let frame = match channel.recv().await {
                 Ok(f) => f,
                 Err(_) => break,
             };
             if frame.is_empty() {
                 break; // terminator
+            }
+            if !wanted.history {
+                return Err(NodeError::Channel(
+                    "unexpected pairing history while history sync is disabled".into(),
+                ));
             }
             backfill_bytes = backfill_bytes.saturating_add(frame.len());
             if backfill.len() >= MAX_PAIRING_BACKFILL_RECORDS
@@ -119,13 +127,54 @@ impl Node {
                 "pairing account secret does not match the certified account key".into(),
             ));
         }
-        if self.device_sync_policy().history {
+        if wanted.history
+            && self.device_sync_policy_snapshot().1 == wanted_revision
+            && self.device_sync_policy().history
+        {
             self.import_account_backfill_for_account(&account.account_id(), &backfill)?;
         }
         Ok(LinkedAccount {
             secret: resp.account_secret,
             account_id: account.account_id(),
         })
+    }
+
+    /// Only the request/response phase can negotiate a legacy retry. A decoded
+    /// response may already have consumed authorization, so all validation and
+    /// backfill processing happen outside this retry boundary.
+    async fn pairing_response(
+        &self,
+        addr: std::net::SocketAddr,
+        peer_public: &PublicIdentity,
+        code: &PairingCode,
+        selected: Option<bool>,
+    ) -> Result<(SecureChannel<TcpStream>, PairingResponse), NodeError> {
+        let mut channel = self
+            .privacy_dial(addr, peer_public)
+            .await
+            .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
+        let linker_ed = peer_public.ed25519_pub;
+        let joiner = self.identity.public();
+        let tag = match selected {
+            Some(history) => code.authenticator_selected(&linker_ed, &joiner.ed25519_pub, history),
+            None => code.authenticator(&linker_ed, &joiner.ed25519_pub),
+        };
+        let request = PairingRequest { joiner, tag };
+        let bytes = match selected {
+            Some(history) => request.encode_selected(history),
+            None => request.encode(),
+        };
+        channel
+            .send(&bytes)
+            .await
+            .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
+        let bytes = channel
+            .recv()
+            .await
+            .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
+        let response = PairingResponse::decode(&bytes)
+            .ok_or_else(|| NodeError::Channel("pairing rejected".into()))?;
+        Ok((channel, response))
     }
 
     /// Recovery after a joiner disconnects before saving its adopted secret.
@@ -158,16 +207,32 @@ impl Node {
     /// Linker side: handle a pairing request on an inbound (authenticated) channel.
     /// Releases the account secret only if a code is pending AND the request both
     /// proves it and binds the authenticated channel peer. Clears the code on success.
+    #[cfg(test)]
     pub(in crate::node) async fn serve_pairing(
         &self,
         channel: &mut SecureChannel<TcpStream>,
         req: PairingRequest,
+    ) {
+        self.serve_pairing_selected(channel, req, None).await;
+    }
+
+    pub(in crate::node) async fn serve_pairing_selected(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+        req: PairingRequest,
+        selected: Option<bool>,
     ) {
         // Bind the proof to the Noise-authenticated peer.
         if req.joiner != *channel.peer_identity() {
             return;
         }
         let my_ed = self.identity.public().ed25519_pub;
+        let verifies = |code: &PairingCode| match selected {
+            Some(history) => {
+                code.verify_selected(&my_ed, &req.joiner.ed25519_pub, history, &req.tag)
+            }
+            None => code.verify(&my_ed, &req.joiner.ed25519_pub, &req.tag),
+        };
         // Decide under the lock: reject if there's no pending code, it has expired, or the
         // proof is wrong (counting the attempt and burning the code after too many).
         {
@@ -185,7 +250,7 @@ impl Node {
                 *guard = None; // expired — invalidate
                 return;
             }
-            if !pl.code.verify(&my_ed, &req.joiner.ed25519_pub, &req.tag) {
+            if !verifies(&pl.code) {
                 pl.attempts += 1;
                 if pl.attempts >= MAX_PAIRING_ATTEMPTS {
                     *guard = None; // too many wrong guesses — burn the code
@@ -203,7 +268,7 @@ impl Node {
             let mut pending = self.pending_link.lock().expect("pending_link mutex");
             if pending.as_ref().is_none_or(|pl| {
                 now_millis().saturating_sub(pl.created_at_ms) > PAIRING_TTL_MS
-                    || !pl.code.verify(&my_ed, &req.joiner.ed25519_pub, &req.tag)
+                    || !verifies(&pl.code)
             }) {
                 return;
             }
@@ -263,6 +328,7 @@ impl Node {
             cert
         };
         drop(transition);
+        let (offered, policy_revision) = self.device_sync_policy_snapshot();
         let resp = PairingResponse {
             account_secret: self.account.secret_bytes(),
             account_ed25519_pub: self.account.public().ed25519_pub,
@@ -274,13 +340,16 @@ impl Node {
         // Backfill: stream our account history so the new device starts populated,
         // then an empty frame as terminator. Best-effort — failures just mean the
         // joiner backfills nothing.
-        if self.device_sync_policy().history {
+        if selected.unwrap_or(true) && offered.history {
             let mut total_bytes = 0usize;
             for rec in self
                 .export_account_backfill()
                 .into_iter()
                 .take(MAX_PAIRING_BACKFILL_RECORDS)
             {
+                if self.device_sync_policy_snapshot().1 != policy_revision {
+                    return;
+                }
                 let encoded = rec.encode();
                 if total_bytes.saturating_add(encoded.len()) > MAX_PAIRING_BACKFILL_BYTES {
                     break;
@@ -291,7 +360,9 @@ impl Node {
                 }
             }
         }
-        let _ = channel.send(&[]).await;
+        if self.device_sync_policy_snapshot().1 == policy_revision {
+            let _ = channel.send(&[]).await;
+        }
     }
 
     /// Export every account-history message we hold (sent + received) as transferable
@@ -428,15 +499,20 @@ impl Node {
                 continue;
             }
             received
-                .record(
+                .record_durable(&super::received_log::ReceivedEntry {
                     conversation,
-                    r.from.clone(),
-                    r.wall_clock,
-                    &r.plaintext,
-                    EventId::new(r.event_id),
-                )
+                    from: r.from.clone(),
+                    wall_clock: r.wall_clock,
+                    plaintext: r.plaintext.clone(),
+                    event_id: EventId::new(r.event_id),
+                })
                 .map_err(NodeError::Log)?;
+            self.note_account_history_change();
         }
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "pairing_selection_tests.rs"]
+mod pairing_selection_tests;

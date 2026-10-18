@@ -567,9 +567,9 @@
   "linkDevice": {
     "syncTitle": "Sincronización en este dispositivo",
     "historySync": "Historial de mensajes",
-    "historySyncDescription": "Comparte y recibe el historial disponible de mensajes directos y de canales con tus dispositivos vinculados.",
+    "historySyncDescription": "Comparte y recibe mensajes e información de archivos de conversaciones directas y de grupo con tus dispositivos vinculados.",
     "attachmentsSync": "Archivos adjuntos",
-    "attachmentsSyncDescription": "Copia tarjetas de archivos anteriores y archivos verificados de dispositivos vinculados.",
+    "attachmentsSyncDescription": "Comparte y descarga archivos disponibles con tus dispositivos vinculados. Su información también se sincroniza con el historial de mensajes.",
     "profileSync": "Avatar de la cuenta",
     "profileSyncDescription": "Recibe cambios de avatar de tus dispositivos vinculados.",
     "appearanceSync": "Apariencia",
@@ -605,7 +605,8 @@
     "rotateIdentity": "Cambia a una identidad de cuenta nueva.",
     "rekey": "Regenerar claves",
     "rekeyed": "Claves regeneradas. Nueva cuenta: {{id}}…",
-    "rekeyFailed": "Error al regenerar claves: {{error}}"
+    "rekeyFailed": "Error al regenerar claves: {{error}}",
+    "legacyFileMetadata": "Actualiza este dispositivo vinculado para sincronizar la información de los archivos por separado de sus descargas."
   },
   "webrtcTest": {
     "trigger": "Autodiagnóstico de voz/vídeo",
@@ -910,5 +911,11 @@
     "endpointHint": "Esta es la última ruta de red conocida y puede apuntar a un repetidor. No indica una ubicación geográfica.",
     "view": "Ver perfil",
     "viewNamed": "Ver perfil de {{name}}"
+  },
+  "personal": {
+    "title": "Mensajes guardados",
+    "description": "Notas y archivos entre tus dispositivos",
+    "saved": "Guardado en este dispositivo",
+    "fileCardSaved": "Ficha del archivo guardada en este dispositivo"
   }
 }
