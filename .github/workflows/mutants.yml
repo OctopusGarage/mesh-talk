@@ -67,10 +67,10 @@ jobs:
           npm ci
           npm run build
 
-      - name: Install cargo-mutants
+      - name: Install mutation test tools
         uses: taiki-e/install-action@v2.87.27
         with:
-          tool: cargo-mutants@27.1.0
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
 
       - name: Compute PR diff
         if: github.event_name == 'pull_request'

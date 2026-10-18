@@ -9,7 +9,7 @@ assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--in-diff"), "
 const shard = mutationShard(Number(process.env.GITHUB_RUN_NUMBER ?? "1"), Number(process.env.MUTATION_WORKER ?? "0"), Number(process.env.MUTATION_WORKERS ?? "1"));
 // In-place mode enforces one worker, reusing the checkout's build cache. CI runs
 // shards on separate machines to avoid competing workspace builds and tests.
-const options = ["--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", "240", "--output", "..", ...args];
+const options = ["--test-tool", "nextest", "--cargo-test-arg=--profile=mutants", "--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", "240", "--output", "..", ...args];
 const listing = spawnSync("cargo", ["mutants", "--list", "--json", ...options], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
 if (listing.error) throw listing.error;
 assert.equal(listing.status, 0, `mutation list failed: ${listing.stderr}`);
@@ -17,7 +17,7 @@ const selected = parseSelectedMutants(listing.stdout, listing.status);
 const reportPath = resolve("../mutants.out/outcomes.json");
 let exitCode = 0;
 if (selected.length > 0) {
-  const result = spawnSync("cargo", ["mutants", ...options, "--", "--", "--test-threads=2"], { stdio: "inherit" });
+  const result = spawnSync("cargo", ["mutants", ...options, "--", "--test-threads=2"], { stdio: "inherit" });
   if (result.error) throw result.error;
   exitCode = result.status;
 }

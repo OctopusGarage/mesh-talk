@@ -22,13 +22,16 @@ test("the protected mutants check requires every mutation shard to succeed", () 
   }
 });
 
-test("both mutation modes forward test threads to the test binary, not Cargo", () => {
+test("both mutation modes use process-isolated tests with bounded execution", () => {
   assert.equal([...workflow.matchAll(/run: node \.\.\/scripts\/release\/run-mutants\.mjs/g)].length, 2);
-  assert.match(wrapper, /"--", "--", "--test-threads=2"/);
+  assert.match(wrapper, /"--test-tool", "nextest"/);
+  assert.match(wrapper, /"--cargo-test-arg=--profile=mutants"/);
+  assert.match(wrapper, /"--", "--test-threads=2"/);
   assert.doesNotMatch(workflow, /continue-on-error: true/);
   assert.doesNotMatch(workflow, /cargo test --workspace/);
   assert.doesNotMatch(wrapper, /"--baseline", "skip"/);
   assert.match(workflow, /tool: cargo-mutants@27\.1\.0/);
+  assert.match(workflow, /cargo-nextest@0\.9\.148/);
   assert.match(wrapper, /const shard = mutationShard\(Number\(process\.env\.GITHUB_RUN_NUMBER/);
   assert.match(wrapper, /"--shard", shard/);
   assert.match(wrapper, /"--sharding", "round-robin"/);
