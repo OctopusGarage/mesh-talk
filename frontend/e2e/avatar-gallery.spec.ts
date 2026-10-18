@@ -1,5 +1,5 @@
 import { test, expect } from "./tauri-mock";
-import { seedMarketPacks } from "./helpers/packs";
+import { seedMarketPacks, waitForPackBootstrap } from "./helpers/packs";
 const CHANNEL = "chan_team_dddd4444";
 test.use({ viewport: { width: 1100, height: 800 } });
 
@@ -12,6 +12,7 @@ async function login(page: import("@playwright/test").Page) {
     await page.getByTestId("login-submit").click();
   }
   await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForPackBootstrap(page);
 }
 
 test("personal avatar gallery offers the player pack", async ({ page }) => {

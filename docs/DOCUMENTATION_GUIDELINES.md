@@ -68,3 +68,12 @@ synchronization still require their own reachable paths.
    inspect desktop and narrow layouts, keyboard focus, reduced motion, and
    image loading. Reserve full E2E and full-suite runs for PR/CI or an explicit
    validation request; see [testing feedback loop](testing-feedback-loop.md).
+
+## User help and AI retrieval
+
+The [user manual](help/README.md) owns task-oriented steps and menu locations.
+Its English Markdown and catalog generate the online reader, offline help and AI
+exports. Maintain those sources rather than editing generated pages or keeping
+a separate Wiki copy. Existing feature guides retain detailed policy ownership.
+See [help system maintenance](help-system.md) for supported Markdown, stable IDs,
+version scope, controlled UI targets and focused validation.

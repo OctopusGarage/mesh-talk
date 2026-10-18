@@ -25,7 +25,12 @@ import { HistorySettings } from "./settings/HistorySettings";
 export function SettingsDialog({
   open: controlledOpen,
   onOpenChange,
-}: { open?: boolean; onOpenChange?: (open: boolean) => void } = {}) {
+  initialTarget,
+}: {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  initialTarget?: { category: SettingsCategory; controlId?: string };
+} = {}) {
   const { t } = useTranslation();
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
@@ -35,19 +40,28 @@ export function SettingsDialog({
   const panel = useRef<HTMLDivElement>(null);
   const focusTarget = useRef<string | null>(null);
   const controller = useSettingsController(open);
+  const initialCategory = initialTarget?.category ?? "general";
+  const initialControlId = initialTarget?.controlId;
   useLayoutEffect(() => {
-    if (open) setCategory("general");
-  }, [open, controller.identity]);
+    if (!open) return;
+    focusTarget.current = initialControlId ? `#${initialControlId}` : null;
+    setCategory(initialCategory);
+  }, [open, controller.identity, initialCategory, initialControlId]);
   useLayoutEffect(() => {
     if (category !== "privacy") setPresetDraft(false);
-    if (panel.current) {
-      panel.current.scrollTop = 0;
-      if (focusTarget.current) {
-        panel.current.querySelector<HTMLElement>(focusTarget.current)?.focus();
-        focusTarget.current = null;
-      }
-    }
+    if (panel.current) panel.current.scrollTop = 0;
   }, [category]);
+  useLayoutEffect(() => {
+    if (!open || !focusTarget.current) return;
+    const editor = panel.current?.querySelector<HTMLElement>(
+      focusTarget.current,
+    );
+    if (!editor) return; // A category's settings may still be loading.
+    editor.scrollIntoView({ block: "nearest" });
+    if (editor.matches(":disabled")) panel.current?.focus();
+    else editor.focus();
+    focusTarget.current = null;
+  }, [open, category, controller.settings, controller.identity]);
   const page = {
     general: <GeneralSettings controller={controller} />,
     appearance: <AppearanceSettings />,

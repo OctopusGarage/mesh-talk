@@ -910,5 +910,20 @@
     "endpointHint": "这是最后已知的网络路径，可能指向中继节点；它不表示地理位置。",
     "view": "查看资料",
     "viewNamed": "查看{{name}}的资料"
+  },
+  "help": {
+    "title": "帮助",
+    "description": "版本 {{version}} · 离线可用",
+    "search": "搜索使用帮助",
+    "clearSearch": "清除搜索",
+    "topicCount_one": "{{count}} 个主题",
+    "topicCount_other": "{{count}} 个主题",
+    "topics": "帮助主题",
+    "noResults": "未找到相关主题。请尝试更简短的关键词，或清除搜索以浏览所有指南。",
+    "englishFallback": "说明文章目前为英文，也支持常用中文关键词搜索。",
+    "openSettings": "打开{{category}}",
+    "openDiagnostics": "打开连接诊断",
+    "online": "在线阅读",
+    "linkFailed": "无法打开链接。请重试，或在浏览器中打开在线手册。"
   }
 }

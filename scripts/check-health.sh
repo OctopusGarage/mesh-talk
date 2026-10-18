@@ -129,6 +129,12 @@ if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
     cd ..
 fi
 
+print_status "success" "Checking public help documents and read-only MCP..."
+if ! npm ci --prefix tools/help --ignore-scripts || ! node --test tools/help/*.test.mjs; then
+    print_status "error" "Public help validation failed."
+    exit 1
+fi
+
 # Tauri's `generate_context!` validates that `frontendDist` exists even during clippy/test
 # compilation. FAST mode intentionally skips the real frontend build, so create the ignored
 # directory when needed; the full gate and CI still build real assets.
@@ -352,6 +358,12 @@ if ! { cd frontend && npx --yes audit-ci --config audit-ci.json; }; then
     exit 1
 fi
 cd ..
+
+# The documentation MCP has its own pinned dependency graph.
+if ! npm audit --prefix tools/help --audit-level=high; then
+    print_status "error" "High/critical vulnerabilities found in public help dependencies."
+    exit 1
+fi
 
 # Build the project
 print_status "success" "Building the project..."

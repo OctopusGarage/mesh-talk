@@ -7,6 +7,7 @@ for (const [action, dialog] of [
   ["settings", "settings-dialog"],
   ["diagnostics", "diagnostics-dialog"],
   ["about", "about-dialog"],
+  ["help", "help-dialog"],
 ] as const) {
   test(`tray ${action} opens its existing dialog`, async ({ page }) => {
     await enterChat(page);
@@ -42,7 +43,7 @@ test("switching tray destinations replaces the open dialog", async ({
   page,
 }) => {
   await enterChat(page);
-  for (const destination of ["settings", "diagnostics", "about"]) {
+  for (const destination of ["settings", "help", "diagnostics", "about"]) {
     await page.evaluate((payload) => {
       (
         window as unknown as {
