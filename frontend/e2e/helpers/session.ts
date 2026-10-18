@@ -14,7 +14,10 @@ export async function waitForChatShell(page: Page) {
   // Lazy chat loading includes cold transforms and coverage instrumentation.
   // Keep startup's platform budget separate from behavior assertions.
   await expect(page.getByTestId("chat-shell")).toBeVisible({
-    timeout: process.platform === "win32" ? 90_000 : 15_000,
+    timeout:
+      process.platform === "win32" || process.env.MESH_TALK_E2E_COVERAGE === "1"
+        ? 90_000
+        : 15_000,
   });
 }
 
