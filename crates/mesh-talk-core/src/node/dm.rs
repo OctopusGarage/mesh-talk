@@ -179,14 +179,18 @@ impl Node {
     ) -> Result<EventId, NodeError> {
         authorize(&mut || Ok(()))?;
         let dests = self.account_fanout_targets(target);
-        if !dests
-            .iter()
-            .any(|p| p.account_id.as_deref() == Some(target))
+        let self_target = target == self.account_id();
+        if !self_target
+            && !dests
+                .iter()
+                .any(|p| p.account_id.as_deref() == Some(target))
         {
             return Err(NodeError::UnknownPeer(target.to_string()));
         }
-        self.initiate_contact_locally_if(target, &mut authorize)
-            .await?;
+        if !self_target {
+            self.initiate_contact_locally_if(target, &mut authorize)
+                .await?;
+        }
         let msg_id = random_msg_id();
         let envelope =
             DmEnvelope::new(self.account_id(), target.to_owned(), msg_id, inner).encode();
@@ -272,12 +276,11 @@ impl Node {
             });
             prepared.push(transition);
         }
-        let id = logical.unwrap_or(destinations[0].event.id);
-        let conv = target
-            .as_ref()
-            .map_or(destinations[0].event.conversation_id, |t| {
-                account_conversation_id(&account, t)
-            });
+        let id = logical.unwrap_or_else(|| destinations[0].event.id);
+        let conv = target.as_ref().map_or_else(
+            || destinations[0].event.conversation_id,
+            |t| account_conversation_id(&account, t),
+        );
         let recipient = target.or_else(|| destinations[0].account.clone());
         let seq = if logical.is_some() {
             self.sentlog
@@ -316,6 +319,7 @@ impl Node {
         if !self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
             log::warn!("accepted delivery awaits local recovery");
         }
+        self.account_sync_notify.notify_one();
         Ok(id)
     }
 }

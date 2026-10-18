@@ -2,7 +2,8 @@
 
 > **For agentic workers:** Use `superpowers:executing-plans` to execute approved
 > work packages in sequence. Each package should be reviewed and committed before
-> starting the next. No application implementation is authorized by this document.
+> starting the next. The user authorized implementation of the messages-and-files
+> scope on 2026-10-18. Optional work packages 5–8 remain outside that authorization.
 
 **Goal:** Make messages and files synchronize reliably across trusted devices and
 authorized groups, including personal messaging, while preserving existing behavior.
@@ -14,8 +15,8 @@ private records, keeping group authorization and account authority separate.
 **Tech stack:** Rust/Tokio, existing encrypted record logs and Noise transport,
 Tauri IPC, React/TypeScript/Zustand, current Rust and Vitest/Playwright tooling.
 
-**Status:** Proposed work packages, based on code inspection at `762525d` on
-2026-10-18; no steps below have been implemented or executed. This is an
+**Status:** Implementation in progress, based on code inspection at `762525d` on
+2026-10-18. Unchecked steps remain proposed and unverified. This is an
 architecture-level implementation plan, not a drop-in patch. Interface sketches
 describe proposed additions rather than existing callable APIs. The
 [design](multi-device-sync-design.md) defines behavior and security boundaries;

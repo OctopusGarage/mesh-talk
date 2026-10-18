@@ -6194,6 +6194,246 @@ async fn send_file_to_account_shows_in_sender_account_history() {
     assert_eq!(files[0].file.as_ref().unwrap().name, "hello.txt");
 }
 
+fn personal_message_node(
+    dir: &std::path::Path,
+    identity: DeviceIdentity,
+    account: crate::identity::account::Account,
+) -> Arc<Node> {
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    Node::open_with_account(
+        identity,
+        account,
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.join("events.log"),
+        &dir.join("sent.log"),
+        "pw",
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn personal_message_is_durable_without_siblings() {
+    use crate::identity::account::Account;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let secret = identity.secret_bytes();
+    let account = Account::generate();
+    let account_secret = account.secret_bytes();
+    let target = account.account_id();
+    let node = personal_message_node(dir.path(), identity, account);
+    assert!(node.account_fanout_targets(&target).is_empty());
+    let id = node
+        .enqueue_to_account(&target, b"private note", None)
+        .await
+        .unwrap();
+    let history = node.account_history(&target, 10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, id);
+    assert!(history[0].from_me);
+    assert_eq!(history[0].text, b"private note");
+    assert!(node.log.lock().unwrap().conversations().is_empty());
+    assert!(node.delivery.lock().unwrap().message(id).is_none());
+    assert_eq!(node.delivery_status(id), None);
+    drop(node);
+    let node = personal_message_node(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Account::from_secret_bytes(account_secret),
+    );
+    let history = node.account_history(&target, 10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, id);
+    assert!(history[0].from_me);
+    assert_eq!(history[0].text, b"private note");
+    assert!(
+        node.delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn personal_message_unavailable_storage_is_unaccepted() {
+    use crate::identity::account::Account;
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("profile");
+    let moved = dir.path().join("moved");
+    let identity = DeviceIdentity::generate();
+    let secret = identity.secret_bytes();
+    let account = Account::generate();
+    let account_secret = account.secret_bytes();
+    let target = account.account_id();
+    let node = personal_message_node(&profile, identity, account);
+    std::fs::rename(&profile, &moved).unwrap();
+    let result = node
+        .enqueue_to_account(&target, b"not accepted", None)
+        .await;
+    std::fs::rename(&moved, &profile).unwrap();
+    assert!(matches!(result, Err(NodeError::Log(_))), "{result:?}");
+    assert!(
+        node.delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+    assert!(node.account_history(&target, 10).is_empty());
+    drop(node);
+    let node = personal_message_node(
+        &profile,
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Account::from_secret_bytes(account_secret),
+    );
+    assert!(node.account_history(&target, 10).is_empty());
+    assert!(
+        node.delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn personal_message_projection_failure_recovers_exactly_once() {
+    use crate::identity::account::Account;
+    for reopen in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let secret = identity.secret_bytes();
+        let account = Account::generate();
+        let account_secret = account.secret_bytes();
+        let target = account.account_id();
+        let node = personal_message_node(dir.path(), identity, account);
+        node.sentlog
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(true)
+            .unwrap();
+        let id = node
+            .enqueue_to_account(&target, b"recover note", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            node.delivery.lock().unwrap().pending_transactions().len(),
+            1
+        );
+        assert_eq!(node.account_history(&target, 10).len(), 1);
+        assert_eq!(node.account_history(&target, 10)[0].id, id);
+        node.sentlog
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(false)
+            .unwrap();
+        let node = if reopen {
+            drop(node);
+            personal_message_node(
+                dir.path(),
+                DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+                Account::from_secret_bytes(account_secret),
+            )
+        } else {
+            node.recover_delivery(&mut node.delivery.lock().unwrap())
+                .unwrap();
+            node
+        };
+        node.recover_delivery(&mut node.delivery.lock().unwrap())
+            .unwrap();
+        let history = node.account_history(&target, 10);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+        assert!(history[0].from_me);
+        assert_eq!(history[0].text, b"recover note");
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn personal_message_later_linked_sibling_catches_up_once() {
+    use crate::identity::account::Account;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let account_secret = account.secret_bytes();
+    let target = account.account_id();
+    let source = personal_message_node(
+        &dir.path().join("source"),
+        DeviceIdentity::generate(),
+        account,
+    );
+    let id = source
+        .enqueue_to_account(&target, b"before linking", None)
+        .await
+        .unwrap();
+    let sibling = personal_message_node(
+        &dir.path().join("sibling"),
+        DeviceIdentity::generate(),
+        Account::from_secret_bytes(account_secret),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    for (owner, other) in [(&source, &sibling), (&sibling, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(crate::node::account_devices::AccountDevice {
+                public: other.identity.public(),
+                certificate: owner.account.certify(&other.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    add_account_peer(
+        &sibling.roster,
+        &source.identity,
+        &source.account,
+        "source",
+        listener.local_addr().unwrap().port(),
+        &sibling.user_id(),
+    );
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    // Restart the pull worker to perform two complete sweeps with fresh cursors.
+    // Both must merge the same logical message rather than duplicating history.
+    for _ in 0..2 {
+        sibling.account_sync_status.lock().unwrap().clear();
+        let worker = tokio::spawn(sibling.clone().run_account_history_loop());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if sibling
+                    .device_sync_status()
+                    .iter()
+                    .any(|status| status.phase == SyncPhase::UpToDate)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        worker.abort();
+        let _ = worker.await;
+    }
+    let history = sibling.account_history(&target, 10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, id);
+    assert!(history[0].from_me);
+    assert_eq!(history[0].text, b"before linking");
+    server.abort();
+    let _ = server.await;
+}
+
 #[tokio::test]
 async fn send_to_account_self_syncs_to_own_other_device() {
     use crate::identity::account::Account;

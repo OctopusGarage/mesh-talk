@@ -46,6 +46,12 @@ pub(crate) struct OutgoingDelivery {
     pub(crate) destinations: Vec<DeliveryDestination>,
 }
 
+impl OutgoingDelivery {
+    fn has_transport_work(&self) -> bool {
+        !self.destinations.is_empty()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReceiptDelivery {
     pub(crate) logical_id: EventId,
@@ -1718,7 +1724,12 @@ impl DeliveryStore {
                     self.work_events.insert(d.event_id, id);
                 }
             }
-            if self.messages.contains_key(&id) || self.completed_work(id).is_some() {
+            if self
+                .messages
+                .get(&id)
+                .is_some_and(OutgoingDelivery::has_transport_work)
+                || self.completed_work(id).is_some()
+            {
                 self.active_work.insert(id);
             } else {
                 self.destination_cursors.remove(&id);
@@ -1913,7 +1924,9 @@ impl DeliveryStore {
         for tx in &self.pending {
             match tx {
                 DeliveryTransaction::Outgoing { message, .. }
-                | DeliveryTransaction::OutgoingManifest { message, .. } => {
+                | DeliveryTransaction::OutgoingManifest { message, .. }
+                    if message.has_transport_work() =>
+                {
                     messages
                         .entry(message.logical_id)
                         .or_insert(DeliveryStatus::Awaiting);
@@ -2011,6 +2024,7 @@ impl DeliveryStore {
         for tx in &self.pending {
             if let DeliveryTransaction::Outgoing { message, .. }
             | DeliveryTransaction::OutgoingManifest { message, .. } = tx
+                && message.has_transport_work()
             {
                 work.entry(message.logical_id)
                     .or_insert_with(|| (true, CompletedDelivery::from(message).remaining));
@@ -2142,7 +2156,9 @@ impl DeliveryStore {
             }
             match tx {
                 DeliveryTransaction::Outgoing { message, .. }
-                | DeliveryTransaction::OutgoingManifest { message, .. } => {
+                | DeliveryTransaction::OutgoingManifest { message, .. }
+                    if message.has_transport_work() =>
+                {
                     messages.insert(message.logical_id);
                 }
                 DeliveryTransaction::Incoming {
@@ -2276,14 +2292,24 @@ impl DeliveryStore {
                 .recipient_account
                 .as_deref()
                 .is_some_and(|a| !valid_account(a))
-            || message.destinations.is_empty()
+            || (message.destinations.is_empty()
+                && (message.recipient_account.as_deref() != Some(message.sender_account.as_str())
+                    || message.conversation
+                        != super::conversation::account_conversation_id(
+                            &message.sender_account,
+                            &message.sender_account,
+                        )))
             || message.destinations.len() > self.limits.destinations
         {
             return Err(invalid("invalid delivery destinations"));
         }
         let mut devices = HashSet::new();
         let mut events = HashSet::new();
-        let first_author = message.destinations[0].event.author;
+        let Some(first) = message.destinations.first() else {
+            // Local account history needs no synthetic device event or ratchet.
+            return Ok(());
+        };
+        let first_author = first.event.author;
         for destination in &message.destinations {
             self.validate_destination(destination)?;
             let author = destination.event.author.ed25519_pub();
@@ -2330,7 +2356,8 @@ impl DeliveryStore {
                 self.validate_record(&OutboxRecord::FileCard(file.clone()))?;
                 let manifest = super::files::validated_manifest(&received.plaintext)
                     .ok_or_else(|| invalid("invalid file manifest"))?;
-                if message.logical_id != message.destinations[0].event.id
+                if message.destinations.is_empty()
+                    || message.logical_id != message.destinations[0].event.id
                     || file.completion_binding.is_some()
                     || file.id != message.logical_id
                     || file.conversation != message.conversation
@@ -2529,7 +2556,12 @@ fn metadata_for(tx: &DeliveryTransaction) -> Option<OutboxRecord> {
     match tx {
         DeliveryTransaction::Outgoing { message, .. }
         | DeliveryTransaction::OutgoingManifest { message, .. } => {
-            Some(OutboxRecord::Message(message.clone()))
+            // A personal message with no known siblings has no transport work.
+            // The WAL projects it into sent history without retaining an outbox
+            // row or reserving remote delivery capacity indefinitely.
+            message
+                .has_transport_work()
+                .then(|| OutboxRecord::Message(message.clone()))
         }
         DeliveryTransaction::Incoming { receipt, .. }
         | DeliveryTransaction::IncomingManifest { receipt, .. } => {
