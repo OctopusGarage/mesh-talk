@@ -145,15 +145,24 @@ The implementation was checked with focused frontend unit tests, browser E2E,
 real core loopback tests and source-based AI evaluations. Browser tests use the
 Tauri IPC mock; they do not replace native transport tests.
 
-- The focused frontend run passed 150 tests across ten files, covering unread
+- The focused frontend run passed 155 tests across eleven files, covering unread
   retention, stale owners, lock/unlock, viewport insertion, recovery status,
   delivery wording and locale parity.
-- The final browser acceptance run passed all 19 tests in
-  `group-reception.spec.ts`, `unread-badge.spec.ts` and `message-lifecycle.spec.ts`,
-  with one worker and no retries. Earlier compatibility testing passed 44 of 47;
-  its delayed-scroll and legacy-unread failures were fixed and their paths passed
-  in the final acceptance run. The remaining initial failure was a cold-start
-  loading timeout whose scenario also passed in the final run.
+- The full default-build Chromium run selected 349 tests: 341 passed, four
+  failed and four were intentionally skipped. The skipped cases require the lite
+  build, opt-in site capture or physical Mac/Windows media environments. The four
+  failures exposed oversized-row auto-follow/restoration bugs and asynchronous
+  pack setup races. Corrections use the virtualizer's scroll API, protect saved
+  offsets during initial measurement, update jump visibility as rows grow and
+  explicitly await required pack setup. Regression tests cover nonzero reading
+  offsets inside oversized messages.
+- The final serial acceptance run passed all 49 tests in `chat.spec.ts`,
+  `group-reception.spec.ts`, `packs.spec.ts` and `avatar-gallery.spec.ts`, with one
+  worker and no retries. It includes every original failure above, nonzero
+  reading-position restoration and all four group reception cases.
+- `make e2e` passed all 12 real multi-process scenarios plus the separate 110 MiB
+  large-folder regression. These cover routed and cross-LAN discovery, direct and
+  group messages, byte-for-byte file transfer, restart history and offline custody.
 - Frontend production build, both TypeScript configurations, ESLint and Prettier
   checks passed. Workspace Clippy passed with `--all-targets -- -D warnings`.
 - The focused core run passed all 13 tests: causal ordering, backward logical
@@ -168,10 +177,12 @@ Tauri IPC mock; they do not replace native transport tests.
 - A core regression replayed 4,097 messages through 65 bounded chunks using one
   ordered cursor. This checks that chunking does not repeatedly rebuild the graph;
   it is not a network throughput benchmark.
-- All six source-based group reception AI scenarios passed using the configured
-  Codex command provider, with scores from 0.95 to 0.98 and no reported required
-  improvements. The default ten-case AI suite and deterministic `make eval-smoke`
-  also passed. Model judgments supplement the executable regressions.
+- All 27 source-based AI cases passed using the configured Codex command provider:
+  ten default, six group reception and eleven linked-device cases. The group
+  suite was refreshed against the viewport corrections and scored 0.96 to 0.98,
+  with no required improvements. Deterministic `make eval-smoke` and all nine AI
+  harness tests also passed. Model judgments supplement executable regressions;
+  supplied source context defines the extent of each model review.
 
 The focused core command was:
 

@@ -51,6 +51,15 @@ export function useConversationViewport(
   const pendingUserAnchor = useRef(false);
   const pendingScrollIntent = useRef(false);
   const initialList = useRef<{ key: string; index: number } | null>(null);
+  const renderedConversation = useRef(key);
+  if (renderedConversation.current !== key) {
+    renderedConversation.current = key;
+    // Child layout measurements precede parent effects. Protect the saved
+    // position before the remounted virtual list can report a temporary bottom.
+    restoringScroll.current = exactScrollPositions.current.has(key)
+      ? key
+      : null;
+  }
   const pinLiveEdge = useCallback(() => {
     const scroller = scrollerRef.current;
     if (
@@ -63,10 +72,15 @@ export function useConversationViewport(
       performance.now() < userInteractionUntil.current
     )
       return;
-    scroller.scrollTop = Math.max(
-      0,
-      scroller.scrollHeight - scroller.clientHeight,
-    );
+    const top = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    // Keep Virtuoso's measurement state in sync with the requested movement.
+    // Direct writes can fight its correction after an oversized row is measured.
+    if (virtuosoRef.current)
+      virtuosoRef.current.scrollTo({
+        top: Number.MAX_SAFE_INTEGER,
+        behavior: "auto",
+      });
+    else scroller.scrollTop = top;
   }, [key]);
   const restoreVisibleAnchor = useCallback(() => {
     const scroller = scrollerRef.current;
@@ -362,6 +376,11 @@ export function useConversationViewport(
       const observedBottom = scrollerRef.current
         ? isAtBottom(scrollerRef.current)
         : bottom;
+      if (restoringScroll.current === key) {
+        atBottom.current.set(key, observedBottom);
+        setShowJump(!observedBottom);
+        return;
+      }
       if (
         !observedBottom &&
         atBottom.current.get(key) !== false &&
@@ -370,7 +389,6 @@ export function useConversationViewport(
       )
         return;
       atBottom.current.set(key, observedBottom);
-      if (restoringScroll.current === key) return;
       if (observedBottom) {
         anchors.current.delete(key);
         scrollPositions.current.delete(key);

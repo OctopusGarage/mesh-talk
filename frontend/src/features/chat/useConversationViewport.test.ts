@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement } from "react";
+import { act, createElement, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { VirtuosoHandle } from "react-virtuoso";
@@ -45,11 +45,13 @@ function Harness({
   search = null,
   rows = messages,
   onViewed,
+  reportInitialBottom = false,
 }: {
   conversation: string;
   search?: Search;
   rows?: ChatMessage[];
   onViewed?: (key: string, ids: string[]) => void;
+  reportInitialBottom?: boolean;
 }) {
   viewport = useConversationViewport(
     conversation,
@@ -59,6 +61,9 @@ function Harness({
     search,
     onViewed,
   );
+  useLayoutEffect(() => {
+    if (reportInitialBottom) viewport.atBottomStateChange(true);
+  }, [conversation, reportInitialBottom]);
   return createElement("div", { ref: viewport.scrollerRef });
 }
 
@@ -206,6 +211,7 @@ it("navigates to an exact search result and reports a later miss", async () => {
   expect(viewport.searchMiss).toBe(true);
   expect(scrollToIndex).toHaveBeenCalledTimes(1);
 
+  scrollTo.mockClear();
   viewport.jumpToLatest();
   await nextAnimationFrame();
   expect(scrollTo).toHaveBeenCalledTimes(2);
@@ -467,4 +473,70 @@ it("does not consume scroll intent during an unrelated visibility measurement", 
   );
   expect(scroller.scrollTop).toBe(250);
   now.mockRestore();
+});
+
+it("preserves a saved position when the remounted list reports bottom before measuring rows", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  viewport.stopRestoring();
+  scroller.scrollTop = 120;
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  await render("account:bob");
+  scroller.scrollTop = 0;
+  Object.defineProperty(scroller, "scrollHeight", {
+    value: 300,
+    configurable: true,
+  });
+  await act(async () =>
+    root.render(
+      createElement(Harness, {
+        conversation: "account:alice",
+        reportInitialBottom: true,
+      }),
+    ),
+  );
+  Object.defineProperty(scroller, "scrollHeight", {
+    value: 1000,
+    configurable: true,
+  });
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(120);
+  expect(viewport.showJump).toBe(true);
+});
+
+it("updates jump visibility when restored rows grow after the first measurement", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  await render("account:bob");
+  Object.defineProperty(scroller, "scrollHeight", {
+    value: 300,
+    configurable: true,
+  });
+  await render("account:alice");
+  await nextAnimationFrame();
+  Object.defineProperty(scroller, "scrollHeight", {
+    value: 1000,
+    configurable: true,
+  });
+  await act(async () => viewport.atBottomStateChange(false));
+  expect(scroller.scrollTop).toBe(0);
+  expect(viewport.showJump).toBe(true);
 });

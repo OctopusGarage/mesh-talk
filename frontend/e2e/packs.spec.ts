@@ -50,6 +50,13 @@ test("default build preinstalls a theme and keeps its removal after restart", as
   page,
 }) => {
   await enterChat(page);
+  // Exercise the real bundled installer and await its completion, including
+  // image validation, before checking the installed theme.
+  await page.evaluate(async () => {
+    const modulePath = "/src/store/packs.ts";
+    const { usePacks } = await import(/* @vite-ignore */ modulePath);
+    await usePacks.getState().load();
+  });
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
   const manager = page.getByTestId("pack-manager-theme");

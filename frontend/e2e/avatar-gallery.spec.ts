@@ -42,6 +42,7 @@ test("personal avatar gallery offers all Cat Acrylic portraits", async ({
 
 test("bundled avatar tabs retain their translated names", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("mesh-talk-lang", "ja"));
+  await seedMarketPacks(page, ["players"]);
   await login(page);
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "自分の写真を変更" }).click();

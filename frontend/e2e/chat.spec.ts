@@ -151,12 +151,12 @@ test.describe("Mesh-Talk UI flow", () => {
 
     const log = page.getByRole("log");
     await expect(log.getByText("latest-after-reading")).toBeInViewport();
-    await log.evaluate((element) => {
-      element.scrollTop = 80;
-    });
+    await log.hover();
+    await page.mouse.wheel(0, -600);
     const jump = page.getByRole("button", { name: "Jump to latest messages" });
     await expect(jump).toBeVisible();
     const before = await log.evaluate((element) => element.scrollTop);
+    expect(before).toBeGreaterThan(0);
 
     await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
     await page.getByTestId(`conversation-row-${BOB.account}`).click();
