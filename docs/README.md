@@ -14,6 +14,10 @@ belongs and how to keep the site, README, and guides aligned.
 | Contribute to the desktop app      | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                                                                  |
 | Review security or past validation | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Evaluation records](#evaluation-records)                                                                 |
 
+For menu locations and everyday tasks, start with the [user guide](help/README.md).
+The [help system guide](help-system.md) explains offline reading, publication and
+the read-only [documentation MCP](../tools/help/README.md).
+
 ## Current product and architecture
 
 | Doc                                                                                 | What it covers                                                                                                                                              |

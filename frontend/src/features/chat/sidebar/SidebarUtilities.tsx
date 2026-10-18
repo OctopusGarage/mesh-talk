@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   LogOut,
+  BookOpen,
   Info,
   LockKeyhole,
   MoreHorizontal,
@@ -26,6 +27,9 @@ import { DiagnosticsDialog } from "../DiagnosticsDialog";
 import { SettingsDialog } from "../SettingsDialog";
 import { WebRtcTestDialog } from "../WebRtcTestDialog";
 import { AboutDialog } from "../AboutDialog";
+import { HelpDialog } from "@/features/help/HelpDialog";
+import { resolveHelpTarget } from "@/features/help/targets";
+import type { SettingsCategory } from "../settings/model";
 
 /** Secondary actions share one labeled utility menu beside connection status. */
 export function SidebarUtilities() {
@@ -34,16 +38,26 @@ export function SidebarUtilities() {
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [settingsTarget, setSettingsTarget] = useState<{
+    category: SettingsCategory;
+    controlId?: string;
+  }>();
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
     void listen<string>("tray-navigate", ({ payload }) => {
-      if (!active || !["diagnostics", "settings", "about"].includes(payload))
+      if (
+        !active ||
+        !["diagnostics", "settings", "about", "help"].includes(payload)
+      )
         return;
       setOpen(false);
       setConnectionOpen(payload === "diagnostics");
       setSettingsOpen(payload === "settings");
       setAboutOpen(payload === "about");
+      setHelpOpen(payload === "help");
+      setSettingsTarget(undefined);
     })
       .then((stop) => {
         if (active) unlisten = stop;
@@ -104,6 +118,7 @@ export function SidebarUtilities() {
               data-testid="sidebar-nav-settings"
               onClick={() => {
                 setOpen(false);
+                setSettingsTarget(undefined);
                 setSettingsOpen(true);
               }}
             >
@@ -111,6 +126,19 @@ export function SidebarUtilities() {
               {t("settings.title")}
             </Button>
             {callsEnabled && <WebRtcTestDialog menuItem />}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2.5 px-2"
+              data-testid="sidebar-nav-help"
+              onClick={() => {
+                setOpen(false);
+                setHelpOpen(true);
+              }}
+            >
+              <BookOpen className="h-4 w-4" />
+              {t("help.title")}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -171,7 +199,24 @@ export function SidebarUtilities() {
         open={connectionOpen}
         onOpenChange={setConnectionOpen}
       />
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        initialTarget={settingsTarget}
+      />
+      <HelpDialog
+        open={helpOpen}
+        onOpenChange={setHelpOpen}
+        onNavigate={(id) => {
+          const target = resolveHelpTarget(id);
+          if (!target) return;
+          setHelpOpen(false);
+          if (target.kind === "settings") {
+            setSettingsTarget(target);
+            setSettingsOpen(true);
+          } else setConnectionOpen(true);
+        }}
+      />
       <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} hideTrigger />
     </>
   );

@@ -911,6 +911,21 @@
     "view": "View profile",
     "viewNamed": "View {{name}}'s profile"
   },
+  "help": {
+    "title": "Help",
+    "description": "Version {{version}} · Available offline",
+    "search": "Search help",
+    "clearSearch": "Clear search",
+    "topicCount_one": "{{count}} topic",
+    "topicCount_other": "{{count}} topics",
+    "topics": "Help topics",
+    "noResults": "No matching topics. Try a shorter phrase, or clear your search to browse all guides.",
+    "englishFallback": "Articles are currently available in English. Search also recognizes common Chinese terms.",
+    "openSettings": "Open {{category}}",
+    "openDiagnostics": "Open Connection",
+    "online": "Read online",
+    "linkFailed": "The link could not be opened. Try again or open the online manual in your browser."
+  },
   "dmLanguage": {
     "title": "Direct-message language",
     "help": "Require each incoming direct message to use your selected language for at least 80% of its text. Other languages may make up at most 20%. Group chats are unaffected.",

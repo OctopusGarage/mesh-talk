@@ -122,3 +122,10 @@ state, relay dependency combinations, failed reads/writes, owner-generation ABA,
 native picker cancellation/rejection and recovery challenge gating. These browser
 checks use mocked native IPC; they do not certify native OS dialogs, screen
 readers, or physical-network delivery. Full-suite gates remain separate.
+
+## Help navigation
+
+**More → Help** links task guides to the relevant settings category. An explicit
+help action can select a category and focus its control after loading, without
+changing the saved value. Opening Settings normally still starts at General.
+See the [user guide](help/README.md).

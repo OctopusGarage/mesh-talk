@@ -911,6 +911,21 @@
     "view": "Ver perfil",
     "viewNamed": "Ver perfil de {{name}}"
   },
+  "help": {
+    "title": "Ayuda",
+    "description": "Versión {{version}} · Disponible sin conexión",
+    "search": "Buscar ayuda",
+    "clearSearch": "Borrar búsqueda",
+    "topicCount_one": "{{count}} tema",
+    "topicCount_other": "{{count}} temas",
+    "topics": "Temas de ayuda",
+    "noResults": "No hay temas coincidentes. Prueba una frase más corta o borra la búsqueda para ver todas las guías.",
+    "englishFallback": "Los artículos están disponibles en inglés. La búsqueda también reconoce términos habituales en chino.",
+    "openSettings": "Abrir {{category}}",
+    "openDiagnostics": "Abrir Conexión",
+    "online": "Leer en línea",
+    "linkFailed": "No se pudo abrir el enlace. Inténtalo de nuevo o abre el manual en tu navegador."
+  },
   "dmLanguage": {
     "title": "Idioma de los mensajes directos",
     "help": "Cada mensaje directo que recibas debe contener al menos un 80% del idioma elegido. Los demás idiomas pueden ocupar como máximo un 20%. No afecta a los grupos.",

@@ -51,6 +51,17 @@ updates:
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
 
+  # Keep the read-only documentation MCP SDK and its schema dependency aligned.
+  - package-ecosystem: npm
+    directory: "/tools/help"
+    target-branch: dev
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      help-sdk:
+        patterns: ["@modelcontextprotocol/*", "zod"]
+
   # GitHub Actions versions used in workflows.
   - package-ecosystem: github-actions
     directory: "/"

@@ -9,6 +9,7 @@ const MENU_UNREAD: &str = "unread";
 const MENU_DIAGNOSTICS: &str = "diagnostics";
 const MENU_SETTINGS: &str = "settings";
 const MENU_ABOUT: &str = "about";
+const MENU_HELP: &str = "help";
 pub const TRAY_ID: &str = "mesh-talk-tray";
 
 struct TrayMenuState<R: tauri::Runtime> {
@@ -64,6 +65,7 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
     )?;
     let settings = MenuItem::with_id(app, MENU_SETTINGS, "Settings…", true, None::<&str>)?;
     let about = MenuItem::with_id(app, MENU_ABOUT, "About Mesh-Talk", true, None::<&str>)?;
+    let help = MenuItem::with_id(app, MENU_HELP, "Mesh-Talk Help…", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, MENU_HIDE, "Hide", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "Quit Mesh-Talk", true, None::<&str>)?;
 
@@ -75,6 +77,7 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &diagnostics,
             &settings,
+            &help,
             &about,
             &PredefinedMenuItem::separator(app)?,
             &hide,
@@ -99,7 +102,7 @@ pub fn create_system_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = window.set_focus();
                 }
             }
-            MENU_DIAGNOSTICS | MENU_SETTINGS | MENU_ABOUT => {
+            MENU_DIAGNOSTICS | MENU_SETTINGS | MENU_ABOUT | MENU_HELP => {
                 if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
                     let _ = crate::window_visibility::show(&window);
                     let _ = window.set_focus();
