@@ -3,7 +3,7 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
-import { revealComposerTools } from "./helpers/session";
+import { enterChat, revealComposerTools } from "./helpers/session";
 
 // Stable scenario ids — mirror e2e/tauri-mock.ts.
 const BOB = { account: "acc_bob_bbbb2222" };
@@ -23,17 +23,6 @@ async function signIn(page: Page, user = "tester") {
   await page.getByTestId("login-username").fill(user);
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-}
-
-/** Full path to a rendered, ready chat shell with the roster loaded. */
-async function enterChat(page: Page, user = "tester", path = "/") {
-  await register(page, user, path);
-  await signIn(page, user);
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
-  // Roster has loaded once the seeded contact row is present (node boot resolved).
-  await expect(
-    page.getByTestId(`conversation-row-${BOB.account}`),
-  ).toBeVisible();
 }
 
 /** Open Bob's DM and wait for its (seeded) history to render. */
