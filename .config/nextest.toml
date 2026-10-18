@@ -1,0 +1,5 @@
+# Each mutated test runs in its own process so a busy loop cannot starve an
+# async timeout or block the remaining tests until the whole-suite deadline.
+[profile.mutants]
+slow-timeout = { period = "60s", terminate-after = 1, grace-period = "5s" }
+test-threads = 2
