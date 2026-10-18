@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 test.use({ viewport: { width: 1100, height: 800 } });
 
@@ -15,7 +16,7 @@ test("chrome is unselectable; message text and inputs stay selectable", async ({
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 
   const sel = (el: import("@playwright/test").Locator) =>
     el.evaluate((n) => getComputedStyle(n).userSelect);

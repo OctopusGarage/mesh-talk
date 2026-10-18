@@ -3,7 +3,11 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
-import { enterChat, revealComposerTools } from "./helpers/session";
+import {
+  waitForChatShell,
+  enterChat,
+  revealComposerTools,
+} from "./helpers/session";
 
 // Stable scenario ids — mirror e2e/tauri-mock.ts.
 const BOB = { account: "acc_bob_bbbb2222" };
@@ -41,7 +45,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByText("Account created")).toBeVisible();
     await signIn(page);
 
-    await expect(page.getByTestId("chat-shell")).toBeVisible();
+    await waitForChatShell(page);
     // Identity is present (the glyph + own name), and no blank/black screen regression.
     await expect(page.getByTestId("self-identity")).toBeVisible();
     await expect(page.locator("#root")).not.toBeEmpty();
@@ -54,7 +58,7 @@ test.describe("Mesh-Talk UI flow", () => {
   }) => {
     await enterChat(page, "guard");
     await expect(page.locator("#root")).not.toBeEmpty();
-    await expect(page.getByTestId("chat-shell")).toBeVisible();
+    await waitForChatShell(page);
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
   });
 

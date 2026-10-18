@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 import { seedMarketPacks } from "./helpers/packs";
 const CHANNEL = "chan_team_dddd4444";
@@ -11,7 +12,7 @@ async function login(page: import("@playwright/test").Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 }
 
 test("personal avatar gallery offers the player pack", async ({ page }) => {

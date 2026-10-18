@@ -4,6 +4,7 @@ import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
 import {
+  waitForChatShell,
   enterChat,
   openBobDm,
   seedThemeBeforeLoad,
@@ -153,7 +154,7 @@ test("empty shell at the minimum desktop size has no detectable WCAG A/AA violat
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expectNoWcagViolations(page);
 });
 

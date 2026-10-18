@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
 
@@ -13,7 +14,7 @@ async function enterGroup(page: Page, count = 120) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   // Persist initial history before opening it: no notification/read shortcut.
   await page.evaluate(
     ({ conversation, who, count }) => {

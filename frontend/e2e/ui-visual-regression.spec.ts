@@ -1,5 +1,10 @@
 import { test, expect } from "./tauri-mock";
-import { enterChat, openBobDm, seedThemeBeforeLoad } from "./helpers/session";
+import {
+  waitForChatShell,
+  enterChat,
+  openBobDm,
+  seedThemeBeforeLoad,
+} from "./helpers/session";
 import {
   prepareForScreenshot,
   snapshotName,
@@ -46,7 +51,7 @@ test("no peers offers a direct connection path", async ({ page }) => {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(page.getByText("Connection help")).toBeVisible();
   await prepareForScreenshot(page);
   await expect(page.getByTestId("chat-shell")).toHaveScreenshot(

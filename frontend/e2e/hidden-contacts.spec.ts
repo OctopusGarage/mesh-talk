@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
@@ -14,7 +15,7 @@ async function login(page: Page, username = "tester") {
   await page.getByTestId("login-username").fill(username);
   await page.getByTestId("login-password").fill("a strong password");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 }
 async function manage(page: Page) {
   await openSidebarMenuAction(page, "sidebar-nav-settings");

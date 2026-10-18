@@ -10,6 +10,14 @@ export const CAROL = {
 };
 export const CHANNEL = { id: "chan_team_dddd4444" };
 
+export async function waitForChatShell(page: Page) {
+  // Lazy chat loading includes cold transforms and coverage instrumentation.
+  // Keep startup's platform budget separate from behavior assertions.
+  await expect(page.getByTestId("chat-shell")).toBeVisible({
+    timeout: process.platform === "win32" ? 90_000 : 15_000,
+  });
+}
+
 export async function enterChatShell(page: Page, user = "tester", path = "/") {
   await page.goto(path);
   for (const tab of ["register", "signin"]) {
@@ -18,10 +26,7 @@ export async function enterChatShell(page: Page, user = "tester", path = "/") {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  // Windows CI can take longer to finish the mocked startup while other UI jobs run.
-  await expect(page.getByTestId("chat-shell")).toBeVisible({
-    timeout: process.platform === "win32" ? 90_000 : 15_000,
-  });
+  await waitForChatShell(page);
 }
 
 export async function enterChat(page: Page, user = "tester", path = "/") {

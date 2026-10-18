@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { expect, test } from "./tauri-mock";
 
 // Regression: the channel members list must show OUR OWN row with our display name and an
@@ -16,7 +17,7 @@ test("channel members shows self with name + online", async ({ page }) => {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
 
