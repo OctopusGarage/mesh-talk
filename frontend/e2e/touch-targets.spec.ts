@@ -82,7 +82,8 @@ test("settings switches keep a compact track inside a usable touch target", asyn
     before === "true" ? "false" : "true",
   );
   await wallpaper.focus();
-  await page.keyboard.press("Space");
+  await expect(wallpaper).toBeFocused();
+  await wallpaper.press("Space");
   await expect(wallpaper).toHaveAttribute("aria-checked", before ?? "false");
 });
 
