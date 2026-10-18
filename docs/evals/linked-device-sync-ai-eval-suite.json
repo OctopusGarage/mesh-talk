@@ -162,8 +162,9 @@
       "id": "MT-SYNC-AI-011",
       "name": "linked appearance does not overwrite a fresh device with defaults",
       "subject_file": "frontend/src/lib/linkedAppearance.ts",
+      "context_files": ["frontend/src/lib/theme.ts"],
       "min_score": 0.85,
-      "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Judge only this file.",
+      "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Trace the supplied theme projection when checking whether a local value was explicitly saved.",
       "rubric": [
         "A new device does not automatically publish default appearance values that could overwrite another linked device.",
         "Before issuing a pairing code, existing saved appearance values can be published when missing.",

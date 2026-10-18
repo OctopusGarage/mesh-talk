@@ -25,6 +25,10 @@ participate in linked-device synchronization when its category is enabled. Each
 page names its scope, with exceptions beside the affected control. Backup does
 not export the device's settings; see [backup and recovery](backup-recovery.md).
 
+Before issuing a pairing code, only explicitly saved local appearance choices
+seed missing account preferences. Fresh-device defaults remain local, and
+existing account values are preserved.
+
 ## Saved Messages and linked devices
 
 **Saved Messages** is always available after the account is ready, including when

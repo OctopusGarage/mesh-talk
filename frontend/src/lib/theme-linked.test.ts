@@ -3,7 +3,12 @@ import { beforeEach, expect, it, vi } from "vitest";
 
 vi.mock("@/store/packs", () => ({ installedTheme: () => undefined }));
 
-import { appearanceValues, applyLinkedAppearance, useTheme } from "./theme";
+import {
+  appearanceValues,
+  savedAppearanceValues,
+  applyLinkedAppearance,
+  useTheme,
+} from "./theme";
 
 beforeEach(() => {
   localStorage.clear();
@@ -11,6 +16,30 @@ beforeEach(() => {
     theme: "dark",
     wallpaperEnabled: true,
     packWallpaperIds: {},
+  });
+});
+
+it("distinguishes fresh defaults from individually saved appearance choices", () => {
+  expect(appearanceValues()).toEqual({
+    theme: "dark",
+    wallpaper_enabled: "on",
+    pack_wallpaper_ids: "{}",
+  });
+  expect(savedAppearanceValues()).toEqual({});
+
+  // Explicitly choosing a default value still counts as a saved choice.
+  useTheme.getState().set("dark");
+  expect(savedAppearanceValues()).toEqual({ theme: "dark" });
+  useTheme.getState().setWallpaperEnabled(true);
+  expect(savedAppearanceValues()).toEqual({
+    theme: "dark",
+    wallpaper_enabled: "on",
+  });
+  applyLinkedAppearance("pack_wallpaper_ids", '{"nature":"forest-1"}');
+  expect(savedAppearanceValues()).toEqual({
+    theme: "dark",
+    wallpaper_enabled: "on",
+    pack_wallpaper_ids: '{"nature":"forest-1"}',
   });
 });
 
