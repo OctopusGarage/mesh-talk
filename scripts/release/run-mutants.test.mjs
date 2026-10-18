@@ -9,7 +9,7 @@ import test from "node:test";
 // Run explicitly in mutation CI, where the pinned tool is installed. These tiny,
 // dependency-free crates exercise its actual CLI and report format in seconds.
 const runner = fileURLToPath(new URL("./run-mutants.mjs", import.meta.url));
-for (const scenario of ["caught", "missed", "baseline failure", "empty", "hanging mutant"]) {
+for (const scenario of ["caught", "missed", "baseline failure", "empty", "hanging mutant", "hanging baseline"]) {
   test(`real cargo-mutants runner: ${scenario}`, () => {
     const root = mkdtempSync(join(tmpdir(), "mesh-mutants-runner-"));
     try {
@@ -19,7 +19,7 @@ for (const scenario of ["caught", "missed", "baseline failure", "empty", "hangin
       writeFileSync(join(cwd, "Cargo.toml"), '[package]\nname = "mutation-smoke"\nversion = "0.1.0"\nedition = "2024"\n');
       const assertion = scenario === "baseline failure" ? "assert!(super::eligible(1));" : "assert!(super::eligible(11));";
       const negative = scenario === "caught" ? "assert!(!super::eligible(1));" : "";
-      const source = scenario === "hanging mutant" ? "pub fn advance() -> bool { true }\n#[cfg(test)] mod tests { #[test] fn completes() { while !super::advance() {} } }\n" : `pub fn eligible(x: u32) -> bool { x > 10 }\n#[cfg(test)] mod tests { #[test] fn accepts() { ${assertion} ${negative} } }\n`;
+      const source = scenario.startsWith("hanging") ? `pub fn advance() -> bool { ${scenario === "hanging baseline" ? "false" : "true"} }\n#[cfg(test)] mod tests { #[test] fn completes() { while !super::advance() {} } }\n` : `pub fn eligible(x: u32) -> bool { x > 10 }\n#[cfg(test)] mod tests { #[test] fn accepts() { ${assertion} ${negative} } }\n`;
       mkdirSync(join(root, ".config"), { recursive: true });
       writeFileSync(join(root, ".config/nextest.toml"), '[profile.mutants]\nslow-timeout = { period = "1s", terminate-after = 1, grace-period = "1s" }\ntest-threads = 2\n');
       const sourcePath = join(cwd, "src/lib.rs");
@@ -42,13 +42,13 @@ for (const scenario of ["caught", "missed", "baseline failure", "empty", "hangin
           GITHUB_STEP_SUMMARY: join(root, "summary.md"),
         },
         encoding: "utf8",
-        timeout: scenario === "hanging mutant" ? 10_000 : 60_000,
+        timeout: 60_000,
       });
       assert.ifError(result.error);
       const output = result.stdout + result.stderr;
-      assert.equal(result.status, scenario === "baseline failure" ? 1 : 0, output);
+      assert.equal(result.status, scenario.includes("baseline") ? 1 : 0, output);
       assert.equal(readFileSync(sourcePath, "utf8"), source, "in-place mutation must restore source");
-      if (scenario === "baseline failure") {
+      if (scenario.includes("baseline")) {
         assert.match(output, /mutation tool exit indicates failure: 4/);
       } else {
         const summary = readFileSync(join(root, "summary.md"), "utf8");
