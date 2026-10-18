@@ -146,10 +146,9 @@ async fn both_invisible_runtimes_restart_with_pinned_routes_and_return_dm() {
     bob.set_invisible(true).await.unwrap();
     let ports = (alice.listen_tcp_port(), bob.listen_tcp_port());
     let ids = (alice.user_id().to_owned(), bob.user_id().to_owned());
-    drop(alice);
-    drop(bob);
-    // Aborted accept tasks must release sockets before the restart bind.
-    tokio::task::yield_now().await;
+    // Join cancelled producers so pinned listener ports are released before restart.
+    alice.stop().await;
+    bob.stop().await;
     let (alice, mut arx) = start(dir.path(), "alice", port).await;
     let (bob, _) = start(dir.path(), "bob", port).await;
     assert_eq!((alice.listen_tcp_port(), bob.listen_tcp_port()), ports);
