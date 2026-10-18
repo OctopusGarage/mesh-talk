@@ -119,3 +119,6 @@ pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{ReactionPayload, ReactionView, aggregate};
 pub use received_log::{ReceivedEntry, ReceivedLog};
 pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeNetworkOptions};
+
+mod outgoing_message;
+pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessageRequest};

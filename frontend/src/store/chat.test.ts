@@ -2165,3 +2165,95 @@ describe("offline contact deletion", () => {
     expect(useChat.getState().accounts).toHaveLength(1);
   });
 });
+
+describe("externally accepted messages", () => {
+  for (const kind of ["account", "channel"] as const) {
+    it(`reloads the active ${kind} history without unread changes`, async () => {
+      const history = [
+        {
+          id: "external-1",
+          from_me: true,
+          who: "you",
+          text: "Alert from agent",
+          wall_clock: 1,
+          reply_to: null,
+        },
+      ];
+      invoke.mockImplementation((command: string) => {
+        if (command === "owner_node_identity")
+          return Promise.resolve({
+            owner: "host",
+            account_id: "myacct",
+            device_id: "me",
+          });
+        if (
+          command ===
+          (kind === "account" ? "owner_account_history" : "channel_history")
+        )
+          return Promise.resolve(history);
+        return Promise.resolve([]);
+      });
+      const stop = useChat.getState().start();
+      try {
+        await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+        useChat.setState({
+          active: { kind, id: "target", name: "Target" },
+          unread: { "account:other": 3 },
+        });
+        captured.current!.onIntegrationMessageAccepted({
+          owner: "host",
+          account_id: "myacct",
+          destination: { kind, id: "target" },
+        });
+        await vi.waitFor(() =>
+          expect(useChat.getState().messages[`${kind}:target`]?.[0]?.text).toBe(
+            "Alert from agent",
+          ),
+        );
+        expect(useChat.getState().unread).toEqual({ "account:other": 3 });
+      } finally {
+        stop();
+      }
+    });
+  }
+
+  it("ignores unrelated, unready, and retired-session integration events", async () => {
+    invoke.mockImplementation((command: string) =>
+      command === "owner_node_identity"
+        ? Promise.resolve({
+            owner: "host",
+            account_id: "myacct",
+            device_id: "me",
+          })
+        : Promise.resolve([]),
+    );
+    const stop = useChat.getState().start();
+    try {
+      await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+      useChat.setState({
+        active: { kind: "account", id: "target", name: "Target" },
+      });
+      invoke.mockClear();
+      const accepted = {
+        owner: "host",
+        account_id: "myacct",
+        destination: { kind: "account", id: "target" },
+      };
+      const handler = captured.current!.onIntegrationMessageAccepted;
+      handler({ ...accepted, owner: "other-owner" });
+      handler({ ...accepted, account_id: "other-account" });
+      handler({ ...accepted, destination: { kind: "account", id: "other" } });
+      handler({ ...accepted, destination: { kind: "channel", id: "target" } });
+      useChat.setState({ ready: false });
+      handler(accepted);
+      useChat.setState({ ready: true });
+      useAuth.setState({ generation: useAuth.getState().generation + 1 });
+      handler(accepted);
+      useAuth.setState({ user: null });
+      handler(accepted);
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+});

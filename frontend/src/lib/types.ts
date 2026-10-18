@@ -303,6 +303,13 @@ export interface ChannelMessageEvent {
   reply_to: string | null;
 }
 
+/** Content-free notice: read accepted outgoing content through guarded history APIs. */
+export interface IntegrationMessageAcceptedEvent {
+  owner: string;
+  account_id: string;
+  destination: { kind: "account" | "channel"; id: string };
+}
+
 export interface FileReceivedEvent {
   conv: string;
   is_channel: boolean; // emitted by the same installed native app, not over the network

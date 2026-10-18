@@ -688,34 +688,28 @@ impl Node {
         }
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
-        // Publish our sender-key distribution before the first seal (see
-        // `send_channel_message_reply`).
-        let (members, already_distributed) = {
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state_mut(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            let epoch = state.epoch();
-            (state.members().to_vec(), state.has_my_sender(epoch))
-        };
-        if !already_distributed {
-            self.distribute_my_sender_key(channel, &members)?;
-        }
-        let sealed = {
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state_mut(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            state
-                .seal_sender_message(&crate::expiry::wrap(
-                    &outgoing_manifest_bytes(&manifest),
-                    expires_at_ms,
-                ))
-                .map_err(|e| NodeError::File(format!("manifest sealing failed: {e}")))?
-        };
-        // Persist our advanced sending chain (see `send_channel_message_reply`).
-        self.persist_my_senders(channel);
-        let seq = self.append_event(channel, EventKind::FileManifest, sealed)?;
+        let members = self
+            .channels
+            .lock()
+            .expect("channels lock")
+            .state(&channel)
+            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
+            .members()
+            .to_vec();
+        let id = self.enqueue_channel_payload_if(
+            channel,
+            crate::expiry::wrap(&outgoing_manifest_bytes(&manifest), expires_at_ms),
+            EventKind::FileManifest,
+            None,
+            &mut |accept| accept(),
+        )?;
+        let seq = self
+            .log
+            .lock()
+            .expect("log lock")
+            .get(&id)
+            .ok_or_else(|| NodeError::File("accepted manifest awaits recovery".into()))?
+            .seq;
         self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)?;
         // A file/folder manifest is an offer. Members pull its chunks only after
         // their own receive policy permits it; pushing the chunk conversation here

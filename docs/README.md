@@ -40,6 +40,22 @@ belongs and how to keep the site, README, and guides aligned.
 | [`docs/privacy-controls.md`](privacy-controls.md)                                   | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
 | [`specifications/TODO.md`](../specifications/TODO.md)                               | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
 
+## Bots and local agents
+
+[Bot integrations](bot-integrations.md) explains the dedicated headless bot host,
+opt-in desktop delegation, scoped CLI credentials and local MCP tools. Text/reply
+sending is implemented; interactive subscriptions and HTTP ingress are later stages.
+
+## Proposed features and research
+
+These documents distinguish implemented initial capabilities from investigated
+options and proposed later stages. The usage guide above owns current behavior.
+
+| Doc                                                                    | What it covers                                                                                                                                                       |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Bots and MCP architecture proposal](bot-mcp-architecture-research.md) | Bot identities, group installations, desktop and headless hosting, shared integration service, reliable sending, MCP/webhook adapters, security and staged delivery. |
+| [Feishu/Lark and MCP source research](bot-mcp-source-research.md)      | Official bot/API/SDK references, current MCP version and transport requirements, and evidence limits.                                                                |
+
 ## Contributor workflow and design
 
 | Doc                                                                                           | What it covers                                                                                           |
@@ -50,7 +66,7 @@ belongs and how to keep the site, README, and guides aligned.
 | [`specifications/development_conventions.md`](../specifications/development_conventions.md)   | Coding standards, naming, error handling, performance, cross-platform conventions.                       |
 | [`specifications/testing_guidelines.md`](../specifications/testing_guidelines.md)             | The three test layers — inline unit, multi-process backend E2E, Playwright UI E2E.                       |
 | [`docs/testing-feedback-loop.md`](testing-feedback-loop.md)                                   | Focused local test commands, module boundaries, and full-gate triggers.                                  |
-| [`docs/build-retention.md`](build-retention.md)                                               | Shared build archives, compiler-cache budget, worktree discovery, and cleanup coordination.             |
+| [`docs/build-retention.md`](build-retention.md)                                               | Shared build archives, compiler-cache budget, worktree discovery, and cleanup coordination.              |
 | [`specifications/git_standards.md`](../specifications/git_standards.md)                       | Conventional-commit format, scopes, and GPG signing / hook enforcement.                                  |
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements.                            |
 | [`scripts/README.md`](../scripts/README.md)                                                   | Script entry points, CI globs, manual real-machine rigs, and maintenance tools.                          |
@@ -62,6 +78,8 @@ belongs and how to keep the site, README, and guides aligned.
 | [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
 
 ## Evaluation records
+
+[Bot integration implementation evidence, 2026-10-19](evals/bot-integrations-2026-10-19.md) records focused test commands, standalone binary checks and platform limits.
 
 These dated reports record what was tested and the limits of that evidence. Use
 the current guides above for commands and implementation behavior.

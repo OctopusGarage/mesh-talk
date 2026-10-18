@@ -535,6 +535,23 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
+      onIntegrationMessageAccepted: (e) => {
+        const state = get();
+        if (
+          !lease.current() ||
+          !state.ready ||
+          e.owner !== lease.owner ||
+          e.account_id !== state.myAccountId ||
+          !state.active ||
+          e.destination.kind !== state.active.kind ||
+          e.destination.id !== state.active.id
+        )
+          return;
+        // Outgoing delegated sends do not count as inbound notifications. Fetch
+        // their content through the same guarded history path as ordinary sends.
+        void state.reload();
+      },
+
       onDm: (e) => {
         if (lease.current()) get_handleDm(set, get, e);
       },

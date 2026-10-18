@@ -114,6 +114,9 @@ impl MsgHeader {
 /// A member's view of a channel: its id, current membership/name/epoch, and the
 /// sender-key ratchet state this node holds (its own per-epoch sending key plus the
 /// receiving chains it follows for each `(author, epoch)`).
+pub(crate) type PreparedSenderMessage =
+    (Vec<u8>, Option<SenderKeyDistribution>, Vec<(u64, Vec<u8>)>);
+
 pub struct ChannelState {
     id: ConversationId,
     name: String,
@@ -380,6 +383,40 @@ impl ChannelState {
         out.extend_from_slice(&hdr);
         out.extend_from_slice(&ct);
         Ok(out)
+    }
+
+    /// Prepare a send without changing the live sender chain. The host journals
+    /// the returned snapshot atomically with the signed event before installing it.
+    pub(crate) fn prepare_sender_message(
+        &self,
+        plaintext: &[u8],
+    ) -> Result<PreparedSenderMessage, ChannelError> {
+        let me = self
+            .my_user_id
+            .clone()
+            .ok_or_else(|| ChannelError::Malformed("no identity".into()))?;
+        let mut senders = self.export_my_senders();
+        let mut key = self
+            .my_sender
+            .get(&self.epoch)
+            .and_then(|key| SenderKey::deserialize(&key.serialize()))
+            .unwrap_or_else(SenderKey::generate);
+        let distribution = (!self.has_my_sender(self.epoch)).then(|| key.distribution());
+        let (n, mk) = key.ratchet();
+        let header = MsgHeader {
+            epoch: self.epoch,
+            sender: me,
+            n,
+        }
+        .encode();
+        let ciphertext = sk_seal(&mk, plaintext, &header).map_err(|_| ChannelError::Encrypt)?;
+        let mut payload = Vec::with_capacity(2 + header.len() + ciphertext.len());
+        payload.extend_from_slice(&(header.len() as u16).to_be_bytes());
+        payload.extend(header);
+        payload.extend(ciphertext);
+        senders.retain(|(epoch, _)| *epoch != self.epoch);
+        senders.push((self.epoch, key.serialize()));
+        Ok((payload, distribution, senders))
     }
 
     /// Open a sender-keyed message (`&mut` — the receiving chain ratchets + deletes the

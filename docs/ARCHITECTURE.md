@@ -912,17 +912,49 @@ visible and is counted as missing media in the preview. Messages newer than the
 backup require a later peer sync. Recovery cannot revoke an old certified device;
 the UI sends users who suspect compromise to new identity creation.
 
+## Local bot and agent integrations
+
+`crates/mesh-talk-integrations` owns a transport-independent service for scoped
+text/reply sends, encrypted profile-bound grants and recent metadata-only audit.
+The desktop supplies exact-session admission; a dedicated headless host supplies
+profile/lifecycle admission. Private Unix sockets or Windows named pipes expose
+a closed local API. The MCP adapter in `crates/mesh-talk-mcp` translates four
+context/send/status tools using the official SDK. See the
+[setup and limits](bot-integrations.md) and [design rationale](bot-mcp-architecture-research.md).
+
+Core `node/outgoing_message.rs` accepts retry keys through guarded enqueue.
+Request mapping and prepared DM/group state share the encrypted delivery WAL.
+Appended journal variants preserve old positional tags; a pending new variant
+requires a compatible binary for recovery. Group messages, sender distributions
+and group file manifests use serialized sender snapshots and durable replay,
+so failures cannot reuse an older sending chain. Duplicate requests return the
+original message reference; changed content conflicts. Retry records are bounded
+by seven days, 100,000 records and existing outbox budgets. Local acceptance is
+separate from network distribution and recipient confirmation.
+
+Local endpoint manifests let scoped credentials survive host restarts without
+exposing profile keys. Runtime retirement signals graceful service shutdown and
+joins nested request tasks before profile reuse. Administrators separately enroll
+bot devices through ordinary signed group invitation acceptance. A send-only
+client grant does not remove the hosting member's decryption capability. Bot
+badges and authenticated delegated-send attribution are later wire extensions;
+existing participants see an ordinary signed account/device author.
+
 ## 6. Binaries
 
 - `mesh-talk` (`main.rs` → `lib.rs::run_tauri`) — the desktop app.
 - `mesh-talk-node` (`bin/mesh-talk-node.rs`) — headless node CLI; `--post-office`
   runs relay mode.
+- `mesh-talk-integrations` — dedicated bot host, scoped credential administration,
+  local send/status and explicit enrollment CLI.
+- `mesh-talk-mcp` — private-client-file MCP stdio adapter.
 
 ## 7. Build, test, CI
 
-- **Workspace** (two layered crates): `crates/mesh-talk-core/` — the UI-free protocol
+- **Workspace** (four layered crates): `crates/mesh-talk-core/` — the UI-free protocol
   core / SDK foundation (lib `mesh_talk_core` + the `mesh-talk-node` CLI bin) — and
-  `src-tauri/` — the Tauri desktop shell, a thin layer that depends on the core. Shared
+  `src-tauri/` — the Tauri desktop shell. `crates/mesh-talk-integrations/` owns
+  scoped local messaging, and `crates/mesh-talk-mcp/` owns the MCP adapter. Shared
   dependency versions live in the root `[workspace.dependencies]`. The app references the
   core as `mesh_talk_core::…`; a third party can depend on `mesh-talk-core` alone (no Tauri).
 - **Windows runtime**: `src-tauri/tauri.conf.json` selects static Visual C++ runtime

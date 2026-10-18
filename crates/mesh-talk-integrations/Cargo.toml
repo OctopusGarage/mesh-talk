@@ -1,0 +1,32 @@
+[package]
+name = "mesh-talk-integrations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scoped local messaging capabilities for Mesh-Talk bots, scripts and agents."
+
+[lints]
+workspace = true
+
+[dependencies]
+mesh-talk-core = { path = "../mesh-talk-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+log = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand_core = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Threading"] }
+
+[dev-dependencies]
+mesh-talk-core = { path = "../mesh-talk-core", features = ["fast-test-kdf"] }

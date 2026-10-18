@@ -17,6 +17,13 @@ where those decisions live in code and how to change them safely.
 | Feature modules: `frontend/src/features`    | User interaction and composition                                                              | Stores, typed adapters, shared models and UI primitives | Reimplementation of identity, policy or delivery rules               |
 | UI primitives: `frontend/src/components/ui` | Accessible visual controls                                                                    | React/Radix and styling helpers                         | Session lifecycle and protocol policy                                |
 
+The bot integration service in `crates/mesh-talk-integrations` depends on the core
+and host-supplied admission ports. It owns grants, bounded metadata audit and
+private IPC; `crates/mesh-talk-mcp` owns SDK/stdio translation only. Core
+`node/outgoing_message.rs` owns retry-safe event acceptance and sender-state WAL
+recovery. Desktop `src-tauri/src/integrations.rs` binds exact-session leases and
+graceful listener retirement. See [bot integration setup](bot-integrations.md).
+
 The headless CLI uses the core directly. A protocol change should not require
 Tauri; a presentation change should not alter the wire protocol. Not every helper
 in `lib/` is pure: `theme.ts`, for example, owns reactive appearance effects. Use

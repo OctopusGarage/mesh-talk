@@ -1626,3 +1626,85 @@ fn failed_durable_intent_does_not_install_or_publish_status() {
             .is_empty()
     );
 }
+
+#[test]
+fn request_ledger_expires_without_evicting_live_retry_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let now = super::super::node::now_millis();
+    let mut request = RequestRecord {
+        request_id: [4; 32],
+        digest: [5; 32],
+        destination: super::super::MessageDestination::Account("b".repeat(32)),
+        message_id: EventId::new([9; 32]),
+        accepted_at_ms: now - 8 * 24 * 60 * 60 * 1000,
+    };
+    store
+        .install_record(OutboxRecord::Request(request.clone()))
+        .unwrap();
+    assert!(store.request(&request.request_id).is_none());
+    request.accepted_at_ms = now;
+    request.message_id = EventId::new([10; 32]);
+    store
+        .install_record(OutboxRecord::Request(request.clone()))
+        .unwrap();
+    assert_eq!(
+        store.request(&request.request_id).unwrap().message_id,
+        request.message_id
+    );
+    drop(store);
+    let store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert_eq!(
+        store.request(&request.request_id).unwrap().message_id,
+        request.message_id
+    );
+}
+
+#[test]
+fn request_ledger_capacity_rejects_before_new_wal_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let now = super::super::node::now_millis();
+    let template = RequestRecord {
+        request_id: [0; 32],
+        digest: [5; 32],
+        destination: super::super::MessageDestination::Account("b".repeat(32)),
+        message_id: EventId::new([9; 32]),
+        accepted_at_ms: now,
+    };
+    for index in 0u32..100_000 {
+        let mut row = template.clone();
+        row.request_id[..4].copy_from_slice(&index.to_be_bytes());
+        store.requests.insert(row.request_id, row);
+    }
+    let transaction = outgoing(dir.path(), 19);
+    let request = RequestRecord {
+        request_id: [255; 32],
+        message_id: transaction.id(),
+        ..template
+    };
+    let error = store
+        .begin(DeliveryTransaction::Requested {
+            request,
+            transaction: Box::new(transaction),
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("request capacity exhausted"));
+    assert!(store.pending_transactions().is_empty());
+    assert_eq!(store.requests.len(), 100_000);
+}
+
+#[test]
+fn request_envelopes_preserve_legacy_transaction_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = outgoing(dir.path(), 21);
+    let bytes = bincode::serialize(&old).unwrap();
+    assert_eq!(&bytes[..4], &0u32.to_le_bytes());
+    let decoded: DeliveryTransaction = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(bincode::serialize(&decoded).unwrap(), bytes);
+    let incoming = incoming(dir.path());
+    let bytes = bincode::serialize(&incoming).unwrap();
+    assert_eq!(&bytes[..4], &1u32.to_le_bytes());
+    let decoded: DeliveryTransaction = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(bincode::serialize(&decoded).unwrap(), bytes);
+}

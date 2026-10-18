@@ -209,6 +209,7 @@ pub struct FileHistoryInfo {
 pub enum NodeError {
     /// Caller-supplied local data cannot be accepted.
     InvalidInput(String),
+    RequestConflict,
     /// The host rejected a local operation under its owner guard.
     Authorization(String),
     /// `send_dm` to a `user_id` not in the roster.
@@ -229,6 +230,9 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NodeError::RequestConflict => {
+                write!(f, "message request conflicts with prior acceptance")
+            }
             NodeError::InvalidInput(m) => write!(f, "invalid input: {m}"),
             NodeError::Authorization(m) => write!(f, "authorization: {m}"),
             NodeError::UnknownPeer(u) => write!(f, "unknown peer: {u}"),
@@ -253,6 +257,7 @@ type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) outgoing_requests_gate: tokio::sync::Mutex<()>,
     pub(in crate::node) sessions: super::session_pool::SessionPool,
     pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
     pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
@@ -564,7 +569,7 @@ impl Node {
         let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -596,12 +601,13 @@ impl Node {
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
         while delivery
-            .recover_next_with_files(
+            .recover_next_with_channels(
                 &mut dm_ratchet,
                 &mut log,
                 &mut sentlog,
                 &mut received,
                 Some(&mut received_files),
+                Some(&mut channel_senders),
             )?
             .is_some()
         {}
@@ -756,6 +762,7 @@ impl Node {
             recovery_origins,
             recovery_contacts,
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
+            outgoing_requests_gate: tokio::sync::Mutex::new(()),
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),

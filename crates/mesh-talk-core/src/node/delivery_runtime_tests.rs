@@ -6127,3 +6127,330 @@ async fn retained_relay_file_exchange_rechecks_signed_consent_and_relay_role() {
         let _ = server.await;
     }
 }
+
+#[tokio::test]
+async fn outgoing_request_retries_are_durable_and_conflicts_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let peer =
+        Announce::new_with_account(&DeviceIdentity::generate(), &Account::generate(), "peer", 9);
+    let request = OutgoingMessageRequest {
+        request_id: [42; 32],
+        destination: MessageDestination::Account(peer.account_id().unwrap()),
+        text: b"alert".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(identity.secret_bytes().0, identity.secret_bytes().1),
+        Account::from_secret_bytes(account.secret_bytes()),
+        &peer,
+    );
+    let first = sender
+        .enqueue_message_once_if(&request, |accept| accept())
+        .await
+        .unwrap();
+    let retry = sender
+        .enqueue_message_once_if(&request, |accept| accept())
+        .await
+        .unwrap();
+    assert_eq!(first.message_id, retry.message_id);
+    assert!(!first.duplicate);
+    assert!(retry.duplicate);
+    let mut conflict = request.clone();
+    conflict.text = b"different".to_vec();
+    assert!(matches!(
+        sender
+            .enqueue_message_once_if(&conflict, |accept| accept())
+            .await,
+        Err(NodeError::RequestConflict)
+    ));
+    drop(sender);
+    let (sender, _) = node(dir.path(), identity, account, &peer);
+    assert_eq!(
+        sender
+            .message_request_status(&request.request_id)
+            .unwrap()
+            .unwrap()
+            .message_id,
+        first.message_id
+    );
+    assert!(
+        sender
+            .enqueue_message_once_if(&request, |accept| accept())
+            .await
+            .unwrap()
+            .duplicate
+    );
+}
+
+#[tokio::test]
+async fn outgoing_channel_request_is_guarded_and_shared_with_ordinary_sends() {
+    let dir = tempfile::tempdir().unwrap();
+    let peer =
+        Announce::new_with_account(&DeviceIdentity::generate(), &Account::generate(), "peer", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &peer,
+    );
+    let channel = sender.create_channel("alerts", vec![]).await.unwrap();
+    let request = OutgoingMessageRequest {
+        request_id: [43; 32],
+        destination: MessageDestination::Channel(channel),
+        text: b"alert".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    let before = sender
+        .channels
+        .lock()
+        .unwrap()
+        .state(&channel)
+        .unwrap()
+        .export_my_senders();
+    assert!(
+        sender
+            .enqueue_message_once_if(&request, |_| Err(NodeError::Authorization(
+                "revoked".into()
+            )))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        before,
+        sender
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .export_my_senders()
+    );
+    let first = sender
+        .enqueue_message_once_if(&request, |accept| accept())
+        .await
+        .unwrap();
+    sender
+        .send_channel_message(channel, b"manual")
+        .await
+        .unwrap();
+    assert_eq!(
+        sender
+            .enqueue_message_once_if(&request, |accept| accept())
+            .await
+            .unwrap()
+            .message_id,
+        first.message_id
+    );
+    assert_eq!(
+        sender
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .iter()
+            .filter(|e| e.kind == crate::eventlog::EventKind::Message)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn outgoing_request_concurrent_retry_and_revocation_do_not_advance_ratchets() {
+    let dir = tempfile::tempdir().unwrap();
+    let peer =
+        Announce::new_with_account(&DeviceIdentity::generate(), &Account::generate(), "peer", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &peer,
+    );
+    let request = OutgoingMessageRequest {
+        request_id: [44; 32],
+        destination: MessageDestination::Account(peer.account_id().unwrap()),
+        text: b"one alert".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    let (one, two) = tokio::join!(
+        sender.enqueue_message_once_if(&request, |accept| accept()),
+        sender.enqueue_message_once_if(&request, |accept| accept())
+    );
+    let (one, two) = (one.unwrap(), two.unwrap());
+    assert_eq!(one.message_id, two.message_id);
+    assert_ne!(one.duplicate, two.duplicate);
+    let conversations = sender.log.lock().unwrap().conversations();
+    let before = conversations
+        .iter()
+        .map(|conv| sender.log.lock().unwrap().events(conv).len())
+        .sum::<usize>();
+    let mut denied = request.clone();
+    denied.request_id = [45; 32];
+    let mut checks = 0;
+    let result = sender
+        .enqueue_message_once_if(&denied, |accept| {
+            checks += 1;
+            if checks >= 4 {
+                return Err(NodeError::Authorization("revoked".into()));
+            }
+            accept()
+        })
+        .await;
+    assert!(matches!(result, Err(NodeError::Authorization(_))));
+    assert!(
+        sender
+            .message_request_status(&denied.request_id)
+            .unwrap()
+            .is_none()
+    );
+    let conversations = sender.log.lock().unwrap().conversations();
+    let after = conversations
+        .iter()
+        .map(|conv| sender.log.lock().unwrap().events(conv).len())
+        .sum::<usize>();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn outgoing_channel_request_recovers_after_durable_acceptance_and_sidecar_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let keys = identity.secret_bytes();
+    let account = Account::generate();
+    let account_key = account.secret_bytes();
+    let peer =
+        Announce::new_with_account(&DeviceIdentity::generate(), &Account::generate(), "peer", 9);
+    let (sender, _) = node(dir.path(), identity, account, &peer);
+    let channel = sender.create_channel("alerts", vec![]).await.unwrap();
+    sender
+        .sentlog
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
+    let request = OutgoingMessageRequest {
+        request_id: [46; 32],
+        destination: MessageDestination::Channel(channel),
+        text: b"accepted before crash".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    let first = sender
+        .enqueue_message_once_if(&request, |accept| accept())
+        .await
+        .unwrap();
+    assert!(
+        !sender
+            .delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+    assert_eq!(
+        sender
+            .message_request_status(&request.request_id)
+            .unwrap()
+            .unwrap()
+            .message_id,
+        first.message_id
+    );
+    drop(sender);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        Account::from_secret_bytes(account_key),
+        &peer,
+    );
+    assert!(
+        sender
+            .delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+    assert_eq!(
+        sender
+            .enqueue_message_once_if(&request, |accept| accept())
+            .await
+            .unwrap()
+            .message_id,
+        first.message_id
+    );
+    sender
+        .send_channel_message(channel, b"after restart")
+        .await
+        .unwrap();
+    let log = sender.log.lock().unwrap();
+    let messages: Vec<_> = log
+        .events(&channel)
+        .into_iter()
+        .filter(|event| event.kind == crate::eventlog::EventKind::Message)
+        .collect();
+    assert_eq!(messages.len(), 2);
+    assert_ne!(messages[0].ciphertext, messages[1].ciphertext);
+}
+
+#[tokio::test]
+async fn outgoing_reply_lookup_is_bounded_to_recent_borrowed_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let peer =
+        Announce::new_with_account(&DeviceIdentity::generate(), &Account::generate(), "peer", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &peer,
+    );
+    let target = peer.account_id().unwrap();
+    let conversation = super::conversation::account_conversation_id(&sender.account_id(), &target);
+    let mut oldest = EventId::new([0; 32]);
+    let mut newest = oldest;
+    for index in 0u32..501 {
+        let mut id = [0; 32];
+        id[..4].copy_from_slice(&index.to_be_bytes());
+        if index == 0 {
+            oldest = EventId::new(id);
+        }
+        newest = EventId::new(id);
+        let envelope = super::dm_envelope::DmEnvelope::new(
+            sender.account_id(),
+            target.clone(),
+            id,
+            MessageBody::new(b"history".to_vec(), None).encode(),
+        )
+        .encode();
+        sender
+            .sentlog
+            .lock()
+            .unwrap()
+            .record(conversation, u64::from(index) + 1, 100, &envelope)
+            .unwrap();
+    }
+    let request = OutgoingMessageRequest {
+        request_id: [55; 32],
+        destination: MessageDestination::Account(target),
+        text: b"reply".to_vec(),
+        reply_to: Some(oldest),
+        expires_at_ms: None,
+    };
+    assert!(
+        matches!(sender.enqueue_message_once_if(&request, |accept| accept()).await, Err(NodeError::InvalidInput(message)) if message.contains("500 records"))
+    );
+    let recent = OutgoingMessageRequest {
+        reply_to: Some(newest),
+        ..request
+    };
+    assert!(
+        sender
+            .enqueue_message_once_if(&recent, |accept| accept())
+            .await
+            .is_ok()
+    );
+}

@@ -399,37 +399,70 @@ impl Node {
         channel: ConversationId,
         members: &[PublicIdentity],
     ) -> Result<(), NodeError> {
-        let sealed = {
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state_mut(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            let epoch = state.epoch();
-            let skd = state.my_sender_distribution();
-            seal_keys_for(&self.identity, members, &skd, epoch)
-                .map_err(|e| NodeError::Channel(format!("key sealing failed: {e}")))?
-        };
-        self.append_event(channel, EventKind::KeyRotation, sealed.encode())?;
-        self.persist_my_senders(channel);
+        let _ = members;
+        let mut delivery = self.delivery.lock().expect("delivery lock");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        let book = self.channels.lock().expect("channels lock");
+        let state = book
+            .state(&channel)
+            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+        let mut senders = state.export_my_senders();
+        let key = senders
+            .iter()
+            .find(|(epoch, _)| *epoch == state.epoch())
+            .and_then(|(_, bytes)| crate::channel::sender_key::SenderKey::deserialize(bytes))
+            .unwrap_or_else(crate::channel::sender_key::SenderKey::generate);
+        senders.retain(|(epoch, _)| *epoch != state.epoch());
+        senders.push((state.epoch(), key.serialize()));
+        let sealed = seal_keys_for(
+            &self.identity,
+            state.members(),
+            &key.distribution(),
+            state.epoch(),
+        )
+        .map_err(|e| NodeError::Channel(e.to_string()))?;
+        let log = self.log.lock().expect("log lock");
+        let author =
+            crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
+        let seq = log
+            .version_vector(&channel)
+            .get(&author)
+            .copied()
+            .unwrap_or(0)
+            + 1;
+        let (parents, lamport) = log.prepare(&channel);
+        let clock = now_millis();
+        let event = crate::eventlog::event::Event::new(
+            &self.identity,
+            channel,
+            seq,
+            parents,
+            lamport,
+            clock,
+            EventKind::KeyRotation,
+            sealed.encode(),
+        );
+        log.sync().map_err(NodeError::Log)?;
+        drop(log);
+        delivery
+            .begin(
+                super::delivery_store::DeliveryTransaction::ChannelOutgoing {
+                    events: vec![event],
+                    senders,
+                    sent: super::sentlog::SentEntry {
+                        conversation: channel,
+                        seq,
+                        wall_clock: clock,
+                        plaintext: vec![],
+                    },
+                },
+            )
+            .map_err(NodeError::Log)?;
+        drop(book);
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
         Ok(())
-    }
-
-    /// Snapshot `channel`'s `my_sender` (under the channels lock) and persist it to the
-    /// durable store so our sending chains survive a restart. Best-effort: a store
-    /// write error must not fail an already-appended message. No `MutexGuard` is held
-    /// across the persist (the snapshot is taken first, then the lock is dropped).
-    pub(in crate::node) fn persist_my_senders(&self, channel: ConversationId) {
-        let snapshot = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.state(&channel).map(|s| s.export_my_senders())
-        };
-        if let Some(senders) = snapshot {
-            let _ = self
-                .channel_senders
-                .lock()
-                .expect("channel_senders mutex not poisoned")
-                .put(&channel, &senders);
-        }
     }
 
     /// Add `new_member` to `channel`, bumping the epoch. Posts a `MembershipChange`
@@ -801,56 +834,8 @@ impl Node {
         channel: ConversationId,
         wrapped: Vec<u8>,
     ) -> Result<(), NodeError> {
-        // Ensure this node's sender-key distribution for the current epoch is published
-        // BEFORE the first seal (which generates+ratchets our chain to n=1). Without
-        // this, a non-creator member's messages are undecryptable by everyone.
-        let (members, already_distributed) = {
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state_mut(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.is_member(&self.user_id()) || state.pending_invite() {
-                return Err(NodeError::Channel("not a channel member".into()));
-            }
-            let epoch = state.epoch();
-            (state.members().to_vec(), state.has_my_sender(epoch))
-        };
-        if !already_distributed {
-            self.distribute_my_sender_key(channel, &members)?;
-        }
-        let payload = {
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state_mut(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            state
-                .seal_sender_message(&wrapped)
-                .map_err(|e| NodeError::Channel(format!("message sealing failed: {e}")))?
-        };
-        // Persist our advanced sending chain so a post-restart send resumes THIS chain
-        // (receivers are first-wins and keep the chain they already hold).
-        self.persist_my_senders(channel);
-        let seq = self.append_event(channel, EventKind::Message, payload)?;
-        // Keep a local plaintext copy of what we sent — the sender-key wire key is
-        // single-use and not self-decryptable, so channel history is served from the
-        // stores. Best-effort: a sidecar write error doesn't fail a sealed+appended
-        // message.
-        let _ = self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .record(channel, seq, now_millis(), &wrapped);
-        let event_id = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            let author =
-                crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
-            log.events(&channel)
-                .into_iter()
-                .find(|event| event.author == author && event.seq == seq)
-                .map(|event| event.id)
-                .expect("just-appended channel message")
-        };
-        self.distribute_channel_message(channel, &members, event_id)
+        let id = self.enqueue_channel_body_if(channel, wrapped, None, &mut |accept| accept())?;
+        self.flush_accepted_message(&MessageDestination::Channel(channel), id)
             .await;
         Ok(())
     }

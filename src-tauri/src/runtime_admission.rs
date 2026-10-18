@@ -39,6 +39,31 @@ impl RuntimeAdmission {
         Self::capture_for(app, node, None)
     }
 
+    /// Reuse the exact startup session of a long-lived local integration host.
+    /// Never substitute a newer session, even when the owner has not changed.
+    pub(crate) fn capture_lease(
+        app: &AppState,
+        node: &NodeState,
+        lease: &SessionLease,
+    ) -> Result<Self, CommandError> {
+        app.session()
+            .matching(lease, |_| {
+                if app.app_lock().is_locked() {
+                    return Err(CommandError::Authorization("app locked".into()));
+                }
+                #[cfg(test)]
+                if let Some(entered) = app.owner_command_captured.lock().unwrap().as_ref() {
+                    let _ = entered.send("owner-entry");
+                }
+                Ok(Self {
+                    app: app.clone(),
+                    node: node.clone(),
+                    lease: lease.clone(),
+                })
+            })
+            .map_err(CommandError::Authorization)?
+    }
+
     fn capture_for(
         app: &AppState,
         node: &NodeState,
@@ -142,5 +167,53 @@ impl RuntimeAdmission {
         })
         .await
         .map_err(|_| CommandError::Internal("enqueue operation terminated".into()))?
+    }
+}
+
+#[cfg(test)]
+mod integration_lease_tests {
+    use super::*;
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        AppState,
+        NodeState,
+        crate::services::user::User,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new(crate::services::auth_service::AuthService::new(
+            std::sync::Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "integration-owner".into(),
+            name: "integration".into(),
+            display_name: "Integration".into(),
+            address: "local".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        (root, app, NodeState::empty(), user)
+    }
+
+    #[test]
+    fn integrations_lease_rejects_replacement_login_even_for_same_owner() {
+        let (_root, app, node, user) = fixture();
+        let original = app
+            .session()
+            .publish("old".into(), user.clone(), "pw".into());
+        assert!(RuntimeAdmission::capture_lease(&app, &node, &original).is_ok());
+        app.session().publish("new".into(), user, "pw".into());
+        assert!(RuntimeAdmission::capture_lease(&app, &node, &original).is_err());
+    }
+
+    #[test]
+    fn integrations_lease_rejects_logout() {
+        let (_root, app, node, user) = fixture();
+        let lease = app.session().publish("old".into(), user, "pw".into());
+        app.session().clear();
+        assert!(RuntimeAdmission::capture_lease(&app, &node, &lease).is_err());
     }
 }

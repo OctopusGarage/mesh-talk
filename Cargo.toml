@@ -1,11 +1,13 @@
 [workspace]
-members = ["crates/mesh-talk-core", "src-tauri"]
+members = ["crates/mesh-talk-core", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp", "src-tauri"]
 resolver = "3"
 
 # Layered workspace:
 #   crates/mesh-talk-core — the UI-free protocol core (the SDK foundation)
+#   crates/mesh-talk-integrations — scoped local service and dedicated bot host
+#   crates/mesh-talk-mcp   — MCP adapter over the local service
 #   src-tauri             — the Tauri desktop app, a thin shell over the core
-# Shared package metadata + dependency versions live here so the two crates never
+# Shared package metadata + dependency versions live here so the crates never
 # drift apart. Each crate opts in with `<dep>.workspace = true`.
 
 [workspace.package]
@@ -14,7 +16,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/OctopusGarage/mesh-talk"
 
-# Lint guardrails shared by both crates (each opts in with `[lints] workspace = true`).
+# Lint guardrails shared by all crates (each opts in with `[lints] workspace = true`).
 # These are enforced by `cargo clippy` locally (make lint / pre-commit) and in CI.
 [workspace.lints.clippy]
 # Lock-correctness: holding a std Mutex/RwLock guard across an `.await` can deadlock

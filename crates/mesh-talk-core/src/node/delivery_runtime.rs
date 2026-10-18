@@ -366,6 +366,11 @@ impl Node {
     ) -> Result<bool, NodeError> {
         let mut transaction = Some(transaction);
         authorize(&mut || {
+            self.log
+                .lock()
+                .expect("log lock")
+                .sync()
+                .map_err(NodeError::Log)?;
             store
                 .begin(transaction.take().expect("accept is single-use"))
                 .map(|_| ())
@@ -796,18 +801,29 @@ impl Node {
                         },
                     );
             }
+            let channel_snapshot =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelOutgoing { sent, senders, .. } => {
+                            Some((sent.conversation, senders.clone()))
+                        }
+                        _ => None,
+                    });
             let installed = {
                 let mut ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
                 let mut log = self.log.lock().expect("log lock not poisoned");
                 let mut received = self.received.lock().expect("received lock not poisoned");
                 let mut sent = self.sentlog.lock().expect("sent lock not poisoned");
                 let mut files = self.received_files.lock().expect("files lock not poisoned");
-                store.recover_next_with_files(
+                store.recover_next_with_channels(
                     &mut ratchet,
                     &mut log,
                     &mut sent,
                     &mut received,
                     Some(&mut files),
+                    Some(&mut self.channel_senders.lock().expect("sender store lock")),
                 )
             };
             let removed = transaction_id.is_some_and(|id| {
@@ -816,6 +832,20 @@ impl Node {
                     .first()
                     .is_none_or(|tx| tx.id() != id)
             });
+            if (installed.is_ok() || removed)
+                && let Some((channel, senders)) = channel_snapshot
+                && let Some(state) = self
+                    .channels
+                    .lock()
+                    .expect("channels lock")
+                    .state_mut(&channel)
+            {
+                for (epoch, bytes) in senders {
+                    if let Some(key) = crate::channel::sender_key::SenderKey::deserialize(&bytes) {
+                        state.import_my_sender(epoch, key);
+                    }
+                }
+            }
             if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
                 if file {
                     if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
@@ -1002,7 +1032,7 @@ impl Node {
             .expect("sent lock not poisoned")
             .entries(&conversation);
         for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx
+            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx.body()
                 && sent.conversation == conversation
             {
                 ids.insert(sent.seq, message.logical_id);
@@ -1041,7 +1071,7 @@ impl Node {
             .expect("sent lock not poisoned")
             .entries(&conversation);
         for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { sent, .. } = tx
+            if let DeliveryTransaction::Outgoing { sent, .. } = tx.body()
                 && sent.conversation == conversation
                 && !entries.iter().any(|e| e == sent)
             {

@@ -4,7 +4,7 @@ use crate::discovery::announce::Announce;
 use crate::node::conversation::dm_conversation_id;
 use crate::node::message::MessageBody;
 use crate::node::postbox::run_relay_accept_loop;
-use crate::node::{SyncCategory, SyncPhase};
+use crate::node::{MessageDestination, OutgoingMessageRequest, SyncCategory, SyncPhase};
 use crate::postoffice::PostOffice;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -2618,6 +2618,35 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     assert!(!bob_hist[0].from_me);
     assert_eq!(bob_hist[0].text, b"hello channel");
     assert_eq!(bob_hist[0].who, alice_node.user_id());
+
+    let request = OutgoingMessageRequest {
+        request_id: [91; 32],
+        destination: MessageDestination::Channel(channel),
+        text: b"bot alert".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    let accepted = alice_node
+        .enqueue_message_once_if(&request, |accept| accept())
+        .await
+        .unwrap();
+    alice_node
+        .flush_accepted_message(&request.destination, accepted.message_id)
+        .await;
+    let alert = tokio::time::timeout(std::time::Duration::from_secs(5), bob_ch_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(alert.text, b"bot alert");
+    assert_eq!(alert.from, alice_node.user_id());
+    assert!(
+        alice_node
+            .enqueue_message_once_if(&request, |accept| accept())
+            .await
+            .unwrap()
+            .duplicate
+    );
+    assert_eq!(bob_node.channel_history(channel, 10).len(), 2);
 
     // The membership projection can lag the durable log while two commands
     // interleave. The transfer must not report success if replay sees a newer

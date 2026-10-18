@@ -112,7 +112,9 @@ impl From<mesh_talk_core::node::NodeError> for CommandError {
 
         let msg = e.to_string();
         match e {
-            NodeError::InvalidInput(_) => CommandError::InvalidInput(msg),
+            NodeError::InvalidInput(_) | NodeError::RequestConflict => {
+                CommandError::InvalidInput(msg)
+            }
             NodeError::Authorization(_) => CommandError::Authorization(msg),
             // Recipient not yet discovered / not in the roster.
             NodeError::UnknownPeer(_) => CommandError::PeerUnknown(msg),

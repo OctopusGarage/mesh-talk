@@ -24,6 +24,7 @@ pub mod diagnostics;
 mod easytier_discovery;
 pub mod events;
 pub mod favorites;
+mod integrations;
 mod linked_account;
 pub mod logger;
 pub mod owner_commands;
