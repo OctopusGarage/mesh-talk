@@ -68,6 +68,51 @@ No private drafts/read-state synchronization, new cloud service, secure device
 revocation or indefinite offline custody is included. Existing signed account
 preferences remain intact. Availability still depends on reachable retained data.
 
+## E2E and AI follow-up (2026-10-18)
+
+Validation targets implementation commit `2b4a50c` on
+`opt/optimization-20261018`.
+
+- Backend `make e2e`: **13 passed**, including multi-process routed discovery,
+  group/file delivery, persistent history, offline custody and the 110 MB compact
+  directory case. The fixed working tree was validated in Linux with the same
+  Make selectors and isolated Cargo storage (`MANAGED_BUILD=` inside the container).
+- Focused synchronization tests: **24 passed** in Linux. A new real TCP
+  regression first reproduced channel plaintext reaching a certified sibling
+  whose invitation was still pending. Both channel archive selection and file-byte
+  lookup now require accepted requester membership; the test also verifies that
+  accepted membership enables the intended paths.
+- Core `cargo clippy --offline -p mesh-talk-core --all-targets -- -D warnings`:
+  **passed**. Rust formatting, Node syntax checks and the AI smoke contract pass.
+- Model-backed evaluations through the documented read-only Codex CLI provider:
+  **10/10 default cases and 11/11 linked-device cases passed**. The first linked
+  run failed 3 cases: missing delegated-source context, the obsolete file-card
+  selection contract, and the pending-membership boundary above. Suite version 2
+  includes explicit supporting production files and records their paths. Passing
+  thresholds remain unchanged. The harness has **9 passing tests**.
+- Full browser E2E on Windows: **341 passed, 4 explicit skips, no failures or
+  retries**, in 11.8 minutes. The runner used the complete verification archive of
+  `2b4a50c`, pinned `EVAL_SOURCE_SHA`, fresh locked dependencies and D: workspaces,
+  caches and temporary storage. Command: `npm run e2e -- --reporter=list --workers=2 --timeout=90000`. The skipped cases require the lite edition (two),
+  manual site capture, or physical Mac/Windows Tailscale media. The default
+  edition's browser call-engine test passed. The final Windows log and passing
+  manifest are retained at `target/ai-eval/windows-e2e-2b4a50c/`.
+- The changed E2E TypeScript project also passes `tsc --noEmit -p tsconfig.e2e.json`.
+
+The first complete Linux browser sweep reported 336 passes, 4 flaky cases that
+passed on retry, 4 explicit skips and one outdated navigation expectation. The
+updated test now traverses the permanent Saved Messages row between the pinned
+section and ordinary contacts; its focused Linux rerun passed. Later local full
+attempts encountered Docker storage exhaustion or inaccessible shared dependency
+files and do not establish product failures or successful candidate verification.
+The final committed-candidate browser result is recorded above.
+
+AI reports are local artifacts at `target/ai-eval/report.json` and
+`target/ai-eval/linked-device-sync-report.json`; the initial linked findings are
+preserved as `target/ai-eval/linked-device-sync-report.initial.json`. Model judgments
+supplement runtime tests. This validation is not the full workspace health gate
+or the Linux-and-Windows committed-candidate PR preflight.
+
 ## Scope, order and completion boundaries
 
 **Confirmed first-release scope: messages and files.** Work packages 1–4 are all
