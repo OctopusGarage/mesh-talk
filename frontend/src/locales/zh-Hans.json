@@ -231,7 +231,20 @@
     "dropToSend": "拖放以发送给 {{name}}",
     "clearHistory": "清空聊天记录",
     "clearHistoryConfirm": "这会永久删除本机上这个会话的消息,无法恢复,且不影响对方的记录。",
-    "noPeersHint": "Mesh-Talk 会搜索本地网络。请让两台设备连接到同一个局域网。"
+    "noPeersHint": "Mesh-Talk 会搜索本地网络。请让两台设备连接到同一个局域网。",
+    "earlierMessages": "收到较早的消息",
+    "newMessages": "新消息",
+    "catchingUp": "正在补齐已接收的历史记录…",
+    "waitingForPeer": "等待可连接的节点",
+    "delayedMessage": "稍后收到",
+    "receivedLocally": "本设备接收时间：{{time}}",
+    "unreadSummary": "{{count}} 条未读消息",
+    "unreadSummary_one": "{{count}} 条未读消息",
+    "unreadUnavailable": "此消息不在本设备可用的历史记录中。",
+    "markConversationRead": "将会话标为已读",
+    "peerChecked": "已检查可连接的成员",
+    "peerCheckedDetail": "上次检查可连接的成员：{{time}}。离线成员可能还有其他消息。",
+    "moreUnread": "还有更多未读消息"
   },
   "presence": {
     "online": "在线",

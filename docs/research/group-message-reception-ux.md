@@ -147,37 +147,6 @@ Application behavior has not been modified by this research pass.
 
 These scenarios are a proposed test target, not results from executed tests.
 
-## Current implementation audit
-
-The following findings describe the inspected optimization branch, rather than
-the external products above:
-
-- `Node::channel_history` delegates to `history`, whose final presentation order is
-  `(wall_clock, event_id)`. The lower-level event log instead iterates by
-  `(lamport, event_id)` and explicitly documents that it does not validate peer
-  Lamport monotonicity. Thus deterministic timestamp tie-breaking exists, but the
-  rendered history does not provide a validated causal-order contract.
-  [History query](../../crates/mesh-talk-core/src/node/queries.rs),
-  [event store](../../crates/mesh-talk-core/src/eventlog/store.rs)
-- The host's `ChannelMessageEvent` contains conversation/sender/text/reply data,
-  without event identity, authored time, arrival class or catch-up batch identity.
-  `emit_channel_message` calls notification handling for each emitted message.
-  The payload therefore cannot support precise arrival-aware notification policy
-  in the client by itself.
-  [Host events](../../src-tauri/src/events.rs)
-- `get_handleChannel` reloads the active conversation and bumps unread state per
-  callback. `markActiveRead` checks active/loading/error/visibility state, rather
-  than which individual rows were visible. These are useful basic guards, but
-  they do not represent late-message exceptions or viewport-based read tracking.
-  [Chat store](../../frontend/src/store/chat.ts)
-- The conversation list uses stable row keys and follows new output only when
-  already at the bottom. That prevents a common disruptive scroll behavior;
-  explicit message-ID-plus-offset anchoring for insertion in the middle remains
-  a separate requirement to verify and specify.
-  [Conversation view](../../frontend/src/features/chat/ConversationView.tsx)
-
-The practical next step is to specify ordering/clock validation and enrich the
-application event contract before polishing banners or badges. Arrival kind,
-stable message identity and batch boundaries let notification aggregation, unread
-tracking and scroll behavior share the same evidence. This research changes no
-runtime behavior and executes no tests.
+The implementation following this audit is documented in
+[group conversation reception](../group-conversation-reception.md). The source
+findings above describe the pre-change baseline, not the current implementation.

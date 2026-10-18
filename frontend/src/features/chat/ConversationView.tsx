@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { needsCustomWindowControls } from "@/lib/platform";
+import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
 import {
   EmptyState,
@@ -65,12 +66,14 @@ function DaySeparator({ label }: { label: string }) {
 // useSyncExternalStore read a new snapshot on every render → an infinite render loop
 // ("Maximum update depth exceeded") that tears the whole app down to a blank screen.
 const NO_MESSAGES: ChatMessage[] = [];
+const NO_IDS: string[] = [];
 const NO_REACTIONS: ReactionInfo[] = [];
 
 export function ConversationView() {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
+  const receptionScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const myAccountId = useChat((s) => s.myAccountId);
   const isPersonal = active?.kind === "account" && active.id === myAccountId;
   const channels = useChat((s) => s.channels);
@@ -123,6 +126,11 @@ export function ConversationView() {
   const reactions = useChat((s) =>
     active ? (s.reactions[key] ?? NO_REACTIONS) : NO_REACTIONS,
   );
+  const unread = useChat((s) => s.unreadIds[key] ?? NO_IDS);
+  const earlier = useChat((s) => s.lateUnreadIds[key] ?? NO_IDS);
+  const recovery = useChat((s) => s.reception[key]);
+  const overflowUnread = useChat((s) => s.overflowUnread[key] ?? 0);
+  const markMessagesViewed = useChat((s) => s.markMessagesViewed);
   const loading = useChat((s) => s.loading);
   const historyError = useChat((s) => s.historyError === key);
   const searchTarget = useChat((s) => s.searchTarget);
@@ -136,7 +144,46 @@ export function ConversationView() {
     loading,
     historyError,
     searchTarget,
+    markMessagesViewed,
   );
+
+  const unreadNavigationRequest = useRef(0);
+  const [unreadNavigation, setUnreadNavigation] = useState<{
+    key: string;
+    id: string;
+  } | null>(null);
+  const [unavailableUnread, setUnavailableUnread] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    unreadNavigationRequest.current++;
+    setUnavailableUnread(null);
+    setUnreadNavigation(null);
+  }, [key]);
+  useEffect(() => {
+    if (
+      unreadNavigation?.key === key &&
+      viewport.jumpToMessage(unreadNavigation.id)
+    )
+      setUnreadNavigation(null);
+  }, [key, messages, unreadNavigation, viewport]);
+  const navigateUnread = async (id: string) => {
+    const request = ++unreadNavigationRequest.current;
+    const generation = useAuth.getState().generation;
+    setUnavailableUnread(null);
+    if (viewport.jumpToMessage(id)) return;
+    const found = await useChat.getState().revealUnread(key, id);
+    const current = useChat.getState().active;
+    if (
+      !current ||
+      convKey(current) !== key ||
+      useAuth.getState().generation !== generation ||
+      unreadNavigationRequest.current !== request
+    )
+      return;
+    if (found) setUnreadNavigation({ key, id });
+    else setUnavailableUnread(id);
+  };
 
   const [reply, setReply] = useState<{
     key: string;
@@ -175,7 +222,10 @@ export function ConversationView() {
     if (!primed.current && messages.length > 0) primed.current = true;
   }, [messages, key]);
   const isFresh = (m: ChatMessage, i: number) =>
-    primed.current && !seenKeys.current.has(messageRowKey(m, i));
+    primed.current &&
+    m.arrivalKind !== "catch_up" &&
+    m.arrivalKind !== "history_sync" &&
+    !seenKeys.current.has(messageRowKey(m, i));
 
   const byId = useMemo(() => {
     const m = new Map<string, ChatMessage>();
@@ -265,7 +315,8 @@ export function ConversationView() {
     // getting clipped under the shell's overflow-hidden / behind the sidebar).
     <main
       className="conversation-canvas relative flex min-w-0 flex-1 flex-col"
-      onClickCapture={() => useChat.getState().markActiveRead()}
+      onPointerDownCapture={() => useChat.getState().markLegacyActiveRead()}
+      onFocusCapture={() => useChat.getState().markLegacyActiveRead()}
     >
       <AnimatePresence>
         {attachments.dragOver && (
@@ -339,6 +390,20 @@ export function ConversationView() {
           )
         )}
       </header>
+      <ReceptionStatus
+        key={`${receptionScope}:${key}`}
+        conversation={key}
+        overflow={overflowUnread}
+        unread={unread}
+        earlier={earlier}
+        recovery={recovery}
+        onJump={(id) => void navigateUnread(id)}
+        unavailable={!!unavailableUnread && unread.includes(unavailableUnread)}
+        onMarkRead={() => {
+          useChat.getState().markActiveRead();
+          setUnavailableUnread(null);
+        }}
+      />
 
       <div className="conversation-log-surface relative flex-1 overflow-hidden">
         {!loading && historyError && (
@@ -406,10 +471,9 @@ export function ConversationView() {
             // switching conversations — equivalent to the old `[messages.length, key]` reset.
             key={key}
             data={messages}
-            // Announce newly-arriving messages to assistive tech. `polite` so it waits for
-            // a pause rather than interrupting; the per-bubble aria-label carries the text.
+            // ReceptionStatus batches announcements; row mounts are silent.
             role="log"
-            aria-live="polite"
+            aria-live="off"
             aria-label={t("conversation.messageLog", { name: headerName })}
             className="h-full py-3"
             // Keep a short conversation anchored to the bottom (just above the composer)
@@ -460,6 +524,7 @@ export function ConversationView() {
               );
               return (
                 <div
+                  data-message-id={messageRowKey(m, i)}
                   className={cn(
                     "mx-auto max-w-[820px] px-0 pb-1 transition-colors duration-500 motion-reduce:transition-none",
                     viewport.highlightedKey === messageRowKey(m, i) &&

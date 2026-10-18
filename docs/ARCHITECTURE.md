@@ -216,13 +216,26 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
 
 ## 3. Event log & sync (`eventlog/`)
 
+Group presentation traverses the retained, validated parent graph through
+`node/timeline.rs`; author timestamps remain display metadata and deterministic
+tie-breaks among concurrent ready events. This does not rely on a peer's signed
+Lamport value being monotonic. Plaintext-only account archive rows have a
+timestamp/ID fallback until signed ancestry is available. The desktop reception
+contract carries event identity, local observation and processing-batch context
+for bounded unread reconciliation, calm notifications and message-anchored
+history insertion. See [group conversation reception](group-conversation-reception.md)
+for user behavior, compatibility and resource limits. A successful bounded peer
+exchange is an observation, never a claim that offline members have no more data.
+
 - **Event** — content-addressed: `id = SHA-256(domain ‖ content)`; fields `conversation,
 author (Ed25519 pub, self-certifying), seq, parents (→ hash-linked DAG), lamport,
 wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadMarker/
   MembershipChange/KeyRotation/FileManifest (indices frozen for wire stability).
 - **EventLog** (in-memory, `store.rs`) — per-conversation DAG; tracks `heads` (frontier),
   `version` (per-author max seq → equivocation/fork detection), `max_lamport`. `events()`
-  returns `(lamport, id)`-sorted (deterministic topological order).
+  returns `(lamport, id)`-sorted (deterministic logical-clock order). Because peer
+  Lamport monotonicity is not validated, group consumers use the validated-parent
+  traversal in `node/timeline.rs` when they require causal order.
 - **Sync** (`sync.rs`) — three-message id-set reconciliation: `Request(have)` →
   `Response(missing + responder have)` → `Followup(what responder lacks)`, bounded by
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is

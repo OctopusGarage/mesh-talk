@@ -51,6 +51,19 @@ frontend navigation, and the controlled About dialog. Its
 AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/tray-menu-ai-eval-suite.json --report target/ai-eval/tray-menu-report.json
 ```
 
+## Group reception
+
+The [group reception suite](group-reception-ai-eval-suite.json) reviews causal
+ordering under clock skew, reception classification, notification privacy and
+batching, late unread identities, stable reading anchors, and recovery knowledge
+boundaries. Supply the production helper modules named by each case as supporting
+context. These judgments supplement executable Rust and browser regressions;
+they do not establish delivery or visual correctness by themselves.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/group-reception-ai-eval-suite.json --report target/ai-eval/group-reception-report.json
+```
+
 ## Core Smoke Examples
 
 | Case         | Stable example                                                 | Expected guard                                                                                            |

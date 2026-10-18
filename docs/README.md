@@ -1,5 +1,10 @@
 # Documentation
 
+For delayed group messages, unread behavior and recovery status, see
+[group conversation reception](group-conversation-reception.md). Its
+[research note](research/group-message-reception-ux.md) records the protocol and
+UX rationale.
+
 This is the navigation hub for Mesh-Talk's current guides, technical references, and
 dated evidence. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information

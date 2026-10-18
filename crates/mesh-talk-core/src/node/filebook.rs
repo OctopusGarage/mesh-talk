@@ -24,6 +24,14 @@ pub struct ReceivedFile {
     /// Whether this is inline MEDIA (media button) vs a generic attachment (attach button).
     /// Decided by the sender's intent (manifest kind), not the file extension.
     pub media: bool,
+    pub event_id: EventId,
+    pub authored_at: u64,
+    pub received_at: u64,
+    pub arrival_kind: &'static str,
+    pub own_device: bool,
+    pub batch_id: Option<String>,
+    pub batch_complete: bool,
+    pub batch_size: usize,
 }
 
 #[derive(Default)]

@@ -1,0 +1,137 @@
+{
+  "name": "mesh-talk-group-reception-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-GROUP-UX-001",
+      "name": "group ordering preserves causal relationships despite clock skew",
+      "subject_file": "crates/mesh-talk-core/src/node/queries.rs",
+      "context_files": [
+        "crates/mesh-talk-core/src/eventlog/store.rs",
+        "crates/mesh-talk-core/src/node/timeline.rs",
+        "crates/mesh-talk-core/src/node/channel.rs"
+      ],
+      "min_score": 0.85,
+      "scenario": "Group participants receive the same retained events in different orders, with incorrect author clocks, simultaneous sends, replies, files and older archive imports. Review the production sources for a deterministic causal timeline. Do not assume a logical clock is valid merely because the event is signed. Distinguish supported causal evidence from legacy fallbacks.",
+      "rubric": [
+        "The group presentation order is independent of local receipt time and preserves known valid dependencies despite wall-clock skew.",
+        "Concurrent events have deterministic tie-breaking and duplicate identities do not produce duplicate rows.",
+        "Signed original timestamps remain intact for display rather than being rewritten to fabricate chronology.",
+        "Untrusted causal metadata is validated or ordered using independently validated parent relationships.",
+        "Records lacking causal evidence retain explicit compatible behavior; unsupported global convergence is not claimed.",
+        "Membership admission projection and message processing use consistent validated parent ordering, including signed events with non-monotonic logical clocks."
+      ]
+    },
+    {
+      "id": "MT-GROUP-UX-002",
+      "name": "reception contract and notifications distinguish recovery from live activity",
+      "subject_file": "src-tauri/src/events.rs",
+      "context_files": [
+        "src-tauri/src/runtime_bootstrap.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "src-tauri/src/channel_reception.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/filebook.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+      ],
+      "min_score": 0.85,
+      "scenario": "A group recovers many retained messages while live traffic continues and duplicate paths overlap. Review reception identity, arrival classification, notification batching and privacy. Sender clock age alone is not reliable evidence of backfill.",
+      "rubric": [
+        "Reception events retain stable message identity and distinguish original authored time from local receipt time.",
+        "Recovery/backfill classification follows actual processing evidence rather than trusting wall-clock age alone.",
+        "Repeated stable identities and own-device replication do not produce repeated external-message alerts.",
+        "Catch-up bursts are summarized with bounded state instead of deliberately alerting once per historical message.",
+        "Notification opt-out, lock/preview privacy, focused conversation and account ownership safeguards apply to summaries as well as individual alerts."
+      ]
+    },
+    {
+      "id": "MT-GROUP-UX-003",
+      "name": "late unread state is identity based and owner scoped",
+      "subject_file": "frontend/src/store/chat.ts",
+      "context_files": [
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/ownership.ts",
+        "docs/group-conversation-reception.md"
+      ],
+      "min_score": 0.85,
+      "scenario": "An unseen old message arrives above the viewport, duplicates arrive through several routes, sibling imports update inactive conversations and the user switches accounts during reload. Review unread identity reconciliation and persistence, including capacity and legacy event behavior. The new identity contract covers group text and file cards; legacy DM or host callbacks without identities intentionally retain counter fallback and cannot promise exact identity deduplication. Assess guarantees where stable identities are available, plus compatibility of fallback. The first retained snapshot is a quiet baseline; subsequent imports and locked-period arrivals must remain discoverable. The maintained guide defines the supported retention contract: exact deduplication is within the bounded retained identity window, reconciliation snapshots cover at most500 retained rows, evicted snapshots quietly rebaseline and overflow remains an explicit aggregate. Evaluate correctness and honest presentation within those declared bounds; do not require an unlimited identity index or unbounded historical pagination. Flag any count loss, focus-clearing of overflow, false completeness claim or retained-window discovery failure.",
+      "rubric": [
+        "Unseen late arrivals within retained reconciliation coverage remain discoverable even when their authored timestamps precede previously read messages; coverage and overflow limitations are explicit.",
+        "Duplicate retained message identities do not inflate unread counts; capacity eviction preserves aggregate unread discoverability without claiming unlimited exact deduplication.",
+        "A focused active conversation does not automatically mark offscreen unseen identities read; explicit viewed identities or an explicit mark-read action control that state.",
+        "Persistent identity state is bounded, validated and scoped to host/account/conversation without exposing message content.",
+        "Owner changes and stale asynchronous work cannot leak or mutate another account's unread state, and older event contracts remain usable."
+      ]
+    },
+    {
+      "id": "MT-GROUP-UX-004",
+      "name": "history insertion preserves reading position and accessible feedback",
+      "subject_file": "frontend/src/features/chat/useConversationViewport.ts",
+      "context_files": [
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/ReceptionStatus.tsx"
+      ],
+      "min_score": 0.85,
+      "scenario": "While a user reads the middle of a virtual conversation, older messages are prepended or inserted between existing messages, then a catch-up batch and fresh messages arrive. Review stable anchoring, navigation and assistive announcements.",
+      "rubric": [
+        "The reading anchor identifies a stable message and viewport offset instead of relying only on array index or absolute scroll pixels.",
+        "Incoming history does not move keyboard focus or forcibly scroll a user who is reading older messages.",
+        "Bottom following remains available when the reader is actually at the live edge, and search navigation remains explicit.",
+        "New and earlier unseen messages have actionable navigation without silently marking all offscreen rows read.",
+        "Catch-up announcements are polite and batched; historical recovery does not deliberately animate or narrate each recovered row."
+      ]
+    },
+    {
+      "id": "MT-GROUP-UX-005",
+      "name": "recovery presentation respects peer knowledge and file availability",
+      "subject_file": "frontend/src/features/chat/ConversationView.tsx",
+      "context_files": [
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/lib/types.ts",
+        "frontend/src/features/chat/ReceptionStatus.tsx",
+        "frontend/src/store/reception.ts",
+        "src-tauri/src/chat_commands/channels.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "frontend/src/store/chat.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/store/fileAvailability.ts",
+        "docs/group-conversation-reception.md"
+      ],
+      "min_score": 0.85,
+      "scenario": "A conversation has reachable members, offline members and partial history. A file card is present before its bytes. Review status copy and transitions for false global completeness, fabricated progress and conflation of custody, delivery, read and download.",
+      "rubric": [
+        "Recovery status communicates only known local work and reachable-peer evidence rather than claiming all offline members have synchronized.",
+        "Missing-message totals or progress percentages are shown only when supported by actual counts.",
+        "Recovery status is scoped to the active conversation and does not leak from a previous account or conversation.",
+        "Group custody does not imply every member received or read an event.",
+        "File-card receipt and actual file-byte availability remain distinct."
+      ]
+    },
+    {
+      "id": "MT-GROUP-UX-006",
+      "name": "local storage failure retains bounded decrypted group work for retry",
+      "subject_file": "crates/mesh-talk-core/src/node/serving.rs",
+      "context_files": [
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/lifecycle.rs",
+        "docs/group-conversation-reception.md",
+        "crates/mesh-talk-core/src/node/received_log.rs"
+      ],
+      "min_score": 0.85,
+      "scenario": "The encrypted group event arrives, decryption consumes a sender key, then local plaintext persistence fails due to disk or IO error. Storage later recovers without a new incoming message. Review whether the exact message can still be saved and emitted once, without an unbounded plaintext queue, busy-loop or incorrect batch completion. State the process-crash durability boundary explicitly; do not invent an atomic cryptographic journal that is absent.",
+      "rubric": [
+        "Consumed-key plaintext is retained for retry until its local projection succeeds; an IO failure does not silently drop the only recoverable plaintext in the running process.",
+        "Pending decrypted work has an explicit message and byte bound, and further decryption is limited or paused when that budget is occupied.",
+        "Recovery retries can progress after storage returns even without new network traffic; persistent failures use bounded retry/backoff rather than a tight busy loop.",
+        "New reception callbacks and notification completion do not claim successfully installed local history before the corresponding persistence succeeds.",
+        "Retry ordering and batch completion remain correct across bounded processing chunks and duplicate paths; expiry, explicit deletion, clear-history and retention must suppress queued plaintext rather than resurrect it."
+      ]
+    }
+  ]
+}

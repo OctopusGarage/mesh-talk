@@ -231,7 +231,20 @@
     "dropToSend": "ドロップして {{name}} に送信",
     "clearHistory": "履歴を消去",
     "clearHistoryConfirm": "この端末のこの会話のメッセージを完全に消去します。元に戻せません。相手の端末には影響しません。",
-    "noPeersHint": "Mesh-Talk はローカルネットワーク上の相手を探します。両方の端末を同じ LAN に接続してください。"
+    "noPeersHint": "Mesh-Talk はローカルネットワーク上の相手を探します。両方の端末を同じ LAN に接続してください。",
+    "earlierMessages": "以前のメッセージを受信",
+    "newMessages": "新しいメッセージ",
+    "catchingUp": "受信した履歴を取得中…",
+    "waitingForPeer": "接続可能なピアを待機中",
+    "delayedMessage": "後から受信",
+    "receivedLocally": "この端末での受信日時: {{time}}",
+    "unreadSummary": "{{count}}件の未読メッセージ",
+    "unreadSummary_one": "{{count}}件の未読メッセージ",
+    "unreadUnavailable": "このメッセージはこの端末で利用可能な履歴の範囲外です。",
+    "markConversationRead": "会話を既読にする",
+    "peerChecked": "接続可能なメンバーを確認済み",
+    "peerCheckedDetail": "接続可能なメンバーの最終確認: {{time}}。オフラインのメンバーに他のメッセージがある可能性があります。",
+    "moreUnread": "他にも未読メッセージがあります"
   },
   "presence": {
     "online": "オンライン",

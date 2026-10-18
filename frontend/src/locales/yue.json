@@ -231,7 +231,20 @@
     "clearHistory": "清除聊天記錄",
     "clearHistoryConfirm": "此操作將永久刪除本地端此對話的訊息，無法恢復，亦不會影響對方的記錄。",
     "noPeersHint": "Mesh-Talk 會搜尋本地網絡。請將兩部裝置連接到同一個區域網絡。",
-    "messageChannel": "發送訊息至 #{{name}}"
+    "messageChannel": "發送訊息至 #{{name}}",
+    "earlierMessages": "收到較早嘅訊息",
+    "newMessages": "新訊息",
+    "catchingUp": "補緊已收到嘅歷史記錄…",
+    "waitingForPeer": "等緊可以連線嘅節點",
+    "delayedMessage": "遲啲收到",
+    "receivedLocally": "呢部裝置收到嘅時間：{{time}}",
+    "unreadSummary": "{{count}} 則未讀訊息",
+    "unreadSummary_one": "{{count}} 則未讀訊息",
+    "unreadUnavailable": "呢則訊息唔喺呢部裝置可用嘅歷史記錄入面。",
+    "markConversationRead": "將對話標為已讀",
+    "peerChecked": "已檢查連到線嘅成員",
+    "peerCheckedDetail": "上次檢查連到線嘅成員：{{time}}。離線成員可能仲有其他訊息。",
+    "moreUnread": "仲有更多未讀訊息"
   },
   "presence": {
     "online": "在線",

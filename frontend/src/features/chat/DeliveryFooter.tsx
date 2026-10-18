@@ -17,6 +17,15 @@ export function DeliveryFooter({
 }) {
   const { t } = useTranslation();
   const tooltip = useId();
+  const delayed =
+    !message.fromMe &&
+    message.arrivalKind === "catch_up" &&
+    message.receivedAt !== undefined;
+  const receiptDetail = delayed
+    ? t("conversation.receivedLocally", {
+        time: new Date(message.receivedAt!).toLocaleString(),
+      })
+    : undefined;
   const delivery =
     message.fromMe &&
     !isChannel &&
@@ -51,6 +60,7 @@ export function DeliveryFooter({
     !message.pending &&
     !message.failed;
   if (
+    !delayed &&
     !showTime &&
     !message.pending &&
     !delivery &&
@@ -60,6 +70,15 @@ export function DeliveryFooter({
     return null;
   return (
     <span className="mt-1 flex items-center gap-1 px-1 text-xs tabular-nums text-muted-foreground">
+      {delayed && (
+        <span
+          title={receiptDetail}
+          aria-label={receiptDetail}
+          data-testid="delayed-message"
+        >
+          {t("conversation.delayedMessage")}
+        </span>
+      )}
       {showTime && (
         <span data-testid="message-time">{formatTime(message.wallClock)}</span>
       )}

@@ -141,3 +141,18 @@ describe("automatic delivery footer", () => {
     await i18n.changeLanguage("en");
   });
 });
+
+it("keeps authored time distinct from local receipt detail for recovered content", async () => {
+  await i18n.changeLanguage("en");
+  const html = render(
+    { ...base, fromMe: false, arrivalKind: "catch_up", receivedAt: 500000 },
+    true,
+  );
+  expect(html).toContain("Received later");
+  expect(html).toContain("Received on this device:");
+  expect(html).toContain('data-testid="message-time"');
+  expect(html).not.toContain("synchronized");
+  expect(
+    render({ ...base, fromMe: false, receivedAt: 500000 }, true),
+  ).not.toContain("Received later");
+});

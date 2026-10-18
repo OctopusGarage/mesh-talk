@@ -231,7 +231,20 @@
     "dropToSend": "Drop to send to {{name}}",
     "clearHistory": "Clear chat history",
     "clearHistoryConfirm": "This permanently erases this conversation's messages on this device. It can't be undone and doesn't affect the other person's copy.",
-    "noPeersHint": "Mesh-Talk searches your local network. Keep both devices on the same LAN."
+    "noPeersHint": "Mesh-Talk searches your local network. Keep both devices on the same LAN.",
+    "earlierMessages": "Earlier messages received",
+    "newMessages": "New messages",
+    "catchingUp": "Catching up with received history…",
+    "waitingForPeer": "Waiting for a reachable peer",
+    "delayedMessage": "Received later",
+    "receivedLocally": "Received on this device: {{time}}",
+    "unreadSummary": "{{count}} unread messages",
+    "unreadSummary_one": "{{count}} unread message",
+    "unreadUnavailable": "This message is outside the history available on this device.",
+    "markConversationRead": "Mark conversation as read",
+    "peerChecked": "Checked an available member",
+    "peerCheckedDetail": "Last checked a reachable member: {{time}}. Offline members may have more messages.",
+    "moreUnread": "More unread messages"
   },
   "presence": {
     "online": "Online",

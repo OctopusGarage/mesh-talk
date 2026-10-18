@@ -236,7 +236,11 @@ impl NodeRuntime {
             },
             RuntimeEvents {
                 on_dm: Box::new(on_dm),
-                on_channel: Box::new(on_channel),
+                on_channel: Box::new(move |message| {
+                    if !message.reception_only {
+                        on_channel(message);
+                    }
+                }),
                 on_file: Box::new(on_file),
                 on_profile: Box::new(on_profile),
                 on_call_signal: Box::new(on_call_signal),
@@ -842,6 +846,13 @@ impl NodeRuntime {
     /// The current owner of a channel.
     pub fn channel_owner(&self, channel: crate::eventlog::event::ConversationId) -> String {
         self.node.channel_owner(channel)
+    }
+
+    pub fn channel_recovery(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Option<super::ChannelRecovery> {
+        self.node.channel_recovery(channel)
     }
 
     /// History of a channel (all senders).

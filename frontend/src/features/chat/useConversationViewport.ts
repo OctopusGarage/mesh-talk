@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
 import type { ChatMessage, SearchTarget } from "@/store/chat";
 import { jumpToLatest } from "./jumpToLatest";
@@ -18,6 +24,7 @@ export function useConversationViewport(
   loading: boolean,
   historyError: boolean,
   searchTarget: Target,
+  onViewed?: (key: string, ids: string[]) => void,
 ) {
   const [showJump, setShowJump] = useState(false);
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
@@ -29,9 +36,196 @@ export function useConversationViewport(
   const restoringScroll = useRef<string | null>(null);
   const lastVisibleRows = useRef(new Map<string, number>());
   const atBottom = useRef(new Map<string, boolean>());
+  const anchors = useRef(
+    new Map<
+      string,
+      {
+        id: string;
+        offset: number;
+        viewportTop: number;
+        viewportHeight: number;
+      }
+    >(),
+  );
+  const userInteractionUntil = useRef(0);
+  const pendingUserAnchor = useRef(false);
+  const pendingScrollIntent = useRef(false);
+  const initialList = useRef<{ key: string; index: number } | null>(null);
+  const pinLiveEdge = useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (
+      !scroller ||
+      anchors.current.has(key) ||
+      pendingUserAnchor.current ||
+      pendingScrollIntent.current ||
+      atBottom.current.get(key) === false ||
+      restoringScroll.current === key ||
+      performance.now() < userInteractionUntil.current
+    )
+      return;
+    scroller.scrollTop = Math.max(
+      0,
+      scroller.scrollHeight - scroller.clientHeight,
+    );
+  }, [key]);
+  const restoreVisibleAnchor = useCallback(() => {
+    const scroller = scrollerRef.current;
+    const anchor = anchors.current.get(key);
+    if (!scroller || !anchor) return;
+    const bounds = scroller.getBoundingClientRect();
+    const row = [
+      ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ].find((element) => element.dataset.messageId === anchor.id);
+    if (!row) return;
+    const delta = row.getBoundingClientRect().top - bounds.top - anchor.offset;
+    if (Math.abs(delta) > 0.5) scroller.scrollTop += delta;
+    anchor.viewportTop = bounds.top;
+    anchor.viewportHeight = bounds.bottom - bounds.top;
+    exactScrollPositions.current.set(key, scroller.scrollTop);
+  }, [key]);
+  const viewedRef = useRef(onViewed);
+  viewedRef.current = onViewed;
+  const measureRows = useCallback(
+    (captureAnchor = true) => {
+      const scroller = scrollerRef.current;
+      if (!scroller) return;
+      const bounds = scroller.getBoundingClientRect();
+      const rows = [
+        ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+      ];
+      const visible = rows.filter((row) => {
+        const rect = row.getBoundingClientRect();
+        return rect.bottom > bounds.top && rect.top < bounds.bottom;
+      });
+      if (captureAnchor && visible[0] && !isAtBottom(scroller)) {
+        pendingUserAnchor.current = false;
+        anchors.current.set(key, {
+          id: visible[0].dataset.messageId!,
+          offset: visible[0].getBoundingClientRect().top - bounds.top,
+          viewportTop: bounds.top,
+          viewportHeight: bounds.bottom - bounds.top,
+        });
+        if (anchors.current.size > 24)
+          anchors.current.delete(anchors.current.keys().next().value!);
+      }
+      if (
+        !loading &&
+        !historyError &&
+        document.visibilityState === "visible" &&
+        document.hasFocus()
+      )
+        viewedRef.current?.(
+          key,
+          visible
+            .filter((row) => {
+              // Date separators belong to the anchor geometry, but seeing only a
+              // separator is not evidence that the message itself was displayed.
+              const article =
+                row.querySelector<HTMLElement>('[role="article"]') ?? row;
+              const rect = article.getBoundingClientRect();
+              return rect.bottom > bounds.top && rect.top < bounds.bottom;
+            })
+            .map((row) => row.dataset.messageId!),
+        );
+    },
+    [key, loading, historyError],
+  );
+
+  // Restore by identity after any insertion, including rows inserted in the middle.
+  // DOM geometry includes variable-height messages and date separators.
+  useLayoutEffect(() => {
+    const anchor = anchors.current.get(key);
+    if (
+      !anchor ||
+      loading ||
+      historyError ||
+      (searchTarget?.key === key &&
+        handledSearch.current !== searchTarget.request)
+    )
+      return;
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    let frame = 0;
+    let attempts = 0;
+    const restoreAnchor = () => {
+      if (anchors.current.get(key) !== anchor) return;
+      const row = [
+        ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+      ].find((element) => element.dataset.messageId === anchor.id);
+      if (row) {
+        const delta =
+          row.getBoundingClientRect().top -
+          scroller.getBoundingClientRect().top -
+          anchor.offset;
+        scroller.scrollTop += delta;
+        exactScrollPositions.current.set(key, scroller.scrollTop);
+      } else if (attempts++ < 12) {
+        const index = messages.findIndex(
+          (m, i) => messageRowKey(m, i) === anchor.id,
+        );
+        if (index >= 0) {
+          if (attempts === 1)
+            virtuosoRef.current?.scrollToIndex({
+              index,
+              align: "start",
+              offset: -anchor.offset,
+              behavior: "auto",
+            });
+          frame = requestAnimationFrame(restoreAnchor);
+        }
+      }
+    };
+    restoreAnchor();
+    return () => cancelAnimationFrame(frame);
+  }, [key, messages, loading, historyError, searchTarget]);
+
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    let frame = 0;
+    const check = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        pinLiveEdge();
+        measureRows(pendingUserAnchor.current && !pendingScrollIntent.current);
+      });
+    };
+    const resize =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            restoreVisibleAnchor();
+            check();
+          });
+    resize?.observe(scroller);
+    const observer = new MutationObserver(check);
+    observer.observe(scroller, { childList: true, subtree: true });
+    window.addEventListener("focus", check);
+    document.addEventListener("visibilitychange", check);
+    check();
+    return () => {
+      observer.disconnect();
+      resize?.disconnect();
+      cancelAnimationFrame(frame);
+      window.removeEventListener("focus", check);
+      document.removeEventListener("visibilitychange", check);
+    };
+  }, [
+    key,
+    messages,
+    loading,
+    historyError,
+    measureRows,
+    restoreVisibleAnchor,
+    pinLiveEdge,
+  ]);
+
   const handledSearch = useRef<number | null>(null);
 
   useEffect(() => {
+    pendingUserAnchor.current = false;
+    pendingScrollIntent.current = false;
+    userInteractionUntil.current = 0;
     setShowJump(false);
     setSearchMiss(false);
     setHighlightedKey(null);
@@ -48,7 +242,7 @@ export function useConversationViewport(
   useEffect(() => {
     if (restoringScroll.current !== key || loading || messages.length === 0)
       return;
-    const top = exactScrollPositions.current.get(key);
+    let top = exactScrollPositions.current.get(key);
     if (top === undefined) return;
     let frame = 0;
     let attempts = 0;
@@ -57,12 +251,26 @@ export function useConversationViewport(
       const maxTop = scroller
         ? scroller.scrollHeight - scroller.clientHeight
         : 0;
-      if ((!scroller || maxTop < top) && attempts++ < 30) {
+      if ((!scroller || maxTop < top!) && attempts++ < 30) {
         frame = requestAnimationFrame(restore);
         return;
       }
       if (scroller) {
-        scroller.scrollTop = Math.min(top, Math.max(0, maxTop));
+        const anchor = anchors.current.get(key);
+        const row =
+          anchor &&
+          [...scroller.querySelectorAll<HTMLElement>("[data-message-id]")].find(
+            (element) => element.dataset.messageId === anchor.id,
+          );
+        if (anchor && row) {
+          top =
+            scroller.scrollTop +
+            row.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top -
+            anchor.offset;
+          exactScrollPositions.current.set(key, top);
+        }
+        scroller.scrollTop = Math.min(top!, Math.max(0, maxTop));
         const bottom = maxTop - scroller.scrollTop <= 48;
         atBottom.current.set(key, bottom);
         setShowJump(!bottom);
@@ -93,6 +301,9 @@ export function useConversationViewport(
     setHighlightedKey(messageRowKey(messages[index], index));
     const frame = requestAnimationFrame(() => {
       if (restoringScroll.current === key) restoringScroll.current = null;
+      pendingUserAnchor.current = false;
+      anchors.current.delete(key);
+      atBottom.current.set(key, false);
       virtuosoRef.current?.scrollToIndex({
         index,
         align: "center",
@@ -109,6 +320,27 @@ export function useConversationViewport(
     return () => clearTimeout(timer);
   }, [highlightedKey]);
 
+  // initialTopMostItemIndex is an initial condition, not a reactive scroll target.
+  // Later ledger updates or row measurements must not change it mid-mount.
+  if (messages.length === 0) initialList.current = null;
+  else if (initialList.current?.key !== key) {
+    const anchor = anchors.current.get(key);
+    initialList.current = {
+      key,
+      index: anchor
+        ? Math.max(
+            0,
+            messages.findIndex((m, i) => messageRowKey(m, i) === anchor.id),
+          )
+        : exactScrollPositions.current.has(key)
+          ? 0
+          : Math.min(
+              messages.length - 1,
+              scrollPositions.current.get(key) ?? messages.length - 1,
+            ),
+    };
+  }
+
   return {
     virtuosoRef,
     highlightedKey,
@@ -118,25 +350,29 @@ export function useConversationViewport(
       scrollerRef.current = element instanceof HTMLElement ? element : null;
     },
     stopRestoring() {
+      userInteractionUntil.current = performance.now() + 250;
+      pendingUserAnchor.current = true;
+      pendingScrollIntent.current = true;
       if (restoringScroll.current === key) restoringScroll.current = null;
     },
-    // Exact pixel restoration runs after the list has measured its rows. Starting
-    // Virtuoso at the saved row as well can issue a later scroll that overwrites it.
-    initialIndex: exactScrollPositions.current.has(key)
-      ? 0
-      : Math.min(
-          messages.length - 1,
-          scrollPositions.current.get(key) ?? messages.length - 1,
-        ),
+    initialIndex: initialList.current?.index ?? 0,
     atBottomStateChange(bottom: boolean) {
       // Virtuoso can report a previous measurement after a long row changes height.
       // The DOM scroller is the source of truth for whether the reader scrolled up.
       const observedBottom = scrollerRef.current
         ? isAtBottom(scrollerRef.current)
         : bottom;
+      if (
+        !observedBottom &&
+        atBottom.current.get(key) !== false &&
+        !anchors.current.has(key) &&
+        performance.now() >= userInteractionUntil.current
+      )
+        return;
       atBottom.current.set(key, observedBottom);
       if (restoringScroll.current === key) return;
       if (observedBottom) {
+        anchors.current.delete(key);
         scrollPositions.current.delete(key);
         exactScrollPositions.current.delete(key);
       } else {
@@ -165,10 +401,36 @@ export function useConversationViewport(
         return;
       }
       const scroller = event.currentTarget;
+      pinLiveEdge();
+      const anchor = anchors.current.get(key);
+      const bounds = scroller.getBoundingClientRect();
+      const geometryChanged =
+        !!anchor &&
+        (anchor.viewportTop !== bounds.top ||
+          anchor.viewportHeight !== bounds.bottom - bounds.top);
+      // Retain the first scroll intent until a visible anchor is captured: a
+      // busy event loop can deliver the scroll well after the momentum window.
+      const userScrolling =
+        pendingScrollIntent.current ||
+        pendingUserAnchor.current ||
+        performance.now() < userInteractionUntil.current;
+      // A browser or virtualizer adjustment is not a new reading position.
+      // Restore before observing rows when the viewport changed under the reader.
+      if (geometryChanged || (!userScrolling && anchor)) restoreVisibleAnchor();
+      if (userScrolling && !geometryChanged) {
+        anchors.current.delete(key);
+        pendingUserAnchor.current = true;
+      }
+      measureRows(userScrolling && !geometryChanged);
+      pendingScrollIntent.current = false;
+      if (userScrolling) userInteractionUntil.current = performance.now() + 250;
       const bottom = isAtBottom(scroller);
       atBottom.current.set(key, bottom);
       setShowJump(!bottom);
       if (bottom) {
+        pendingUserAnchor.current = false;
+        pendingScrollIntent.current = false;
+        anchors.current.delete(key);
         scrollPositions.current.delete(key);
         exactScrollPositions.current.delete(key);
         return;
@@ -180,7 +442,29 @@ export function useConversationViewport(
           exactScrollPositions.current.keys().next().value!,
         );
     },
+    jumpToMessage(id: string) {
+      const index = messages.findIndex((m, i) => messageRowKey(m, i) === id);
+      if (index >= 0) {
+        restoringScroll.current = null;
+        pendingUserAnchor.current = false;
+        pendingScrollIntent.current = false;
+        atBottom.current.set(key, false);
+        anchors.current.delete(key);
+        setHighlightedKey(id);
+        virtuosoRef.current?.scrollToIndex({
+          index,
+          align: "center",
+          behavior: "auto",
+        });
+        return true;
+      }
+      return false;
+    },
     jumpToLatest() {
+      pendingUserAnchor.current = false;
+      pendingScrollIntent.current = false;
+      atBottom.current.set(key, true);
+      anchors.current.delete(key);
       if (restoringScroll.current === key) restoringScroll.current = null;
       jumpToLatest(() => virtuosoRef.current);
     },

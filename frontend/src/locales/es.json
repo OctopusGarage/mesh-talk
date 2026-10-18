@@ -231,7 +231,20 @@
     "dropToSend": "Suelta para enviar a {{name}}",
     "clearHistory": "Borrar historial",
     "clearHistoryConfirm": "Esto borra permanentemente los mensajes de esta conversación en este dispositivo. No se puede deshacer y no afecta la copia de la otra persona.",
-    "noPeersHint": "Mesh-Talk busca en tu red local. Mantén ambos dispositivos en la misma red LAN."
+    "noPeersHint": "Mesh-Talk busca en tu red local. Mantén ambos dispositivos en la misma red LAN.",
+    "earlierMessages": "Se recibieron mensajes anteriores",
+    "newMessages": "Mensajes nuevos",
+    "catchingUp": "Recuperando el historial recibido…",
+    "waitingForPeer": "Esperando un par accesible",
+    "delayedMessage": "Recibido más tarde",
+    "receivedLocally": "Recibido en este dispositivo: {{time}}",
+    "unreadSummary": "{{count}} mensajes sin leer",
+    "unreadSummary_one": "{{count}} mensaje sin leer",
+    "unreadUnavailable": "Este mensaje está fuera del historial disponible en este dispositivo.",
+    "markConversationRead": "Marcar conversación como leída",
+    "peerChecked": "Miembro disponible consultado",
+    "peerCheckedDetail": "Última consulta a un miembro accesible: {{time}}. Los miembros sin conexión pueden tener más mensajes.",
+    "moreUnread": "Más mensajes sin leer"
   },
   "presence": {
     "online": "En línea",

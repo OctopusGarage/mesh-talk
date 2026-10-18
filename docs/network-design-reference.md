@@ -158,6 +158,14 @@ Role classification and route classification are separate. A post office belongs
 
 ### User-facing identity, membership and network details
 
+The [group reception contract](group-conversation-reception.md) separates author
+time, causal conversation order and local arrival observation. Recovery status
+must describe only local work and checked reachable peers; it cannot certify
+global history completeness. Catch-up and own-device replication must not replay
+live-message notifications. Group custody, recipient delivery, reading and file
+byte availability remain distinct evidence. Legacy archive rows without signed
+ancestry use an explicit compatible fallback rather than invented causal proof.
+
 The [member profile](../frontend/src/features/chat/MemberProfileDialog.tsx) uses [shared profile projection](../frontend/src/features/chat/memberProfileDetails.ts) to show the account ID, known device IDs and observed network endpoints. A device that is no longer in the live roster can still appear as a historical/profile target with an unavailable endpoint. Displayed endpoints are observations, not proof of physical location, a unique machine or a directly usable remote listener.
 
 Sidebar contacts, group invite candidates and counts must use the shared person/role projection. Raw connection diagnostics may include post offices because their role and endpoint matter for routing. Group membership is owned by signed channel state, not rebuilt from whoever is currently discoverable. A member can be offline without leaving the group; a discovered relay cannot become a member through a UI picker.

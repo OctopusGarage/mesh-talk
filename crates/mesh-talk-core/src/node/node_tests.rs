@@ -2859,6 +2859,19 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .expect("Carol recovered from Bob")
         .expect("channel stream open");
     assert_eq!(recovered.text, b"recover from Bob");
+    assert_eq!(recovered.arrival_kind, "catch_up");
+    assert!(recovered.received_at > 0);
+    assert_eq!(recovered.event_id, sent_id);
+    assert!(!recovered.batch_complete);
+    assert!(!recovered.reception_only);
+    let completed = carol_rx.try_recv().unwrap();
+    assert!(completed.reception_only && completed.batch_complete);
+    assert!(completed.text.is_empty() && completed.wrapped.is_empty());
+    assert_eq!(completed.batch_id, recovered.batch_id);
+    assert!(recovered.batch_id.is_some());
+    let recovery = carol_node.channel_recovery(channel).unwrap();
+    assert!(matches!(recovery.phase, "peer_checked" | "catching_up"));
+    assert!(recovery.checked_at.is_some());
     assert_eq!(carol_node.channel_history(channel, 10).len(), 1);
     let resumed_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, carol_port))
         .await
@@ -3807,6 +3820,17 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
             .await
             .expect("bob received a channel message within 5s")
             .expect("channel stream open");
+        assert!(got.received_at > 0);
+        assert_eq!(got.arrival_kind, "live");
+        assert!(!got.own_device);
+        assert_eq!(got.batch_size, 1);
+        assert!(got.batch_complete);
+        assert!(
+            bob_node
+                .channel_history(channel, 10)
+                .iter()
+                .any(|entry| entry.id == got.event_id && entry.wall_clock == got.wall_clock)
+        );
         texts.push(got.text);
     }
     texts.sort();
@@ -3828,6 +3852,112 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         "a consumed message was re-opened"
     );
     assert_eq!(bob_node.channel_history(channel, 10).len(), 2);
+    // Rebuilding the receiver projection (as at restart) must not replay alerts
+    // for plaintext already saved locally.
+    *bob_node.channels.lock().unwrap() = crate::node::channel::ChannelBook::default();
+    bob_node.process_channel(channel);
+    assert!(
+        b_ch_r.try_recv().is_err(),
+        "saved history generated a second reception callback"
+    );
+
+    // Losing the projection write must retain the exact decrypted plaintext;
+    // recovering the disk is enough, with no new sender event or reachable peer.
+    bob_node
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
+    alice_node
+        .send_channel_message(channel, b"retry after disk recovery")
+        .await
+        .unwrap();
+    assert!(b_ch_r.try_recv().is_err());
+    assert_eq!(bob_node.channel_history(channel, 10).len(), 2);
+    bob_node
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
+    let changes = bob_node.roster.lock().unwrap().changes();
+    let recovery_task = tokio::spawn(Arc::clone(&bob_node).run_channel_recovery_loop(changes));
+    let retried = tokio::time::timeout(Duration::from_secs(5), b_ch_r.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retried.text, b"retry after disk recovery");
+    assert_eq!(retried.arrival_kind, "catch_up");
+    let completed = b_ch_r.try_recv().unwrap();
+    assert!(completed.reception_only && completed.batch_complete);
+    assert!(completed.text.is_empty() && completed.wrapped.is_empty());
+    assert_eq!(bob_node.channel_history(channel, 10).len(), 3);
+    bob_node.process_channel(channel);
+    assert!(b_ch_r.try_recv().is_err(), "retry must surface once");
+    bob_node
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
+    alice_node
+        .send_channel_message(channel, b"erase before retry")
+        .await
+        .unwrap();
+    let erased = alice_node
+        .channel_history(channel, 10)
+        .into_iter()
+        .find(|entry| entry.text == b"erase before retry")
+        .unwrap()
+        .id;
+    bob_node
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
+    bob_node.clear_conversation(channel).unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    bob_node.retry_channel_plaintext();
+    assert!(
+        !bob_node
+            .channel_history(channel, 10)
+            .iter()
+            .any(|entry| entry.id == erased)
+    );
+    assert!(
+        std::iter::from_fn(|| b_ch_r.try_recv().ok())
+            .all(|event| event.reception_only && event.text.is_empty()),
+        "local erase must cancel queued user messages"
+    );
+    assert!(bob_node.channel_history(channel, 10).is_empty());
+    bob_node
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
+    alice_node
+        .send_channel_message(channel, b"prune before retry")
+        .await
+        .unwrap();
+    bob_node
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
+    bob_node.prune_older_than(u64::MAX).unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    bob_node.retry_channel_plaintext();
+    assert!(bob_node.channel_history(channel, 10).is_empty());
+    assert!(
+        std::iter::from_fn(|| b_ch_r.try_recv().ok())
+            .all(|event| event.reception_only && event.text.is_empty()),
+        "retention prune must cancel queued user messages"
+    );
+    recovery_task.abort();
 }
 
 #[tokio::test]
@@ -5197,10 +5327,19 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
+    let live_card = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(live_card.arrival_kind, "live");
+    assert!(live_card.received_at > 0);
+    assert!(!live_card.own_device);
+    assert!(live_card.batch_complete);
+    assert!(
+        carol_node.channel_history(channel, 10).iter().any(
+            |entry| entry.id == live_card.event_id && entry.wall_clock == live_card.authored_at
+        )
+    );
     bob_node.decide_attachment(file, true).unwrap();
     let bob_dest = dir.path().join("bob.bin");
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -5217,6 +5356,17 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
     assert_eq!(std::fs::read(&bob_dest).unwrap(), payload);
     assert_eq!(bob_node.log.lock().unwrap().events(&file).len(), 2);
 
+    // Carol misses a later card, then learns it through Bob's retained group log.
+    alice_node
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&carol_node.identity.public());
+    let missed_file = alice_node
+        .send_file_channel(channel, &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    assert!(carol_rx.try_recv().is_err());
     alice_task.abort();
     alice_task.await.unwrap_err();
     bob_node
@@ -5235,6 +5385,31 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
         "Bob",
         bob_port,
         &carol_id,
+    );
+    carol_node.pull_one_channel_from_member(0).await;
+    let recovered_card = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered_card.file_conv, missed_file);
+    assert_eq!(recovered_card.arrival_kind, "catch_up");
+    assert!(
+        recovered_card
+            .batch_id
+            .as_deref()
+            .unwrap()
+            .starts_with("file:")
+    );
+    assert!(recovered_card.batch_complete);
+    assert_eq!(
+        carol_node.file_progress(missed_file).unwrap().done,
+        0,
+        "card reception is distinct from byte availability"
+    );
+    carol_node.process_file_events_reception(channel, "catch_up");
+    assert!(
+        carol_rx.try_recv().is_err(),
+        "duplicate recovered file cards stay silent"
     );
     carol_node.decide_attachment(file, true).unwrap();
     bob_node
@@ -8329,5 +8504,394 @@ async fn sibling_file_retry_uses_attachment_category_independently_of_history() 
     assert!(
         source.delivery_destination_allowed(&destination),
         "files-only mode remains allowed"
+    );
+}
+
+#[tokio::test]
+async fn group_reception_history_respects_signed_ancestry_despite_clock_skew() {
+    let dir = tempfile::tempdir().unwrap();
+    let author = DeviceIdentity::generate();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let conv = node
+        .create_channel("skew", vec![author.public()])
+        .await
+        .unwrap();
+    node.pull_one_channel_from_member(0).await;
+    let recovery = node.channel_recovery(conv).unwrap();
+    assert_eq!(recovery.phase, "waiting_for_peer");
+    assert_eq!(recovery.checked_at, None);
+
+    let (parents, _) = node.log.lock().unwrap().prepare(&conv);
+    let question = Event::new(
+        &author,
+        conv,
+        1,
+        parents,
+        900,
+        9000,
+        EventKind::Message,
+        vec![],
+    );
+    // Valid signatures/ancestry but deliberately non-monotone Lamport and wall clocks.
+    let reply = Event::new(
+        &author,
+        conv,
+        2,
+        vec![question.id],
+        1,
+        1,
+        EventKind::Message,
+        vec![],
+    );
+    for (event, text, parent) in [
+        (&question, b"question".as_slice(), None),
+        (&reply, b"reply".as_slice(), Some(question.id)),
+    ] {
+        node.log.lock().unwrap().append(event.clone()).unwrap();
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conv,
+                author.public().user_id(),
+                event.wall_clock,
+                &MessageBody::new(text.to_vec(), parent).encode(),
+                event.id,
+            )
+            .unwrap();
+    }
+    let history = node.channel_history(conv, 10);
+    assert_eq!(
+        history.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        vec![question.id, reply.id]
+    );
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| entry.wall_clock)
+            .collect::<Vec<_>>(),
+        vec![9000, 1]
+    );
+    assert_eq!(node.channel_history(conv, 1)[0].id, reply.id);
+
+    let archive = crate::channel::new_channel_id();
+    let genesis = Event::new(
+        &author,
+        archive,
+        1,
+        vec![],
+        900,
+        9000,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "archived skew".into(),
+            members: vec![author.public()],
+            epoch: 0,
+            owner: author.public().user_id(),
+        }
+        .encode(),
+    );
+    let dissolve = Event::new(
+        &author,
+        archive,
+        2,
+        vec![genesis.id],
+        1,
+        1,
+        EventKind::ChannelDissolve,
+        vec![],
+    );
+    let mut log = node.log.lock().unwrap();
+    log.append(genesis).unwrap();
+    log.append(dissolve).unwrap();
+    let summaries = archived_channel_summaries(&log, &crate::node::channel::ChannelBook::default());
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.id == archive && summary.archived && summary.dissolved)
+    );
+}
+
+#[tokio::test]
+async fn group_reception_multiple_chunks_complete_once_and_reopen_preserves_erases() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = DeviceIdentity::generate();
+    let receiver = DeviceIdentity::generate();
+    let secret = receiver.secret_bytes();
+    let public = receiver.public();
+    let open = |identity| {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, rx) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        (
+            Node::open(
+                identity,
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channel,
+                file,
+                &dir.path().join("node.log"),
+                &dir.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap(),
+            rx,
+        )
+    };
+    let (node, mut rx) = open(receiver);
+    let conv = crate::channel::new_channel_id();
+    let meta = ChannelMeta {
+        name: "backlog".into(),
+        members: vec![owner.public(), public],
+        epoch: 0,
+        owner: owner.public().user_id(),
+    };
+    let append = |seq, kind, bytes| {
+        let mut log = node.log.lock().unwrap();
+        let (parents, clock) = log.prepare(&conv);
+        let event = Event::new(&owner, conv, seq, parents, clock, seq, kind, bytes);
+        let id = event.id;
+        log.append(event).unwrap();
+        id
+    };
+    append(1, EventKind::MembershipChange, meta.encode());
+    let mut sender = crate::channel::ChannelState::from_meta(conv, meta.clone());
+    sender.set_identity(owner.public().user_id());
+    let keys = crate::node::channel::seal_keys_for(
+        &owner,
+        &meta.members,
+        &sender.my_sender_distribution(),
+        0,
+    )
+    .unwrap();
+    append(2, EventKind::KeyRotation, keys.encode());
+    let mut ids = Vec::new();
+    for index in 0..65 {
+        let body = MessageBody::new(format!("backlog {index}").into_bytes(), None).encode();
+        ids.push(append(
+            index + 3,
+            EventKind::Message,
+            sender.seal_sender_message(&body).unwrap(),
+        ));
+    }
+    append(68, EventKind::ChannelDissolve, vec![]);
+    // One projection write fails after a saved prefix; later writes would work.
+    // Publication must still retain the entire uncommitted causal suffix.
+    node.received.lock().unwrap().fail_once_after_for_test(1);
+    node.process_channel_reception(conv, "catch_up");
+    assert_eq!(node.channel_history(conv, 100).len(), 1);
+    let prefix = rx.try_recv().unwrap();
+    assert_eq!(prefix.event_id, ids[0]);
+    assert!(!prefix.reception_only && !prefix.batch_complete);
+    assert!(
+        rx.try_recv().is_err(),
+        "a failed suffix must not be published or complete the batch"
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    node.retry_channel_plaintext();
+    let events = std::iter::once(prefix).chain(std::iter::from_fn(|| rx.try_recv().ok()));
+    let (terminals, received): (Vec<_>, Vec<_>) = events.partition(|event| event.reception_only);
+    assert_eq!(terminals.len(), 1);
+    assert!(terminals[0].batch_complete);
+    assert_eq!(terminals[0].batch_size, 65);
+    assert!(terminals[0].text.is_empty() && terminals[0].wrapped.is_empty());
+    assert!(!terminals[0].own_device);
+    assert_eq!(terminals[0].batch_id, received[0].batch_id);
+    assert_eq!(received.len(), 65);
+    assert_eq!(
+        received
+            .iter()
+            .map(|message| message.event_id)
+            .collect::<Vec<_>>(),
+        ids,
+        "partial projection failure must preserve publication order"
+    );
+    assert_eq!(
+        received
+            .iter()
+            .map(|message| message.event_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        65
+    );
+    assert!(
+        received
+            .iter()
+            .all(|message| message.batch_id == received[0].batch_id)
+    );
+    assert_eq!(
+        received
+            .iter()
+            .filter(|message| message.batch_complete)
+            .count(),
+        0
+    );
+    assert!(!received.last().unwrap().batch_complete);
+    assert_eq!(received.last().unwrap().batch_size, 65);
+    assert_eq!(node.channel_history(conv, 100).len(), 65);
+    assert!(node.list_channels()[0].dissolved);
+
+    // Simulate a sidecar projection missing after a crash, plus a separate
+    // intentional erase. Startup repairs only the missing projection silently.
+    node.received
+        .lock()
+        .unwrap()
+        .remove_where(|entry| entry.event_id == ids[0])
+        .unwrap();
+    node.delete_message(conv, ids[1], false).unwrap();
+    drop(node);
+    let (reopened, mut reopened_rx) = open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
+    let history = reopened.channel_history(conv, 100);
+    assert_eq!(history.len(), 64);
+    assert!(history.iter().any(|entry| entry.id == ids[0]));
+    assert!(!history.iter().any(|entry| entry.id == ids[1]));
+    assert!(
+        reopened_rx.try_recv().is_err(),
+        "restart repair must not replay notifications"
+    );
+    // Clear must also cover a retained signed row whose projection is absent.
+    reopened
+        .received
+        .lock()
+        .unwrap()
+        .remove_where(|entry| entry.event_id == ids[2])
+        .unwrap();
+    reopened.clear_conversation(conv).unwrap();
+    drop(reopened);
+    let (cleared, mut cleared_rx) = open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
+    assert!(cleared.channel_history(conv, 100).is_empty());
+    assert!(cleared_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn group_reception_terminal_is_independent_of_erased_and_expired_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = DeviceIdentity::generate();
+    let receiver = DeviceIdentity::generate();
+    let meta = ChannelMeta {
+        name: "terminal".into(),
+        members: vec![owner.public(), receiver.public()],
+        epoch: 0,
+        owner: owner.public().user_id(),
+    };
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, mut rx) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        receiver,
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let conv = crate::channel::new_channel_id();
+    let append = |seq, kind, bytes| {
+        let mut log = node.log.lock().unwrap();
+        let (parents, clock) = log.prepare(&conv);
+        let event = Event::new(
+            &owner,
+            conv,
+            seq,
+            parents,
+            clock,
+            crate::node::node::now_millis(),
+            kind,
+            bytes,
+        );
+        log.append(event).unwrap();
+    };
+    append(1, EventKind::MembershipChange, meta.encode());
+    let mut sender = crate::channel::ChannelState::from_meta(conv, meta.clone());
+    sender.set_identity(owner.public().user_id());
+    let keys = crate::node::channel::seal_keys_for(
+        &owner,
+        &meta.members,
+        &sender.my_sender_distribution(),
+        0,
+    )
+    .unwrap();
+    append(2, EventKind::KeyRotation, keys.encode());
+    for index in 0..3 {
+        append(
+            index + 3,
+            EventKind::Message,
+            sender
+                .seal_sender_message(format!("erase {index}").as_bytes())
+                .unwrap(),
+        );
+    }
+    node.received.lock().unwrap().fail_once_after_for_test(1);
+    node.process_channel_reception(conv, "catch_up");
+    let published = rx.try_recv().unwrap();
+    assert_eq!(published.text, b"erase 0");
+    assert!(!published.batch_complete);
+    node.clear_conversation(conv).unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    node.retry_channel_plaintext();
+    let terminal = rx.try_recv().unwrap();
+    assert!(terminal.reception_only && terminal.batch_complete);
+    assert_eq!(terminal.batch_id, published.batch_id);
+    assert!(terminal.text.is_empty() && terminal.wrapped.is_empty());
+    assert_eq!(terminal.from, owner.public().user_id());
+    assert!(
+        !terminal.own_device,
+        "a terminal must retain real ownership metadata"
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(node.channel_history(conv, 10).is_empty());
+
+    let expiring = crate::expiry::wrap(
+        &MessageBody::new(b"expiring prefix".to_vec(), None).encode(),
+        Some(crate::node::node::now_millis() + 500),
+    );
+    append(
+        6,
+        EventKind::Message,
+        sender.seal_sender_message(&expiring).unwrap(),
+    );
+    append(
+        7,
+        EventKind::Message,
+        sender.seal_sender_message(b"retained suffix").unwrap(),
+    );
+    node.received.lock().unwrap().fail_once_after_for_test(1);
+    node.process_channel_reception(conv, "catch_up");
+    let published = rx.try_recv().unwrap();
+    assert_eq!(published.text, b"expiring prefix");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    node.retry_channel_plaintext();
+    let remainder: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let visible: Vec<_> = remainder
+        .iter()
+        .filter(|event| !event.reception_only)
+        .collect();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].text, b"retained suffix");
+    assert!(
+        remainder
+            .iter()
+            .any(|event| event.reception_only && event.batch_complete)
+    );
+    assert!(
+        remainder
+            .iter()
+            .all(|event| event.text != b"expiring prefix")
     );
 }

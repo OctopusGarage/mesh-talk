@@ -916,6 +916,14 @@ impl Node {
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
                                     media: super::media_store::manifest_is_media(&manifest),
+                                    event_id: entry.event_id,
+                                    authored_at: entry.wall_clock,
+                                    received_at: super::node::now_millis(),
+                                    arrival_kind: "live",
+                                    own_device: false,
+                                    batch_id: None,
+                                    batch_complete: true,
+                                    batch_size: 1,
                                 });
                             }
                         }

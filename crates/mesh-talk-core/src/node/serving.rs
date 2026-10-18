@@ -20,6 +20,21 @@ const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// streams wait in the OS queue; the Node's shared pool also counts handshakes.
 pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS;
 
+// A received event fits one transport frame (<64 KiB). Limiting a processing
+// pass to 64 messages bounds wrapped+decoded failed plaintext to about 8 MiB.
+const CHANNEL_PLAINTEXT_BATCH: usize = 64;
+
+#[derive(Default)]
+pub(in crate::node) struct PendingChannelPlaintext {
+    messages: Vec<super::channel::ReceivedChannelMessage>,
+    retry_at: Option<std::time::Instant>,
+    delay_ms: u64,
+    batch_id: Option<String>,
+    batch_size: usize,
+    // Contains metadata only, never decrypted text or a wrapped body.
+    terminal: Option<super::channel::ReceivedChannelMessage>,
+}
+
 impl Node {
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
     /// peer may be offline, in which case the dial fails.
@@ -345,6 +360,14 @@ impl Node {
     /// author's X25519 from the roster). A no-op for conversations with no new
     /// manifest events. Own manifests are skipped (the sender already knows).
     pub(in crate::node) fn process_file_events(&self, conv: ConversationId) {
+        self.process_file_events_reception(conv, "live");
+    }
+
+    pub(in crate::node) fn process_file_events_reception(
+        &self,
+        conv: ConversationId,
+        context: &'static str,
+    ) {
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let all_events: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
@@ -361,12 +384,30 @@ impl Node {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.state(&conv).is_some()
         };
+        if is_channel
+            && !self
+                .pending_channel_plaintext
+                .lock()
+                .expect("pending plaintext lock not poisoned")
+                .messages
+                .is_empty()
+        {
+            return;
+        }
         let content_gate = self.channel_content_gate(conv);
         let mut surfaced: Vec<ReceivedFile> = Vec::new();
         for event in all_events
             .into_iter()
             .filter(|event| event.kind == EventKind::FileManifest && event.author != self_author)
         {
+            if self
+                .account_suppression
+                .lock()
+                .expect("account suppression lock not poisoned")
+                .contains(conv, event.id)
+            {
+                continue;
+            }
             if content_gate
                 .as_ref()
                 .is_some_and(|ids| !ids.contains(&event.id))
@@ -455,6 +496,14 @@ impl Node {
                 mime: manifest.mime().to_string(),
                 file_conv: manifest.file_conv(),
                 media: crate::node::media_store::manifest_is_media(&manifest),
+                event_id: event.id,
+                authored_at: event.wall_clock,
+                received_at: super::node::now_millis(),
+                arrival_kind: context,
+                own_device,
+                batch_id: None,
+                batch_complete: true,
+                batch_size: 1,
             };
             // The conversation to FILE this manifest under for history. A channel manifest
             // stays in the channel conv (which is the UI's conversation id). A DM manifest
@@ -522,7 +571,24 @@ impl Node {
             }
             surfaced.push(received);
         }
-        for rf in surfaced {
+        let total = surfaced.len();
+        let kind = if context == "live" && total > 1 {
+            "catch_up"
+        } else {
+            context
+        };
+        let batch = (kind == "catch_up")
+            .then(|| {
+                surfaced
+                    .last()
+                    .map(|file| format!("file:{}", file.event_id.to_hex()))
+            })
+            .flatten();
+        for (index, mut rf) in surfaced.into_iter().enumerate() {
+            rf.arrival_kind = kind;
+            rf.batch_id = batch.clone();
+            rf.batch_complete = index + 1 == total;
+            rf.batch_size = total;
             // We have the manifest; if its chunks haven't all arrived, queue a direct pull
             // from peers (the sender's one-shot push may have raced our discovery, and on a
             // PO-less LAN nothing else fetches them). Cleared once the file completes.
@@ -612,45 +678,192 @@ impl Node {
     /// Run the channel book over `conv`'s events and stream any newly-decryptable
     /// channel messages. A no-op for DM conversations (no channel state).
     pub(in crate::node) fn process_channel(&self, conv: ConversationId) {
-        let events: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv).into_iter().cloned().collect()
-        };
-        let refs: Vec<&Event> = events.iter().collect();
-        let messages = {
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            book.process(&self.identity, conv, &refs)
-        };
-        let has_new_messages = !messages.is_empty();
-        for msg in messages {
-            let own_device = self
+        self.process_channel_reception(conv, "live");
+    }
+
+    /// Recovery provenance is supplied by the operation, never inferred from a
+    /// sender's wall clock. A multi-message decryption pass is a catch-up batch.
+    pub(in crate::node) fn process_channel_reception(
+        &self,
+        conv: ConversationId,
+        context: &'static str,
+    ) {
+        let mut pending = self
+            .pending_channel_plaintext
+            .lock()
+            .expect("pending plaintext lock not poisoned");
+        if pending
+            .retry_at
+            .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            || pending
+                .messages
+                .first()
+                .is_some_and(|message| message.channel_id != conv)
+        {
+            return;
+        }
+        let mut saved: std::collections::HashSet<_> = self
+            .received
+            .lock()
+            .expect("received mutex not poisoned")
+            .entries_ref(&conv)
+            .iter()
+            .map(|entry| entry.event_id)
+            .collect();
+        let events: Vec<Event> = self
+            .log
+            .lock()
+            .expect("log mutex not poisoned")
+            .events(&conv)
+            .into_iter()
+            .cloned()
+            .collect();
+        let refs: Vec<_> = events.iter().collect();
+        let mut replay = super::channel::ChannelReplay::new(&refs);
+        let mut context = context;
+        loop {
+            let retrying = !pending.messages.is_empty();
+            let (mut messages, limited) = if retrying {
+                context = "catch_up";
+                (std::mem::take(&mut pending.messages), false)
+            } else {
+                self.channels
+                    .lock()
+                    .expect("channels mutex not poisoned")
+                    .process_replay(
+                        &self.identity,
+                        conv,
+                        &mut replay,
+                        CHANNEL_PLAINTEXT_BATCH,
+                        super::channel::CHANNEL_PENDING_BYTES.saturating_sub(
+                            pending
+                                .terminal
+                                .as_ref()
+                                .map_or(0, super::channel::ReceivedChannelMessage::retained_bytes),
+                        ),
+                    )
+            };
+            let own_devices: std::collections::HashSet<_> = self
                 .linked_devices()
                 .iter()
-                .any(|device| device.public.user_id() == msg.from);
-            if !own_device && self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock) {
-                continue;
+                .map(|device| device.public.user_id())
+                .collect();
+            let observed_at = super::node::now_millis();
+            for msg in &mut messages {
+                if msg.received_at == 0 {
+                    msg.received_at = observed_at;
+                }
+                if !own_devices.contains(&msg.from) {
+                    let _ = self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock);
+                }
             }
-            // Persist the decrypted plaintext: the sender-key wire key is single-use,
-            // so channel history is served from the received store, not re-opened.
-            let _ = self
-                .received
-                .lock()
-                .expect("received mutex not poisoned")
-                .record(
-                    conv,
-                    msg.from.clone(),
-                    msg.wall_clock,
-                    &msg.wrapped,
-                    msg.event_id,
-                );
-            let _ = self.channel_incoming.send(msg);
+            let opened = messages.len();
+            let mut received = Vec::new();
+            let mut messages = messages.into_iter();
+            while let Some(mut msg) = messages.next() {
+                if saved.contains(&msg.event_id)
+                    || self
+                        .account_suppression
+                        .lock()
+                        .expect("account suppression lock not poisoned")
+                        .contains(conv, msg.event_id)
+                {
+                    continue;
+                }
+                msg.own_device = own_devices.contains(&msg.from);
+                if !msg.own_device
+                    && self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock)
+                {
+                    continue;
+                }
+                if msg.received_at == 0 {
+                    msg.received_at = super::node::now_millis();
+                }
+                if let Err(error) = self
+                    .received
+                    .lock()
+                    .expect("received mutex not poisoned")
+                    .record(
+                        conv,
+                        msg.from.clone(),
+                        msg.wall_clock,
+                        &msg.wrapped,
+                        msg.event_id,
+                    )
+                {
+                    log::warn!(
+                        "channel plaintext persistence failed; retaining bounded retry: {error}"
+                    );
+                    pending.messages.push(msg);
+                    pending.messages.extend(messages);
+                    break;
+                }
+                saved.insert(msg.event_id);
+                received.push(msg);
+            }
+            let total = received.len();
+            let kind = if context == "live" && (opened > 1 || retrying) {
+                "catch_up"
+            } else {
+                context
+            };
+            if kind == "catch_up" {
+                if pending.batch_id.is_none() {
+                    pending.batch_id = received
+                        .first()
+                        .or_else(|| pending.messages.first())
+                        .map(|msg| format!("message:{}", msg.event_id.to_hex()));
+                }
+                pending.batch_size += total;
+                if pending.terminal.is_none() {
+                    pending.terminal = received
+                        .first()
+                        .or_else(|| pending.messages.first())
+                        .map(|msg| msg.terminal(pending.batch_id.clone(), pending.batch_size));
+                }
+                for mut msg in received {
+                    msg.arrival_kind = kind;
+                    msg.batch_id = pending.batch_id.clone();
+                    msg.batch_complete = false;
+                    msg.batch_size = pending.batch_size;
+                    pending.terminal =
+                        Some(msg.terminal(pending.batch_id.clone(), pending.batch_size));
+                    let _ = self.channel_incoming.send(msg);
+                }
+            } else {
+                for mut msg in received {
+                    msg.arrival_kind = kind;
+                    msg.batch_complete = true;
+                    msg.batch_size = total;
+                    let _ = self.channel_incoming.send(msg);
+                }
+            }
+            if total > 0 {
+                self.channel_recovery_notify.notify_one();
+            }
+            if !pending.messages.is_empty() {
+                let delay = pending.delay_ms.max(1000);
+                pending.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
+                pending.delay_ms = (delay * 2).min(30_000);
+                self.channel_recovery_notify.notify_one();
+                return;
+            }
+            pending.retry_at = None;
+            pending.delay_ms = 0;
+            if !limited && !retrying {
+                break;
+            }
+            context = "catch_up";
         }
+        if let Some(mut terminal) = pending.terminal.take() {
+            terminal.batch_size = pending.batch_size;
+            let _ = self.channel_incoming.send(terminal);
+        }
+        pending.batch_id = None;
+        pending.batch_size = 0;
         // ChannelBook returns only newly validated, decryptable messages. A
         // coalesced domain-specific wake advances bounded background gossip;
         // repeated processing and empty sync rounds do not create feedback.
-        if has_new_messages {
-            self.channel_recovery_notify.notify_one();
-        }
         if self
             .log
             .lock()
@@ -660,6 +873,27 @@ impl Node {
             .any(|event| event.kind == EventKind::Delete)
         {
             self.recalled_targets_channel(conv);
+        }
+    }
+
+    /// Retry exact failed plaintext even with no reachable member or new event.
+    pub(in crate::node) fn retry_channel_plaintext(&self) {
+        let channel = {
+            let pending = self
+                .pending_channel_plaintext
+                .lock()
+                .expect("pending plaintext lock not poisoned");
+            if pending
+                .retry_at
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            {
+                return;
+            }
+            pending.messages.first().map(|message| message.channel_id)
+        };
+        if let Some(channel) = channel {
+            self.process_channel_reception(channel, "catch_up");
+            self.process_file_events_reception(channel, "catch_up");
         }
     }
 
