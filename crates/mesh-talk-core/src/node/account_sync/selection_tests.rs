@@ -826,3 +826,95 @@ async fn account_sync_restart_replays_retained_sibling_cipher_without_discovery(
         1
     );
 }
+
+#[tokio::test]
+async fn account_sync_pending_channel_requester_receives_no_archive_or_file_bytes() {
+    use tokio::net::TcpListener;
+    let (dir, source, receiver) = sibling_nodes();
+    source
+        .set_device_sync_category(SyncCategory::Attachments, true)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    sibling_peer(&source, &receiver, "127.0.0.1:9".parse().unwrap());
+    let group = source
+        .create_channel_invited("private", vec![receiver.identity.public()])
+        .await
+        .unwrap();
+    source
+        .send_channel_message(group, b"accepted members only")
+        .await
+        .unwrap();
+    let path = dir.path().join("private.txt");
+    std::fs::write(&path, b"private file bytes").unwrap();
+    let file = source
+        .send_file_channel(group, &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    source
+        .save_directory_archive(file, &dir.path().join("retained.txt"))
+        .unwrap();
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    for accepted in [false, true] {
+        if accepted {
+            source
+                .channels
+                .lock()
+                .unwrap()
+                .state_mut(&group)
+                .unwrap()
+                .accept_invite(&receiver.user_id(), EventId::new([71; 32]));
+        }
+        let mut io = receiver
+            .privacy_dial(peer.addr, &peer.public)
+            .await
+            .unwrap();
+        send_frame(
+            &mut io,
+            AccountSyncVersion::V2,
+            &AccountHistoryFrame::Request {
+                version: 2,
+                account_id: source.account_id(),
+                cursor: None,
+                known_digest: [0; 32],
+                wanted: DeviceSyncPolicy {
+                    attachments: true,
+                    ..DeviceSyncPolicy::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let mut saw_channel = false;
+        let mut saw_file = false;
+        loop {
+            let bytes = tokio::time::timeout(Duration::from_secs(3), io.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match AccountHistoryFrame::decode_versioned(&bytes).unwrap().1 {
+                AccountHistoryFrame::ChannelHeader { .. } => saw_channel = true,
+                AccountHistoryFrame::FileCardHeader { .. } => saw_file = true,
+                AccountHistoryFrame::Complete { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            saw_channel, accepted,
+            "pending invitation must not disclose channel plaintext"
+        );
+        assert_eq!(
+            saw_file, accepted,
+            "pending invitation must not disclose file cards"
+        );
+        assert_eq!(
+            source
+                .attachment_for_sibling(file, &receiver.identity.public())
+                .is_some(),
+            accepted,
+            "attachment serving requires accepted requester membership"
+        );
+    }
+    server.abort();
+    let _ = server.await;
+}

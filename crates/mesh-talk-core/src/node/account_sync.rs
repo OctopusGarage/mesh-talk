@@ -265,7 +265,7 @@ impl Node {
                     book.state(id).is_some_and(|state| {
                         !state.is_dissolved()
                             && state.is_accepted_member(&me)
-                            && state.is_member(&requester_id)
+                            && state.is_accepted_member(&requester_id)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -869,7 +869,7 @@ impl Node {
                 if book.state(&channel).is_some_and(|state| {
                     !state.is_dissolved()
                         && state.is_accepted_member(&me)
-                        && state.is_member(&requester_id)
+                        && state.is_accepted_member(&requester_id)
                 }) {
                     hosts.insert(channel);
                 }

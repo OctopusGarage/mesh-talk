@@ -240,6 +240,10 @@ test("a thousand pinned conversations stay bounded and keyboard reachable", asyn
   const lastPinned = page.getByTestId("conversation-row-acc_bulk_999");
   await lastPinned.focus();
   await page.keyboard.press("ArrowDown");
+  await expect(
+    page.getByTestId("conversation-row-acc_self_aaaa1111"),
+  ).toBeFocused();
+  await page.keyboard.press("ArrowDown");
   await expect(page.getByTestId(`conversation-row-${BOB}`)).toBeFocused();
   await expectNoHorizontalOverflow(page, "large pinned roster");
 });

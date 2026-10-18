@@ -32,6 +32,15 @@ AI_EVAL_COMMAND='<non-interactive model command>' make ai-eval
 AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/linked-device-sync-ai-eval-suite.json --report target/ai-eval/linked-device-sync-report.json
 ```
 
+Cases can declare `context_files` alongside their primary `subject_file`. The
+runner includes each supporting source in the model prompt and records its path
+in the report. This lets the model assess delegated production validation without
+requiring duplicated guards in an orchestration module. Unprovided dependencies
+remain unverified; minimum passing scores and security requirements still apply.
+The linked-device suite version 2 includes the page assembler/importer and wire
+helpers, requires accepted requester membership, and distinguishes MTAHS2 file
+metadata selection from attachment bytes while preserving MTAHS1 behavior.
+
 The linked-device suite reviews source against a security rubric. It supplements the Rust unit tests and real-process E2E runs; model scores alone do not verify runtime behavior.
 
 The [tray menu suite](tray-menu-ai-eval-suite.json) reviews native menu actions,
