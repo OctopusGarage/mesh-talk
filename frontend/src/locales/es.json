@@ -910,5 +910,20 @@
     "endpointHint": "Esta es la última ruta de red conocida y puede apuntar a un repetidor. No indica una ubicación geográfica.",
     "view": "Ver perfil",
     "viewNamed": "Ver perfil de {{name}}"
+  },
+  "help": {
+    "title": "Ayuda",
+    "description": "Versión {{version}} · Disponible sin conexión",
+    "search": "Buscar ayuda",
+    "clearSearch": "Borrar búsqueda",
+    "topicCount_one": "{{count}} tema",
+    "topicCount_other": "{{count}} temas",
+    "topics": "Temas de ayuda",
+    "noResults": "No hay temas coincidentes. Prueba una frase más corta o borra la búsqueda para ver todas las guías.",
+    "englishFallback": "Los artículos están disponibles en inglés. La búsqueda también reconoce términos habituales en chino.",
+    "openSettings": "Abrir {{category}}",
+    "openDiagnostics": "Abrir Conexión",
+    "online": "Leer en línea",
+    "linkFailed": "No se pudo abrir el enlace. Inténtalo de nuevo o abre el manual en tu navegador."
   }
 }
