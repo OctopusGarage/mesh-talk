@@ -61,6 +61,17 @@ belongs and how to keep the site, README, and guides aligned.
 | [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md)                                       | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing.               |
 | [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
 
+## Proposed designs and research
+
+These documents distinguish inspected behavior from proposed changes. They do not
+establish shipped capabilities or completed validation.
+
+| Doc | What it covers |
+| --- | --- |
+| [Multi-device synchronization research](research/multi-device-sync-patterns.md) | Dated primary-source comparison of Signal, Matrix, Syncthing and document CRDTs. |
+| [Personal messaging and synchronization design](multi-device-sync-design.md) | Existing-code gaps, recommended models/protocols, conflict rules, settings, offline limits and device-security boundaries. |
+| [Synchronization implementation plan](multi-device-sync-plan.md) | Sequenced work packages, file owners, focused tests, compatibility and release gates. |
+
 ## Evaluation records
 
 These dated reports record what was tested and the limits of that evidence. Use
