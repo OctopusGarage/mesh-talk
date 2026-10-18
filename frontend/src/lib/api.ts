@@ -14,3 +14,5 @@ export const settings = createSettingsApi(
   () => useAuth.getState().user?.id ?? null,
 );
 export { recovery } from "./api/recovery";
+
+export { dmLanguage } from "./api/language";

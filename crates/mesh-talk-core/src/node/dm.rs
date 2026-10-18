@@ -40,14 +40,22 @@ impl Node {
         let peer = self
             .routing_peer(recipient)
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
+        if let Some(account) = &peer.account_id {
+            self.check_dm_language(account, text)?;
+        }
         self.initiate_device(&peer.public)
             .await
             .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
-        let id = self.enqueue_encoded(
+        let account = peer.account_id.clone();
+        let id = self.enqueue_encoded_if(
             vec![peer],
             None,
             MessageBody::new(text.to_vec(), reply_to).encode(),
             None,
+            &mut |accept| match &account {
+                Some(account) => self.authorize_dm_language(account, text, accept),
+                None => accept(),
+            },
         )?;
         self.flush_delivery(id).await;
         Ok(())
@@ -88,16 +96,17 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
         expires_at_ms: Option<u64>,
-        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.check_dm_language(target, text)?;
         self.enqueue_account_inner(
             target,
             crate::expiry::wrap(
                 &MessageBody::new(text.to_vec(), reply_to).encode(),
                 expires_at_ms,
             ),
-            authorize,
+            |accept| authorize(&mut || self.authorize_dm_language(target, text, accept)),
         )
         .await
     }
@@ -197,16 +206,6 @@ impl Node {
             Some(EventId::new(msg_id)),
             &mut authorize,
         )
-    }
-
-    fn enqueue_encoded(
-        &self,
-        dests: Vec<PeerRecord>,
-        target: Option<String>,
-        plaintext: Vec<u8>,
-        logical: Option<EventId>,
-    ) -> Result<EventId, NodeError> {
-        self.enqueue_encoded_if(dests, target, plaintext, logical, &mut |accept| accept())
     }
 
     fn enqueue_encoded_if(

@@ -1,3 +1,4 @@
+import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposerImagePreview } from "./ComposerImagePreview";
 import { AnimatePresence, motion } from "framer-motion";
@@ -186,6 +187,8 @@ function StickerThumb({
 
 export function Composer({
   onSend,
+  validateText,
+  admissionPending = false,
   initialDraft = "",
   onDraftChange,
   onAttach,
@@ -205,7 +208,10 @@ export function Composer({
   expiryDurationMs = 300_000,
   onExpiryDurationChange,
 }: {
-  onSend: (text: string) => boolean;
+  onSend: (text: string) => boolean | Promise<boolean>;
+  validateText?: (text: string) => Promise<string | null>;
+  /** A conversation-scoped durable admission may outlive this keyed composer. */
+  admissionPending?: boolean;
   initialDraft?: string;
   onDraftChange?: (text: string) => void;
   onAttach?: () => void;
@@ -225,7 +231,7 @@ export function Composer({
   myName?: string;
   /** Drop text into the composer from outside (WeChat-style "re-edit" of a recalled
    * message). `n` is a bump counter so the same text can be re-applied. */
-  prefill?: { text: string; n: number } | null;
+  prefill?: { text: string; n: number; applyIf?: () => boolean } | null;
   /** Send a bundled sticker (by id, with its emoji fallback) as its own message. */
   onSendSticker?: (stickerId: string, fallback: string) => void;
   /** Pick + send an image/video via the NATIVE file dialog (reliable in the webview;
@@ -246,6 +252,22 @@ export function Composer({
   const motionOK = useMotionOK();
   const [text, setText] = useState(initialDraft);
   const [sendRejected, setSendRejected] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [validating, setValidating] = useState(false);
+  const validationPending = useRef(false);
+  const validationEpoch = useRef(0);
+  const draftRevision = useRef(0);
+  useEffect(
+    () => () => {
+      validationEpoch.current += 1;
+    },
+    [],
+  );
+  const setDraftText = (next: string) => {
+    draftRevision.current += 1;
+    setText(next);
+    setValidationError(null);
+  };
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [sendingFiles, setSendingFiles] = useState(false);
   const lastScreenshot = useRef<File | null>(null);
@@ -285,9 +307,10 @@ export function Composer({
   // Apply an external prefill (re-edit): replace the draft and focus, caret at the end.
   // Keyed on the bump counter so re-editing the same text twice still re-applies.
   useEffect(() => {
-    if (!prefill) return;
-    setText(prefill.text);
+    if (!prefill || (prefill.applyIf && !prefill.applyIf())) return;
+    setDraftText(prefill.text);
     onDraftChange?.(prefill.text);
+    if (!prefill.text) return;
     queueMicrotask(() => {
       const el = ref.current;
       if (el) {
@@ -344,7 +367,7 @@ export function Composer({
     const el = ref.current;
     const caret = el?.selectionStart ?? text.length;
     const next = text.slice(0, caret) + emoji + text.slice(caret);
-    setText(next);
+    setDraftText(next);
     onDraftChange?.(next);
     setPanelPointerMotion(false);
     setExpressionTab(null);
@@ -378,13 +401,14 @@ export function Composer({
       .slice(0, caret)
       .replace(/@([\p{L}\p{N}_-]*)$/u, `@${name} `);
     const next = before + text.slice(caret);
-    setText(next);
+    setDraftText(next);
     onDraftChange?.(next);
     setMentionQuery(null);
     queueMicrotask(() => el.focus());
   };
 
   const send = () => {
+    if (validationPending.current || admissionPending) return;
     if (pendingFiles.length) {
       if (sendingFiles || !onPasteFiles) return;
       setSendingFiles(true);
@@ -412,17 +436,71 @@ export function Composer({
         .finally(() => setSendingFiles(false));
       return;
     }
-    const t = text.trim();
-    if (!t) return;
-    if (!onSend(t)) {
-      setSendRejected(true);
+    const candidate = text.trim();
+    if (!candidate) return;
+    const epoch = validationEpoch.current;
+    const revision = draftRevision.current;
+    const current = () =>
+      validationEpoch.current === epoch && draftRevision.current === revision;
+    const pending = () => {
+      validationPending.current = true;
+      setValidating(true);
+      setValidationError(null);
+    };
+    const release = () => {
+      if (validationEpoch.current !== epoch) return;
+      validationPending.current = false;
+      setValidating(false);
+    };
+    const rejected = () => {
+      if (current()) setSendRejected(true);
+    };
+    const finish = (accepted: boolean) => {
+      if (!current()) return;
+      if (!accepted) {
+        rejected();
+        return;
+      }
+      setSendRejected(false);
+      setDraftText("");
+      onDraftChange?.("");
+      setMentionQuery(null);
+      if (ref.current) ref.current.style.height = "auto";
+    };
+    const admit = (): void | Promise<void> => {
+      try {
+        const acceptance = onSend(candidate);
+        if (typeof acceptance === "boolean") {
+          finish(acceptance);
+          return;
+        }
+        pending();
+        return acceptance.then(finish, rejected);
+      } catch {
+        rejected();
+      }
+    };
+    if (!validateText) {
+      const admission = admit();
+      if (admission) void admission.finally(release);
       return;
     }
-    setSendRejected(false);
-    setText("");
-    onDraftChange?.("");
-    setMentionQuery(null);
-    if (ref.current) ref.current.style.height = "auto";
+    pending();
+    void (async () => {
+      let error: string | null;
+      try {
+        error = await validateText(candidate);
+      } catch {
+        if (current()) setValidationError(t("dmLanguage.validationFailed"));
+        return;
+      }
+      if (!current()) return;
+      if (error) {
+        setValidationError(error);
+        return;
+      }
+      await admit();
+    })().finally(release);
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -448,6 +526,7 @@ export function Composer({
     const files = clipboardFiles(e.clipboardData);
     if (!files.length) return;
     e.preventDefault();
+    draftRevision.current += 1;
     setPendingFiles((current) => [...current, ...files]);
     setSendRejected(false);
   };
@@ -455,7 +534,7 @@ export function Composer({
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
     setSendRejected(false);
-    setText(el.value);
+    setDraftText(el.value);
     onDraftChange?.(el.value);
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
@@ -476,7 +555,7 @@ export function Composer({
           <span className="min-w-0 flex-1 truncate text-muted-foreground">
             {t("composer.replyingTo")}{" "}
             <span className="text-foreground">
-              {replyTo.text || t("composer.message")}
+              {messageDisplayText(replyTo.text, t) || t("composer.message")}
             </span>
           </span>
           <button
@@ -919,7 +998,10 @@ export function Composer({
               "h-9 w-9 shrink-0 rounded-md bg-signal text-primary-foreground",
             )}
             disabled={
-              sendingFiles || (!text.trim() && pendingFiles.length === 0)
+              sendingFiles ||
+              validating ||
+              admissionPending ||
+              (!text.trim() && pendingFiles.length === 0)
             }
             onClick={() => {
               send();
@@ -929,12 +1011,19 @@ export function Composer({
             <SendHorizontal className="h-4 w-4" />
           </Button>
         </div>
-        {sendRejected ? (
+        {validationError || sendRejected ? (
           <p
             role="alert"
             className="mt-1.5 min-h-4 text-right text-[11px] text-destructive"
           >
-            {t("composer.notQueued")}
+            {validationError ?? t("composer.notQueued")}
+          </p>
+        ) : validating || admissionPending ? (
+          <p
+            role="status"
+            className="mt-1.5 min-h-4 text-right text-[11px] text-muted-foreground"
+          >
+            {t("dmLanguage.checking")}
           </p>
         ) : (
           <p className="mt-1.5 h-4 text-right text-[11px] text-muted-foreground opacity-0 transition-opacity group-focus-within:opacity-100">

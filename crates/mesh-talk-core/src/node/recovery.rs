@@ -369,6 +369,22 @@ impl Node {
                             wall_clock,
                         )
                         .map_err(|_| SnapshotError::Io)?,
+                    SnapshotRecordV1::DmLanguageProfile { payload } => {
+                        let profile = super::profile::ProfilePayload::decode(&payload)
+                            .ok_or(SnapshotError::InvalidEncoding)?;
+                        node.language_state
+                            .lock()
+                            .expect("language state mutex not poisoned")
+                            .record_profile(&profile)
+                            .map_err(|_| SnapshotError::Io)?;
+                    }
+                    SnapshotRecordV1::DmLanguageDecision { id, hidden } => {
+                        node.language_state
+                            .lock()
+                            .expect("language state mutex not poisoned")
+                            .decide(EventId::new(id), hidden)
+                            .map_err(|_| SnapshotError::Io)?;
+                    }
                     SnapshotRecordV1::Profile {
                         account_id,
                         updated_at,
@@ -601,11 +617,20 @@ impl Node {
             .lock()
             .expect("profiles mutex not poisoned")
             .snapshot_entries();
+        let (language_profiles, language_decisions) = {
+            let language = self
+                .language_state
+                .lock()
+                .expect("language state mutex not poisoned");
+            (language.snapshot_profiles(), language.snapshot_decisions())
+        };
         let mut record_count = u64::try_from(
             sent_count
                 .checked_add(received_count)
                 .and_then(|count| count.checked_add(recalls.len()))
                 .and_then(|count| count.checked_add(profiles.len()))
+                .and_then(|count| count.checked_add(language_profiles.len()))
+                .and_then(|count| count.checked_add(language_decisions.len()))
                 .and_then(|count| count.checked_add(event_count))
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
@@ -759,6 +784,17 @@ impl Node {
                 account_id,
                 updated_at,
                 avatar,
+            })?;
+        }
+        for profile in language_profiles {
+            writer.push(&SnapshotRecordV1::DmLanguageProfile {
+                payload: profile.encode(),
+            })?;
+        }
+        for (id, hidden) in language_decisions {
+            writer.push(&SnapshotRecordV1::DmLanguageDecision {
+                id: *id.as_bytes(),
+                hidden,
             })?;
         }
         for (file_conv, size, digest) in media {

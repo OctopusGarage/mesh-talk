@@ -158,6 +158,12 @@ impl Node {
             }
             let (id, body) = decode_account_entry(&rcv.plaintext);
             let from_me = rcv.from == my_account;
+            let hidden = !from_me && self.hidden_by_language(rcv.event_id);
+            let body = if hidden {
+                MessageBody::new(super::language_io::HIDDEN_TEXT.to_vec(), None)
+            } else {
+                body
+            };
             entries.push(HistoryEntry {
                 id,
                 from_me,
@@ -240,6 +246,11 @@ impl Node {
             }
             let body = MessageBody::decode(&rcv.plaintext);
             let from_me = own_devices.contains(&rcv.from);
+            let body = if !from_me && self.hidden_by_language(rcv.event_id) {
+                MessageBody::new(super::language_io::HIDDEN_TEXT.to_vec(), None)
+            } else {
+                body
+            };
             entries.push(HistoryEntry {
                 id: rcv.event_id,
                 from_me,

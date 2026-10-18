@@ -93,8 +93,19 @@ pub struct ProfilePayload {
     pub updated_at: u64,
     /// The avatar data-URL bytes, or `None` to clear (revert to the glyph).
     pub avatar: Option<Vec<u8>>,
+    pub language: Option<String>,
+    pub language_supported: bool,
     #[serde(with = "sig_bytes")]
     pub signature: [u8; 64],
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyProfile {
+    account_ed25519_pub: [u8; 32],
+    updated_at: u64,
+    avatar: Option<Vec<u8>>,
+    #[serde(with = "sig_bytes")]
+    signature: [u8; 64],
 }
 
 impl ProfilePayload {
@@ -113,8 +124,40 @@ impl ProfilePayload {
             account_ed25519_pub,
             updated_at,
             avatar,
+            language: None,
+            language_supported: false,
             signature,
         }
+    }
+
+    /// V2 is a complete profile so existing ciphertext compaction keeps avatar and
+    /// language preference together. V1 remains byte-identical for legacy avatars.
+    pub fn new_with_language(
+        account: &Account,
+        avatar: Option<Vec<u8>>,
+        updated_at: u64,
+        language: Option<String>,
+    ) -> Self {
+        let mut payload = Self::new(account, avatar, updated_at);
+        payload.language = language;
+        payload.language_supported = true;
+        payload.signature = account.sign(&payload.signature_input());
+        payload
+    }
+
+    fn signature_input(&self) -> Vec<u8> {
+        let mut input = signing_input(
+            &self.account_ed25519_pub,
+            self.updated_at,
+            self.avatar.as_deref().unwrap_or(&[]),
+        );
+        if self.language_supported {
+            input.extend_from_slice(b"mesh-talk-profile-language-v2");
+            let language = self.language.as_deref().unwrap_or("");
+            input.extend_from_slice(&(language.len() as u64).to_le_bytes());
+            input.extend_from_slice(language.as_bytes());
+        }
+        input
     }
 
     /// The account id this profile claims (only meaningful once [`Self::verify`] is true).
@@ -133,42 +176,87 @@ impl ProfilePayload {
         {
             return false;
         }
-        let avatar_bytes = self.avatar.as_deref().unwrap_or(&[]);
+        if self
+            .language
+            .as_deref()
+            .is_some_and(|language| !super::language_policy::is_supported(language))
+            || (!self.language_supported && self.language.is_some())
+        {
+            return false;
+        }
         DeviceIdentity::verify(
             &self.account_ed25519_pub,
-            &signing_input(&self.account_ed25519_pub, self.updated_at, avatar_bytes),
+            &self.signature_input(),
             &self.signature,
         )
     }
 
     /// `PROFILE_MAGIC ‖ bincode(self)` — the plaintext sealed to a peer device.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(PROFILE_MAGIC.len() + 96);
-        out.extend_from_slice(PROFILE_MAGIC);
-        out.extend_from_slice(
-            &bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .serialize(self)
-                .expect("profile payload serializes"),
-        );
+        let mut out = if self.language_supported {
+            b"MTPF2".to_vec()
+        } else {
+            PROFILE_MAGIC.to_vec()
+        };
+        let opts = bincode::DefaultOptions::new().with_fixint_encoding();
+        let bytes = if self.language_supported {
+            opts.serialize(self)
+        } else {
+            opts.serialize(&LegacyProfile {
+                account_ed25519_pub: self.account_ed25519_pub,
+                updated_at: self.updated_at,
+                avatar: self.avatar.clone(),
+                signature: self.signature,
+            })
+        }
+        .expect("profile serializes");
+        out.extend(bytes);
         out
     }
 
-    /// Recover a profile from opened plaintext, or `None` if the bytes are not a framed
-    /// profile (so the message/file decoders can fall through to their own framings).
-    pub fn decode(bytes: &[u8]) -> Option<ProfilePayload> {
-        let rest = bytes.strip_prefix(PROFILE_MAGIC)?;
-        bincode::DefaultOptions::new()
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_AVATAR_BYTES + 512 {
+            return None;
+        }
+        let opts = bincode::DefaultOptions::new()
             .with_fixint_encoding()
-            .reject_trailing_bytes()
-            .deserialize::<ProfilePayload>(rest)
-            .ok()
+            .with_limit((MAX_AVATAR_BYTES + 512) as u64)
+            .reject_trailing_bytes();
+        if let Some(rest) = bytes.strip_prefix(b"MTPF2") {
+            let payload: Self = opts.deserialize(rest).ok()?;
+            return payload.language_supported.then_some(payload);
+        }
+        let legacy: LegacyProfile = opts.deserialize(bytes.strip_prefix(PROFILE_MAGIC)?).ok()?;
+        Some(Self {
+            account_ed25519_pub: legacy.account_ed25519_pub,
+            updated_at: legacy.updated_at,
+            avatar: legacy.avatar,
+            signature: legacy.signature,
+            language: None,
+            language_supported: false,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_profile_is_signed_and_keeps_legacy_encoding_separate() {
+        let account = Account::generate();
+        let legacy = ProfilePayload::new(&account, None, 100);
+        assert!(legacy.encode().starts_with(b"MTPF1"));
+        let mut payload = ProfilePayload::new_with_language(&account, None, 200, Some("en".into()));
+        assert!(payload.verify());
+        assert!(payload.encode().starts_with(b"MTPF2"));
+        assert_eq!(
+            ProfilePayload::decode(&payload.encode()),
+            Some(payload.clone())
+        );
+        payload.language = Some("zh".into());
+        assert!(!payload.verify());
+    }
 
     #[test]
     fn round_trips_and_verifies() {

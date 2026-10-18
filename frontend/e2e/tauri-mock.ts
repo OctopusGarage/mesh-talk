@@ -663,6 +663,24 @@ export const test = base.extend({
       (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
         probedEndpoints;
       let failNextCommand: string | null = null;
+      const languagePolicies: Record<string, string | null> = {};
+      if (dataMode === "dm-language") languagePolicies[BOB.account_id] = "en";
+      const languagePreference = (account: string) => ({
+        language: languagePolicies[account] ?? null,
+        min_target_percent: 80,
+        supported_languages: [
+          "en",
+          "zh",
+          "ja",
+          "es",
+          "fr",
+          "de",
+          "ko",
+          "pt",
+          "ru",
+          "ar",
+        ],
+      });
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
         command: string,
@@ -706,6 +724,21 @@ export const test = base.extend({
       };
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
+          dm_language_policy: (a) =>
+            languagePreference(String(a.account ?? SELF.account)),
+          set_dm_language_policy: (a) => {
+            languagePolicies[SELF.account] =
+              a.language === null ? null : String(a.language);
+            return languagePreference(SELF.account);
+          },
+          // Deliberately fixed browser fixtures; Rust tests cover real classification.
+          validate_dm_language: (a) => {
+            const language =
+              languagePreference(String(a.account)).language ?? "";
+            const allowed =
+              !language || a.text !== "你好，今天我们一起讨论这个项目。";
+            return { allowed, language, target_percent: allowed ? 100 : 0 };
+          },
           owner_node_identity: (a) => ({
             owner: a.owner,
             device_id: SELF.device,

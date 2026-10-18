@@ -1,3 +1,4 @@
+import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useEffect, useMemo, useState } from "react";
 import {
   open as openDialog,
@@ -400,7 +401,10 @@ export function ConversationHistoryDialog({
                             />
                           </span>
                         ) : (
-                          <Highlighted text={m.text} term={query} />
+                          <Highlighted
+                            text={messageDisplayText(m.text, t)}
+                            term={query}
+                          />
                         )}
                       </div>
                     </div>
@@ -514,7 +518,7 @@ export function ConversationHistoryDialog({
                     >
                       <RowMeta m={m} />
                       <p className="break-words text-sm text-foreground/90">
-                        {renderWithMentions(m.text)}
+                        {renderWithMentions(messageDisplayText(m.text, t))}
                       </p>
                     </div>
                   ))

@@ -588,7 +588,7 @@ impl Node {
             return None;
         }
         let account = self.account_id();
-        let (conversation, from, _body) = if plain.starts_with(b"MTDE1") {
+        let (conversation, from, body) = if plain.starts_with(b"MTDE1") {
             let env = DmEnvelope::decode(&plain)?;
             let valid_account = |id: &str| {
                 id.len() == 32
@@ -618,6 +618,8 @@ impl Node {
                 MessageBody::decode(&plain),
             )
         };
+        self.classify_incoming_language(event.id, &from, &body)
+            .ok()?;
         let received = ReceivedEntry {
             event_id: event.id,
             conversation,
@@ -878,14 +880,19 @@ impl Node {
                         || MessageBody::decode(&entry.plaintext),
                         |env| MessageBody::decode(&env.body),
                     );
+                    let hidden = self.hidden_by_language(entry.event_id);
                     let from_name = self
                         .historical_author(&sender.ed25519_pub)
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
                     let _ = self.incoming.send(ReceivedDm {
                         from: sender.user_id(),
                         from_name,
-                        text: body.text,
-                        reply_to: body.reply_to,
+                        text: if hidden {
+                            super::language_io::HIDDEN_TEXT.to_vec()
+                        } else {
+                            body.text
+                        },
+                        reply_to: if hidden { None } else { body.reply_to },
                     });
                 }
             }

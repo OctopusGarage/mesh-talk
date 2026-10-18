@@ -41,6 +41,11 @@ pub(crate) mod filebook;
 pub(crate) mod files;
 #[cfg(test)]
 mod group_chain_tests;
+mod language_io;
+pub(crate) mod language_policy;
+mod language_state;
+#[cfg(test)]
+mod language_tests;
 pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;
@@ -100,6 +105,7 @@ pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
 pub use files::{FileProgress, OutgoingFileProgress};
+pub use language_policy::{LanguageVerdict, MIN_TARGET_PERCENT, SUPPORTED_LANGUAGES};
 pub use message::MessageBody;
 pub use node::{
     ChannelSummary, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm, ReceivedProfile,

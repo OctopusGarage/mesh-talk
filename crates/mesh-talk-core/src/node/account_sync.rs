@@ -279,6 +279,9 @@ impl Node {
                         {
                             continue;
                         }
+                        if self.hidden_by_language(entry.event_id) {
+                            continue;
+                        }
                         page.offer(
                             HistoryCursor {
                                 tag: 0,

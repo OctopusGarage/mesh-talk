@@ -1,3 +1,4 @@
+import { DmLanguageSettings } from "./DmLanguageSettings";
 import { Languages, MinusSquare, Rocket } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
@@ -47,6 +48,7 @@ export function GeneralSettings({
           </select>
         }
       />
+      <DmLanguageSettings />
       {s && (
         <>
           <SettingsRow

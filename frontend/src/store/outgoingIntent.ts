@@ -313,7 +313,8 @@ export function beginSendIntent(
   get: Get,
   c: Conversation,
   payload: SendPayload,
-): Promise<void> | null {
+  options: { waitForHydration?: boolean } = {},
+): Promise<boolean> | null {
   if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
     set({
       error:
@@ -355,16 +356,22 @@ export function beginSendIntent(
     intents: { ...s.intents, [clientId]: intent },
     messages: { ...s.messages, [key]: [...(s.messages[key] ?? []), message] },
   }));
-  return dispatchIntent(set, get, intent);
+  return dispatchIntent(set, get, intent, options);
 }
 
-export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
+export async function dispatchIntent(
+  set: Set,
+  get: Get,
+  intent: SendIntent,
+  { waitForHydration = true }: { waitForHydration?: boolean } = {},
+): Promise<boolean> {
   const lease = captureChatOwner(get);
   const guarded: Set = (partial) => {
     if (lease.current()) set(partial);
   };
   const { conversation: c, payload, message } = intent;
   const key = convKey(c);
+  let admitted = false;
   const clientId = message.clientId!;
   const update = (next: ChatMessage | null) =>
     guarded((state) => completeSendIntentState(state, c, clientId, next));
@@ -412,10 +419,11 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
           file: { ...message.file!, fileConv: result.fileConv },
         };
       }
-      if (!lease.current()) return;
+      admitted = true;
+      if (!lease.current()) return false;
       const hadIntent = !!get().intents[clientId];
       update(accepted);
-      if (!hadIntent) return;
+      if (!hadIntent) return true;
     } else {
       if (payload.kind === "text")
         await chat.sendChannelMessage(
@@ -439,17 +447,31 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
           clientId,
           payload.expiresAtMs,
         );
-      if (!lease.current()) return;
+      admitted = true;
+      if (!lease.current()) return false;
       update(null); // Legacy void never claims acceptance/receipt for a placeholder.
     }
-    if (!lease.current()) return;
+    if (!lease.current()) return false;
+    if (accepted?.id) {
+      // The durable ID settles admission. Optional UI hydration must not hold the draft.
+      const hydration =
+        get().active && convKey(get().active!) === key
+          ? get().reload()
+          : get().refreshStatuses(c);
+      if (waitForHydration) await hydration;
+      else
+        void hydration.catch(() => {
+          /* Durable acceptance is not a retryable send failure. */
+        });
+      return lease.current();
+    }
     if (get().active && convKey(get().active!) === key) await get().reload();
-    else if (accepted?.id) await get().refreshStatuses(c);
+    return lease.current();
   } catch (e) {
-    if (!lease.current()) return;
+    if (!lease.current()) return false;
+    // Durable acceptance survives hydration failure, even if history already removed the intent.
+    if (admitted) return true;
     if (payload.kind === "file") useTransfers.getState().clear(clientId);
-    // Once a stable ID was accepted, hydration/projection failure is NOT a retryable send.
-    if (get().intents[clientId]?.message.id) return;
     update({
       ...message,
       pending: false,
@@ -462,5 +484,6 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
           ? "This attachment has too much metadata to send. Try a shorter name or a smaller folder."
           : `Couldn't send file: ${errorMessage(e)}`,
       });
+    return false;
   }
 }

@@ -24,6 +24,7 @@ pub mod diagnostics;
 mod easytier_discovery;
 pub mod events;
 pub mod favorites;
+mod language_commands;
 mod linked_account;
 pub mod logger;
 pub mod owner_commands;
@@ -321,6 +322,9 @@ pub fn run_tauri_configured(
         .manage(crate::chat_commands::NodeState::empty())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                language_commands::dm_language_policy,
+                language_commands::set_dm_language_policy,
+                language_commands::validate_dm_language,
                 owner_commands::owner_node_identity,
                 owner_commands::owner_enqueue_text,
                 owner_commands::owner_enqueue_sticker,

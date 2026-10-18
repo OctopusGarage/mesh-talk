@@ -386,6 +386,7 @@ pub struct Node {
     /// account, newest-wins, durable). Read by `peer_avatar`/`peer_avatars` and surfaced
     /// live on `profile_incoming`.
     pub(in crate::node) profiles: Mutex<crate::node::profile_store::ProfileStore>,
+    pub(in crate::node) language_state: Mutex<super::language_state::LanguageState>,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
     /// is unchanged across its many call sites; the runtime claims the receiver once via
@@ -483,6 +484,7 @@ impl Node {
             custody_res,
             recv_files_res,
             profiles_res,
+            language_res,
             recalls_res,
             consent_res,
             consent_controls_res,
@@ -504,6 +506,9 @@ impl Node {
             let h_files =
                 s.spawn(|| ReceivedLog::open_file_cards(&dir.join("received_files.log"), password));
             // Durable store of avatars peers propagated to us (one per account, newest-wins).
+            let h_language = s.spawn(|| {
+                super::language_state::LanguageState::open(&dir.join("language.log"), password)
+            });
             let h_profiles = s.spawn(|| {
                 crate::node::profile_store::ProfileStore::open(&dir.join("profiles.log"), password)
             });
@@ -550,6 +555,7 @@ impl Node {
                 h_custody.join(),
                 h_files.join(),
                 h_profiles.join(),
+                h_language.join(),
                 h_recalls.join(),
                 h_consent.join(),
                 h_consent_controls.join(),
@@ -568,6 +574,8 @@ impl Node {
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let language_state =
+            language_res.unwrap_or_else(|error| std::panic::resume_unwind(error))?;
         let my_profile = profiles
             .snapshot_entries()
             .into_iter()
@@ -575,6 +583,17 @@ impl Node {
             .map(|(_, updated_at, avatar)| {
                 crate::node::profile::ProfilePayload::new(&account, avatar, updated_at)
             });
+        let my_profile = match (my_profile, language_state.profile(&account.account_id())) {
+            (Some(avatar), Some(policy)) => {
+                Some(crate::node::profile::ProfilePayload::new_with_language(
+                    &account,
+                    avatar.avatar,
+                    avatar.updated_at.max(policy.updated_at),
+                    policy.language,
+                ))
+            }
+            (avatar, policy) => policy.or(avatar),
+        };
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -738,6 +757,7 @@ impl Node {
             account_sync_notify: tokio::sync::Notify::new(),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             profiles: Mutex::new(profiles),
+            language_state: Mutex::new(language_state),
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
             call_signal_incoming: call_signal_tx,
