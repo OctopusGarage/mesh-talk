@@ -662,16 +662,21 @@ test.describe("Mesh-Talk UI flow", () => {
 
   test("Settings: switch language EN ↔ 中文", async ({ page }) => {
     await enterChat(page);
-    await expect(page.getByText("Direct messages")).toBeVisible();
+    const sidebar = page.getByTestId("conversation-nav");
+    await expect(
+      sidebar.getByText("Direct messages", { exact: true }),
+    ).toBeVisible();
 
     await openSidebarMenuAction(page, "sidebar-nav-settings");
     const lang = page.getByTestId("settings-language-select");
     await lang.selectOption("zh-Hans");
     // Sidebar section label re-renders in Simplified Chinese.
-    await expect(page.getByText("私信")).toBeVisible();
+    await expect(sidebar.getByText("私信", { exact: true })).toBeVisible();
 
     await lang.selectOption("en");
-    await expect(page.getByText("Direct messages")).toBeVisible();
+    await expect(
+      sidebar.getByText("Direct messages", { exact: true }),
+    ).toBeVisible();
   });
 
   test("Diagnostics: peers / env / logs / troubleshoot present", async ({
