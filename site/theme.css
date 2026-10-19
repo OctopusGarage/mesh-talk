@@ -1,0 +1,100 @@
+/* Public documentation foundations. The landing page and generated manual share
+   this file; application conversation surfaces remain owned by frontend/DESIGN.md. */
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("fonts/space-grotesk-latin.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+}
+:root {
+  color-scheme: dark;
+  --ink: #0b191d;
+  --ink-2: #11252a;
+  --ink-3: #193238;
+  --line: #2b454b;
+  --line-2: #47676d;
+  --signal: #94dac8;
+  --signal-2: #70c6b1;
+  --paper: #eef4f1;
+  --muted: #abc0b9;
+  --faint: #bdcec8;
+  --presence: var(--signal);
+  --display:
+    "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --body: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --maxw: 1240px;
+  --pad: clamp(1.25rem, 5vw, 3rem);
+}
+@media (prefers-color-scheme: light) {
+  .manual {
+    color-scheme: light;
+    --ink: #f6f8f6;
+    --ink-2: #edf2ee;
+    --ink-3: #e3ebe6;
+    --line: #d2ded6;
+    --line-2: #9eb6a8;
+    --paper: #20362f;
+    --muted: #4d675c;
+    --faint: #526e60;
+    --signal: #28664f;
+    --signal-2: #20513f;
+  }
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--body);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+::selection {
+  background: var(--signal);
+  color: var(--ink);
+}
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 4px;
+}
+a {
+  text-underline-offset: 0.22em;
+}
+input {
+  caret-color: var(--signal);
+}
+html {
+  scrollbar-color: var(--line-2) var(--ink);
+}
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+.skip {
+  position: absolute;
+  top: -100px;
+  left: 1rem;
+  z-index: 100;
+  padding: 0.6rem 1rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+.skip:focus {
+  top: 0.5rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

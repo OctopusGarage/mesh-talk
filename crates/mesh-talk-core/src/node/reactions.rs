@@ -21,6 +21,20 @@ impl Node {
         emoji: &str,
         remove: bool,
     ) -> Result<(), NodeError> {
+        self.react_dm_if(recipient, target, emoji, remove, |accept| accept())
+            .await
+    }
+
+    /// Authorize the synchronous durable acceptance before performing network I/O.
+    pub async fn react_dm_if(
+        &self,
+        recipient: &str,
+        target: EventId,
+        emoji: &str,
+        remove: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
         let peer = self
             .roster
             .lock()
@@ -36,10 +50,11 @@ impl Node {
         };
         let sealed = crate::dm::seal(&self.identity, &peer.public.x25519_pub, &payload.encode())
             .map_err(NodeError::Seal)?;
-        self.append_event(conv, EventKind::React, sealed)?;
-        // Our own DM reaction is sealed to the peer; record it so `reactions` can
-        // include it (we can't open it from our own log).
-        self.record_my_reaction(conv, now_millis(), payload);
+        authorize(&mut || {
+            self.append_event(conv, EventKind::React, sealed.clone())?;
+            self.record_my_reaction(conv, now_millis(), payload.clone())?;
+            Ok(())
+        })?;
         self.deliver_direct(&peer, conv).await.ok();
         self.replicate_to_post_office(conv).await.ok();
         Ok(())
@@ -55,6 +70,20 @@ impl Node {
         emoji: &str,
         remove: bool,
     ) -> Result<(), NodeError> {
+        self.react_to_account_if(target_account_id, target, emoji, remove, |accept| accept())
+            .await
+    }
+
+    /// Authorize the synchronous durable acceptance before performing network I/O.
+    pub async fn react_to_account_if(
+        &self,
+        target_account_id: &str,
+        target: EventId,
+        emoji: &str,
+        remove: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
         let my_account = self.account.account_id();
         let dests = self.account_fanout_targets(target_account_id);
         let envelope = ReactionEnvelope::new(
@@ -65,30 +94,47 @@ impl Node {
             remove,
         )
         .encode();
-        for peer in &dests {
-            let sealed = match crate::dm::seal(&self.identity, &peer.public.x25519_pub, &envelope) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-            if self.append_event(conv, EventKind::React, sealed).is_err() {
-                continue;
+        // Account reactions retain best-effort device fanout. Reject failed
+        // local persistence, but do not stop other destinations on a send failure.
+        let acct_conv = account_conversation_id(&my_account, target_account_id);
+        let mut deliveries = Vec::new();
+        authorize(&mut || {
+            let mut failure = None;
+            for peer in &dests {
+                let sealed =
+                    match crate::dm::seal(&self.identity, &peer.public.x25519_pub, &envelope) {
+                        Ok(sealed) => sealed,
+                        Err(error) => {
+                            failure = Some(NodeError::Seal(error));
+                            continue;
+                        }
+                    };
+                let conv = dm_conversation_id(&self.identity.public(), &peer.public);
+                match self.append_event(conv, EventKind::React, sealed) {
+                    Ok(_) => deliveries.push(peer.clone()),
+                    Err(error) => failure = Some(error),
+                }
             }
+            if deliveries.is_empty()
+                && let Some(error) = failure
+            {
+                return Err(error);
+            }
+            self.record_my_reaction(
+                acct_conv,
+                now_millis(),
+                ReactionPayload {
+                    target,
+                    emoji: emoji.to_string(),
+                    remove,
+                },
+            )
+        })?;
+        for peer in &deliveries {
+            let conv = dm_conversation_id(&self.identity.public(), &peer.public);
             self.deliver_direct(peer, conv).await.ok();
             self.replicate_to_post_office(conv).await.ok();
         }
-        // Record our own reaction (sealed to peers, so un-openable from our own log)
-        // under the account conversation, for `account_reactions` to merge.
-        let acct_conv = account_conversation_id(&my_account, target_account_id);
-        self.record_my_reaction(
-            acct_conv,
-            now_millis(),
-            ReactionPayload {
-                target,
-                emoji: emoji.to_string(),
-                remove,
-            },
-        );
         Ok(())
     }
 
@@ -101,27 +147,27 @@ impl Node {
         let me = self.identity.public().user_id();
         // The device-pair conversations whose React events can carry this account's
         // reactions: ours-with-each-target-device and ours-with-each-own-other-device.
-        let convs: Vec<(ConversationId, [u8; 32], Option<String>)> = {
-            let roster = self.roster.lock().expect("roster mutex not poisoned");
-            roster
-                .peers()
+        let convs: Vec<(ConversationId, PublicIdentity, Option<String>)> = {
+            self.historical_dm_peers()
                 .into_iter()
                 .filter(|p| {
-                    let a = p.account_id.as_deref();
-                    a == Some(peer_account_id)
-                        || (a == Some(my_account.as_str()) && p.public.user_id() != me)
+                    let account = p.account_id();
+                    account.as_deref() == Some(peer_account_id)
+                        || (account.as_deref() == Some(my_account.as_str())
+                            && p.public().user_id() != me)
                 })
                 .map(|p| {
+                    let public = p.public();
                     (
-                        dm_conversation_id(&self.identity.public(), &p.public),
-                        p.public.x25519_pub,
-                        p.account_id.clone(),
+                        dm_conversation_id(&self.identity.public(), &public),
+                        public,
+                        p.account_id(),
                     )
                 })
                 .collect()
         };
         let mut decoded: Vec<(String, u64, ReactionPayload)> = Vec::new();
-        for (conv, author_x, peer_account) in convs {
+        for (conv, author, peer_account) in convs {
             let react_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
                 log.events(&conv)
@@ -131,13 +177,22 @@ impl Node {
                     .collect()
             };
             for event in &react_events {
-                let Ok(pt) = crate::dm::open(&self.identity, &author_x, &event.ciphertext) else {
+                if event.author.ed25519_pub() != &author.ed25519_pub {
+                    continue;
+                }
+                let Ok(pt) = crate::dm::open(&self.identity, &author.x25519_pub, &event.ciphertext)
+                else {
                     continue;
                 };
                 if let Some(env) = ReactionEnvelope::decode(&pt) {
                     // Bind the claimed sender account to the peer whose sealed-box key
                     // just authenticated this reaction — no spoofing another account.
-                    if peer_account.as_deref() != Some(env.route.sender_account.as_str()) {
+                    if peer_account.as_deref() != Some(env.route.sender_account.as_str())
+                        || account_conversation_id(
+                            &env.route.sender_account,
+                            &env.route.recipient_account,
+                        ) != account_conversation_id(&my_account, peer_account_id)
+                    {
                         continue;
                     }
                     decoded.push((
@@ -175,6 +230,20 @@ impl Node {
         emoji: &str,
         remove: bool,
     ) -> Result<(), NodeError> {
+        self.react_channel_if(channel, target, emoji, remove, |accept| accept())
+            .await
+    }
+
+    /// Authorize the synchronous durable acceptance before performing network I/O.
+    pub async fn react_channel_if(
+        &self,
+        channel: ConversationId,
+        target: EventId,
+        emoji: &str,
+        remove: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
         let payload = ReactionPayload {
             target,
             emoji: emoji.to_string(),
@@ -196,7 +265,10 @@ impl Node {
         let sealed =
             crate::node::channel::SealedPayload::seal(&self.identity, &members, &payload.encode())
                 .map_err(|e| NodeError::Channel(format!("reaction seal failed: {e}")))?;
-        self.append_event(channel, EventKind::React, sealed.encode())?;
+        authorize(&mut || {
+            self.append_event(channel, EventKind::React, sealed.encode())?;
+            Ok(())
+        })?;
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -218,18 +290,6 @@ impl Node {
                 .cloned()
                 .collect()
         };
-        // Cache by React-event count (add-only per conversation, so a sound version stamp):
-        // on a hit we skip re-decrypting every React event.
-        let version = react_events.len();
-        if let Some((v, cached)) = self
-            .reaction_cache
-            .lock()
-            .expect("reaction_cache mutex not poisoned")
-            .get(&conv)
-            && *v == version
-        {
-            return cached.clone();
-        }
         let is_channel = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.state(&conv).is_some()
@@ -253,10 +313,15 @@ impl Node {
                     .and_then(|author_x| sealed.open(&self.identity, &author_x))
             } else {
                 let author_uid = event.author.user_id();
-                let sender_x25519 = {
-                    let roster = self.roster.lock().expect("roster mutex not poisoned");
-                    roster.get(&author_uid).map(|p| p.public.x25519_pub)
-                };
+                let sender_x25519 = self
+                    .historical_dm_peers()
+                    .into_iter()
+                    .map(|proof| proof.public())
+                    .find(|public| {
+                        public.user_id() == author_uid
+                            && dm_conversation_id(&self.identity.public(), public) == conv
+                    })
+                    .map(|public| public.x25519_pub);
                 sender_x25519
                     .and_then(|x| crate::dm::open(&self.identity, &x, &event.ciphertext).ok())
             };
@@ -277,12 +342,7 @@ impl Node {
                 }
             }
         }
-        let result = aggregate(&decoded);
-        self.reaction_cache
-            .lock()
-            .expect("reaction_cache mutex not poisoned")
-            .insert(conv, (version, result.clone()));
-        result
+        aggregate(&decoded)
     }
 
     /// Record one of OUR OWN reactions (sealed to the peer, so un-openable from our log)
@@ -291,21 +351,67 @@ impl Node {
     /// beats an `add` — so the map matches `aggregate`'s per-author max-reduction and
     /// stays bounded by the number of distinct (conv, target, emoji) keys (no per-toggle
     /// growth, no linear scan blow-up).
-    fn record_my_reaction(&self, conv: ConversationId, wall: u64, payload: ReactionPayload) {
-        let key = (conv, payload.target, payload.emoji.clone());
-        let mut map = self
-            .my_dm_reactions
+    fn record_my_reaction(
+        &self,
+        conv: ConversationId,
+        wall: u64,
+        payload: ReactionPayload,
+    ) -> Result<(), NodeError> {
+        self.my_dm_reactions
             .lock()
-            .expect("my_dm_reactions mutex not poisoned");
-        match map.get(&key) {
-            // Newer wins; on an exact wall-clock tie a remove wins (matches `aggregate`).
-            Some((cur_wall, _)) if wall > *cur_wall || (wall == *cur_wall && payload.remove) => {
-                map.insert(key, (wall, payload));
-            }
-            Some(_) => {}
-            None => {
-                map.insert(key, (wall, payload));
-            }
+            .expect("my_dm_reactions mutex not poisoned")
+            .record(conv, wall, payload)
+            .map_err(NodeError::Log)
+    }
+}
+
+#[cfg(test)]
+mod acceptance_tests {
+    use super::*;
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn rejected_reaction_append_does_not_create_durable_projection() {
+        for account_level in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let own = DeviceIdentity::generate();
+            let peer = DeviceIdentity::generate();
+            let peer_account = Account::generate();
+            let proof = Announce::new_with_account(&peer, &peer_account, "peer", 1);
+            let (node, _, _) = super::super::test_support::node_with_files(
+                dir.path(),
+                own,
+                Account::generate(),
+                &proof,
+            );
+            let conv = dm_conversation_id(&node.identity.public(), &peer.public());
+            node.log
+                .lock()
+                .unwrap()
+                .append(Event::new(
+                    &peer,
+                    conv,
+                    1,
+                    vec![],
+                    u64::MAX,
+                    now_millis(),
+                    EventKind::Message,
+                    vec![],
+                ))
+                .unwrap();
+            let target = EventId::new([7; 32]);
+            let result = if account_level {
+                node.react_to_account(&peer_account.account_id(), target, "👍", false)
+                    .await
+            } else {
+                node.react_dm(&peer.user_id(), target, "👍", false).await
+            };
+            assert!(matches!(
+                result,
+                Err(NodeError::Log(crate::eventlog::LogError::ClockExhausted))
+            ));
+            assert_eq!(node.my_dm_reactions.lock().unwrap().len(), 0);
         }
     }
 }

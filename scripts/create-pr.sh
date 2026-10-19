@@ -48,9 +48,10 @@ case "$base_ref" in
 esac
 git check-ref-format --branch "$pr_base" >/dev/null
 
+base_sha="$(git rev-parse --verify "$base_ref")"
 candidate="$(git rev-parse HEAD)"
-"$repo_root/scripts/pr-preflight.sh" ${preflight_args[@]+"${preflight_args[@]}"}
-if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ]; then
+"$repo_root/scripts/prepare-pr.sh" ${preflight_args[@]+"${preflight_args[@]}"}
+if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ] || [ "$(git rev-parse --verify "$base_ref")" != "$base_sha" ]; then
     echo "The candidate changed during preflight. Verify the new revision before creating its PR." >&2
     exit 1
 fi

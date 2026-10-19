@@ -1,3 +1,4 @@
+import { StickerThumb } from "./StickerThumb";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposerImagePreview } from "./ComposerImagePreview";
 import { AnimatePresence, motion } from "framer-motion";
@@ -89,101 +90,6 @@ const panelVariants = {
   }),
 };
 
-function useReducedMotion() {
-  const [reduced, setReduced] = useState(false);
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => setReduced(media.matches);
-    update();
-    media.addEventListener?.("change", update);
-    return () => media.removeEventListener?.("change", update);
-  }, []);
-  return reduced;
-}
-
-function StickerThumb({
-  src,
-  alt,
-  fallback,
-}: {
-  src: string;
-  alt: string;
-  fallback: string;
-}) {
-  const reducedMotion = useReducedMotion();
-  const [thumb, setThumb] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!reducedMotion || !src) return;
-    let active = true;
-    setThumb(null);
-
-    void (async () => {
-      try {
-        const blob = await fetch(src).then((res) => res.blob());
-        const bitmap = await createImageBitmap(blob);
-        const canvas = document.createElement("canvas");
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) {
-          bitmap.close();
-          return;
-        }
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close();
-        if (active) setThumb(canvas.toDataURL("image/webp"));
-      } catch {
-        if (active) setThumb(null);
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [reducedMotion, src]);
-
-  return !src ? (
-    <div
-      className="flex h-12 w-12 items-center justify-center text-2xl leading-none"
-      aria-hidden="true"
-    >
-      {fallback}
-    </div>
-  ) : reducedMotion ? (
-    thumb ? (
-      <img
-        src={thumb}
-        alt={alt}
-        loading="eager"
-        decoding="async"
-        width={48}
-        height={48}
-        className="h-12 w-12"
-        draggable={false}
-      />
-    ) : (
-      <div
-        className="flex h-12 w-12 items-center justify-center text-2xl leading-none"
-        aria-hidden="true"
-      >
-        {fallback}
-      </div>
-    )
-  ) : (
-    <img
-      src={src}
-      alt={alt}
-      loading="lazy"
-      decoding="async"
-      width={48}
-      height={48}
-      className="h-12 w-12"
-      draggable={false}
-    />
-  );
-}
-
 export function Composer({
   onSend,
   admissionPending = false,
@@ -203,7 +109,7 @@ export function Composer({
   prefill,
   onSendSticker,
   onImage,
-  expiryDurationMs = 300_000,
+  expiryDurationMs = null,
   onExpiryDurationChange,
 }: {
   onSend: (text: string) => boolean | Promise<boolean>;

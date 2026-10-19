@@ -3,9 +3,10 @@
 During feature development, run the smallest tests that cross the changed
 boundary. The pre-commit hook checks staged whitespace and source formatting;
 it does not launch test suites. Record the focused commands and results in the
-PR. Before opening a PR, run `make test` and `./scripts/pr-preflight.sh` with
-the relevant Playwright specs. Run `./scripts/check-health.sh` before requesting
-review. CI also runs the comprehensive suites. Run backend or full UI E2E sooner
+PR. Before opening or updating a PR, commit the candidate and run
+`./scripts/prepare-pr.sh` with affected Rust selectors and Playwright specs.
+It runs affected platform preflight, followed by full health (including
+`make test`'s workspace test stage); `create-pr.sh` invokes it automatically before publication. CI also runs the comprehensive suites. Run backend or full UI E2E sooner
 when explicitly requested or when the changed behavior needs process/browser
 evidence.
 
@@ -23,6 +24,88 @@ package plus either a filter or an integration target, so an omitted selector
 cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
+
+## Change-aware development plans
+
+Use the affected-test planner during development:
+
+```bash
+make test-plan
+make test-changed
+# Include committed changes since a comparison branch, plus current edits:
+node scripts/validation/changed.mjs --base origin/main --json
+```
+
+The default comparison is `HEAD`, so staged, unstaged and untracked edits are
+included. An explicit base uses its merge base with HEAD and includes committed
+changes since then. Deleted files remain selection inputs; renames are treated
+as deletion plus addition. Preview reads source/contracts only: it does not
+compile, start browsers or run tests. It exits with status 2 when selection is
+blocked. `--json` emits the same plan as structured data for agents.
+
+`validation.json` files beside each Rust crate, `src-tauri/`, `frontend/` and the
+validation tooling own focused selectors, explicit downstream consumers and
+escalation notes. Paths are repository-relative exact names or prefixes ending
+in `/`; IDs are unique across contracts. Consumer links expand transitively and
+selected Rust filters are combined per package. Add shared fixture consumers at
+the owner's contract rather than copying selection rules into callers. Contract
+changes themselves select the planner's regression tests.
+
+Frontend selection also follows transitive source imports, type imports,
+re-exports, literal dynamic imports and literal Vitest mocks. It includes all
+importing unit tests and retains former edges for changed/deleted source. The
+registered unit-file convention is `src/**/*.test.ts`, matching Vite. Tests that
+share an imported fixture therefore run together. Runtime IPC/events, computed
+imports, glob discovery and configuration dependencies cannot be established
+completely through static imports. Computed discovery produces an escalation
+note; review runtime wiring and select browser/native evidence where needed.
+
+Automatic Rust contracts initially cover account-profile ownership, desktop
+session/admission and integration/MCP boundaries. Integration policy expands
+through its service, host, IPC, client and desktop/MCP consumers. Most other core
+modules have **explicit-selection-only** IDs such as `core-transport`: their
+public Node/host consumers need a contextual decision. Shared configuration,
+lockfiles, CLI entry points, unassigned fixtures and other unmapped changes block
+execution. Extend the owning contract or explicitly select all affected owners
+and explain the decision:
+
+```bash
+node scripts/validation/changed.mjs \
+  --owner core-transport --owner desktop-session \
+  --reason "Reviewed transport consumers; this change affects session retirement" \
+  --run
+```
+
+An explicit selection acknowledges every otherwise unmapped path, so inspect the
+preview first. The plan preserves those paths and the reason for review. This is
+a developer decision, not evidence that all dependencies have been inferred.
+Contracts with no executable tests (including after consumer expansion), invalid
+references and missing registered test files fail rather than producing a pass.
+
+Execution uses existing cross-worktree stage locks and keeps child processes
+within its cancellation group, with a 30-minute overall queue/run deadline. Rust
+compilation uses the shared heavy lock; focused frontend and Node checks use
+separate locks so they do not queue behind a full browser gate. If edits change
+the required resource class while queued, execution fails and requires a new plan.
+It compiles only selected Rust library targets, checks every filter against actual nonignored test names before running
+any tests, and invokes each test binary once with the combined filters. It never
+automatically enables ignored tests or launches workspace/E2E suites. Each Node
+diagnostic must run passing tests; every selected Vitest file must report at
+least one passing assertion. Output separates Cargo compilation/inventory from
+test execution time; existing stage logs retain queue time and overall duration.
+
+For parallel agents, assign one module owner and its focused plan to each agent.
+After combining their changes, one integration owner reruns the combined plan
+and the applicable mandatory gates. Reuse remains limited to the existing clean,
+revision-bound evidence policy; dirty edits never create reusable success.
+
+This command selects development tests, not static checks or release evidence.
+Run affected formatting/lint/type checks separately. Expand validation for public
+interface, persistence, crypto, authorization, browser and native behavior changes,
+using the boundary table above. Existing PR preflight, full-health, protected CI
+and release obligations remain unchanged. Compare median/p95 feedback latency,
+compile time, resource queue time, first-attempt failures and defects caught only
+by broader tests before claiming a speedup.
 
 ## Local evidence reuse and resource ownership
 
@@ -75,7 +158,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, cache cleanup shell regressions on Linux/macOS/Windows                                                                                        |
+| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, dependency audits on Linux/macOS/Windows                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; Linux Rust/E2E coverage and eval smoke |
 | `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, lite checks, portable browser matrices and scheduled extended scenarios                                                                       |
@@ -134,9 +217,13 @@ Commit the candidate and use the repository's PR entry point:
 ```
 
 Arguments before `--` select tests; arguments after it go to `gh pr create`.
-Use filters and browser specs relevant to your change. Core and host filters
-can be repeated; a changed Rust crate requires at least one corresponding
-filter. Use `--core-test decoder_smoke` to select a nonignored core integration
+Use filters and browser specs relevant to your change. Core, host, integration and MCP filters can be repeated. Use
+`--integration-filter policy::` and `--mcp-filter tests::` for the two integration
+crates; a changed Rust crate requires its corresponding filter. Shared Cargo,
+toolchain or Clippy configuration requires selections for all four crates.
+Examples, benchmarks, package configuration and Tauri build inputs also select
+their owning package. Each selected guest package runs Clippy with
+`--all-targets -- -D warnings` before its focused tests. Use `--core-test decoder_smoke` to select a nonignored core integration
 target instead of a library filter. A selector matching zero tests fails rather than producing misleading
 evidence. This selects unit tests and explicitly named browser scenarios; it
 does not automatically launch the full workspace, ignored process rigs, or
@@ -149,7 +236,11 @@ workflow-only diagnostic plan does not install frontend dependencies.
 Verification archives suppress export substitutions and text/filter conversions
 in private Git metadata so the archived bytes match the committed source.
 
-Frontend changes require affected browser specs. Frontend unit coverage is a shared local stage; the two platform guests do not repeat
+Frontend changes require affected browser specs. Owning `prScenarios` rules in
+`validation.json` add required visual specs automatically, so an unrelated
+explicit spec cannot replace shell/layout/theme evidence. The plan preview
+shows the selected scenario owners and required native platforms. Renames
+include both old and new paths. Frontend unit coverage is a shared local stage; the two platform guests do not repeat
 the whole frontend unit suite. To target another PR base, pass
 `--base origin/release` before `--`; the wrapper uses that same base for
 change selection, coverage and `gh pr create --base release`. A local revision
@@ -175,8 +266,9 @@ preserves that directory's registry and network configuration without logging
 its contents. Otherwise, Cargo uses the isolated D: cache. Source, build
 output, browser downloads and temporary directories remain isolated.
 
-For an existing PR, run `scripts/pr-preflight.sh` directly before pushing the
-candidate. After a broader run has produced evidence, a focused follow-up can
+For an existing PR, run `scripts/prepare-pr.sh` before pushing the candidate.
+Use `scripts/pr-preflight.sh` alone for focused platform investigation; it does
+not certify the complete publication gate. After a broader run has produced evidence, a focused follow-up can
 use `--base <previous-candidate>` with the tests affected by the delta. Retain
 the earlier reports and record both revisions, the comparison base, remaining
 failures and exact test scope in the PR. Shared fixture changes require all
@@ -193,17 +285,17 @@ node scripts/pr-platform/run.mjs --plan \
   e2e/ui-visual-regression.spec.ts
 ```
 
-| Setting                            | Default / purpose                                                                                            |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                      |
-| `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D |
-| `MESH_PR_LINUX_HOST` | Optional SSH host, such as `mac2015`, to run Docker remotely; unset keeps local Docker. |
-| `MESH_PR_LINUX_PLATFORM` | Optional `linux/amd64` or `linux/arm64`; remote Docker defaults to `linux/amd64` and rejects mismatched guest architecture. |
-| `MESH_PR_LINUX_DOCKER` | Remote Docker executable; defaults to `/Applications/Docker.app/Contents/Resources/bin/docker`. |
-| `MESH_PR_LINUX_ROOT` | Remote temporary source/evidence root; defaults to `/tmp/mesh-talk-pr-preflight`. |
-| `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`           |
-| `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                     |
-| `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                 |
+| Setting                            | Default / purpose                                                                                                           |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `MESH_PR_WINDOWS_HOST`             | `windows10`; an SSH host with noninteractive access, Rust, Node and Git tools available                                     |
+| `MESH_PR_WINDOWS_ROOT`             | `D:/MeshTalk/PRPreflight`; Windows source, caches, browser downloads and temporary data must stay on drive D                |
+| `MESH_PR_LINUX_HOST`               | Optional SSH host, such as `mac2015`, to run Docker remotely; unset keeps local Docker.                                     |
+| `MESH_PR_LINUX_PLATFORM`           | Optional `linux/amd64` or `linux/arm64`; remote Docker defaults to `linux/amd64` and rejects mismatched guest architecture. |
+| `MESH_PR_LINUX_DOCKER`             | Remote Docker executable; defaults to `/Applications/Docker.app/Contents/Resources/bin/docker`.                             |
+| `MESH_PR_LINUX_ROOT`               | Remote temporary source/evidence root; defaults to `/tmp/mesh-talk-pr-preflight`.                                           |
+| `MESH_PR_DOCKER_IMAGE`             | Optional prepared image override; the default image is built from `scripts/pr-platform/Dockerfile`                          |
+| `MESH_PR_PLATFORM_TIMEOUT_SECONDS` | `1800`; platform execution limit, not a protocol timeout                                                                    |
+| `PATCH_COVERAGE_BASE` / `--base`   | `origin/main`; the comparison base for changed-file planning                                                                |
 
 To run native Linux amd64 containers on the Intel Mac while preparing a PR:
 
@@ -246,7 +338,7 @@ so the platform checks are part of the normal workflow. GitHub branch
 protection remains the final enforcement for CI; a local script cannot
 intercept arbitrary GitHub CLI or website actions.
 
-The current two-crate Rust workspace already separates protocol logic from
+The current four-crate Rust workspace separates protocol logic from
 the Tauri host. Within the core, `node/node.rs` still coordinates many domain
 modules; keep moving bounded parsing and state transitions behind narrow
 module interfaces so `--lib <module>` reaches them. In the host, ownership
@@ -263,6 +355,64 @@ tests after every small edit; run the focused test during the loop, then the
 appropriate static check and final gates at the triggers above. Do not change
 the CI commands or the explicit `make test`, `make e2e`, and health-check
 entries: they provide the comprehensive evidence for review and release.
+
+## Native requirements and publication evidence
+
+The owning core and desktop sidecars require native acceptance for discovery,
+process/session lifecycle and OS-specific UI boundaries. `host` resolves to the
+preparing OS. Additional `darwin`, `win32` or `linux` entries require evidence
+from each named platform; one platform cannot stand in for another. These rules
+are maintained acceptance boundaries, not exhaustive dependency inference.
+Review escalation notes and add owning rules when new runtime boundaries appear.
+
+Run the existing native runner from an unchanged, clean committed checkout with
+an unlocked desktop. Build its current binaries first:
+
+```bash
+cd frontend && npm ci && cd ..
+node scripts/validation/native-build.mjs
+node scripts/diagnostics/hidden-contacts.mjs
+MESH_PR_NATIVE_REPORTS='["target/hidden-contacts-native/report.json"]' \
+  ./scripts/prepare-pr.sh --host-filter owner_scoped_node_handle
+```
+
+Linux needs the display/session prerequisites documented in
+[platform validation](platform-validation.md) and the native CI workflow. The
+current native harness runs its complete acceptance scenario set; there is no
+claim that it supports per-scenario filtering. It runs only when the selected
+boundary requires it. Keep reports and all referenced JSON, PNG and log files
+together; paths are supplied as a JSON array to preserve spaces. Preparation
+revalidates real native observations, artifact hashes, platform, source SHA and
+the runner's clean-source observation and verified build provenance.
+The build helper pins the committed source and hashes the frontend assets and
+actual binaries. A clean checkout alone cannot certify previously built binaries. Cargo executable
+records must match the hashed paths; redirected `build.target` output is rejected
+rather than allowing old default-path binaries to be stamped as current. Old reports lacking that observation
+must be regenerated. Missing environments or evidence block preparation before
+heavy health/platform work; they never become a pass. Direct platform execution
+also verifies native requirements; `--plan` only previews them.
+
+Preparation runs the outer affected platform preflight before the comprehensive
+health gate, catching selected platform failures sooner. It forces full health
+mode even when `FAST=1` is inherited. Cheap formatting, ESLint and TypeScript checks run
+before diagnostic suites and native compilation. Existing successful stages can
+be reused under their source/tool/configuration and artifact checks; full health
+and platform evidence remain distinct. HEAD, working tree and comparison ref
+must remain stable. Hosted CI still verifies its complete matrices and external
+security policy; local success does not certify every hosted environment.
+
+For parallel agent work, one integration owner collects changes, reviews shared
+interfaces, prepares the combined candidate and pushes it. Individual agents
+commit locally and report focused tests. After a CI failure, reproduce the
+failure and run affected neighboring checks before publishing a coherent fix.
+Do not push each intermediate attempt. Keep failure evidence in untracked output
+or PR artifacts, not historical reports in the repository.
+
+Measure first-attempt PR success, corrective pushes per PR, time to the first
+actionable failure and runner minutes per merged PR. Classify failures as code,
+scenario/fixture, platform/environment or external service before deciding
+whether an earlier check or a harness correction is appropriate. Retain the
+existing cancellation, sharding and comprehensive CI gates.
 
 ## Explicit physical network acceptance
 

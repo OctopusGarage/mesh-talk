@@ -286,8 +286,9 @@ impl ChannelBook {
             .get(&(channel, member.to_string()))
             .is_none_or(|(_, _, enabled)| *enabled)
     }
-    /// Replay only signed membership controls. This keeps late-invite pending
-    /// reconstruction and admission checks on the same causal leave rules.
+    /// Replay signed channel metadata without opening sender keys or messages.
+    /// Late-invite reconstruction, admission and archived summaries share these
+    /// membership/ownership/terminal-state rules.
     fn membership_view(
         channel_id: ConversationId,
         events: &[&Event],
@@ -298,6 +299,9 @@ impl ChannelBook {
         let mut departures: Vec<(String, EventId)> = Vec::new();
         for event in events {
             if before == Some(event.id) {
+                break;
+            }
+            if prior.as_ref().is_some_and(ChannelState::is_dissolved) {
                 break;
             }
             let author = event.author.user_id();
@@ -360,6 +364,22 @@ impl ChannelBook {
                         prior = Some(state);
                     }
                 }
+                EventKind::ChannelRename => {
+                    if let Some(state) = prior.as_mut()
+                        && author == state.owner()
+                        && let Ok(name) = std::str::from_utf8(&event.ciphertext)
+                    {
+                        state.apply_rename(name, event.lamport, event.id);
+                    }
+                }
+                EventKind::ChannelDissolve => {
+                    if event.ciphertext.is_empty()
+                        && let Some(state) = prior.as_mut()
+                        && author == state.owner()
+                    {
+                        state.dissolve();
+                    }
+                }
                 EventKind::ChannelAccept => {
                     if event.ciphertext.is_empty()
                         && let Some(state) = prior.as_mut()
@@ -389,20 +409,29 @@ impl ChannelBook {
         (prior, departures)
     }
 
-    /// Current members from the validated event DAG, without decrypting or
-    /// surfacing message content. Used for connection admission decisions.
-    pub fn projected_members(
+    /// Channel metadata from the validated event DAG. This intentionally creates
+    /// no sender/receiver chains and can project a recovery archive for a device
+    /// which is not itself a member.
+    pub(super) fn projected_metadata(
         channel_id: ConversationId,
         events: &[&Event],
-    ) -> Option<Vec<PublicIdentity>> {
+    ) -> Option<ChannelState> {
         let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
         let order = super::timeline::ordered_ids(events, &[], true);
         let ordered: Vec<_> = order
             .iter()
             .filter_map(|id| by_id.get(id).copied())
             .collect();
-        let (state, _) = Self::membership_view(channel_id, &ordered, None, &by_id);
-        state.map(|state| state.members().to_vec())
+        Self::membership_view(channel_id, &ordered, None, &by_id).0
+    }
+
+    /// Current members from the validated event DAG, without decrypting or
+    /// surfacing message content. Used for connection admission decisions.
+    pub fn projected_members(
+        channel_id: ConversationId,
+        events: &[&Event],
+    ) -> Option<Vec<PublicIdentity>> {
+        Self::projected_metadata(channel_id, events).map(|state| state.members().to_vec())
     }
 
     pub fn new() -> Self {
@@ -927,7 +956,7 @@ mod tests {
         kind: EventKind,
         ciphertext: Vec<u8>,
     ) {
-        let (parents, lamport) = log.prepare(&channel);
+        let (parents, lamport) = log.prepare(&channel).unwrap();
         let self_author = Author::from_ed25519(author.public().ed25519_pub);
         let seq = log
             .version_vector(&channel)

@@ -22,6 +22,7 @@ pub mod chat_commands;
 pub mod commands;
 pub mod config_store;
 pub mod contact_policy;
+mod desktop_session;
 pub mod diagnostics;
 mod easytier_discovery;
 pub mod events;
@@ -220,23 +221,12 @@ pub fn run_tauri_configured(
                 tauri::async_runtime::spawn(async move {
                     use tauri::Manager;
                     loop {
-                        let active = app_handle.state::<SettingsState>().active_retention();
-                        if let Some((owner, cutoff)) = active.and_then(|(owner, days)| {
-                            crate::settings::retention_cutoff_ms(days).map(|cutoff| (owner, cutoff))
-                        }) {
-                            let node = {
-                                let node_state =
-                                    app_handle.state::<crate::chat_commands::NodeState>();
-                                let app_state = app_handle.state::<crate::state::AppState>();
-                                node_state.node_for_owner(app_state.session(), &owner).await
-                            };
-                            if let Some(node) = node {
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    node.prune_older_than(cutoff)
-                                })
-                                .await;
-                            }
-                        }
+                        crate::settings::prune_running_settings(
+                            &app_handle.state::<crate::state::AppState>(),
+                            &app_handle.state::<crate::chat_commands::NodeState>(),
+                            &app_handle.state::<SettingsState>(),
+                        )
+                        .await;
                         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                     }
                 });

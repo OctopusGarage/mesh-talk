@@ -8,9 +8,9 @@ DM/group paths. AI execution stays in your agent application.
 The service exposes private local IPC and four MCP tools. It does not expose
 chat history, run models, or open an HTTP webhook endpoint. Interactive event
 subscriptions, portable bot badges, cards, remote MCP/OAuth and incoming HTTP
-webhooks remain follow-up stages in the [architecture proposal](bot-mcp-architecture-research.md).
-The [source research](bot-mcp-source-research.md) compares Feishu/Lark's bot model
-and records the MCP compatibility baseline.
+webhooks remain outside the current implementation. Future adapters must reuse
+the scoped integration service and core delivery journal; they must not own mesh
+cryptography or introduce a second sending path.
 
 ## Build
 

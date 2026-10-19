@@ -5,8 +5,8 @@
 //! `tauri-plugin-autostart` (the source of truth is the OS launch-agent), so the
 //! frontend reads/writes it through the plugin's own enable/disable/is-enabled.
 
-use crate::commands::CommandError;
 use crate::config_store;
+use crate::{commands::CommandError, runtime_admission::RuntimeAdmission};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -287,6 +287,7 @@ pub fn retention_cutoff_ms(days: u32) -> Option<u64> {
 
 #[derive(Default)]
 struct SettingsRuntime {
+    revision: u64,
     global: GlobalSettings,
     owner: Option<String>,
     current: AppSettings,
@@ -296,17 +297,47 @@ struct SettingsRuntime {
 #[derive(Clone, Default)]
 pub struct SettingsState(
     Arc<Mutex<SettingsRuntime>>,
+    Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)] Option<std::path::PathBuf>,
 );
 
 impl SettingsState {
     #[cfg(test)]
     pub(crate) fn isolated(path: std::path::PathBuf) -> Self {
-        Self(Arc::new(Mutex::new(SettingsRuntime::default())), Some(path))
+        Self(
+            Arc::new(Mutex::new(SettingsRuntime::default())),
+            Arc::default(),
+            Some(path),
+        )
     }
+    fn snapshot(&self, owner: &str) -> Result<(u64, AppSettings), CommandError> {
+        let inner = self.0.lock().unwrap();
+        if inner.owner.as_deref() != Some(owner) {
+            return Err(CommandError::Authorization(
+                "settings owner mismatch".into(),
+            ));
+        }
+        Ok((inner.revision, inner.current.clone()))
+    }
+
+    /// Hold the current revision through the synchronous destructive commit.
+    fn commit_current<T>(
+        &self,
+        owner: &str,
+        revision: u64,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        let inner = self.0.lock().unwrap();
+        if inner.owner.as_deref() != Some(owner) || inner.revision != revision {
+            return Err(CommandError::Authorization("settings superseded".into()));
+        }
+        operation()
+    }
+
     pub fn get(&self) -> AppSettings {
         self.0.lock().unwrap().current.clone()
     }
+    #[cfg(test)]
     pub(crate) fn active_retention(&self) -> Option<(String, u32)> {
         let inner = self.0.lock().unwrap();
         inner
@@ -316,6 +347,7 @@ impl SettingsState {
     }
     pub fn set(&self, value: AppSettings) {
         let mut inner = self.0.lock().unwrap();
+        inner.revision += 1;
         inner.global = GlobalSettings::from(&value);
         inner.owner = None;
         inner.current = value;
@@ -330,12 +362,14 @@ impl SettingsState {
     fn activate_at(&self, owner: &str, path: &std::path::Path) {
         let account: AccountSettings = config_store::read_account(path);
         let mut inner = self.0.lock().unwrap();
+        inner.revision += 1;
         inner.current = account.with_global(&inner.global);
         inner.owner = Some(owner.to_owned());
     }
 
     pub(crate) fn deactivate(&self) {
         let mut inner = self.0.lock().unwrap();
+        inner.revision += 1;
         inner.owner = None;
         inner.current = AccountSettings::default().with_global(&inner.global);
     }
@@ -361,6 +395,7 @@ impl SettingsState {
                 "settings owner mismatch".into(),
             ));
         }
+        inner.revision += 1;
         inner.global.minimize_to_tray = settings.minimize_to_tray;
         inner.global.stay_signed_in = settings.stay_signed_in;
         inner.global.last_user = settings.last_user.clone();
@@ -375,6 +410,7 @@ impl SettingsState {
                 "settings owner required".into(),
             ));
         }
+        inner.revision += 1;
         inner.global.minimize_to_tray = settings.minimize_to_tray;
         inner.global.stay_signed_in = settings.stay_signed_in;
         inner.global.last_user = settings.last_user;
@@ -417,7 +453,7 @@ pub fn record_last_user<R: tauri::Runtime>(
     inner.global.last_user = last_user.clone();
     inner.current.last_user = last_user;
     #[cfg(test)]
-    if let Some(path) = state.1.as_ref() {
+    if let Some(path) = state.2.as_ref() {
         std::fs::write(path, serde_json::to_vec(&inner.global).unwrap()).unwrap();
         return;
     }
@@ -472,43 +508,130 @@ fn preserve_login_bookkeeping(
     (settings, clear_user)
 }
 
-/// Apply the persisted relay preferences in the same order at startup and after a save.
-pub(crate) async fn apply_relay_settings(
-    node: &mesh_talk_core::node::Node,
+/// Apply relay policy only while its originating session and persisted revision
+/// still authorize each commit, including after the asynchronous privacy gate.
+async fn apply_relay_settings(
+    runtime: &mesh_talk_core::node::NodeRuntime,
+    admission: &RuntimeAdmission,
+    state: &SettingsState,
+    owner: &str,
+    revision: u64,
     settings: &AppSettings,
-) -> Result<(), &'static str> {
-    node.set_post_office_permissions(
-        settings.post_office_send_enabled,
-        settings.post_office_receive_enabled,
-    );
-    node.set_post_office_enabled(settings.post_office_enabled);
-    node.set_physical_lan_only(settings.physical_lan_only).await;
-    let hub_result = node.set_bridge_hub_id(
-        (!settings.bridge_hub_id.is_empty()).then_some(settings.bridge_hub_id.as_str()),
-    );
-    node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
-    hub_result
+) -> Result<(), CommandError> {
+    let node = runtime.handle();
+    node.set_physical_lan_only_if(settings.physical_lan_only, |commit| {
+        admission.authorize_io(runtime, &mut || {
+            state
+                .commit_current(owner, revision, || Ok(commit()))
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+                })?
+        })
+    })
+    .await
+    .map_err(|error| CommandError::Authorization(error.to_string()))?;
+    admission.checked(runtime, || {
+        state.commit_current(owner, revision, || {
+            node.set_post_office_permissions(
+                settings.post_office_send_enabled,
+                settings.post_office_receive_enabled,
+            );
+            node.set_post_office_enabled(settings.post_office_enabled);
+            node.set_bridge_hub_id(
+                (!settings.bridge_hub_id.is_empty()).then_some(settings.bridge_hub_id.as_str()),
+            )
+            .map_err(|error| CommandError::InvalidInput(error.into()))?;
+            node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
+            Ok(())
+        })
+    })?;
+    Ok(())
 }
 
-/// Apply one durable settings document to the current account's runtime.
-/// Retention gets a fresh owner check after relay application because the
-/// session or runtime may change before blocking prune work is scheduled.
+/// Startup shares the same application serialization and commit authority as saves.
+pub(crate) async fn apply_startup_settings(
+    admission: RuntimeAdmission,
+    state: SettingsState,
+) -> Result<(), CommandError> {
+    let owner = admission.lease().owner().to_owned();
+    let (revision, settings) = state.snapshot(&owner)?;
+    let serialization = state.1.clone().lock_owned().await;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let _serialization = serialization;
+                apply_relay_settings(runtime, admission, &state, &owner, revision, &settings).await
+            })
+        })
+        .await
+}
+
+/// Applications are serialized; each commit checks the latest persisted revision
+/// under its originating runtime/session lease. Blocking prune owns that runtime.
 async fn apply_running_settings(
-    node_state: &crate::chat_commands::NodeState,
-    session: &crate::state::SessionState,
-    owner: &str,
-    settings: &AppSettings,
+    admission: RuntimeAdmission,
+    state: SettingsState,
+    owner: String,
+    revision: u64,
+    settings: AppSettings,
+) -> Result<(), CommandError> {
+    let serialization = state.1.clone().lock_owned().await;
+    let prune_state = state.clone();
+    let prune_owner = owner.clone();
+    let prune_settings = settings.clone();
+    // The detached task owns both lifecycle and application serialization if the IPC is cancelled.
+    let prune_admission = admission.clone();
+    let serialization = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                apply_relay_settings(runtime, admission, &state, &owner, revision, &settings)
+                    .await?;
+                Ok(serialization)
+            })
+        })
+        .await?;
+    let Some(cutoff) = retention_cutoff_ms(prune_settings.retention_days) else {
+        return Ok(());
+    };
+    prune_admission
+        .blocking(move |runtime, _| {
+            let _serialization = serialization;
+            prune_state.commit_current(&prune_owner, revision, || {
+                runtime
+                    .prune_older_than(cutoff)
+                    .map(|_| ())
+                    .map_err(CommandError::from)
+            })
+        })
+        .await
+}
+
+pub(crate) async fn prune_running_settings(
+    app: &crate::state::AppState,
+    node: &crate::chat_commands::NodeState,
+    state: &SettingsState,
 ) {
-    if let Some(node) = node_state.node_for_owner(session, owner).await {
-        apply_relay_settings(&node, settings)
-            .await
-            .expect("settings fingerprint validated before persistence");
-    }
-    if let Some(cutoff) = retention_cutoff_ms(settings.retention_days)
-        && let Some(node) = node_state.node_for_owner(session, owner).await
-    {
-        let _ = tokio::task::spawn_blocking(move || node.prune_older_than(cutoff)).await;
-    }
+    let Ok(admission) = RuntimeAdmission::capture_current(app, node) else {
+        return;
+    };
+    let owner = admission.lease().owner().to_owned();
+    let Ok((revision, settings)) = state.snapshot(&owner) else {
+        return;
+    };
+    let Some(cutoff) = retention_cutoff_ms(settings.retention_days) else {
+        return;
+    };
+    let state = state.clone();
+    let _ = admission
+        .blocking(move |runtime, _| {
+            state.commit_current(&owner, revision, || {
+                runtime
+                    .prune_older_than(cutoff)
+                    .map(|_| ())
+                    .map_err(CommandError::from)
+            })
+        })
+        .await;
 }
 
 /// Update the toggles and persist them. If "stay signed in" was just turned OFF,
@@ -523,6 +646,10 @@ pub async fn set_app_settings(
     owner: Option<String>,
     settings: AppSettings,
 ) -> Result<(), CommandError> {
+    let admission = owner
+        .as_deref()
+        .map(|owner| RuntimeAdmission::capture(&app_state, &node_state, owner))
+        .transpose()?;
     let level = settings.privacy_level;
     let mut settings = settings.with_privacy_level(level);
     let hub = settings.bridge_hub_id.trim();
@@ -532,19 +659,24 @@ pub async fn set_app_settings(
         ));
     }
     settings.bridge_hub_id = hub.to_ascii_lowercase();
-    let running_settings = settings.clone();
     match owner.as_deref() {
-        Some(owner) => config_store::with_account(&app_state, owner, SETTINGS_FILE, |path| {
-            let previous = state.get_for_owner(owner)?;
-            let (settings, clear_user) = preserve_login_bookkeeping(settings.clone(), &previous);
-            config_store::write_account(path, &AccountSettings::from(&settings))?;
-            let global = state.update_for_owner(owner, settings)?;
-            save(&app, &global);
-            if let Some(user) = clear_user.as_deref() {
-                crate::session_store::clear(user);
-            }
-            Ok(())
-        })?,
+        Some(owner) => config_store::with_account_lease(
+            &app_state,
+            admission.as_ref().unwrap().lease(),
+            SETTINGS_FILE,
+            |path| {
+                let previous = state.get_for_owner(owner)?;
+                let (settings, clear_user) =
+                    preserve_login_bookkeeping(settings.clone(), &previous);
+                config_store::write_account(path, &AccountSettings::from(&settings))?;
+                let global = state.update_for_owner(owner, settings)?;
+                save(&app, &global);
+                if let Some(user) = clear_user.as_deref() {
+                    crate::session_store::clear(user);
+                }
+                Ok(())
+            },
+        )?,
         None => {
             if app_state.session().capture().is_ok() {
                 return Err(CommandError::Authorization(
@@ -561,8 +693,14 @@ pub async fn set_app_settings(
     }
 
     // Apply the durable account preference to its running node, if still current.
-    if let Some(owner) = owner.as_deref() {
-        apply_running_settings(&node_state, app_state.session(), owner, &running_settings).await;
+    if let (Some(owner), Some(admission)) = (owner, admission) {
+        let (revision, settings) = state.snapshot(&owner)?;
+        // Persistence succeeds even when a concurrent save or logout supersedes live application.
+        let state = state.inner().clone();
+        let application = tokio::spawn(async move {
+            apply_running_settings(admission, state, owner, revision, settings).await
+        });
+        let _ = application.await;
     }
     Ok(())
 }
@@ -570,6 +708,240 @@ pub async fn set_app_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delayed_settings_application_rejects_newer_disabled_save_and_same_owner_relogin() {
+        for replace_session in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let app = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+                Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                    mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+                )),
+            ));
+            let user = crate::services::user::User {
+                user_id: "settings-owner".into(),
+                name: "settings".into(),
+                display_name: "Settings".into(),
+                address: "local".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            };
+            app.session()
+                .publish("original".into(), user.clone(), "pw".into());
+            let node = crate::chat_commands::NodeState::empty();
+            let runtime = mesh_talk_core::node::NodeRuntime::start(
+                root.path(),
+                "settings-owner",
+                "Settings",
+                "pw",
+                0,
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            )
+            .await
+            .unwrap();
+            let handle = runtime.handle();
+            *node.0.lock().await = Some(runtime);
+            let state = SettingsState::default();
+            state.0.lock().unwrap().owner = Some("settings-owner".into());
+            state
+                .update_for_owner(
+                    "settings-owner",
+                    AppSettings {
+                        retention_days: 1,
+                        physical_lan_only: true,
+                        ..AppSettings::default()
+                    },
+                )
+                .unwrap();
+            let (revision, settings) = state.snapshot("settings-owner").unwrap();
+            let admission = RuntimeAdmission::capture_current(&app, &node).unwrap();
+            let serialization = state.1.clone().lock_owned().await;
+            let pending_state = state.clone();
+            let pending = tokio::spawn(async move {
+                apply_running_settings(
+                    admission,
+                    pending_state,
+                    "settings-owner".into(),
+                    revision,
+                    settings,
+                )
+                .await
+            });
+            if replace_session {
+                app.session()
+                    .publish("replacement".into(), user, "pw".into());
+            } else {
+                state
+                    .update_for_owner("settings-owner", AppSettings::default())
+                    .unwrap();
+            }
+            drop(serialization);
+            assert!(pending.await.unwrap().is_err());
+            assert!(
+                !handle.physical_lan_only(),
+                "obsolete settings cannot commit runtime policy or reach retention pruning"
+            );
+            node.0.lock().await.take().unwrap().stop().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_relay_policy_rejects_authority_or_revision_change_during_policy_wait() {
+        for change in ["settings", "relogin", "logout", "lock", "current"] {
+            let root = tempfile::tempdir().unwrap();
+            let app = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+                Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                    mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+                )),
+            ));
+            let user = crate::services::user::User {
+                user_id: "settings-owner".into(),
+                name: "settings".into(),
+                display_name: "Settings".into(),
+                address: "local".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            };
+            app.session()
+                .publish("original".into(), user.clone(), "pw".into());
+            let node = crate::chat_commands::NodeState::empty();
+            let runtime = mesh_talk_core::node::NodeRuntime::start(
+                root.path(),
+                "settings-owner",
+                "Settings",
+                "pw",
+                0,
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            )
+            .await
+            .unwrap();
+            let handle = runtime.handle();
+            *node.0.lock().await = Some(runtime);
+            let state = SettingsState::default();
+            state.0.lock().unwrap().owner = Some("settings-owner".into());
+            state
+                .update_for_owner(
+                    "settings-owner",
+                    AppSettings {
+                        physical_lan_only: true,
+                        ..AppSettings::default()
+                    },
+                )
+                .unwrap();
+            let (revision, settings) = state.snapshot("settings-owner").unwrap();
+            let admission = RuntimeAdmission::capture_current(&app, &node).unwrap();
+            let (entered, held) = std::sync::mpsc::channel();
+            let (release, resumed) = std::sync::mpsc::channel();
+            let holder_node = handle.clone();
+            let holder = std::thread::spawn(move || {
+                tauri::async_runtime::block_on(holder_node.set_invisible_if(false, move || {
+                    entered.send(()).unwrap();
+                    resumed.recv().unwrap();
+                    Err(std::io::Error::other("test holder makes no mutation"))
+                }))
+            });
+            held.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let runtime_guard = node.0.lock().await;
+            let runtime = runtime_guard.as_ref().unwrap();
+            let result = {
+                let pending = apply_relay_settings(
+                    runtime,
+                    &admission,
+                    &state,
+                    "settings-owner",
+                    revision,
+                    &settings,
+                );
+                tokio::pin!(pending);
+                tokio::select! {
+                    biased;
+                    result = &mut pending => panic!("policy gate was not held: {result:?}"),
+                    _ = tokio::task::yield_now() => {}
+                }
+                match change {
+                    "settings" => {
+                        state
+                            .update_for_owner("settings-owner", AppSettings::default())
+                            .unwrap();
+                    }
+                    "relogin" => {
+                        app.session()
+                            .publish("replacement".into(), user, "pw".into());
+                    }
+                    "logout" => app.session().clear(),
+                    "lock" => {
+                        use tauri::Manager;
+                        let host = tauri::test::mock_builder()
+                            .manage(app.clone())
+                            .manage(app.app_lock().clone())
+                            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                            .unwrap();
+                        crate::app_lock::lock_app(host.state(), host.state()).unwrap();
+                    }
+                    _ => {}
+                }
+                release.send(()).unwrap();
+                pending.await
+            };
+            drop(runtime_guard);
+            assert!(holder.join().unwrap().is_err());
+            assert_eq!(
+                result.is_ok(),
+                change == "current",
+                "startup result for {change}"
+            );
+            assert_eq!(
+                handle.physical_lan_only(),
+                change == "current",
+                "startup policy for {change}"
+            );
+            node.0.lock().await.take().unwrap().stop().await;
+        }
+    }
+
+    #[test]
+    fn stale_retention_commit_cannot_run_after_newer_save_disables_retention() {
+        let state = SettingsState::default();
+        state.0.lock().unwrap().owner = Some("alice".into());
+        state
+            .update_for_owner(
+                "alice",
+                AppSettings {
+                    retention_days: 1,
+                    ..AppSettings::default()
+                },
+            )
+            .unwrap();
+        let (revision, _) = state.snapshot("alice").unwrap();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let queued_state = state.clone();
+        let pending = std::thread::spawn(move || {
+            waiting.recv().unwrap();
+            let mut pruned = false;
+            let result = queued_state.commit_current("alice", revision, || {
+                pruned = true;
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert!(!pruned);
+        });
+        state
+            .update_for_owner("alice", AppSettings::default())
+            .unwrap();
+        release.send(()).unwrap();
+        pending.join().unwrap();
+    }
 
     #[test]
     fn account_settings_keep_private_values_separate_from_device_settings() {

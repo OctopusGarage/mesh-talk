@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A local sign-in user; distinct from a mesh account or device identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub username: String,
-    pub user_id: String, // UUID
+    pub user_id: String, // Local user UUID, not the mesh device/account ID.
     pub public_key: String,
     pub created_at: u64,
     /// Editable, peer-facing display name (the "nickname"). Empty means "not set" — fall

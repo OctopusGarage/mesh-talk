@@ -548,6 +548,16 @@ impl NodeRuntime {
         self.participant.probe_endpoint(endpoint).await
     }
 
+    pub async fn probe_endpoint_if(
+        &self,
+        endpoint: std::net::SocketAddr,
+        authorize: impl FnMut(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> + Send,
+    ) -> std::io::Result<()> {
+        self.participant
+            .probe_endpoint_if(endpoint, authorize)
+            .await
+    }
+
     /// The display name this node advertises to peers.
     pub fn display_name(&self) -> &str {
         &self.display_name
@@ -835,6 +845,17 @@ impl NodeRuntime {
     /// persists the adopted account secret to disk (effective next login) and returns
     /// the adopted account id.
     pub async fn link_device(&self, peer_user_id: &str, code: &str) -> Result<String, NodeError> {
+        self.link_device_if(peer_user_id, code, |commit| commit())
+            .await
+    }
+
+    pub async fn link_device_if(
+        &self,
+        peer_user_id: &str,
+        code: &str,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<String, NodeError> {
         let peer = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
             roster
@@ -844,36 +865,39 @@ impl NodeRuntime {
         };
         let linked = self
             .node
-            .link_to_device(peer.addr, &peer.public, code)
+            .link_to_device_if(peer.addr, &peer.public, code, &mut authorize)
             .await?;
-        let account = crate::identity::account::Account::from_secret_bytes(linked.secret);
-        let device_dir = self
-            .account_path
-            .parent()
-            .ok_or_else(|| NodeError::Channel("account path has no parent".into()))?;
-        let mut devices = super::account_devices::AccountDevices::open(
-            &super::account_devices::file_path(device_dir, &linked.account_id),
-            &self.password,
-            &linked.account_id,
-        )
-        .map_err(NodeError::Log)?;
-        for public in [self.node.identity.public(), peer.public] {
-            devices
-                .insert(super::account_devices::AccountDevice {
-                    certificate: account.certify(&public.ed25519_pub),
-                    public,
-                })
-                .map_err(NodeError::Log)?;
-        }
-        self.node
-            .persist_account_adoption(&account.account_id(), || {
-                crate::identity::account_keystore::save(
-                    &self.account_path,
-                    &self.password,
-                    &account,
-                )
-                .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))
-            })?;
+        authorize(&mut || {
+            let account = crate::identity::account::Account::from_secret_bytes(linked.secret);
+            let device_dir = self
+                .account_path
+                .parent()
+                .ok_or_else(|| NodeError::Channel("account path has no parent".into()))?;
+            let mut devices = super::account_devices::AccountDevices::open(
+                &super::account_devices::file_path(device_dir, &linked.account_id),
+                &self.password,
+                &linked.account_id,
+            )
+            .map_err(NodeError::Log)?;
+            for public in [self.node.identity.public(), peer.public.clone()] {
+                devices
+                    .insert(super::account_devices::AccountDevice {
+                        certificate: account.certify(&public.ed25519_pub),
+                        public,
+                    })
+                    .map_err(NodeError::Log)?;
+            }
+            self.node
+                .persist_account_adoption(&account.account_id(), || {
+                    crate::identity::account_keystore::save(
+                        &self.account_path,
+                        &self.password,
+                        &account,
+                    )
+                    .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))
+                })?;
+            Ok(())
+        })?;
         Ok(linked.account_id)
     }
 

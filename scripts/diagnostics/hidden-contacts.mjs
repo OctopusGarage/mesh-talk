@@ -8,16 +8,19 @@ import { resolve, join } from "node:path";
 import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
+import { verifyNativeBuild } from "../validation/native-build.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
 import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const initialStatus = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
 const sourceSha = process.env.EVAL_SOURCE_SHA ?? gitSha;
 assert.match(sourceSha, /^[0-9a-f]{40}$/);
 assert.equal(sourceSha, gitSha, "evaluation source SHA matches checked-out source");
 const appBinary = resolve(process.env.NATIVE_CONTACT_APP ?? `target/release/examples/native-contact-eval${executableSuffix}`);
 const nodeBinary = resolve(process.env.NATIVE_CONTACT_NODE ?? `target/release/mesh-talk-node${executableSuffix}`);
+const initialBuildProof = await verifyNativeBuild({ sourceSha, appBinary, nodeBinary });
 const output = resolve(process.env.NATIVE_CONTACT_OUTPUT ?? "target/hidden-contacts-native");
 await mkdir(output, { recursive: true });
 const fixture = await mkdtemp(join(output, "fixture-"));
@@ -35,6 +38,8 @@ const report = { schema: 1, platform: process.platform, native: true, mocked: fa
 const owned = new Set();
 report.schema = 2;
 report.sourceSha = sourceSha;
+report.buildVerified = initialBuildProof.buildVerified;
+report.buildProof = initialBuildProof;
 if (process.env.GITHUB_RUN_ID) report.runId = process.env.GITHUB_RUN_ID;
 let app, peer, session, endpoint, account, userId, signedInUser;
 const registeredOwners = new Map();
@@ -143,7 +148,13 @@ async function focusOwnedWindow() {
     throw error;
   }
 }
-async function click(id) { await command("POST", `/element/${await element(id)}/click`, {}); }
+async function click(id) {
+  // Embedded WebDriver dispatches DOM clicks without activating an application
+  // relaunched in the background. Real pointer input activates the window first;
+  // do the same so WKWebView can commit history and virtual-list rendering.
+  await focusOwnedWindow();
+  await command("POST", `/element/${await element(id)}/click`, {});
+}
 async function openDialog(id) {
   await element(id);
   // Driver 1.4 click_element calls click() then focus(), moving focus outside
@@ -507,6 +518,10 @@ try {
   for (const child of [...owned]) {
     try { await stop(child, child === peer); } catch (error) { report.cleanupFailure = redact(error.message); process.exitCode = 1; }
   }
+  report.cleanSource = initialStatus === "" && execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() === "" && execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() === gitSha;
+  const finalBuildProof = await verifyNativeBuild({ sourceSha, appBinary, nodeBinary, expectedManifestDigest: initialBuildProof.manifestDigest });
+  report.buildVerified = initialBuildProof.buildVerified && finalBuildProof.buildVerified && initialBuildProof.manifestDigest === finalBuildProof.manifestDigest;
+  if (!report.buildVerified) report.buildProofFailure = finalBuildProof.error ?? initialBuildProof.error ?? "Native build manifest changed during evaluation";
   report.finishedAt = new Date().toISOString();
   report.elapsedMs = Date.now() - started;
   report.validationErrors = await validateEvidence(report, output, { sourceSha: gitSha, platform: process.platform });

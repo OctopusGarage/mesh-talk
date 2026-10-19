@@ -3,6 +3,7 @@ set -e
 # Keep commits responsive. Developers run the affected tests while changing code;
 # PR preflight and CI run the comprehensive gates.
 git diff --cached --check
+node scripts/check-repository-hygiene.mjs
 
 if git diff --cached --name-only --diff-filter=ACMR | rg -q '^(crates/|src-tauri/).*\.rs$'; then
     cargo fmt --all -- --check

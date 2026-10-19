@@ -7,6 +7,7 @@
 //! composition), and [`sync`] (the bounded 3-message reconciliation).
 
 pub mod event;
+pub(crate) mod order;
 pub mod persist;
 pub mod store;
 pub mod sync;
@@ -25,6 +26,10 @@ pub enum LogError {
     BadSignature,
     /// `parents` are not in canonical (sorted, de-duplicated) form.
     NonCanonical,
+    /// No representable timestamp remains for a new local event.
+    ClockExhausted,
+    /// No representable sequence remains for this local author.
+    SequenceExhausted,
     /// One or more `parents` are not present in the log yet (causally incomplete).
     MissingParents(Vec<EventId>),
     /// The author already has a *different* event at this `seq` (equivocation).
@@ -45,6 +50,8 @@ impl std::fmt::Display for LogError {
             LogError::CorruptId => write!(f, "event id does not match its content"),
             LogError::BadSignature => write!(f, "event signature did not verify"),
             LogError::NonCanonical => write!(f, "event parents are not in canonical form"),
+            LogError::ClockExhausted => write!(f, "event clock exhausted"),
+            LogError::SequenceExhausted => write!(f, "event author sequence exhausted"),
             LogError::MissingParents(p) => write!(f, "missing {} parent event(s)", p.len()),
             LogError::AuthorEquivocation { seq, .. } => {
                 write!(f, "author equivocation at seq {seq}")

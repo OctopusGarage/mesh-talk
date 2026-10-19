@@ -6,11 +6,8 @@
  * covers JS-driven (framer-motion) animation. Use `useMotionOK()` to no-op motion when
  * the user prefers reduced motion.
  */
-import {
-  useReducedMotion,
-  type Transition,
-  type Variants,
-} from "framer-motion";
+import { useSyncExternalStore } from "react";
+import type { Transition, Variants } from "framer-motion";
 
 /** Default tasteful ease (a soft, slightly-overshootless out-curve). */
 export const ease = [0.22, 1, 0.36, 1] as const;
@@ -37,6 +34,35 @@ export const listStagger: Variants = {
 /** Keep list entrances within a short, visible window. Longer lists appear at once. */
 export const MAX_STAGGER_ITEMS = 6;
 
+let preferenceQuery: MediaQueryList | null = null;
+let querySource: typeof window.matchMedia | undefined;
+
+function motionPreference(): MediaQueryList | null {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function")
+    return null;
+  if (querySource !== window.matchMedia) {
+    querySource = window.matchMedia;
+    try {
+      preferenceQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    } catch {
+      preferenceQuery = null;
+    }
+  }
+  return preferenceQuery;
+}
+
+function subscribePreference(notify: () => void) {
+  const query = motionPreference();
+  if (!query) return () => {};
+  query.addEventListener("change", notify);
+  return () => query.removeEventListener("change", notify);
+}
+
+// Unknown/server preferences never opt a user into animation. The same live
+// observer serves transitions and static sticker previews, including OS changes.
+const reducedOnServer = () => true;
+const reducedSnapshot = () => motionPreference()?.matches !== false;
+
 /**
  * Returns `true` when JS-driven motion should run, `false` when the user prefers
  * reduced motion. Components should gate animation props on this:
@@ -45,5 +71,9 @@ export const MAX_STAGGER_ITEMS = 6;
  *   <motion.div initial={ok ? "hidden" : false} animate="visible" variants={fadeSlideUp} />
  */
 export function useMotionOK(): boolean {
-  return !useReducedMotion();
+  return !useSyncExternalStore(
+    subscribePreference,
+    reducedSnapshot,
+    reducedOnServer,
+  );
 }

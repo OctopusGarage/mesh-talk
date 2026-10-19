@@ -377,10 +377,8 @@ impl Node {
                         updated_at,
                         avatar,
                     } => {
-                        node.profiles
-                            .lock()
-                            .expect("profiles mutex not poisoned")
-                            .record(&account_id, updated_at, avatar)
+                        node.account_profiles
+                            .restore_avatar(&account_id, updated_at, avatar)
                             .map_err(|_| SnapshotError::Io)?;
                     }
                     SnapshotRecordV1::MediaDescriptor { file_conv, .. } => {
@@ -599,11 +597,7 @@ impl Node {
             .lock()
             .expect("recalls mutex not poisoned")
             .snapshot_marks();
-        let profiles = self
-            .profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .snapshot_entries();
+        let profiles = self.account_profiles.snapshot();
         let mut record_count = u64::try_from(
             sent_count
                 .checked_add(received_count)

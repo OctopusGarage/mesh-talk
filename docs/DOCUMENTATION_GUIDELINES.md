@@ -14,28 +14,74 @@ owns them. A feature does not need a new paragraph everywhere it is mentioned.
 | [Architecture](ARCHITECTURE.md)                              | How does the system work?                                             | Protocol, modules, data flow, crypto, wire compatibility, and technical limits.                                                                    |
 | [Network architecture baseline](network-design-reference.md) | Which communication model and contracts must future changes preserve? | Network design principles, module ownership, topology scenarios, policy interactions, resource budgets and feature-specific acceptance boundaries. |
 | Feature and operations guides                                | How do I configure or use this capability?                            | Exact steps, options, examples, constraints, and troubleshooting for their topic.                                                                  |
-| [Evaluations](evals/)                                        | What was verified at the time?                                        | Dated test evidence and its limits; never a substitute for current behavior.                                                                       |
+| [Evaluation inputs](evals/README.md)                         | Which reusable cases and rubrics apply?                               | Maintained suites, inventory and prompts; generated evidence belongs in PR/CI artifacts.                                                           |
 
 The site and README may summarize a capability, but link to its owning guide
 for setup, flags, support matrices, and changing limits. Do not copy a CLI option
 table, release procedure, or full feature inventory into either overview.
 
+## Shared domain language
+
+[CONTEXT.md](../CONTEXT.md) owns domain definitions; [DDD conventions](domain-design.md)
+own modeling vocabulary, identifier mappings and the reference index. Use those
+terms in guides, code comments and reviews. Keep technical invariants in the
+architecture/network references and implementation ownership in the module map.
+Do not create feature-local glossaries that redefine account/device identity,
+conversation membership, lifecycle or delivery outcomes.
+
 ## Shared project narrative
 
-1. **Local first:** a local identity, automatic signed LAN discovery, direct
-   authenticated connections, and no vendor-operated account service.
-2. **Optional reach beyond a LAN:** an existing routed path or a configured
-   post-office bridge introduces participating peers. Mesh-Talk does not provide
-   a VPN or merge IP subnets.
-3. **Encrypted content with visible metadata:** messages are end-to-end encrypted;
-   peers and relays can observe some network or routing metadata.
-4. **Offline delivery is bounded:** a peer-operated post office stores encrypted
-   events temporarily, subject to capacity and a 30-day maximum age.
+Explain the whole communication model in this order, regardless of which feature
+changed most recently:
 
-Use this order when explaining the product to newcomers. Describe a capability
-and its relevant boundary together. For example, bridge discovery is opt-in;
-federated relays can replicate opaque mailboxes, while calls and direct device
-synchronization still require their own reachable paths.
+1. **Encrypted communication on a LAN:** local identities, signed discovery and
+   authenticated direct connections; no internet or central messaging service is
+   required for reachable LAN peers.
+2. **Decentralized synchronization:** authorized peers exchange signed,
+   content-addressed events. Multi-node synchronization is bounded by retained data
+   and available paths, rather than dependent on one permanent sender.
+3. **Other LANs and sites:** existing routed paths or opted-in, trusted post-office
+   bridges/federation connect participants. Mesh-Talk does not provide a VPN, forward
+   all LAN multicast or merge subnets.
+4. **Offline delivery:** optional peer-operated post offices temporarily hold
+   recipient-encrypted events, subject to capacity and a 30-day maximum age.
+5. **Reconnection and group recovery:** authorized members with sharing enabled can
+   supply retained messages and eligible file chunks, even without the original
+   sender. A reachable source, receiving approval and retained content are required.
+6. **Linked devices:** certified devices can synchronize selected account history,
+   file cards and attachment contents over eligible direct device paths.
+
+Use “no central server required” when describing serverless operation. Optional
+post offices are services run by peers; serverless does not mean the project can
+never use a server. Decentralized does not mean unrestricted routing, automatic
+trust, infinite storage or guaranteed delivery. Encryption protects content; peers
+and relays still observe some connection and routing metadata.
+
+Keep outcomes precise: local acceptance, relay custody, recipient confirmation,
+reading, file-card visibility and file-byte availability are distinct. A completed
+peer recovery check is a local observation, not proof that every offline device
+has no additional history. Calls and linked-device synchronization have their own
+reachability requirements. Link to [the glossary](../CONTEXT.md),
+[network contracts](network-design-reference.md) and
+[group reception](group-conversation-reception.md) for the authoritative definitions.
+
+## Public documentation styling
+
+The [shared public theme](../site/theme.css) owns the landing page and generated
+help reader's colors, self-hosted Space Grotesk headings, system body font, focus
+states and reduced-motion behavior. The [reader stylesheet](../tools/help/style.css)
+owns reading measure, topic navigation and article layout. The help build copies
+the same theme and licensed font into both current and versioned readers, keeping
+them self-contained under GitHub Pages project paths. Edit these sources rather
+than generated CSS or HTML. Application surfaces remain governed by
+[the desktop visual system](../frontend/DESIGN.md).
+
+Use a restrained hierarchy, short paragraphs, meaningful diagrams, consistent
+navigation and descriptive links. Keep screenshots labeled as demo data. Group
+manual topics by task; use the catalog as the source for search and navigation.
+Technical references keep their detailed contracts and scoped evidence rather
+than repeating the landing page's product copy. Prefer consistent terminology
+over making every document use identical prose.
 
 ## Writing and maintenance rules
 
@@ -77,3 +123,28 @@ exports. Maintain those sources rather than editing generated pages or keeping
 a separate Wiki copy. Existing feature guides retain detailed policy ownership.
 See [help system maintenance](help-system.md) for supported Markdown, stable IDs,
 version scope, controlled UI targets and focused validation.
+
+## Repository hygiene
+
+Maintain one owner for each topic. Merge durable decisions into that guide and
+remove superseded proposals, implementation plans, investigation notes, duplicate
+runbooks and completed-work reports. Git history preserves prior versions; do not
+add archive directories or placeholder documents just to retain old filenames.
+
+Use ignored `tmp/` for implementation research and scratch scripts. Generated
+validation output belongs under ignored `target/`, coverage or Playwright output
+directories. Delete disposable notes when the work is complete. Keep screenshots
+only when they serve the maintained product/user documentation or an executable
+visual baseline, not as a diary of an earlier investigation.
+
+`docs/evals/` accepts only its README, named `*-suite.json` inputs,
+`module-coverage.json` and reusable Markdown prompts. Operational validation
+guidance belongs in [platform validation](platform-validation.md),
+[quality gates](quality-gates.md) or the [testing workflow](testing-feedback-loop.md).
+
+`.gitignore` owns the artifact policy. `node scripts/check-repository-hygiene.mjs`
+checks the whole Git index, including force-added files. The pre-commit hook, CI
+and health gate run the same check. For a new maintained guide or script, give it
+an owner and a real caller/navigation path; do not add another report or copied
+command wrapper. Filename checks cannot determine whether prose is obsolete, so
+review this ownership rule when changing documentation.

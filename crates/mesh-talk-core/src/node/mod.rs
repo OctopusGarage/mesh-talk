@@ -9,6 +9,7 @@
 pub(crate) mod account_devices;
 pub(crate) mod account_file_proofs;
 pub(crate) mod account_preferences;
+mod account_profile;
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
 pub(crate) mod account_sync_policy;
@@ -65,6 +66,7 @@ pub(crate) mod profile_store;
 pub(crate) mod queries;
 pub(crate) mod ratchet_sessions;
 pub(crate) mod reaction;
+mod reaction_store;
 pub(crate) mod reactions;
 pub(crate) mod recall;
 pub(crate) mod received_log;

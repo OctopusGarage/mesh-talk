@@ -31,6 +31,17 @@ impl IdentityManager {
 
         // Check if user already exists
         if self.file_manager.file_exists(username, "meta/user.json") {
+            if !self
+                .file_manager
+                .file_exists(username, "meta/credentials.json")
+                || !self
+                    .file_manager
+                    .file_exists(username, "meta/private_key.enc")
+            {
+                return Err(IdentityError::StorageError(
+                    "Incomplete account directory exists; preserve it for account recovery before registering again".into(),
+                ));
+            }
             return Err(IdentityError::UserAlreadyExists(username.to_string()));
         }
 
@@ -42,43 +53,43 @@ impl IdentityManager {
         let password_hash = AuthManager::hash_password(password)
             .map_err(|e| IdentityError::StorageError(e.to_string()))?;
 
-        // Serialize and encrypt private key
         let secret_key_bytes = KeyManager::serialize_secret_key(&signing_key);
-        self.file_manager
-            .write_encrypted_file(
-                username,
-                "meta/private_key.enc",
-                &secret_key_bytes,
-                password,
-            )
-            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
-
-        // Create user object
         let public_key_str = KeyManager::serialize_public_key(&public_key);
         let user = User::new(username.to_string(), public_key_str);
-
-        // Save user metadata
-        self.file_manager
-            .write_encrypted_file(username, "meta/user.json", &user, password)
-            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
-
-        // Save user credentials
         let credentials = UserCredentials {
             username: username.to_string(),
             password_hash,
-            private_key: secret_key_bytes,
+            private_key: secret_key_bytes.clone(),
         };
-        self.file_manager
-            .write_encrypted_file(username, "meta/credentials.json", &credentials, password)
-            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
 
-        // Persist user identifier separately for quick lookup
+        // Publish the complete aggregate in one rename. A failed write or process
+        // exit while staging must never reserve the account's login namespace.
         self.file_manager
-            .write_encrypted_file(username, "meta/user_id.enc", &user.user_id, password)
+            .publish_user(username, |staged| {
+                staged.write_encrypted_file(
+                    username,
+                    "meta/private_key.enc",
+                    &secret_key_bytes,
+                    password,
+                )?;
+                staged.write_encrypted_file(username, "meta/user.json", &user, password)?;
+                staged.write_encrypted_file(
+                    username,
+                    "meta/credentials.json",
+                    &credentials,
+                    password,
+                )?;
+                staged.write_encrypted_file(
+                    username,
+                    "meta/user_id.enc",
+                    &user.user_id,
+                    password,
+                )?;
+                // ContactManager owns contacts.json and its public-key format.
+                let empty_chats: HashMap<String, Vec<String>> = HashMap::new();
+                staged.write_encrypted_file(username, "data/chats.json", &empty_chats, password)
+            })
             .map_err(|e| IdentityError::StorageError(e.to_string()))?;
-
-        // Initialize user data directories
-        self.initialize_user_data(username, password)?;
 
         Ok(user)
     }
@@ -267,32 +278,6 @@ impl IdentityManager {
         user.display_name = validated;
         Ok(user)
     }
-
-    fn initialize_user_data(&self, username: &str, password: &str) -> Result<(), IdentityError> {
-        // Create initial user directories
-        let directories = ["contacts", "chats", "files"];
-
-        for _dir in &directories {
-            let _dir_path = format!("data/{}", _dir);
-            // We don't actually need to create empty directories since our file manager
-            // will create them when writing files
-        }
-
-        // Note: data/contacts.json is intentionally NOT pre-created here.
-        // ContactManager owns that file and stores it using public-key (base64)
-        // encryption via PublicKeyFileManager. Pre-creating it with the
-        // password-based binary FileManager format caused a format mismatch
-        // ("stream did not contain valid UTF-8") on the first contact load.
-        // ContactManager.load_contacts() already treats a missing file as an
-        // empty contact list.
-
-        let empty_chats: HashMap<String, Vec<String>> = HashMap::new(); // contact_id -> messages
-        self.file_manager
-            .write_encrypted_file(username, "data/chats.json", &empty_chats, password)
-            .map_err(|e| IdentityError::StorageError(e.to_string()))?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -303,6 +288,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fm = FileManager::new(dir.path().to_path_buf());
         (IdentityManager::new(fm), dir)
+    }
+
+    #[test]
+    fn registration_preserves_an_existing_partial_account() {
+        let (mgr, dir) = manager();
+        let path = dir.path().join("users/alice/meta/private_key.enc");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"recoverable old key").unwrap();
+        assert!(mgr.register_user("alice", "password").is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"recoverable old key");
+        assert!(!mgr.file_manager.file_exists("alice", "meta/user.json"));
+    }
+
+    #[test]
+    fn registration_reports_incomplete_legacy_metadata_for_recovery() {
+        let (mgr, dir) = manager();
+        let metadata = dir.path().join("users/alice/meta/user.json");
+        std::fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+        std::fs::write(&metadata, b"recoverable metadata").unwrap();
+        let error = mgr.register_user("alice", "password").unwrap_err();
+        assert!(matches!(error, IdentityError::StorageError(_)));
+        assert!(error.to_string().contains("recovery"));
+        assert_eq!(std::fs::read(metadata).unwrap(), b"recoverable metadata");
     }
 
     #[test]

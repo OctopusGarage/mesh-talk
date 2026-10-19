@@ -14,6 +14,10 @@ An attachment card and completed local file bytes are separate things. A file ca
 
 Open **Saved Messages** to keep a file for yourself, even before another device is linked. In **Your devices**, choose whether linked devices synchronize history, file cards and attachment contents. Contents require an eligible trusted device that still retains them and is reachable. Synchronizing a card alone does not copy the file bytes.
 
+## Recover channel attachments
+
+A channel member can supply retained attachments when both devices have accepted membership, the required keys and a reachable authorized path, and the serving member permits **Share a copy**. Members and post offices retain bounded copies; an expired, deleted or evicted copy cannot supply missing bytes. A file card or historical copy count does not guarantee a source remains available. See [Channels](channels.md) for sharing and catch-up behavior.
+
 ## Control incoming transfers
 
 Open **More → Settings → Files & receiving** to choose the default receiving policy. Individual conversations can override it through their attachment receiving settings. Review the conversation's policy when its behavior differs from the default.

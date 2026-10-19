@@ -26,3 +26,13 @@ test("failed inventory builds and missing binaries cannot validate a selection",
   await assert.rejects(validateSelectors(plan, { run: async () => ({ code: 1, output: "compile error" }) }), /compile error/);
   await assert.rejects(validateSelectors(plan, { run: async () => ({ code: 0, output: "" }) }), /test executable/i);
 });
+
+
+test("integration and MCP selectors use their real compiled inventories and reject empty matches", async () => {
+  const selected = { coreFilters: [], hostFilters: [], coreTests: [], integrationFilters: ["grants::"], mcpFilters: ["tools::"] };
+  const output = ["mesh_talk_integrations", "mesh_talk_mcp"].map(name => JSON.stringify({ reason: "compiler-artifact", target: { name }, executable: `/tmp/${name}` })).join("\n");
+  const run = async program => ({ code: 0, output: program === "cargo" ? output : program.endsWith("integrations") ? "grants::allows: test\n" : "tools::send: test\n" });
+  assert.deepEqual(await validateSelectors(selected, { run }), [{ kind: "integration", filter: "grants::", count: 1 }, { kind: "mcp", filter: "tools::", count: 1 }]);
+  await assert.rejects(validateSelectors({ ...selected, mcpFilters: ["missing::"] }, { run }), /zero.*mcp.*missing::/i);
+  await assert.rejects(validateSelectors(selected, { run: async () => ({ code: 0, output: "" }) }), /integration test executable/i);
+});

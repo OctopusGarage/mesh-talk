@@ -1,11 +1,20 @@
 import { mkdir, writeFile, copyFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadHelp } from "./load.mjs";
+import { loadHelp, helpCategories } from "./load.mjs";
 import { renderMarkdown, escapeHtml as e } from "./render.mjs";
-const css = `:root{color-scheme:light dark;--bg:#f7f6f2;--fg:#252e2b;--muted:#626e67;--line:#d7ddd5;--accent:#287260}@media(prefers-color-scheme:dark){:root{--bg:#1b201e;--fg:#e2e7e1;--muted:#a0afa5;--line:#3b4840;--accent:#86c9b1}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 system-ui,sans-serif}a{color:var(--accent);text-underline-offset:4px}a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:4px}header{padding:28px 5vw;border-bottom:1px solid var(--line)}header a{font-weight:650;text-decoration:none}small{color:var(--muted)}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);max-width:1280px;margin:auto}aside{align-self:start;position:sticky;top:0;max-height:100vh;overflow:auto;padding:32px 24px;border-right:1px solid var(--line)}main{padding:42px 5vw 80px;max-width:82ch;min-width:0}h1{font-size:2rem;line-height:1.15;letter-spacing:-.04em;font-weight:600}h2{margin-top:2em;font-size:1.3rem}summary{cursor:pointer}nav a[aria-current]{font-weight:650}.skip{position:absolute;left:16px;top:-100px}.skip:focus{top:10px;background:var(--bg);padding:8px;z-index:1}nav a{display:block;padding:8px 0}input{width:100%;font:inherit;background:transparent;color:inherit;border:1px solid var(--line);border-radius:4px;padding:10px}#results{padding-left:20px}#results li{padding:14px 0;border-bottom:1px solid var(--line)}#results p{margin:4px 0;color:var(--muted)}code{font-size:.9em;overflow-wrap:anywhere}article{max-width:70ch}footer{margin-top:3em;border-top:1px solid var(--line);padding-top:1em}@media(max-width:720px){.layout{display:block}aside{position:static;max-height:none;overflow:visible;border-right:0;border-bottom:1px solid var(--line);padding:20px 6vw}nav{display:flex;flex-wrap:wrap;gap:4px 20px}main{padding:28px 6vw 60px}}`;
+function navigation(data, id) {
+  return Object.entries(helpCategories)
+    .map(([category, label]) => {
+      const topics = data.topics.filter((topic) => topic.category === category);
+      return topics.length
+        ? `<section><h2>${e(label)}</h2>${topics.map((t) => `<a href="${t.id}.html"${id === t.id ? ' aria-current="page"' : ""}>${e(t.title)}</a>`).join("")}</section>`
+        : "";
+    })
+    .join("");
+}
 function page(data, title, content, { id, projectHref } = {}) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${e(title)} · Mesh-Talk Help</title><link rel="stylesheet" href="style.css"><link rel="describedby" type="text/plain" href="llms.txt">${id ? `<link rel="alternate" type="text/markdown" href="${id}.md">` : ""}</head><body><a class="skip" href="#main">Skip to content</a><header><a href="${projectHref}">Mesh-Talk</a> / <a href="index.html">Help</a> <small>Version ${e(data.version)} · English</small></header><div class="layout"><aside><details><summary>Browse help topics</summary><nav aria-label="Help topics">${data.topics.map((t) => `<a href="${t.id}.html"${id === t.id ? ' aria-current="page"' : ""}>${e(t.title)}</a>`).join("")}</nav></details></aside><main id="main" tabindex="-1">${content}</main></div><script type="module" src="navigation.mjs"></script></body></html>`;
+  return `<!doctype html><html lang="en" class="manual"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${e(title)} · Mesh-Talk Help</title><link rel="stylesheet" href="theme.css"><link rel="stylesheet" href="style.css"><link rel="describedby" type="text/plain" href="llms.txt">${id ? `<link rel="alternate" type="text/markdown" href="${id}.md">` : ""}</head><body><a class="skip" href="#main">Skip to content</a><header><div class="breadcrumb"><a class="wordmark" href="${projectHref}">Mesh-Talk</a><span aria-hidden="true">/</span><a href="index.html">User guide</a></div><small>Version ${e(data.version)} · English</small></header><div class="layout"><aside><details><summary>Browse help topics</summary><nav aria-label="Help topics">${navigation(data, id)}</nav></details></aside><main id="main" tabindex="-1">${content}</main></div><script type="module" src="navigation.mjs"></script></body></html>`;
 }
 export async function buildHelp({
   root,
@@ -32,7 +41,23 @@ export async function buildHelp({
         schemaVersion: 1,
       }) + "\n",
     );
-    await writeFile(join(dir, "style.css"), css);
+    await copyFile(
+      new URL("./style.css", import.meta.url),
+      join(dir, "style.css"),
+    );
+    await copyFile(
+      new URL("../../site/theme.css", import.meta.url),
+      join(dir, "theme.css"),
+    );
+    await mkdir(join(dir, "fonts"), { recursive: true });
+    await copyFile(
+      new URL("../../site/fonts/space-grotesk-latin.woff2", import.meta.url),
+      join(dir, "fonts/space-grotesk-latin.woff2"),
+    );
+    await copyFile(
+      new URL("../../site/fonts/OFL.txt", import.meta.url),
+      join(dir, "fonts/OFL.txt"),
+    );
     await copyFile(
       new URL("./navigation.mjs", import.meta.url),
       join(dir, "navigation.mjs"),
@@ -50,7 +75,7 @@ export async function buildHelp({
       page(
         data,
         "Help",
-        '<h1>Mesh-Talk help</h1><p>Guides to connecting, talking, and keeping control of your conversations.</p><label for="search">Search help</label><input id="search" type="search" placeholder="Try notifications or connecting" autocomplete="off"><p id="status" role="status"></p><ul id="results">' +
+        '<h1>Mesh-Talk help</h1><p class="intro">Connect on your LAN, reach another site, and keep conversations moving when devices reconnect. Practical guides to messaging, files and privacy.</p><label for="search">Search help</label><input id="search" type="search" placeholder="Try notifications or connecting" autocomplete="off"><p id="status" role="status"></p><ul id="results">' +
           data.topics
             .map(
               (t) =>
@@ -80,7 +105,7 @@ export async function buildHelp({
     const prefix = dir === resolve(out) ? "" : `v/${data.version}/`;
     await writeFile(
       join(dir, "llms.txt"),
-      `# Mesh Talk Help\n\nEnglish product help for Mesh Talk ${data.version}. Public documentation only.\n\n- [Complete help index](${new URL(prefix + "index.json", base)})\n` +
+      `# Mesh-Talk Help\n\nEnglish product help for Mesh-Talk ${data.version}. Public documentation only.\n\n- [Complete help index](${new URL(prefix + "index.json", base)})\n` +
         data.topics
           .map(
             (t) =>

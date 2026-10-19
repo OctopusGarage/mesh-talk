@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { TFunction } from "i18next";
 import { presence as presenceApi } from "@/lib/api";
 import type { PresenceInfo, PresenceMap } from "@/lib/types";
-import type { PresenceStatus } from "@/components/identity";
+import type { PresenceStatus } from "@/lib/presence";
 import { captureRuntimeOwner } from "./ownership";
 
 const POLL_MS = 2000;

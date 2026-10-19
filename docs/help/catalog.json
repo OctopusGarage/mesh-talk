@@ -117,7 +117,7 @@
     {
       "id": "send-files",
       "title": "Send and receive files",
-      "summary": "Attach a file in a conversation and control whether incoming transfers require approval.",
+      "summary": "Send attachments and resume approved transfers when retained content becomes reachable.",
       "category": "messaging",
       "keywords": [
         "attachment",
@@ -127,7 +127,11 @@
         "发送文件",
         "接收文件",
         "附件",
-        "自动接收"
+        "自动接收",
+        "attachment recovery",
+        "retained copies",
+        "missing file",
+        "文件不可用"
       ],
       "platforms": ["macos", "windows", "linux"],
       "document": "topics/send-files.md",
@@ -161,7 +165,7 @@
     {
       "id": "channels",
       "title": "Create and manage a channel",
-      "summary": "Start a group conversation and review its members from the conversation header.",
+      "summary": "Create a group, manage members, and recover retained history from authorized peers.",
       "category": "messaging",
       "keywords": [
         "group",
@@ -170,7 +174,13 @@
         "群聊",
         "频道",
         "创建群",
-        "群成员"
+        "群成员",
+        "Share a copy",
+        "replica",
+        "catch-up",
+        "group recovery",
+        "群消息恢复",
+        "共享副本"
       ],
       "platforms": ["macos", "windows", "linux"],
       "document": "topics/channels.md"
@@ -285,7 +295,7 @@
     {
       "id": "history",
       "title": "Search and retain message history",
-      "summary": "Search available local conversations and choose how long this device keeps history.",
+      "summary": "Search local conversations, navigate late messages and control unread state and retention.",
       "category": "messaging",
       "keywords": [
         "search messages",
@@ -294,7 +304,14 @@
         "搜索消息",
         "聊天记录",
         "历史记录",
-        "保留时间"
+        "保留时间",
+        "unread",
+        "mark read",
+        "Earlier messages received",
+        "New messages",
+        "delayed messages",
+        "未读",
+        "补收消息"
       ],
       "platforms": ["macos", "windows", "linux"],
       "document": "topics/history.md",

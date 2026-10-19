@@ -107,6 +107,7 @@ let connectTimer: ReturnType<typeof setTimeout> | null = null;
  * account's devices). Emptied once one answers (it becomes the locked `peerId`) or the call
  * ends. Always empty for an incoming call. */
 let ringingPeers: string[] = [];
+let outgoingOffered = false;
 
 const CONNECT_TIMEOUT_MS = 20_000;
 const GATHER_TIMEOUT_MS = 2_000;
@@ -159,10 +160,13 @@ export const useCalls = create<CallState>((set, get) => {
   /** Build a peer connection wired to surface the remote stream + connection state. */
   function newPc(): RTCPeerConnection {
     const conn = new RTCPeerConnection({ iceServers: [] });
+    const callId = get().callId;
     conn.ontrack = (e) => {
+      if (get().callId !== callId || pc !== conn) return;
       if (e.streams[0]) set({ remoteStream: e.streams[0] });
     };
     conn.onconnectionstatechange = () => {
+      if (get().callId !== callId || pc !== conn) return;
       const s = conn.connectionState;
       if (s === "connected") {
         if (connectTimer) clearTimeout(connectTimer);
@@ -186,12 +190,23 @@ export const useCalls = create<CallState>((set, get) => {
     }
     pendingOffer = null;
     ringingPeers = [];
+    outgoingOffered = false;
     const { localStream } = get();
     if (localStream) for (const t of localStream.getTracks()) t.stop();
   }
 
   /** Reset to idle, stopping media. `reason` is surfaced briefly to the UI. */
-  function end(reason: string | null) {
+  function end(reason: string | null, signalReason?: ByeReason) {
+    const { callId, peerId, phase } = get();
+    if (signalReason && callId) {
+      const targets = ringingPeers.length
+        ? ringingPeers
+        : peerId && (phase !== "outgoing" || outgoingOffered)
+          ? [peerId]
+          : [];
+      for (const target of targets)
+        void send(target, { callId, kind: "bye", reason: signalReason });
+    }
     cleanup();
     set({
       phase: "idle",
@@ -210,9 +225,11 @@ export const useCalls = create<CallState>((set, get) => {
 
   function armConnectTimeout() {
     if (connectTimer) clearTimeout(connectTimer);
+    const callId = get().callId;
     connectTimer = setTimeout(() => {
-      if (get().phase === "connecting" || get().phase === "outgoing") {
-        end("failed");
+      if (get().callId !== callId) return;
+      if (["connecting", "outgoing", "incoming"].includes(get().phase)) {
+        end("failed", "failed");
       }
     }, CONNECT_TIMEOUT_MS);
   }
@@ -237,7 +254,7 @@ export const useCalls = create<CallState>((set, get) => {
       const owner = useAuth.getState().user?.id;
       if (!owner) return;
       const callId = crypto.randomUUID();
-      ringingPeers = [...target.deviceIds];
+      ringingPeers = [];
       set({
         phase: "outgoing",
         // A representative device for the glyph/roster lookup until one answers and locks in.
@@ -255,7 +272,7 @@ export const useCalls = create<CallState>((set, get) => {
         // leaks (camera light stays on) and we'd dial peers we abandoned.
         if (get().callId !== callId || useAuth.getState().user?.id !== owner) {
           stopStream(stream);
-          if (get().callId === callId) end("failed");
+          if (get().callId === callId) end("failed", "failed");
           return;
         }
         set({ localStream: stream, hasVideo, camOn: hasVideo });
@@ -269,7 +286,7 @@ export const useCalls = create<CallState>((set, get) => {
         await gatherComplete(conn);
         if (get().callId !== callId) return; // torn down mid-negotiation; cleanup() already ran
         if (useAuth.getState().user?.id !== owner) {
-          end("failed");
+          end("failed", "failed");
           return;
         }
         // Only an explicit outgoing call grants permission. Answer/ICE/bye and
@@ -277,7 +294,7 @@ export const useCalls = create<CallState>((set, get) => {
         await privacy.initiateContact(owner, target.accountId);
         if (get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
-          end("failed");
+          end("failed", "failed");
           return;
         }
         const myName = useAuth.getState().user?.display_name ?? "";
@@ -291,25 +308,27 @@ export const useCalls = create<CallState>((set, get) => {
         // Ring every device of the account. NOT best-effort: if EVERY device is unreachable
         // the node errors on all of them, and we surface that at once rather than waiting out
         // the 20s timeout. As long as one offer is delivered, the call proceeds.
+        ringingPeers = [...target.deviceIds];
+        outgoingOffered = true;
+        armConnectTimeout();
         const results = await Promise.allSettled(
           target.deviceIds.map((d) => calls.signal(d, payload)),
         );
         if (get().callId !== callId) return;
         if (results.every((r) => r.status === "rejected")) {
-          end("failed");
+          end("failed", "failed");
           return;
         }
-        armConnectTimeout();
       } catch (e) {
         // A cancelled operation can fail after another call owns the shared
         // media/connection. Never tear down that newer call with a stale error.
         if (get().callId !== callId) return;
         if (useAuth.getState().user?.id !== owner) {
-          end("failed");
+          end("failed", "failed");
           return;
         }
         set({ error: errorMessage(e) });
-        end("failed");
+        end("failed", "failed");
       }
     },
 
@@ -355,31 +374,18 @@ export const useCalls = create<CallState>((set, get) => {
       } catch (e) {
         if (get().callId !== callId) return;
         set({ error: errorMessage(e) });
-        void send(peerId, { callId, kind: "bye", reason: "failed" });
-        end("failed");
+        end("failed", "failed");
       }
     },
 
     decline: () => {
-      const { phase, peerId, callId } = get();
-      if (phase !== "incoming") return;
-      if (peerId && callId)
-        void send(peerId, { callId, kind: "bye", reason: "decline" });
-      end(null);
+      if (get().phase !== "incoming") return;
+      end(null, "decline");
     },
 
     hangup: () => {
-      const { phase, peerId, callId } = get();
-      if (phase === "idle") return;
-      if (callId) {
-        // Cancel everyone we're still ringing (outgoing fan-out), else the single
-        // connected/locked peer (connected call or incoming).
-        const targets =
-          ringingPeers.length > 0 ? ringingPeers : peerId ? [peerId] : [];
-        for (const d of targets)
-          void send(d, { callId, kind: "bye", reason: "hangup" });
-      }
-      end(null);
+      if (get().phase === "idle") return;
+      end(null, "hangup");
     },
 
     toggleMic: () => {
@@ -433,6 +439,7 @@ export const useCalls = create<CallState>((set, get) => {
           endedReason: null,
           error: null,
         });
+        armConnectTimeout();
         return;
       }
 
@@ -448,17 +455,13 @@ export const useCalls = create<CallState>((set, get) => {
         if (!ringingPeers.includes(e.from)) return;
         const losers = ringingPeers.filter((d) => d !== e.from);
         ringingPeers = [];
-        set({ peerId: e.from }); // lock the winner (also fixes the glyph/roster name)
+        set({ peerId: e.from, phase: "connecting" }); // lock before asynchronous SDP work
+        for (const d of losers)
+          void send(d, { callId, kind: "bye", reason: "hangup" });
         void pc
           .setRemoteDescription({ type: "answer", sdp: msg.sdp })
-          .then(() => {
-            if (get().callId !== callId) return;
-            set({ phase: "connecting" });
-            for (const d of losers)
-              void send(d, { callId, kind: "bye", reason: "hangup" });
-          })
           .catch(() => {
-            if (get().callId === callId) end("failed");
+            if (get().callId === callId) end("failed", "failed");
           });
         return;
       }
@@ -483,6 +486,6 @@ export const useCalls = create<CallState>((set, get) => {
 
     clearEnded: () => set({ endedReason: null, error: null }),
 
-    teardown: () => end(null),
+    teardown: () => end(null, "hangup"),
   };
 });

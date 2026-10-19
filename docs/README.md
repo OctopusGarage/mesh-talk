@@ -1,23 +1,21 @@
 # Documentation
 
-For delayed group messages, unread behavior and recovery status, see
-[group conversation reception](group-conversation-reception.md). Its
-[research note](research/group-message-reception-ux.md) records the protocol and
-UX rationale.
-
 This is the navigation hub for Mesh-Talk's current guides, technical references, and
-dated evidence. Start with the path that matches your task. The
+validation guidance. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information
 belongs and how to keep the site, README, and guides aligned.
 
-| I want to…                         | Start here                                                   | Continue with                                                                                                                                                                           |
-| ---------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Install or try the desktop app     | [Project overview](../README.md)                             | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                                                                                        |
-| Connect peers across networks      | [Network architecture baseline](network-design-reference.md) | [Current topologies](network-topologies.md) · [Scenario Q&A](network-design-qa.md) · [Routed discovery](routed-network-discovery.md) · [Relay privacy](post-office-metadata-privacy.md) |
-| Run a headless node or relay       | [Deployment](../specifications/deployment_guide.md)          | [Relay releases](post-office-release.md)                                                                                                                                                |
-| Understand or change the protocol  | [Architecture](ARCHITECTURE.md)                              | [Domain model](../CONTEXT.md) · [Testing feedback loop](testing-feedback-loop.md)                                                                                                       |
-| Contribute to the desktop app      | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                                                                  |
-| Review security or past validation | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Evaluation records](#evaluation-records)                                                                 |
+| I want to…                                    | Start here                                                   | Continue with                                                                                                                                    |
+| --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Install or try the desktop app                | [Project overview](../README.md)                             | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                                                 |
+| Read conversations or resolve missing history | [User guide](help/README.md)                                 | [Group reception](group-conversation-reception.md) · [Message delivery](help/topics/delivery.md) · [Files](help/topics/send-files.md)            |
+| Link devices or recover an account            | [Linked devices](help/topics/link-devices.md)                | [Backup and recovery](backup-recovery.md) · [Settings](settings.md)                                                                              |
+| Connect a bot or local assistant              | [Bot integrations](bot-integrations.md)                      | [Public documentation MCP](../tools/help/README.md)                                                                                              |
+| Connect peers across networks                 | [Network architecture baseline](network-design-reference.md) | [Current topologies](network-topologies.md) · [Routed discovery](routed-network-discovery.md) · [Relay privacy](post-office-metadata-privacy.md) |
+| Run a headless node or relay                  | [Deployment](../specifications/deployment_guide.md)          | [Relay releases](post-office-release.md)                                                                                                         |
+| Understand or change the protocol             | [Architecture](ARCHITECTURE.md)                              | [Domain glossary](../CONTEXT.md) · [DDD conventions](domain-design.md) · [Testing feedback loop](testing-feedback-loop.md)                       |
+| Contribute to the desktop app                 | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                           |
+| Review security or past validation            | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Validation and evaluation](#validation-and-evaluation)            |
 
 For menu locations and everyday tasks, start with the [user guide](help/README.md).
 The [help system guide](help-system.md) explains offline reading, publication and
@@ -25,45 +23,37 @@ the read-only [documentation MCP](../tools/help/README.md).
 
 ## Current product and architecture
 
-| Doc                                                                                 | What it covers                                                                                                                                              |
-| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`README.md`](../README.md)                                                         | Project overview, install, quick start.                                                                                                                     |
-| [`PROJECT.md`](../PROJECT.md)                                                       | Top-level context pointer for AI tools / new contributors.                                                                                                  |
-| [`CONTEXT.md`](../CONTEXT.md)                                                       | Domain model — entities, layers, invariants, what the project does _not_ own.                                                                               |
-| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)                                           | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI.                                             |
-| [`docs/routed-network-discovery.md`](routed-network-discovery.md)                   | Optional routed discovery over existing Tailscale, EasyTier or manually supplied addresses, identity boundary, route selection, and release checks.         |
-| [`docs/routed-network-discovery-research.md`](routed-network-discovery-research.md) | Historical cited research and design options behind routed discovery; see the implementation guide for current behavior.                                    |
-| [`docs/easytier-compatibility-research.md`](easytier-compatibility-research.md)     | Dated EasyTier feasibility research, discovery integration options, source evidence, and validation limits.                                                 |
-| [`docs/network-design-reference.md`](network-design-reference.md)                   | Network Topology and Communication Architecture: principles, module contracts, settings, 34 illustrated scenarios, resource limits and acceptance evidence. |
-| [`docs/network-topologies.md`](network-topologies.md)                               | Review baseline: network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.                         |
-| [`docs/network-design-qa.md`](network-design-qa.md)                                 | Focused questions and current answers; remote-relay participation, group chains and links to the architectural baseline.                                    |
-| [`docs/post-office-federation.md`](post-office-federation.md)                       | Equal-relay trust manifest, enrollment/revocation, boot-service deployment, compatibility, and bounded discovery.                                           |
-| [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md)           | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility.                                                                       |
-| [`docs/post-office-release.md`](post-office-release.md)                             | Signed headless relay release archives and Linux GHCR container deployment.                                                                                 |
-| [`docs/post-office-macos-service.md`](post-office-macos-service.md)                 | mac2015 relay service paths, Intel build, first install, update, and health commands.                                                                       |
-| [`docs/post-office-windows-service.md`](post-office-windows-service.md)             | Windows relay Scheduled Task, secure install, update, health, and LAN tests.                                                                                |
-| [`docs/backup-recovery.md`](backup-recovery.md)                                     | Manual encrypted backup, offline restore, recovery key handling, and coverage limits.                                                                       |
-| [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md)                 | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks.                                                                |
-| [`docs/updates.md`](updates.md)                                                     | Manual release check, verified package download, and platform install steps.                                                                                |
-| [`docs/settings.md`](settings.md)                                                   | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
-| [`docs/privacy-controls.md`](privacy-controls.md)                                   | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
-| [`specifications/TODO.md`](../specifications/TODO.md)                               | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
+| Doc                                                                       | What it covers                                                                                                                                              |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`README.md`](../README.md)                                               | Project overview, install, quick start.                                                                                                                     |
+| [`PROJECT.md`](../PROJECT.md)                                             | Top-level context pointer for AI tools / new contributors.                                                                                                  |
+| [`CONTEXT.md`](../CONTEXT.md)                                             | Canonical domain glossary — identity, conversations, networking, acceptance and delivery.                                                                   |
+| [`docs/domain-design.md`](domain-design.md)                               | DDD vocabulary, reference index, identifier translations and conventions for code and docs.                                                                 |
+| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)                                 | Authoritative technical reference — crypto, event log + sync, transport, discovery, post office, build/test/CI.                                             |
+| [`docs/routed-network-discovery.md`](routed-network-discovery.md)         | Optional routed discovery over existing Tailscale, EasyTier or manually supplied addresses, identity boundary, route selection, and release checks.         |
+| [`docs/network-design-reference.md`](network-design-reference.md)         | Network Topology and Communication Architecture: principles, module contracts, settings, 34 illustrated scenarios, resource limits and acceptance evidence. |
+| [`docs/network-topologies.md`](network-topologies.md)                     | Network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.                                          |
+| [`docs/post-office-federation.md`](post-office-federation.md)             | Equal-relay trust manifest, enrollment/revocation, boot-service deployment, compatibility, and bounded discovery.                                           |
+| [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md) | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility.                                                                       |
+| [`docs/post-office-release.md`](post-office-release.md)                   | Signed headless relay release archives and Linux GHCR container deployment.                                                                                 |
+| [`docs/post-office-macos-service.md`](post-office-macos-service.md)       | mac2015 relay service paths, Intel build, first install, update, and health commands.                                                                       |
+| [`docs/post-office-windows-service.md`](post-office-windows-service.md)   | Windows relay Scheduled Task, secure install, update, health, and LAN tests.                                                                                |
+| [`docs/backup-recovery.md`](backup-recovery.md)                           | Manual encrypted backup, offline restore, recovery key handling, and coverage limits.                                                                       |
+| [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md)       | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks.                                                                |
+| [`docs/updates.md`](updates.md)                                           | Manual release check, verified package download, and platform install steps.                                                                                |
+| [`docs/settings.md`](settings.md)                                         | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
+| [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
+| [`specifications/TODO.md`](../specifications/TODO.md)                     | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
+
+The [group reception guide](group-conversation-reception.md) owns ordering, unread
+tracking, catch-up notifications and local recovery observations. For embedding
+the UI-free protocol core, see the [core crate guide](../crates/mesh-talk-core/README.md).
 
 ## Bots and local agents
 
 [Bot integrations](bot-integrations.md) explains the dedicated headless bot host,
 opt-in desktop delegation, scoped CLI credentials and local MCP tools. Text/reply
 sending is implemented; interactive subscriptions and HTTP ingress are later stages.
-
-## Proposed features and research
-
-These documents distinguish implemented initial capabilities from investigated
-options and proposed later stages. The usage guide above owns current behavior.
-
-| Doc                                                                    | What it covers                                                                                                                                                       |
-| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Bots and MCP architecture proposal](bot-mcp-architecture-research.md) | Bot identities, group installations, desktop and headless hosting, shared integration service, reliable sending, MCP/webhook adapters, security and staged delivery. |
-| [Feishu/Lark and MCP source research](bot-mcp-source-research.md)      | Official bot/API/SDK references, current MCP version and transport requirements, and evidence limits.                                                                |
 
 ## Contributor workflow and design
 
@@ -79,54 +69,38 @@ options and proposed later stages. The usage guide above owns current behavior.
 | [`specifications/git_standards.md`](../specifications/git_standards.md)                       | Conventional-commit format, scopes, and GPG signing / hook enforcement.                                  |
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements.                            |
 | [`scripts/README.md`](../scripts/README.md)                                                   | Script entry points, CI globs, manual real-machine rigs, and maintenance tools.                          |
-| [`docs/chat-ui-manual-test.md`](chat-ui-manual-test.md)                                       | Supplementary manual smoke checklist for the desktop chat UI.                                            |
 | [`fuzz/README.md`](../fuzz/README.md)                                                         | Current protocol fuzz targets, scope, and local commands.                                                |
 | [`frontend/DESIGN.md`](../frontend/DESIGN.md)                                                 | Current native-direction visual system and interaction rules.                                            |
 | [`docs/screenshots/README.md`](screenshots/README.md)                                         | How current demo screenshots are captured and shared with the site.                                      |
 | [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md)                                       | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing.               |
 | [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
 
-## Proposed designs and research
+## Design boundaries
 
-These documents distinguish inspected behavior from proposed changes. They do not
-establish shipped capabilities or completed validation.
+[Personal messaging and synchronization](multi-device-sync-design.md) retains the
+product contract and distinguishes proposed private-state and authority extensions
+from current behavior. The architecture and feature guides own shipped behavior. Completed first-release
+audits and implementation steps remain in Git history.
 
-| Doc | What it covers |
-| --- | --- |
-| [Multi-device synchronization research](research/multi-device-sync-patterns.md) | Dated primary-source comparison of Signal, Matrix, Syncthing and document CRDTs. |
-| [Personal messaging and synchronization design](multi-device-sync-design.md) | Existing-code gaps, recommended models/protocols, conflict rules, settings, offline limits and device-security boundaries. |
-| [Synchronization implementation plan](multi-device-sync-plan.md) | Sequenced work packages, file owners, focused tests, compatibility and release gates. |
+## Validation and evaluation
 
-## Evaluation records
+The [evaluation registry](evals/README.md) owns reusable cases, suites and prompts.
+[Platform validation](platform-validation.md) distinguishes backend, native,
+browser and model evidence. Keep generated reports, screenshots from investigations
+and completed-work logs in ignored local output or PR/CI artifacts. Git history
+retains retired records without presenting them as current documentation.
 
-[Bot integration implementation evidence, 2026-10-19](evals/bot-integrations-2026-10-19.md) records focused test commands, standalone binary checks and platform limits.
-
-These dated reports record what was tested and the limits of that evidence. Use
-the current guides above for commands and implementation behavior.
-
-EasyTier-specific evidence: [two-Mac acceptance, 2026-10-17](evals/easytier-macos-2026-10-17.md).
-
-| Doc                                                                                               | What it covers                                                                                       |
-| ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| [`docs/evals/tray-menu.md`](evals/tray-menu.md)                                                   | Tray navigation regressions, native menu evidence and validation limits.                             |
-| [`docs/evals/tray-menu-ai-eval-suite.json`](evals/tray-menu-ai-eval-suite.json)                   | Source evaluation cases for native tray and utility dialog ownership.                                |
-| [`docs/evals/settings-pane-review-2026-10-16.md`](evals/settings-pane-review-2026-10-16.md)       | Settings inventory, source/browser findings, proposed categories and redesign acceptance boundaries. |
-| [`docs/evals/architecture-score.md`](evals/architecture-score.md)                                 | Current fixed-rubric architecture health loop and historical assessments.                            |
-| [`docs/evals/architecture-boundaries-2026-10-15.md`](evals/architecture-boundaries-2026-10-15.md) | Feature responsibility map, dependency risks, and ordered refactoring steps.                         |
-| [`docs/evals/delivery-ai-regression.md`](evals/delivery-ai-regression.md)                         | Delivery and AI validation contract.                                                                 |
-| [`docs/evals/ai-eval-cases.md`](evals/ai-eval-cases.md)                                           | Stable AI eval and smoke cases.                                                                      |
-| [`docs/evals/ai-eval-suite.json`](evals/ai-eval-suite.json)                                       | Machine-readable AI evaluation suite.                                                                |
-| [`docs/evals/linked-device-sync-ai-eval-suite.json`](evals/linked-device-sync-ai-eval-suite.json) | Model-backed linked-device review cases.                                                             |
-| [`docs/evals/module-coverage.json`](evals/module-coverage.json)                                   | Module coverage inventory used by the AI evaluation harness.                                         |
-| [`docs/evals/prompts/agent-contract-evaluator.md`](evals/prompts/agent-contract-evaluator.md)     | Evaluator prompt for agent-contract verdicts.                                                        |
-| [`docs/evals/prompts/ui-ux-review.md`](evals/prompts/ui-ux-review.md)                             | UI review prompt used with screenshot evidence.                                                      |
-| [`docs/evals/quality-gates.md`](evals/quality-gates.md)                                           | Review, mutation, and release evidence requirements.                                                 |
-| [`docs/evals/core-platform-workflows.md`](evals/core-platform-workflows.md)                       | Backend, native, and browser evidence boundaries.                                                    |
-| [`docs/evals/hidden-contacts.md`](evals/hidden-contacts.md)                                       | Hidden-contact native evidence.                                                                      |
-| [`docs/evals/ui-ux-ai-review.md`](evals/ui-ux-ai-review.md)                                       | Screenshot-assisted UI review.                                                                       |
-| [`docs/evals/file-transfer-experience.md`](evals/file-transfer-experience.md)                     | File transfer audit and validation.                                                                  |
-| [`docs/evals/screenshot-capture-experience.md`](evals/screenshot-capture-experience.md)           | Screenshot interaction evaluation.                                                                   |
-| [`docs/evals/channel-lifecycle-worktree.md`](evals/channel-lifecycle-worktree.md)                 | Channel lifecycle E2E evidence from its development worktree.                                        |
+| Doc                                                                                               | What it covers                                                        |
+| ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [`docs/evals/tray-menu-ai-eval-suite.json`](evals/tray-menu-ai-eval-suite.json)                   | Source evaluation cases for native tray and utility dialog ownership. |
+| [`docs/evals/README.md`](evals/README.md)                                                         | Stable AI eval and smoke cases.                                       |
+| [`docs/evals/ai-eval-suite.json`](evals/ai-eval-suite.json)                                       | Machine-readable AI evaluation suite.                                 |
+| [`docs/evals/linked-device-sync-ai-eval-suite.json`](evals/linked-device-sync-ai-eval-suite.json) | Model-backed linked-device review cases.                              |
+| [`docs/evals/module-coverage.json`](evals/module-coverage.json)                                   | Module coverage inventory used by the AI evaluation harness.          |
+| [`docs/evals/prompts/agent-contract-evaluator.md`](evals/prompts/agent-contract-evaluator.md)     | Evaluator prompt for agent-contract verdicts.                         |
+| [`docs/evals/prompts/ui-ux-review.md`](evals/prompts/ui-ux-review.md)                             | UI review prompt used with screenshot evidence.                       |
+| [`docs/quality-gates.md`](quality-gates.md)                                                       | Review, mutation, and release evidence requirements.                  |
+| [`docs/platform-validation.md`](platform-validation.md)                                           | Backend, native, and browser evidence boundaries.                     |
 
 ## Operations and deployment
 
@@ -142,10 +116,10 @@ EasyTier-specific evidence: [two-Mac acceptance, 2026-10-17](evals/easytier-maco
 | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | [`SECURITY.md`](../SECURITY.md)                                                         | Vulnerability-reporting policy and supported versions.                                                               |
 | [`docs/ARCHITECTURE.md` § Security posture](ARCHITECTURE.md#8-security-posture-summary) | Crypto primitives, domain separation, forward secrecy, and known limitations by design.                              |
-| [`docs/evals/managed-device-security-audit.md`](evals/managed-device-security-audit.md) | App-specific macOS managed-device exposure paths, risk ranking, and hardening sequence.                              |
 | [`docs/evals/prompts/independent-review.md`](evals/prompts/independent-review.md)       | Clone-and-review steps plus a copyable English prompt for an evidence-based AI-assisted security and product review. |
 | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)                                           | Community conduct expectations.                                                                                      |
 
-The `docs/evals/` files record evidence at a point in time. For current behavior,
-use the feature guides and architecture reference above, then verify against code.
-Personal plans in `docs/superpowers/` and root `plans/` stay local.
+The `docs/evals/` directory contains maintained evaluation inputs. Feature guides
+and the architecture reference own current behavior; verify changes against code.
+Keep temporary plans, investigations and research under ignored `tmp/`.
+Promote lasting decisions into the owning guide; Git history retains retired reports.

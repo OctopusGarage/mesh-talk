@@ -1,25 +1,34 @@
-import { emptyReception } from "./reception";
-import type { ReactionInfo } from "@/lib/types";
+import type { HistoryItem, ReactionInfo } from "@/lib/types";
 import type {
   ChatMessage,
-  ChatState,
   Conversation,
   SearchTarget,
-} from "./chat";
+} from "./conversationModel";
 import type { SendIntent } from "./outgoingIntent";
-import type { HistoryItem } from "@/lib/types";
 
-type ConversationSnapshot = Pick<
-  ChatState,
-  | "cacheOrder"
-  | "messages"
-  | "reactions"
-  | "historyRequests"
-  | "historyLimits"
-  | "deleted"
-  | "unread"
-  | "intents"
->;
+/** Cache data and exact-ID protection travel together across eviction and reopening. */
+export interface ConversationCacheState {
+  /** Conversation keys in open-recency order; eviction keeps the active conversation. */
+  cacheOrder: string[];
+  messages: Record<string, ChatMessage[]>;
+  reactions: Record<string, ReactionInfo[]>;
+  historyRequests: Record<string, number>;
+  historyLimits: Record<string, number>;
+  deleted: Record<string, string[]>;
+  intents: Record<string, SendIntent>;
+}
+
+export function emptyConversationCache(): ConversationCacheState {
+  return {
+    cacheOrder: [],
+    messages: {},
+    reactions: {},
+    historyRequests: {},
+    historyLimits: {},
+    deleted: {},
+    intents: {},
+  };
+}
 
 // Cap how many conversations keep cached message/reaction arrays in memory at once.
 // Touching hundreds of conversations in a session would otherwise retain them all until
@@ -84,11 +93,11 @@ export function protectIntentDeletion(
 
 /** Settle a send against the same cache, deletion, and intent rules as history. */
 export function completeSendIntentState(
-  state: ConversationSnapshot,
+  state: ConversationCacheState,
   conversation: Conversation,
   clientId: string,
   next: ChatMessage | null,
-): Partial<ChatState> {
+) {
   const key = convKey(conversation);
   const intent = state.intents[clientId];
   if (!intent) {
@@ -226,11 +235,11 @@ function evictCaches(
 }
 
 export function openConversationState(
-  state: ConversationSnapshot,
+  state: ConversationCacheState,
   conversation: Conversation,
   target: SearchTarget | undefined,
   request: number,
-): Partial<ChatState> {
+) {
   const key = convKey(conversation);
   const order = [...state.cacheOrder.filter((item) => item !== key), key];
   const trimmed = evictCaches(state.messages, state.reactions, order, key);
@@ -260,10 +269,10 @@ export function openConversationState(
 }
 
 export function deleteConversationMessage(
-  state: ConversationSnapshot,
+  state: ConversationCacheState,
   key: string,
   target: string,
-): Partial<ChatState> {
+) {
   return {
     deleted: boundedConversationMap(
       state.deleted,
@@ -299,9 +308,9 @@ export function deleteConversationMessage(
 }
 
 export function clearConversationMessages(
-  state: ConversationSnapshot,
+  state: ConversationCacheState,
   key: string,
-): Partial<ChatState> {
+) {
   return {
     deleted: boundedConversationMap(
       state.deleted,
@@ -328,34 +337,5 @@ export function clearConversationMessages(
     messages: state.messages[key]
       ? { ...state.messages, [key]: [] }
       : state.messages,
-  };
-}
-
-export function invalidateConversationIdentity(): Partial<ChatState> {
-  return {
-    ...emptyReception(),
-    historyScanBusy: false,
-    historyScanQueue: [],
-    historyScanRevision: null,
-    historyBaselines: [],
-    historyFullBaselines: [],
-    ready: false,
-    active: null,
-    unread: {},
-    unreadOwner: "",
-    pendingUnknownUnread: {},
-    messages: {},
-    searchTarget: null,
-    reactions: {},
-    intents: {},
-    deleted: {},
-    historyRequests: {},
-    historyLimits: {},
-    cacheOrder: [],
-    members: [],
-    channelOwner: "",
-    statusBusy: false,
-    loading: false,
-    historyError: null,
   };
 }

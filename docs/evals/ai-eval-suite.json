@@ -62,7 +62,7 @@
     {
       "id": "MT-AI-005",
       "name": "delivery eval runbook makes real and deterministic gates explicit",
-      "subject_file": "docs/evals/delivery-ai-regression.md",
+      "subject_file": "docs/evals/README.md",
       "min_score": 0.85,
       "scenario": "A future edit removes key runbook detail. Evaluate whether the runbook still distinguishes deterministic smoke, real smoke, real AI eval, trigger rules, known gaps, and human review.",
       "rubric": [

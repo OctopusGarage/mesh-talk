@@ -101,7 +101,7 @@ The suite checks messages and recovery paths, seven themes and screenshot baseli
 large virtualized conversation/member lists, compact windows, touch targets, and
 representative WCAG A/AA rules with axe. Browser automation does not replace testing
 the native webview, real network, or a screen reader. Use
-[`docs/chat-ui-manual-test.md`](../docs/chat-ui-manual-test.md) for the human smoke pass.
+[`docs/platform-validation.md`](../docs/platform-validation.md) for the human smoke pass.
 
 The detached [`fuzz/`](../fuzz/README.md) crate covers untrusted protocol decoders.
 Compile its targets with `cargo check --manifest-path fuzz/Cargo.toml --bins`; nightly
@@ -141,7 +141,7 @@ changes. Run `make smoke-full` for release-critical changes or broad workflow ch
 
 ## Testing Best Practices
 
-See [quality gates and release evidence](../docs/evals/quality-gates.md) for the
+See [quality gates and release evidence](../docs/quality-gates.md) for the
 required scenario matrix, failing-baseline evidence, mutation-result semantics and
 native platform limitations. Record applicable gaps in the PR; line coverage alone
 does not establish correctness.

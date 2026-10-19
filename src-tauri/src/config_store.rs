@@ -41,6 +41,25 @@ pub fn with_account<T>(
         .map_err(CommandError::Authorization)?
 }
 
+/// Preserve the originating generation across asynchronous settings application.
+pub(crate) fn with_account_lease<T>(
+    app: &AppState,
+    lease: &crate::state::SessionLease,
+    filename: &str,
+    operation: impl FnOnce(&Path) -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
+    app.session()
+        .matching(lease, |_| {
+            if app.app_lock().is_locked() {
+                return Err(CommandError::Authorization("app locked".into()));
+            }
+            let path = account_path(&crate::data_dir(), lease.owner(), filename)
+                .ok_or_else(|| CommandError::Authorization("invalid account owner".into()))?;
+            operation(&path)
+        })
+        .map_err(CommandError::Authorization)?
+}
+
 pub fn read_account<T: DeserializeOwned + Default>(path: &Path) -> T {
     std::fs::read_to_string(path)
         .ok()

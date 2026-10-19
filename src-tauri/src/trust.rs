@@ -14,6 +14,7 @@
 use crate::chat_commands::NodeState;
 use crate::commands::CommandError;
 use crate::config_store;
+use crate::runtime_admission::RuntimeAdmission;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -162,23 +163,22 @@ pub async fn mark_verified(
     account_id: String,
     fingerprint: String,
 ) -> Result<(), CommandError> {
-    let node = node_state.0.lock().await;
-    let fingerprints = config_store::with_account(&app, &owner, TRUST_FILE, |path| {
-        let _guard = state.0.lock().unwrap();
-        let mut file: TrustFile = config_store::read_account(path);
-        set_verified(&mut file, account_id, fingerprint);
-        config_store::write_account(path, &file)?;
-        Ok(verified_fingerprints(&file))
-    })?;
-    if let Some(runtime) = node
-        .as_ref()
-        .filter(|runtime| runtime.host_account_id() == Some(&owner))
-    {
-        runtime
-            .handle()
-            .replace_verified_dm_pull_peers(fingerprints);
-    }
-    Ok(())
+    let admission = RuntimeAdmission::capture(&app, &node_state, &owner)?;
+    let state = state.inner().clone();
+    let path = config_store::account_path(&crate::data_dir(), &owner, TRUST_FILE)
+        .ok_or_else(|| CommandError::Authorization("invalid account owner".into()))?;
+    admission
+        .blocking(move |runtime, _| {
+            let _guard = state.0.lock().unwrap();
+            let mut file: TrustFile = config_store::read_account(&path);
+            set_verified(&mut file, account_id, fingerprint);
+            config_store::write_account(&path, &file)?;
+            runtime
+                .handle()
+                .replace_verified_dm_pull_peers(verified_fingerprints(&file));
+            Ok(())
+        })
+        .await
 }
 
 #[cfg(test)]

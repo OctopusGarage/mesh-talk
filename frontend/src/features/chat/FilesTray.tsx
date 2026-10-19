@@ -1,5 +1,6 @@
+import { createAttachmentDecision } from "./attachments/attachmentDecision";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Download, ExternalLink, FolderOpen, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -20,12 +21,9 @@ import {
   retryAutomaticDownload,
   useAutomaticDownloads,
 } from "@/lib/automaticDownloads";
-import { defaultSavePath } from "@/lib/download";
-import {
-  attachmentLabel,
-  isDirectoryAttachment,
-} from "@/lib/directoryAttachment";
-import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import { saveAttachment } from "@/lib/attachmentSave";
+import { attachmentLabel } from "@/lib/directoryAttachment";
+import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { useChat, captureChatOwnership } from "@/store/chat";
@@ -74,17 +72,13 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   }, [open, visibleFileKeys]);
   const dismissFile = useChat((s) => s.dismissFile);
   const setError = useChat((s) => s.setError);
-  const decide = async (fileConv: string, accept: boolean) => {
-    const lease = captureChatOwnership();
-    if (!lease.current()) return;
-    try {
-      await chat.decideAttachment(fileConv, accept);
-      if (lease.current()) await refreshFileAvailability([fileConv]);
-    } catch (error) {
-      if (lease.current())
-        setError(t("files.approvalFailed", { error: errorMessage(error) }));
-    }
-  };
+  const decide = createAttachmentDecision({
+    captureOwnership: captureChatOwnership,
+    decideAttachment: chat.decideAttachment,
+    refreshAvailability: refreshFileAvailability,
+    reportError: (error) =>
+      setError(t("files.approvalFailed", { error: errorMessage(error) })),
+  });
 
   // Remembered default download folder ("" = use the OS Downloads folder). Loaded on open, kept as
   // a primitive (memory: zustand selectors returning fresh objects can black-screen).
@@ -170,23 +164,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       return;
     try {
       setSavingFile(fileConv);
-      const defaultPath = await defaultSavePath(name);
-      if (!lease.current()) return;
-      const dest = isDirectoryAttachment(mime)
-        ? await openDialog({ directory: true })
-        : await save({ defaultPath });
-      if (lease.current() && typeof dest === "string") {
-        await refreshFileAvailability([fileConv]);
-        if (
-          !lease.current() ||
-          !useFileAvailability.getState().statuses[fileConv]?.ready
-        )
-          return;
-        const path = isDirectoryAttachment(mime)
-          ? await chat.saveFileToDir(fileConv, dest, lease.owner!)
-          : (await chat.saveFile(fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(fileConv, path);
-      }
+      await saveAttachment({ fileConv, name, mime }, lease, { mode: "as" });
     } catch (e) {
       if (lease.current() && markUnavailableFileError(fileConv, e)) return;
       if (lease.current()) handleSaveError(e);

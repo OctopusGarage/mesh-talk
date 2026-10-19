@@ -789,3 +789,120 @@ describe("multi-device fan-out", () => {
     expect(useCalls.getState().peerId).toBe("d1"); // unchanged; the late answer is ignored
   });
 });
+
+describe("call deadlines cancel remote ringing", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  it("outgoing timeout cancels every still-ringing device", async () => {
+    await useCalls
+      .getState()
+      .startCall(
+        { name: "Bob", accountId: "bob", deviceIds: ["d1", "d2"] },
+        false,
+      );
+    const callId = useCalls.getState().callId;
+    invoke.mockClear();
+    await vi.advanceTimersByTimeAsync(20_000);
+    for (const target of ["d1", "d2"])
+      expect(invoke).toHaveBeenCalledWith("send_call_signal", {
+        target,
+        payload: JSON.stringify({ callId, kind: "bye", reason: "failed" }),
+      });
+    expect(useCalls.getState().phase).toBe("idle");
+  });
+  it("an unanswered incoming offer expires independently and releases busy state", async () => {
+    useCalls.getState().onSignal(offer("bob", "lost-caller"));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(useCalls.getState().phase).toBe("idle");
+    expect(invoke).toHaveBeenCalledWith("send_call_signal", {
+      target: "bob",
+      payload: JSON.stringify({
+        callId: "lost-caller",
+        kind: "bye",
+        reason: "failed",
+      }),
+    });
+    useCalls.getState().onSignal(offer("carol", "next"));
+    expect(useCalls.getState().callId).toBe("next");
+  });
+  it("expiry during media permission releases late capture without answering", async () => {
+    let resolve!: (value: unknown) => void;
+    const stop = vi.fn();
+    getUserMedia.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    useCalls.getState().onSignal(offer("bob", "waiting"));
+    const accepting = useCalls.getState().accept();
+    await vi.advanceTimersByTimeAsync(20_000);
+    resolve({
+      getTracks: () => [{ stop }],
+      getVideoTracks: () => [],
+      getAudioTracks: () => [],
+    });
+    await accepting;
+    expect(stop).toHaveBeenCalledOnce();
+    expect(useCalls.getState().phase).toBe("idle");
+    expect(
+      invoke.mock.calls.filter(
+        ([cmd, arg]) =>
+          cmd === "send_call_signal" &&
+          JSON.parse(arg.payload).kind === "answer",
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+describe("terminal negotiation and timer ownership", () => {
+  it("an invalid first answer cancels the loser and terminates the selected device", async () => {
+    class InvalidPc extends FakePc {
+      setRemoteDescription = vi.fn(async () => {
+        throw new Error("bad SDP");
+      });
+    }
+    vi.stubGlobal("RTCPeerConnection", InvalidPc);
+    await useCalls
+      .getState()
+      .startCall(
+        { name: "Bob", accountId: "bob", deviceIds: ["d1", "d2"] },
+        false,
+      );
+    const callId = useCalls.getState().callId;
+    invoke.mockClear();
+    useCalls.getState().onSignal({
+      from: "d1",
+      payload: JSON.stringify({ callId, kind: "answer", sdp: "BAD" }),
+    });
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("send_call_signal", {
+      target: "d2",
+      payload: JSON.stringify({ callId, kind: "bye", reason: "hangup" }),
+    });
+    expect(invoke).toHaveBeenCalledWith("send_call_signal", {
+      target: "d1",
+      payload: JSON.stringify({ callId, kind: "bye", reason: "failed" }),
+    });
+    expect(useCalls.getState().phase).toBe("idle");
+  });
+  it("a retired incoming deadline cannot expire a newer offer", async () => {
+    vi.useFakeTimers();
+    try {
+      useCalls.getState().onSignal(offer("bob", "old"));
+      await vi.advanceTimersByTimeAsync(15_000);
+      useCalls.getState().decline();
+      useCalls.getState().onSignal(offer("carol", "new"));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(useCalls.getState()).toMatchObject({
+        phase: "incoming",
+        callId: "new",
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(useCalls.getState().phase).toBe("idle");
+    } finally {
+      useCalls.getState().teardown();
+      vi.useRealTimers();
+    }
+  });
+});

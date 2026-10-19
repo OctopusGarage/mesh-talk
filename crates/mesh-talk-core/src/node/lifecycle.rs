@@ -58,6 +58,11 @@ impl Node {
                 .suppress(conv, target)
                 .map_err(NodeError::Log)?;
         }
+        self.my_dm_reactions
+            .lock()
+            .expect("my_dm_reactions mutex not poisoned")
+            .remove_where(|c, _, payload| c == conv && payload.target == target)
+            .map_err(NodeError::Log)?;
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
@@ -256,6 +261,13 @@ impl Node {
                 }
             }
         }
+        self.my_dm_reactions
+            .lock()
+            .expect("my_dm_reactions mutex not poisoned")
+            .remove_where(|conv, wall, payload| {
+                should_remove(conv, wall) || suppressed.contains(&(conv, payload.target))
+            })
+            .map_err(NodeError::Log)?;
         {
             let mut suppression = self
                 .account_suppression

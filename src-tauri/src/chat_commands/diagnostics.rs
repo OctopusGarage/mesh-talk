@@ -1,5 +1,5 @@
 use super::NodeState;
-use crate::commands::CommandError;
+use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use mesh_talk_core::discovery::roster::RouteSource;
 use serde::Serialize;
 
@@ -61,60 +61,78 @@ pub async fn diag_get_peers(
 /// Force an immediate re-announce + /24 rescan (the manual "announce now" control on
 /// the Diagnostics page). Helps converge first-contact when LAN discovery is flaky.
 #[tauri::command]
-pub async fn rescan_peers(state: tauri::State<'_, NodeState>) -> Result<(), CommandError> {
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    rt.trigger_discovery();
-    Ok(())
+pub async fn rescan_peers(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+) -> Result<(), CommandError> {
+    RuntimeAdmission::capture_current(&app, &state)?
+        .with_runtime(|runtime| {
+            runtime.trigger_discovery();
+            Ok(())
+        })
+        .await
 }
 
 /// Query one address supplied by the user. A successful send only means that a
 /// query was queued; the normal signed-response and Noise checks still apply.
 #[tauri::command]
 pub async fn probe_peer_endpoint(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     host: String,
     port: Option<u16>,
 ) -> Result<(), CommandError> {
-    let host = host.trim();
-    if host.is_empty()
-        || host.len() > 253
-        || host
-            .chars()
-            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
-        || (host.contains(':') && host.parse::<std::net::Ipv6Addr>().is_err())
-    {
-        return Err(CommandError::InvalidInput(
-            "enter an IP address or hostname without a port".into(),
-        ));
-    }
-    let port = port.unwrap_or(mesh_talk_core::node::DEFAULT_DISCOVERY_PORT);
-    if port == 0 {
-        return Err(CommandError::InvalidInput(
-            "discovery port must be nonzero".into(),
-        ));
-    }
-    let addresses: Vec<_> = tokio::net::lookup_host((host, port))
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let host = host.trim();
+                if host.is_empty()
+                    || host.len() > 253
+                    || host
+                        .chars()
+                        .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+                    || (host.contains(':') && host.parse::<std::net::Ipv6Addr>().is_err())
+                {
+                    return Err(CommandError::InvalidInput(
+                        "enter an IP address or hostname without a port".into(),
+                    ));
+                }
+                let port = port.unwrap_or(mesh_talk_core::node::DEFAULT_DISCOVERY_PORT);
+                if port == 0 {
+                    return Err(CommandError::InvalidInput(
+                        "discovery port must be nonzero".into(),
+                    ));
+                }
+                let addresses: Vec<_> = tokio::net::lookup_host((host, port))
+                    .await
+                    .map_err(|error| CommandError::Io(error.to_string()))?
+                    .take(8)
+                    .collect();
+                if addresses.is_empty() {
+                    return Err(CommandError::InvalidInput("no address found".into()));
+                }
+                admission.checked(runtime, || Ok(()))?;
+                let rt = runtime;
+                let mut last_error = None;
+                for address in addresses {
+                    match rt
+                        .probe_endpoint_if(address, |commit| {
+                            admission.authorize_io(runtime, commit)
+                        })
+                        .await
+                    {
+                        Ok(()) => return Ok(()),
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                Err(CommandError::Io(last_error.map_or_else(
+                    || "query failed".into(),
+                    |error| error.to_string(),
+                )))
+            })
+        })
         .await
-        .map_err(|error| CommandError::Io(error.to_string()))?
-        .take(8)
-        .collect();
-    if addresses.is_empty() {
-        return Err(CommandError::InvalidInput("no address found".into()));
-    }
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    let mut last_error = None;
-    for address in addresses {
-        match rt.probe_endpoint(address).await {
-            Ok(()) => return Ok(()),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(CommandError::Io(last_error.map_or_else(
-        || "query failed".into(),
-        |error| error.to_string(),
-    )))
 }
 
 /// This device's own identity + LAN/discovery facts, for the Diagnostics page.
@@ -147,7 +165,26 @@ mod tests {
     async fn diagnostics_expose_a_live_runtime_and_reject_invalid_manual_targets() {
         let root = tempfile::tempdir().unwrap();
         let managed = NodeState::empty();
+        let app_state = AppState::new(crate::services::auth_service::AuthService::new(
+            std::sync::Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            )),
+        ));
+        app_state.session().set(
+            "diagnostics".into(),
+            crate::services::user::User {
+                user_id: "diagnostics-test".into(),
+                name: "diagnostics".into(),
+                display_name: "Diagnostics Test".into(),
+                address: "local".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            },
+            "test-password".into(),
+        );
         let app = tauri::test::mock_builder()
+            .manage(app_state)
             .manage(managed.clone())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -181,7 +218,9 @@ mod tests {
         );
         assert!(!info.multicast_group.is_empty());
         assert!(super::super::get_presence(state.clone()).await.unwrap()[&info.account_id].online);
-        rescan_peers(state.clone()).await.unwrap();
+        rescan_peers(app.state::<AppState>(), state.clone())
+            .await
+            .unwrap();
 
         let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let remote_port = reserved.local_addr().unwrap().port();
@@ -278,19 +317,29 @@ mod tests {
 
         for host in ["", "example.com/path", "host name", "127.0.0.1:47474"] {
             assert!(
-                probe_peer_endpoint(state.clone(), host.into(), None)
+                probe_peer_endpoint(app.state::<AppState>(), state.clone(), host.into(), None)
                     .await
                     .is_err()
             );
         }
         assert!(
-            probe_peer_endpoint(state.clone(), "127.0.0.1".into(), Some(0))
-                .await
-                .is_err()
-        );
-        probe_peer_endpoint(state, " 127.0.0.1 ".into(), Some(47474))
+            probe_peer_endpoint(
+                app.state::<AppState>(),
+                state.clone(),
+                "127.0.0.1".into(),
+                Some(0)
+            )
             .await
-            .unwrap();
+            .is_err()
+        );
+        probe_peer_endpoint(
+            app.state::<AppState>(),
+            state,
+            " 127.0.0.1 ".into(),
+            Some(47474),
+        )
+        .await
+        .unwrap();
         managed.0.lock().await.take().unwrap().stop().await;
         remote.stop().await;
     }

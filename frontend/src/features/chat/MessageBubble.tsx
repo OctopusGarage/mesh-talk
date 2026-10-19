@@ -2,8 +2,8 @@ import {
   retryAutomaticDownload,
   useAutomaticDownloads,
 } from "@/lib/automaticDownloads";
+import { createAttachmentDecision } from "./attachments/attachmentDecision";
 import { useState } from "react";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Copy,
@@ -31,12 +31,12 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { chat } from "@/lib/api";
-import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
+import { saveAttachment } from "@/lib/attachmentSave";
 import {
   attachmentLabel,
   isDirectoryAttachment,
 } from "@/lib/directoryAttachment";
-import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { formatTime, humanSize, shortId } from "@/lib/format";
@@ -48,7 +48,6 @@ import type { ReactionInfo } from "@/lib/types";
 import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
 import {
   useFileStatus,
-  useFileAvailability,
   refreshFileAvailability,
   markUnavailableFileError,
 } from "@/store/fileAvailability";
@@ -115,36 +114,9 @@ function FileBubble({
       return;
     try {
       setSaving(true);
-      const dir = directory ? await effectiveDownloadDir() : "";
-      if (!lease.current()) return;
-      if (dir) {
-        await refreshFileAvailability([file.fileConv]);
-        if (
-          !lease.current() ||
-          !useFileAvailability.getState().statuses[file.fileConv]?.ready
-        )
-          return;
-        const path = await chat.saveFileToDir(file.fileConv, dir, lease.owner!);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-        return;
-      }
-      const defaultPath = await defaultSavePath(file.name);
-      if (!lease.current()) return;
-      const dest = directory
-        ? await openDialog({ directory: true })
-        : await save({ defaultPath });
-      if (lease.current() && typeof dest === "string") {
-        await refreshFileAvailability([file.fileConv]);
-        if (
-          !lease.current() ||
-          !useFileAvailability.getState().statuses[file.fileConv]?.ready
-        )
-          return;
-        const path = directory
-          ? await chat.saveFileToDir(file.fileConv, dest, lease.owner!)
-          : (await chat.saveFile(file.fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-      }
+      await saveAttachment(file, lease, {
+        mode: directory ? "default" : "as",
+      });
     } catch (e) {
       if (lease.current() && markUnavailableFileError(file.fileConv, e)) return;
       if (lease.current())
@@ -165,17 +137,14 @@ function FileBubble({
     }
   };
 
-  const decide = async (accept: boolean) => {
-    const lease = captureChatOwnership();
-    if (!lease.current() || !file.fileConv) return;
-    try {
-      await chat.decideAttachment(file.fileConv, accept);
-      if (lease.current()) await refreshFileAvailability([file.fileConv]);
-    } catch (error) {
-      if (lease.current())
-        setError(t("files.approvalFailed", { error: errorMessage(error) }));
-    }
-  };
+  const decideAttachment = createAttachmentDecision({
+    captureOwnership: captureChatOwnership,
+    decideAttachment: chat.decideAttachment,
+    refreshAvailability: refreshFileAvailability,
+    reportError: (error) =>
+      setError(t("files.approvalFailed", { error: errorMessage(error) })),
+  });
+  const decide = (accept: boolean) => decideAttachment(file.fileConv, accept);
 
   // Media (image/video, sent via the media button) that is small enough to render inline:
   // show ONLY the preview. Its filename, size, and download live in the detail view that

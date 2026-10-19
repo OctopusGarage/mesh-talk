@@ -1,7 +1,7 @@
 # mesh-talk-core
 
 The UI-free protocol core of [Mesh-Talk](https://github.com/OctopusGarage/mesh-talk) — a
-**serverless, end-to-end-encrypted, LAN-first messenger**. This crate is the foundation an
+**local-first, end-to-end-encrypted messenger**. This crate is the foundation an
 SDK is built on: it has **no UI and no Tauri dependency**, so it can be embedded in a CLI,
 a daemon, a desktop shell (as the Mesh-Talk app does), or any other Rust program.
 

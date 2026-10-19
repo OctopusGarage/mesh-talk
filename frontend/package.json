@@ -1,7 +1,7 @@
 {
   "name": "mesh-talk-frontend",
   "version": "0.4.1",
-  "description": "Frontend for Mesh-Talk \\u2014 a serverless, end-to-end-encrypted LAN messenger",
+  "description": "Encrypted peer-to-peer messaging across local networks and sites",
   "type": "module",
   "scripts": {
     "dev": "vite",

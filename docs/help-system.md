@@ -55,8 +55,8 @@ version. The build emits:
 
 All page navigation is relative, so a GitHub Pages project subpath is preserved.
 The current build's version comes from `[workspace.package]` in `Cargo.toml`.
-A clean deployment contains the current snapshot only; this first implementation
-does not promise an archive of all past releases. Older installed apps always
+A clean deployment contains the current snapshot only; publication does not
+promise an archive of all past releases. Older installed apps always
 retain their own bundled help. Their version-qualified online link is only
 available while that snapshot is published. A future archive policy can retain
 previous generated snapshots without changing the format.

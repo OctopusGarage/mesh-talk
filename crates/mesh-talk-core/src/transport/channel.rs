@@ -266,13 +266,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
 
     /// Encrypt and send one application message.
     pub async fn send(&mut self, plaintext: &[u8]) -> Result<(), TransportError> {
+        self.send_if(plaintext, |commit| commit()).await
+    }
+
+    /// Admit encryption only after any policy wait. A denied operation consumes
+    /// no Noise nonce; accepted bounded writes may finish after host revocation.
+    pub(crate) async fn send_if(
+        &mut self,
+        plaintext: &[u8],
+        mut authorize: impl FnMut(
+            &mut dyn FnMut() -> Result<(), TransportError>,
+        ) -> Result<(), TransportError>
+        + Send,
+    ) -> Result<(), TransportError> {
         if let Some(admission) = self.io_admission.clone() {
             let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let _guard = admission.gate.read().await;
                 if !(admission.check)() {
                     return Err(TransportError::AdmissionDenied);
                 }
-                let ct = self.session.encrypt(plaintext)?;
+                let ct = self.encrypt_if(plaintext, &mut authorize)?;
                 write_frame(&mut self.stream, &ct).await?;
                 Ok(ct.len() as u64 + 4)
             })
@@ -281,10 +294,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes?);
             return Ok(());
         }
-        let ct = self.session.encrypt(plaintext)?;
+        let ct = self.encrypt_if(plaintext, &mut authorize)?;
         write_frame(&mut self.stream, &ct).await?;
         self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(ct.len() as u64 + 4);
         Ok(())
+    }
+
+    fn encrypt_if(
+        &mut self,
+        plaintext: &[u8],
+        authorize: &mut impl FnMut(
+            &mut dyn FnMut() -> Result<(), TransportError>,
+        ) -> Result<(), TransportError>,
+    ) -> Result<Vec<u8>, TransportError> {
+        let mut ciphertext = None;
+        authorize(&mut || {
+            if ciphertext.is_some() {
+                return Err(TransportError::AdmissionDenied);
+            }
+            ciphertext = Some(self.session.encrypt(plaintext)?);
+            Ok(())
+        })?;
+        ciphertext.ok_or(TransportError::AdmissionDenied)
     }
 
     /// Receive and decrypt one application message.

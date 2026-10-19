@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
+import type { PresenceStatus } from "@/lib/presence";
 
-export type PresenceStatus = "online" | "away" | "recent" | "offline";
+export type { PresenceStatus } from "@/lib/presence";
 
 const COLOR: Record<PresenceStatus, string> = {
   online: "hsl(var(--presence-online))",

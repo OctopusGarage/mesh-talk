@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "frontend-history",
+      "paths": [
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts"
+      ],
+      "frontend": ["src/store/conversationHistory.test.ts"],
+      "consumers": ["frontend-chat"]
+    },
+    {
+      "id": "frontend-outgoing",
+      "paths": [
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/outgoingIntent.test.ts"
+      ],
+      "frontend": ["src/store/outgoingIntent.test.ts"],
+      "consumers": ["frontend-chat"]
+    },
+    {
+      "id": "frontend-conversation-state",
+      "paths": [
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/conversationModel.ts"
+      ],
+      "consumers": ["frontend-history", "frontend-outgoing"],
+      "frontend": ["src/store/reception.test.ts"]
+    },
+    {
+      "id": "frontend-chat",
+      "paths": [
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/chatRuntimeEffects.ts"
+      ],
+      "frontend": ["src/store/chat.test.ts"],
+      "escalation": [
+        "Changed visible interaction or native IPC behavior requires relevant browser/native scenarios; unit reachability does not prove runtime wiring."
+      ]
+    },
+    {
+      "id": "frontend-owner",
+      "paths": [
+        "frontend/src/store/ownership.ts",
+        "frontend/src/store/ownership.test.ts"
+      ],
+      "frontend": ["src/store/ownership.test.ts"],
+      "consumers": ["frontend-history", "frontend-outgoing"]
+    },
+    {
+      "id": "frontend-channel-actions",
+      "paths": [
+        "frontend/src/store/channelActions.ts",
+        "frontend/src/store/channelActions.test.ts"
+      ],
+      "frontend": ["src/store/channelActions.test.ts"],
+      "consumers": ["frontend-chat"],
+      "escalation": [
+        "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
+      ]
+    }
+  ],
+  "prScenarios": [
+    {
+      "id": "frontend-saved-devices",
+      "paths": [
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts",
+        "frontend/src/features/chat/ConversationHeaders.tsx"
+      ],
+      "browser": ["e2e/personal-messages.spec.ts"]
+    },
+    {
+      "id": "frontend-visual",
+      "paths": [
+        "frontend/src/App.tsx",
+        "frontend/src/index.css",
+        "frontend/src/components/",
+        "frontend/src/features/chat/",
+        "frontend/src/lib/theme.ts",
+        "frontend/src/store/theme.ts"
+      ],
+      "browser": ["e2e/ui-visual-regression.spec.ts"]
+    }
+  ]
+}

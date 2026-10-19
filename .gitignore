@@ -48,6 +48,8 @@ build/
 .DS_Store
 
 # Tauri build artifacts
+# Platform-specific ACL/schema output is regenerated from capabilities at build time.
+/src-tauri/gen/schemas/
 src-tauri/target/
 src-tauri/**/*.app
 src-tauri/**/*.exe
@@ -100,3 +102,28 @@ docs/superpowers/
 /.codex/
 /.impeccable/
 /skills-lock.json
+
+# Implementation scratch work: promote durable decisions into owning guides.
+/docs/research/
+/docs/investigations/
+/docs/implementation-notes/
+/docs/**/*-research.md
+/docs/**/*-plan.md
+/research/
+/investigations/
+/scratch/
+/.brooks-lint-history.json
+# Evaluations contain maintained inputs only, never generated review reports.
+/docs/evals/*
+!/docs/evals/README.md
+!/docs/evals/*-suite.json
+!/docs/evals/module-coverage.json
+!/docs/evals/prompts/
+/docs/evals/prompts/*
+!/docs/evals/prompts/*.md
+
+# Patch, editor and merge leftovers.
+*.orig
+*.rej
+*.bak
+*.tmp

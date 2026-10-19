@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, writeFile } from "node:fs/promises";
 import { runCommand } from "../pr-platform/guest.mjs";
 import { parseFlags } from "../pr-platform/plan.mjs";
+import { selectedRustPackages } from "../pr-platform/rust-packages.mjs";
 
 export async function validateSelectors(plan, { cwd = process.cwd(), run = runCommand } = {}) {
   const results = [];
@@ -13,15 +14,17 @@ export async function validateSelectors(plan, { cwd = process.cwd(), run = runCo
     if (result.code !== 0 || result.timedOut) throw Error(`Test inventory failed: ${result.error || result.output.slice(-3000)}`);
     return result.output;
   }
-  if (plan.coreFilters.length || plan.hostFilters.length) {
-    const output = await checked("cargo", ["test", "--locked", "--workspace", "--lib", "--no-run", "--message-format=json"]);
+  const packages = selectedRustPackages(plan);
+  const libraries = packages.filter(pkg => plan[pkg.filters]?.length);
+  if (libraries.length) {
+    const output = await checked("cargo", ["test", "--locked", ...libraries.flatMap(pkg => ["-p", pkg.package]), "--lib", "--no-run", "--message-format=json"]);
     const executables = new Map();
     for (const line of output.split("\n")) {
       try { const item = JSON.parse(line); if (item.reason === "compiler-artifact" && item.executable) executables.set(item.target.name, item.executable); }
       catch { /* Cargo diagnostics need not be JSON artifacts. */ }
     }
-    for (const [kind, name, filters] of [["core", "mesh_talk_core", plan.coreFilters], ["host", "mesh_talk", plan.hostFilters]]) {
-      if (!filters.length) continue;
+    for (const { kind, library: name, filters: key } of libraries) {
+      const filters = plan[key];
       if (!executables.has(name)) throw Error(`Missing ${kind} test executable`);
       const listed = await checked(executables.get(name), ["--list"]);
       const names = [...listed.matchAll(/^(.+): test\r?$/gmu)].map(match => match[1]);
@@ -32,11 +35,13 @@ export async function validateSelectors(plan, { cwd = process.cwd(), run = runCo
       }
     }
   }
-  for (const target of plan.coreTests) {
-    const listed = await checked("cargo", ["test", "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--list"]);
-    const count = [...listed.matchAll(/^(.+): test\r?$/gmu)].length;
-    if (!count) throw Error(`Integration selector matches zero tests: ${target}`);
-    results.push({ kind: "core-test", target, count });
+  for (const pkg of packages) {
+    for (const target of pkg.targets ? plan[pkg.targets] : []) {
+      const listed = await checked("cargo", ["test", "--locked", "-p", pkg.package, "--test", target, "--", "--list"]);
+      const count = [...listed.matchAll(/^(.+): test\r?$/gmu)].length;
+      if (!count) throw Error(`Integration selector matches zero tests: ${target}`);
+      results.push({ kind: `${pkg.kind}-test`, target, count });
+    }
   }
   return results;
 }
