@@ -2370,10 +2370,10 @@ describe("durable text admission", () => {
       ready: true,
     }),
   );
-  it("returns false when the final policy check rejects after preflight", async () => {
+  it("returns false when final authorization rejects after preflight", async () => {
     invoke.mockImplementation((cmd: string) =>
       cmd === "owner_enqueue_text"
-        ? Promise.reject(new Error("language policy changed"))
+        ? Promise.reject(new Error("authorization changed"))
         : Promise.resolve([]),
     );
     expect(

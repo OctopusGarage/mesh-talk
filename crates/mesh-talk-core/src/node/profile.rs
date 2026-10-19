@@ -93,6 +93,7 @@ pub struct ProfilePayload {
     pub updated_at: u64,
     /// The avatar data-URL bytes, or `None` to clear (revert to the glyph).
     pub avatar: Option<Vec<u8>>,
+    /// Retired MTPF2 metadata, retained only to authenticate existing avatar payloads.
     pub language: Option<String>,
     pub language_supported: bool,
     #[serde(with = "sig_bytes")]
@@ -130,8 +131,8 @@ impl ProfilePayload {
         }
     }
 
-    /// V2 is a complete profile so existing ciphertext compaction keeps avatar and
-    /// language preference together. V1 remains byte-identical for legacy avatars.
+    /// Build a retired wire-format fixture; production only emits avatar-only MTPF1.
+    #[cfg(test)]
     pub fn new_with_language(
         account: &Account,
         avatar: Option<Vec<u8>>,
@@ -176,11 +177,12 @@ impl ProfilePayload {
         {
             return false;
         }
-        if self
-            .language
-            .as_deref()
-            .is_some_and(|language| !super::language_policy::is_supported(language))
-            || (!self.language_supported && self.language.is_some())
+        if self.language.as_deref().is_some_and(|language| {
+            !matches!(
+                language,
+                "en" | "zh" | "ja" | "es" | "fr" | "de" | "ko" | "pt" | "ru" | "ar"
+            )
+        }) || (!self.language_supported && self.language.is_some())
         {
             return false;
         }
@@ -243,7 +245,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn language_profile_is_signed_and_keeps_legacy_encoding_separate() {
+    fn retired_profile_metadata_remains_authenticated_for_avatar_compatibility() {
         let account = Account::generate();
         let legacy = ProfilePayload::new(&account, None, 100);
         assert!(legacy.encode().starts_with(b"MTPF1"));

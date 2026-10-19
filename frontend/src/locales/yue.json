@@ -345,7 +345,8 @@
     "manageStickers": "管理貼圖包",
     "sendSticker": "傳送 {{emoji}} 貼圖",
     "cancelReply": "取消回覆",
-    "tools": "訊息工具"
+    "tools": "訊息工具",
+    "queuing": "儲存緊訊息…"
   },
   "screenshot": {
     "trigger": "截圖",
@@ -945,31 +946,5 @@
     "openDiagnostics": "開啟連線診斷",
     "online": "上網閱讀",
     "linkFailed": "開唔到連結。請再試，或者用瀏覽器開啟線上手冊。"
-  },
-  "dmLanguage": {
-    "title": "私訊語言",
-    "help": "收到嘅每則私訊，所選語言要佔至少80%，其他語言最多佔20%。群組聊天唔受影響。",
-    "localOnly": "語言偵測喺呢部裝置進行，訊息唔會傳送到翻譯服務。",
-    "unrestricted": "不限語言",
-    "loadFailed": "載入唔到語言偏好。",
-    "saveFailed": "儲存唔到語言偏好，之前嘅選擇仍然有效。",
-    "validationFailed": "檢查唔到訊息語言。草稿已經保留，請再試。",
-    "notice": "每則訊息嘅{{language}}要佔至少{{percent}}%，其他語言最多佔20%。",
-    "rejected": "呢則訊息嘅{{language}}要佔至少{{percent}}%（其他語言最多佔20%）。草稿已經保留。",
-    "languages": {
-      "en": "英文",
-      "zh": "中文",
-      "ja": "日文",
-      "es": "西班牙文",
-      "fr": "法文",
-      "de": "德文",
-      "ko": "韓文",
-      "pt": "葡萄牙文",
-      "ru": "俄文",
-      "ar": "阿拉伯文"
-    },
-    "checking": "檢查緊訊息語言…",
-    "resourceLimit": "呢則訊息太長或者太複雜，檢查唔到。請分成幾則短啲嘅訊息。",
-    "hidden": "訊息已按你嘅語言設定隱藏"
   }
 }

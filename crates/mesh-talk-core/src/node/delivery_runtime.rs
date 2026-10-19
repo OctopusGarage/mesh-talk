@@ -635,7 +635,7 @@ impl Node {
             Some(proof) => proof.account_id(),
             None => Some(account.clone()),
         };
-        let (conversation, from, body) = if plain.starts_with(b"MTDE1") {
+        let (conversation, from) = if plain.starts_with(b"MTDE1") {
             let env = DmEnvelope::decode(&plain)?;
             let valid_account = |id: &str| {
                 id.len() == 32
@@ -656,17 +656,10 @@ impl Node {
                     &env.route.recipient_account,
                 ),
                 env.route.sender_account,
-                MessageBody::decode(&env.body),
             )
         } else {
-            (
-                event.conversation_id,
-                peer.user_id(),
-                MessageBody::decode(&plain),
-            )
+            (event.conversation_id, peer.user_id())
         };
-        self.classify_incoming_language(event.id, &from, &body)
-            .ok()?;
         let received = ReceivedEntry {
             event_id: event.id,
             conversation,
@@ -975,7 +968,6 @@ impl Node {
                         || MessageBody::decode(&entry.plaintext),
                         |env| MessageBody::decode(&env.body),
                     );
-                    let hidden = self.hidden_by_language(entry.event_id);
                     let from_name = self
                         .historical_author(&sender.ed25519_pub)
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
@@ -983,12 +975,8 @@ impl Node {
                         let _ = self.incoming.send(ReceivedDm {
                             from: sender.user_id(),
                             from_name,
-                            text: if hidden {
-                                super::language_io::HIDDEN_TEXT.to_vec()
-                            } else {
-                                body.text
-                            },
-                            reply_to: if hidden { None } else { body.reply_to },
+                            text: body.text,
+                            reply_to: body.reply_to,
                         });
                     }
                 }

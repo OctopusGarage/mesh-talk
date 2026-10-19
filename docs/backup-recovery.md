@@ -45,10 +45,10 @@ revoke it. Choose **Start with a new identity** instead and ask contacts to veri
 the new fingerprint. If both the backup and its key are lost, the encrypted history
 and previous identity cannot be recovered by a password reset.
 
-## Language restrictions in backups
+## Snapshot compatibility
 
-New backups use snapshot schema 2 and include account language preferences and
-persisted hidden-message decisions. This build also accepts schema 1 backups;
-older builds reject schema 2 rather than restoring a partial snapshot. Language
-preferences are protocol state, separate from the ordinary device settings that
-backups do not export. See [incoming DM language](dm-language-restrictions.md).
+New backups use snapshot schema 2; this build also accepts schema 1. The retired
+message-language metadata in older schema 2 backups is validated for format and
+authenticity but does not restore restrictions or hidden-message decisions.
+New backups omit that metadata. Display-language preferences remain ordinary
+local device settings.
