@@ -85,7 +85,8 @@ async fn local_inventory_from(executables: Vec<PathBuf>, rpc: &str, port: u16) -
 }
 
 async fn read_inventory(executable: PathBuf, rpc: &str) -> Option<Vec<u8>> {
-    let mut child = tokio::process::Command::new(executable)
+    let mut command = crate::background_command::command(executable);
+    let mut child = command
         .args([
             "--rpc-portal",
             rpc,

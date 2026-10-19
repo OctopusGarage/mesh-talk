@@ -92,7 +92,7 @@ async fn local_inventory(port: u16) -> Vec<SocketAddr> {
 
 async fn local_inventory_from(executables: Vec<PathBuf>, port: u16) -> Vec<SocketAddr> {
     for executable in executables {
-        let mut command = tokio::process::Command::new(executable);
+        let mut command = crate::background_command::command(executable);
         command
             .args(["status", "--json"])
             .env("TAILSCALE_BE_CLI", "1")
