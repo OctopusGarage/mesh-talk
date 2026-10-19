@@ -303,6 +303,18 @@ retains resource ownership through descendant-process cleanup. Nested POSIX
 stage commands share the outer managed group and its single escalation owner;
 nested leases are not released before group termination. Subsequent waiters
 recover locks whose nested owner was terminated.
+POSIX cleanup confirms that the managed group has no runnable descendants after
+escalation; unreaped zombies do not count as running work. Dead nested owners
+cannot release a lease while their group still runs. If process-state inspection
+is unavailable or Windows `taskkill /T /F` fails, termination is unverified:
+the cancelled attempt produces no successful receipt and its locks remain
+quarantined. Inspect the attempt log and the lock's `owner.json`, establish that
+all descendants have stopped, and remove only those quarantined lock directories
+to recover. Automatic dead-owner recovery never clears quarantine. A Windows
+taskkill success is OS process-tree evidence, not a native UI acceptance test.
+Tool versions and mutable configuration digests are rechecked after queueing,
+before reuse and after execution; changes invalidate evidence rather than
+publishing success under the earlier identity.
 Console output reports queue time, execution time, reuse, and running-stage
 heartbeats. Platform preflight reports each platform's completion immediately and
 prints progress while the other continues. Missing/corrupted evidence is a cache

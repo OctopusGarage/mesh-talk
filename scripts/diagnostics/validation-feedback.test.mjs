@@ -199,3 +199,12 @@ test("cancelling a run cannot erase an earlier observed failure", async () => {
   assert.equal(timing.firstIssue.kind, "failed");
   assert.equal(timing.firstIssue.seconds, 2);
 });
+
+test("cancelled phase retains the observation time of an earlier validation issue", async () => {
+  const { feedbackTiming } = await import("../validation/feedback.mjs");
+  const timing = feedbackTiming({ started: 1000, finished: 5000, status: "cancelled", phases: [
+    { name: "tests", started: 1500, status: "cancelled", finished: 4500, commands: [], failure: { kind: "invalidated", observedAt: 3000, message: "source changed" } },
+  ] });
+  assert.deepEqual(timing.firstIssue, { seconds: 2, kind: "invalidated", phase: "tests", origin: "phase" });
+  assert.equal(timing.completionSeconds, 4);
+});

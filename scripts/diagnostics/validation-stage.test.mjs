@@ -403,3 +403,41 @@ test("successful command with changed source is invalidated rather than reported
   assert.match(result.error, /Source changed/);
   await assert.rejects(readFile(result.receipt));
 });
+
+test("configuration changed during execution cannot publish successful evidence", async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.root, "target"), { recursive: true });
+  const config = path.join(f.root, "target/npmrc");
+  await writeFile(config, "audit=true\n");
+  const result = await f.run({ env: { NPM_CONFIG_USERCONFIG: config }, command: [process.execPath, "-e", "require('node:fs').writeFileSync(process.env.NPM_CONFIG_USERCONFIG,'audit=false\\n')"] });
+  assert.notEqual(result.code, 0);
+  assert.equal(result.failureKind, "invalidated");
+  await assert.rejects(readFile(result.receipt));
+});
+
+test("group cleanup waits for runnable descendants and fails closed on unknown state", async () => {
+  const { waitForProcessGroup } = await import("../validation/stage.mjs");
+  let probes = 0;
+  assert.equal(await waitForProcessGroup(123, { probe: () => ++probes < 3, pause: async () => {} }), true);
+  assert.equal(probes, 3);
+  assert.equal(await waitForProcessGroup(123, { probe: () => { throw Error("ps unavailable"); }, pause: async () => {}, attempts: 2 }), false);
+  assert.equal(await waitForProcessGroup(123, { probe: () => true, pause: async () => {}, attempts: 2 }), false);
+});
+
+test("quarantined locks and dead nested owners with live groups cannot be reaped", { skip: process.platform === "win32" }, async t => {
+  const f = await fixture(t);
+  const first = await f.run();
+  const directory = path.join(f.root, "target/validation/locks", first.key);
+  const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" }).stdout.trim());
+  assert.ok(group > 1);
+  for (const extra of [{ quarantined: "termination unknown" }, { group }]) {
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "owner.json"), JSON.stringify({ pid: 2147483647, ...extra }));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1200);
+    try { await assert.rejects(f.run({ signal: controller.signal }), /abort/i); }
+    finally { clearTimeout(timer); }
+    assert.deepEqual(JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8")), { pid: 2147483647, ...extra });
+    await rm(directory, { recursive: true });
+  }
+});

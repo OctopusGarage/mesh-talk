@@ -11,6 +11,21 @@ import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function processGroupRunning(group) {
+  const result = spawnSync("ps", ["-eo", "pgid=,stat="], { encoding: "utf8", timeout: 5000 });
+  if (result.status !== 0) throw Error("Cannot verify process-group termination");
+  return result.stdout.split("\n").some(line => {
+    const [id, state] = line.trim().split(/\s+/u);
+    return Number(id) === group && state && !state.startsWith("Z");
+  });
+}
+export async function waitForProcessGroup(group, { probe = processGroupRunning, pause = delay, attempts = 50 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try { if (!probe(group)) return true; } catch { /* Unknown is not terminated. */ }
+    await pause(100);
+  }
+  return false;
+}
 function git(root, args) {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
   if (result.status !== 0) throw Error(result.stderr.trim() || "Git identity unavailable");
@@ -55,15 +70,24 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
     signal?.throwIfAborted();
     try {
       await mkdir(directory);
-      await writeFile(path.join(directory, "owner.json"), JSON.stringify({ pid: process.pid, started: Date.now() }));
-      return async () => rm(directory, { recursive: true, force: true });
+      const owner = { pid: process.pid, started: Date.now() };
+      if (process.platform !== "win32" && process.env.MESH_VALIDATION_PROCESS_GROUP_OWNER) {
+        const probe = spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
+        const group = Number(probe.stdout?.trim());
+        if (probe.status === 0 && Number.isInteger(group) && group > 1) owner.group = group;
+        else owner.quarantined = "Cannot establish nested process group";
+      }
+      await writeFile(path.join(directory, "owner.json"), JSON.stringify(owner));
+      const release = async () => rm(directory, { recursive: true, force: true });
+      release.quarantine = async reason => writeFile(path.join(directory, "owner.json"), JSON.stringify({ ...owner, quarantined: reason }));
+      return release;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       try {
         const owner = JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
         try { process.kill(owner.pid, 0); }
         catch (probe) {
-          if (probe.code === "ESRCH") {
+          if (probe.code === "ESRCH" && !owner.quarantined) {
             // One reaper rechecks ownership, so a second waiter cannot remove a new lock.
             const reaper = `${directory}.reaper`;
             let acquired = false;
@@ -71,10 +95,13 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
               await mkdir(reaper); acquired = true;
               const current = JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
               try { process.kill(current.pid, 0); }
-              catch (check) { if (check.code === "ESRCH") await rm(directory, { recursive: true, force: true }); }
+              catch (check) {
+                if (check.code === "ESRCH" && !current.quarantined &&
+                    (!current.group || !processGroupRunning(current.group)))
+                  await rm(directory, { recursive: true, force: true });
+              }
             } catch (failure) { if (!["EEXIST", "ENOENT"].includes(failure.code)) throw failure; }
             finally { if (acquired) await rm(reaper, { recursive: true, force: true }); }
-            continue;
           }
         }
       } catch { /* An owner may still be publishing its identity. */ }
@@ -97,6 +124,7 @@ async function execute(command, { cwd, env, logPath, signal }) {
     const output = createWriteStream(logPath);
     let error;
     let failureKind;
+    let cleanupUnverified = false;
     const argv = executableCommand(command, env);
     // Only the outer stage owns a POSIX process group and its kill timer.
     // Nested stage commands join that group so escalation cannot orphan a
@@ -118,8 +146,11 @@ async function execute(command, { cwd, env, logPath, signal }) {
       if (process.platform === "win32") {
         cleanup = new Promise(done => {
           const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-          killer.on("error", failure => { error = `Process tree cleanup failed: ${failure.message}`; child.kill(); });
-          killer.on("close", code => { if (code !== 0) child.kill(); done(); });
+          killer.on("error", failure => { error = `Process tree cleanup failed: ${failure.message}`; cleanupUnverified = true; child.kill(); });
+          killer.on("close", code => {
+            if (code !== 0) { cleanupUnverified = true; error ||= "Windows process-tree termination could not be verified"; child.kill(); }
+            done();
+          });
         });
       } else if (nestedGroup) {
         // The owner signals and escalates the whole group. Keep this stage's
@@ -132,8 +163,10 @@ async function execute(command, { cwd, env, logPath, signal }) {
         try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill(); }
         // The leader may exit while descendants with independent stdio remain.
         // Keep the group escalation and resource lease until cleanup completes.
-        cleanup = new Promise(done => setTimeout(() => {
+        cleanup = new Promise(done => setTimeout(async () => {
           try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ }
+          cleanupUnverified = !await waitForProcessGroup(child.pid);
+          if (cleanupUnverified) error = "Process-group termination could not be verified";
           done();
         }, 2000));
       }
@@ -143,7 +176,7 @@ async function execute(command, { cwd, env, logPath, signal }) {
     child.on("close", async code => {
       signal?.removeEventListener("abort", abort);
       await cleanup;
-      output.end(() => resolve({ code: signal?.aborted ? 130 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind }));
+      output.end(() => resolve({ code: signal?.aborted ? 130 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified }));
     });
   });
 }
@@ -161,26 +194,29 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   const identity = { schema: 2, source: declared ? undefined : initial.head, inputs: declared, cwd: path.relative(root, cwd), name, command, context, platform: process.platform, arch: process.arch,
     node: process.version, executable: process.execPath, environment: environmentIdentity(env, profile), frontendEnvironment, profile, artifacts };
   // Executable versions invalidate cached results after toolchain upgrades.
-  const versions = {};
-  for (const tool of ["cargo", "rustc", "npm"]) {
+  const tools = () => Object.fromEntries(["cargo", "rustc", "npm"].map(tool => {
     const argv = executableCommand([tool, "--version"], env);
     const probe = spawnSync(argv[0], argv.slice(1), { env, encoding: "utf8", timeout: 10_000, shell: false });
-    versions[tool] = `${probe.status}:${probe.stdout || ""}`;
-  }
-  identity.tools = versions;
+    return [tool, `${probe.status}:${probe.stdout || ""}`];
+  }));
+  identity.tools = tools();
   const configuration = [path.join(env.CARGO_HOME || path.join(homedir(), ".cargo"), "config.toml"),
     path.join(env.CARGO_HOME || path.join(homedir(), ".cargo"), "config"),
     env.npm_config_userconfig || env.NPM_CONFIG_USERCONFIG || path.join(homedir(), ".npmrc"),
     path.join(root, "frontend/node_modules/.package-lock.json")];
-  identity.configuration = await Promise.all(configuration.map(async filename => {
+  const configurationIdentity = () => Promise.all(configuration.map(async filename => {
     try { return [filename, await digest(filename)]; } catch (error) { if (error.code !== "ENOENT") throw error; return [filename, null]; }
   }));
+  identity.configuration = await configurationIdentity();
+  const runtimeUnchanged = async () => JSON.stringify(await configurationIdentity()) === JSON.stringify(identity.configuration) &&
+    JSON.stringify(tools()) === JSON.stringify(identity.tools);
   const key = hash(JSON.stringify(identity));
   const directory = path.join(root, "target/validation");
   const receipt = path.join(directory, "receipts", `${key}.json`);
   const reusable = !initial.dirty && !env.CI && !fresh && env.MESH_VALIDATION_FRESH !== "1";
   const release = await lock(path.join(directory, "locks", key), { log, signal });
   let releaseResource;
+  let cleanupUnverified = false;
   try {
     if (reusable) {
       try {
@@ -188,7 +224,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
         if (record.schema === 1 && record.key === key && record.code === 0 && Date.now() >= record.finished && Date.now() - record.finished < 86_400_000 &&
             await digest(record.logPath) === record.logDigest && JSON.stringify(await artifactDigests(cwd, artifacts)) === JSON.stringify(record.artifacts)) {
           const current = source(root);
-          if (!current.dirty && current.head === initial.head && JSON.stringify(await frontendEnvironmentIdentity(root)) === JSON.stringify(frontendEnvironment) && (!declared || JSON.stringify(await inputIdentity(root, inputs)) === JSON.stringify(declared))) {
+          if (!current.dirty && current.head === initial.head && await runtimeUnchanged() && JSON.stringify(await frontendEnvironmentIdentity(root)) === JSON.stringify(frontendEnvironment) && (!declared || JSON.stringify(await inputIdentity(root, inputs)) === JSON.stringify(declared))) {
             const reused = { ...record, source: initial.head, reusedFromSource: record.source, reused: true, receipt,
               savedExecutionMs: record.executionMs ?? record.elapsedMs - record.queuedMs,
               executionMs: 0, queuedMs: Date.now() - started, elapsedMs: Date.now() - started, finished: Date.now() };
@@ -210,6 +246,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       if (JSON.stringify(await frontendEnvironmentIdentity(root)) !== JSON.stringify(frontendEnvironment)) throw Error("Frontend environment changed while waiting for validation");
       if (declared && JSON.stringify(await inputIdentity(root, inputs)) !== JSON.stringify(declared)) throw Error("Stage inputs changed while waiting for validation");
     }
+    if (!await runtimeUnchanged()) throw Error("Stage inputs changed while waiting for validation (tool/configuration identity)");
     // A new attempt supersedes previous proof even if it fails or is cancelled.
     await rm(receipt, { force: true });
     const runId = `${Date.now()}-${randomUUID()}`;
@@ -221,6 +258,15 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     let result;
     try { result = await execute(command, { cwd, env, logPath, signal }); }
     finally { clearInterval(timer); }
+    cleanupUnverified = result.cleanupUnverified;
+    if (cleanupUnverified) {
+      const reason = result.error || "Descendant termination was not verified";
+      await release.quarantine(reason);
+      await releaseResource?.quarantine(reason);
+      log(`resource locks quarantined: ${reason}; verify descendant termination before manual recovery`);
+    }
+    if (result.code === 0 && !await runtimeUnchanged())
+      result = { code: 1, error: "Stage inputs changed during validation (tool/configuration identity)", failureKind: "invalidated" };
     let measured = [];
     if (result.code === 0) {
       try { measured = await artifactDigests(cwd, artifacts); }
@@ -232,7 +278,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       else if (JSON.stringify(await frontendEnvironmentIdentity(root)) !== JSON.stringify(frontendEnvironment)) result = { code: 1, error: "Frontend environment changed during validation", failureKind: "invalidated" };
       else if (declared && JSON.stringify(await inputIdentity(root, inputs)) !== JSON.stringify(declared)) result = { code: 1, error: "Stage inputs changed during validation", failureKind: "invalidated" };
     }
-    const record = { schema: 1, key, name, platform: process.platform, arch: process.arch, source: initial.head, inputs: declared, reused: false, code: result.code, error: result.error, failureKind: result.failureKind, artifacts: measured, logPath, logDigest: await digest(logPath), elapsedMs: Date.now() - started, executionMs: Date.now() - started - queuedMs, queuedMs, finished: Date.now() };
+    const record = { schema: 1, key, name, platform: process.platform, arch: process.arch, source: initial.head, inputs: declared, reused: false, code: result.code, error: result.error, failureKind: result.failureKind, cleanupUnverified, artifacts: measured, logPath, logDigest: await digest(logPath), elapsedMs: Date.now() - started, executionMs: Date.now() - started - queuedMs, queuedMs, finished: Date.now() };
     await recordAttempt(directory, record);
     if (result.code === 0 && !initial.dirty && !signal?.aborted) {
       await mkdir(path.dirname(receipt), { recursive: true });
@@ -241,7 +287,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     }
     log(`${result.code === 0 ? "passed" : "failed"} in ${Math.round(record.elapsedMs / 1000)}s${result.error ? `: ${result.error}` : ""}`);
     return { ...record, reused: false, receipt };
-  } finally { await releaseResource?.(); await release(); }
+  } finally { if (!cleanupUnverified) { await releaseResource?.(); await release(); } }
 }
 
 async function main(args) {

@@ -47,7 +47,7 @@ export function completePhase(report, name, { record, progress, error, aborted =
   phase.reused = record?.reused ?? false;
   phase.finished = Date.now();
   phase.evidence = record ? { source: record.source, key: record.key, logPath: record.logPath, receipt: record.receipt, queuedMs: record.queuedMs, executionMs: record.executionMs, code: record.code } : undefined;
-  phase.failure = error ? { kind: failureKind(error), message: error.reportMessage ?? error.message } : progress?.failure ?? (record?.error ? { kind: record.failureKind ?? "failed", message: record.error } : undefined);
+  phase.failure = error ? { kind: failureKind(error), message: error.reportMessage ?? error.message, observedAt: phase.finished } : progress?.failure ?? (record?.error ? { kind: record.failureKind ?? "failed", message: record.error, observedAt: phase.finished } : undefined);
   if (phase.status !== "passed")
     for (const command of phase.commands) if (command.status === "running") command.status = "interrupted";
 }
@@ -93,7 +93,7 @@ export function observeCommands(filename, identity) {
       await save();
       return result;
     },
-    fail: async error => { progress.failure = { kind: failureKind(error), message: error.reportMessage ?? error.message }; await save(); },
+    fail: async error => { progress.failure = { kind: failureKind(error), message: error.reportMessage ?? error.message, observedAt: Date.now() }; await save(); },
   };
 }
 
@@ -129,6 +129,8 @@ export function feedbackTiming(report) {
     }
     if (["failed", "unavailable", "invalidated"].includes(phase.status) && inPhase(phase.finished))
       issues.push({ seconds: seconds(phase.finished), kind: phase.status, phase: phase.name, origin: "phase" });
+    if (["failed", "unavailable", "invalidated"].includes(phase.failure?.kind) && inPhase(phase.failure.observedAt))
+      issues.push({ seconds: seconds(phase.failure.observedAt), kind: phase.failure.kind, phase: phase.name, origin: "phase" });
   }
   if (report.status === "blocked" && within(end))
     issues.push({ seconds: seconds(end), kind: "blocked", phase: null, origin: "report" });
