@@ -25,6 +25,10 @@
 
 - `make dev` primes Rust + Node deps and installs git hooks.
 - `make build` / `make frontend-build` — release build / Vite production build.
+- During feature development, preview changed-boundary validation with `make test-plan`
+  and run it with `make test-changed`. Unmapped changes require an explicit owner
+  and reason; inspect escalation notes for browser/native or consumer checks.
+  These commands do not replace required PR/review gates or static checks.
 - During feature development, run affected tests only: `make test-focused
 TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.

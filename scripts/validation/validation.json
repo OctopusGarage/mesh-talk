@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "validation-tooling",
+      "paths": [
+        "scripts/validation/affected.mjs",
+        "scripts/validation/changed.mjs",
+        "scripts/validation/frontend-graph.mjs",
+        "scripts/validation/validation.json",
+        "scripts/validation/stage.mjs",
+        "scripts/validation/selectors.mjs",
+        "Makefile",
+        "AGENTS.md",
+        "scripts/diagnostics/affected-plan.test.mjs",
+        "scripts/diagnostics/changed-validation.test.mjs",
+        "scripts/diagnostics/validation-selectors.test.mjs",
+        "scripts/diagnostics/validation-stage.test.mjs",
+        "frontend/validation.json",
+        "crates/mesh-talk-core/validation.json",
+        "src-tauri/validation.json",
+        "crates/mesh-talk-integrations/validation.json",
+        "crates/mesh-talk-mcp/validation.json"
+      ],
+      "node": [
+        "scripts/diagnostics/affected-plan.test.mjs",
+        "scripts/diagnostics/changed-validation.test.mjs",
+        "scripts/diagnostics/validation-selectors.test.mjs",
+        "scripts/diagnostics/validation-stage.test.mjs"
+      ],
+      "escalation": [
+        "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI."
+      ]
+    }
+  ]
+}

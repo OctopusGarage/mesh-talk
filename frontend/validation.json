@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "frontend-history",
+      "paths": [
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts"
+      ],
+      "frontend": ["src/store/conversationHistory.test.ts"],
+      "consumers": ["frontend-chat"]
+    },
+    {
+      "id": "frontend-outgoing",
+      "paths": [
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/outgoingIntent.test.ts"
+      ],
+      "frontend": ["src/store/outgoingIntent.test.ts"],
+      "consumers": ["frontend-chat"]
+    },
+    {
+      "id": "frontend-conversation-state",
+      "paths": [
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/conversationModel.ts"
+      ],
+      "consumers": ["frontend-history", "frontend-outgoing"],
+      "frontend": ["src/store/reception.test.ts"]
+    },
+    {
+      "id": "frontend-chat",
+      "paths": [
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/chatRuntimeEffects.ts"
+      ],
+      "frontend": ["src/store/chat.test.ts"],
+      "escalation": [
+        "Changed visible interaction or native IPC behavior requires relevant browser/native scenarios; unit reachability does not prove runtime wiring."
+      ]
+    },
+    {
+      "id": "frontend-owner",
+      "paths": [
+        "frontend/src/store/ownership.ts",
+        "frontend/src/store/ownership.test.ts"
+      ],
+      "frontend": ["src/store/ownership.test.ts"],
+      "consumers": ["frontend-history", "frontend-outgoing"]
+    }
+  ]
+}

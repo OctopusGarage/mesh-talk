@@ -115,6 +115,24 @@ operation lifetime, runtime installation and retirement, without maintaining a
 second active user/token representation. `state.rs` preserves established exports;
 `runtime_admission.rs` continues to own runtime/session commit authority.
 
+### Focused validation ownership
+
+Module-owned `validation.json` contracts link these boundaries to development
+checks. Account profiles use `core-account-profile`; desktop session/admission
+uses `desktop-session`; history, outgoing intents, shared conversation state and
+chat composition use `frontend-history`, `frontend-outgoing`,
+`frontend-conversation-state` and `frontend-chat`. Contracts declare downstream
+consumer IDs and escalation notes; frontend source imports add affected unit
+consumers automatically. Integration grant policy expands through service,
+headless host, IPC, client and desktop/MCP adapters. Most other core module IDs
+require explicit selection with a reason until their consumers are established.
+
+A module change should ship its focused behavior evidence and update its contract
+when it changes consumer obligations or shared fixtures. Interface changes require
+consumer validation; runtime/native behavior can require browser or process
+checks. See [change-aware development plans](testing-feedback-loop.md#change-aware-development-plans)
+for preview/run commands, unknown-path handling and the unchanged mandatory gates.
+
 ## 3. Sidebar responsibilities
 
 `ui/features/chat/Sidebar.tsx` is the composition root: it selects application

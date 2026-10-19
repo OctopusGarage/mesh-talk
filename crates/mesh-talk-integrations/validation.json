@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "integration-policy",
+      "paths": ["crates/mesh-talk-integrations/src/policy.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["policy::"]
+        }
+      ],
+      "consumers": ["integration-service"],
+      "escalation": [
+        "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
+      ]
+    },
+    {
+      "id": "integration-service",
+      "paths": ["crates/mesh-talk-integrations/src/service.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["service::"]
+        }
+      ],
+      "consumers": [
+        "integration-host",
+        "integration-ipc",
+        "desktop-integrations"
+      ],
+      "escalation": [
+        "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
+      ]
+    },
+    {
+      "id": "integration-host",
+      "paths": ["crates/mesh-talk-integrations/src/host.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["host::"]
+        }
+      ],
+      "consumers": [],
+      "escalation": [
+        "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
+      ]
+    },
+    {
+      "id": "integration-ipc",
+      "paths": ["crates/mesh-talk-integrations/src/ipc.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["ipc::"]
+        }
+      ],
+      "consumers": ["integration-client", "desktop-integrations"],
+      "escalation": [
+        "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
+      ]
+    },
+    {
+      "id": "integration-client",
+      "paths": ["crates/mesh-talk-integrations/src/client.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["client::"]
+        }
+      ],
+      "consumers": ["mcp-adapter"],
+      "escalation": [
+        "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
+      ]
+    },
+    {
+      "id": "integration-private-files",
+      "paths": ["crates/mesh-talk-integrations/src/private_files.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["private_files::"]
+        }
+      ],
+      "consumers": [
+        "integration-client",
+        "desktop-integrations",
+        "integration-ipc"
+      ],
+      "escalation": [
+        "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
+      ]
+    }
+  ]
+}

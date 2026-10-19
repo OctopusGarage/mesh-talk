@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "desktop-session",
+      "paths": [
+        "src-tauri/src/desktop_session.rs",
+        "src-tauri/src/state.rs",
+        "src-tauri/src/runtime_admission.rs",
+        "src-tauri/src/runtime_bootstrap.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/owner_commands.rs",
+        "src-tauri/src/services/auth_service.rs",
+        "src-tauri/src/chat_commands/state.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "desktop_session::",
+            "services::auth_service::tests::",
+            "runtime_admission::",
+            "commands::tests::",
+            "owner_commands::tests::"
+          ]
+        }
+      ],
+      "escalation": [
+        "Session/authorization changes require review of app-lock, integrations and contact-policy admission; native startup/retirement changes require focused native evidence."
+      ],
+      "consumers": ["desktop-integrations"]
+    },
+    {
+      "id": "desktop-integrations",
+      "paths": ["src-tauri/src/integrations.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["integrations::tests::"]
+        }
+      ],
+      "escalation": [
+        "Native IPC/session retirement changes require the relevant platform/native checks."
+      ]
+    }
+  ]
+}

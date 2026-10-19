@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test test-focused e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run clean-builds clean-builds-dry-run check
+.PHONY: dev build test test-focused test-plan test-changed e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run clean-builds clean-builds-dry-run check
 
 # Managed commands coordinate with cache eviction across all local worktrees.
 MANAGED_BUILD = python3 scripts/build-retention.py run --
@@ -26,6 +26,14 @@ test-focused:
 	else \
 		$(MANAGED_BUILD) node scripts/validation/stage.mjs rust-focused --profile shared --resource heavy -- cargo test -p "$(TEST_PACKAGE)" --lib "$(TEST_FILTER)"; \
 	fi
+
+# Development-only affected tests. Preview first; pass literal planner options with
+# VALIDATION_ARGS (for example --base origin/main). Required PR gates are unchanged.
+test-plan:
+	node scripts/validation/changed.mjs $(VALIDATION_ARGS)
+
+test-changed:
+	$(MANAGED_BUILD) node scripts/validation/changed.mjs --run $(VALIDATION_ARGS)
 
 # End-to-end integration tests: real `mesh-talk-node` processes over UDP discovery +
 # TCP (two-node DM, history-across-restart, post-office offline delivery,
@@ -117,6 +125,8 @@ help:
 	@echo "  make build            Build the application for release"
 	@echo "  make test             Run the workspace unit/integration tests"
 	@echo "  make test-focused TEST_PACKAGE=... TEST_FILTER=...  Run affected Rust tests"
+	@echo "  make test-plan        Preview affected development tests and selection reasons"
+	@echo "  make test-changed     Run the affected plan; block unknown/no-test selections"
 	@echo "  make e2e              Run the end-to-end multi-process tests (slow)"
 	@echo "  make eval-smoke       Run delivery and AI regression smoke checks"
 	@echo "  make ai-eval          Run real model-backed AI evals (requires AI_EVAL_COMMAND)"

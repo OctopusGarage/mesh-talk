@@ -1,0 +1,217 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { buildAffectedPlan } from "../validation/affected.mjs";
+import { buildFrontendGraph } from "../validation/frontend-graph.mjs";
+
+const contracts = [
+  {
+    id: "profile",
+    paths: ["core/profile.rs"],
+    rust: [{ package: "core", filters: ["profile::"] }],
+    consumers: ["host"],
+    escalation: ["Signed profile changes need loopback/restart evidence."],
+  },
+  {
+    id: "host",
+    paths: ["host/session.rs"],
+    rust: [{ package: "host", filters: ["session::"] }],
+  },
+];
+const graph = (sources) => buildFrontendGraph(new Map(Object.entries(sources)));
+
+test("selects module owner and declared transitive consumers with reasons, deduplicating commands", () => {
+  const plan = buildAffectedPlan(["core/profile.rs", "host/session.rs"], {
+    contracts,
+  });
+  assert.deepEqual(
+    plan.owners.map((item) => item.id),
+    ["host", "profile"],
+  );
+  assert.deepEqual(
+    plan.rust.map((item) => item.package),
+    ["core", "host"],
+  );
+  assert.match(
+    plan.owners.find((item) => item.id === "host").reasons.join(" "),
+    /consumer of profile/,
+  );
+  assert.equal(plan.blockers.length, 0);
+  assert.match(plan.escalation.join(" "), /loopback/);
+  assert.ok(!JSON.stringify(plan).includes("--workspace"));
+});
+
+test("unknown files block execution, documentation-only changes select no tests", () => {
+  assert.match(
+    buildAffectedPlan(["core/unknown.rs"], { contracts }).blockers.join(" "),
+    /unmapped.*core\/unknown.rs/i,
+  );
+  const docs = buildAffectedPlan(["docs/example.md", "README.md"], {
+    contracts,
+  });
+  assert.deepEqual(docs.rust, []);
+  assert.deepEqual(docs.blockers, []);
+});
+
+test("explicit owners require a reason before acknowledging unmapped files", () => {
+  assert.throws(
+    () => buildAffectedPlan(["unknown"], { contracts, owners: ["host"] }),
+    /reason/i,
+  );
+  assert.throws(
+    () =>
+      buildAffectedPlan([], {
+        contracts,
+        owners: ["typo"],
+        reason: "manual review",
+      }),
+    /unknown owner/i,
+  );
+  const plan = buildAffectedPlan(["unknown"], {
+    contracts,
+    owners: ["host"],
+    reason: "Reviewed shared fixture; only session uses it",
+  });
+  assert.equal(plan.blockers.length, 0);
+  assert.match(plan.owners[0].reasons.join(" "), /Reviewed shared fixture/);
+  assert.deepEqual(plan.acknowledged, ["unknown"]);
+});
+
+test("frontend tests follow transitive imports, aliases, reexports, mocks and shared fixture users", () => {
+  const frontend = graph({
+    "frontend/src/owner.ts": "export const value = 1;",
+    "frontend/src/barrel.ts": 'export { value } from "@/owner";',
+    "frontend/src/a.test.ts": 'import {value} from "./barrel";',
+    "frontend/src/b.test.ts": 'vi.mock("@/owner", () => ({}));',
+    "frontend/src/c.test.ts": 'import("./unrelated");',
+    "frontend/src/unrelated.ts": "",
+  });
+  const plan = buildAffectedPlan(["frontend/src/owner.ts"], {
+    contracts,
+    frontend,
+  });
+  assert.deepEqual(plan.frontend, ["src/a.test.ts", "src/b.test.ts"]);
+  assert.equal(plan.blockers.length, 0);
+  assert.match(plan.frontendReasons["src/a.test.ts"].join(" "), /owner.ts/);
+});
+
+test("changed shared fixture reaches every importing test, including cycles", () => {
+  const frontend = graph({
+    "frontend/src/shared.ts": 'import "./loop";',
+    "frontend/src/loop.ts": 'import "./shared";',
+    "frontend/src/a.test.ts": 'import "./shared";',
+    "frontend/src/b.test.ts": 'import "./loop";',
+  });
+  assert.deepEqual(
+    buildAffectedPlan(["frontend/src/shared.ts"], { contracts, frontend })
+      .frontend,
+    ["src/a.test.ts", "src/b.test.ts"],
+  );
+});
+
+test("former dependency edges retain consumers after deletion or import removal", () => {
+  const frontend = buildFrontendGraph(
+    new Map([["frontend/src/a.test.ts", ""]]),
+    new Map([
+      ["frontend/src/old.ts", "export const value = 1;"],
+      ["frontend/src/a.test.ts", 'import "./old";'],
+    ]),
+  );
+  assert.deepEqual(
+    buildAffectedPlan(["frontend/src/old.ts"], { contracts, frontend })
+      .frontend,
+    ["src/a.test.ts"],
+  );
+});
+
+test("changed tests select themselves but missing tests cannot be silently successful", () => {
+  const frontend = graph({ "frontend/src/a.test.ts": "" });
+  assert.deepEqual(
+    buildAffectedPlan(["frontend/src/a.test.ts"], { contracts, frontend })
+      .frontend,
+    ["src/a.test.ts"],
+  );
+  const noTests = buildAffectedPlan(["frontend/src/untested.ts"], {
+    contracts,
+    frontend: graph({ "frontend/src/untested.ts": "" }),
+  });
+  assert.match(noTests.blockers.join(" "), /no affected unit tests/i);
+  assert.match(noTests.escalation.join(" "), /browser|native/i);
+});
+
+test("deleted tests are reported for review, never passed to Vitest as nonexistent files", () => {
+  const frontend = buildFrontendGraph(
+    new Map(),
+    new Map([["frontend/src/a.test.ts", ""]]),
+  );
+  const plan = buildAffectedPlan(["frontend/src/a.test.ts"], {
+    contracts,
+    frontend,
+  });
+  assert.deepEqual(plan.frontend, []);
+  assert.match(plan.blockers.join(" "), /no affected unit tests/i);
+});
+
+test("invalid consumer references and duplicate owner IDs fail closed", () => {
+  assert.throws(
+    () => buildAffectedPlan([], { contracts: [...contracts, contracts[0]] }),
+    /duplicate/i,
+  );
+  assert.throws(
+    () =>
+      buildAffectedPlan([], {
+        contracts: [{ id: "bad", paths: ["bad"], consumers: ["missing"] }],
+      }),
+    /consumer/i,
+  );
+});
+
+test("mapped source owners with no executable tests cannot produce a successful empty plan", () => {
+  const plan = buildAffectedPlan(["runtime.rs"], {
+    contracts: [{ id: "runtime", paths: ["runtime.rs"] }],
+  });
+  assert.match(plan.blockers.join(" "), /no executable tests/i);
+});
+
+test("repository grant policy expands through service, IPC, client, host and desktop/MCP consumers", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const files = [
+    "../../crates/mesh-talk-integrations/validation.json",
+    "../../crates/mesh-talk-mcp/validation.json",
+    "../../src-tauri/validation.json",
+  ];
+  const registered = (
+    await Promise.all(
+      files.map(
+        async (file) =>
+          JSON.parse(await readFile(new URL(file, import.meta.url), "utf8"))
+            .contracts,
+      ),
+    )
+  ).flat();
+  const plan = buildAffectedPlan(
+    ["crates/mesh-talk-integrations/src/policy.rs"],
+    { contracts: registered },
+  );
+  assert.deepEqual(
+    plan.owners.map((owner) => owner.id),
+    [
+      "desktop-integrations",
+      "integration-client",
+      "integration-host",
+      "integration-ipc",
+      "integration-policy",
+      "integration-service",
+      "mcp-adapter",
+    ],
+  );
+});
+
+test("misspelled contract fields cannot silently drop downstream checks", () => {
+  assert.throws(
+    () =>
+      buildAffectedPlan([], {
+        contracts: [{ id: "owner", paths: ["owner.rs"], consumer: ["host"] }],
+      }),
+    /unknown contract field.*consumer/i,
+  );
+});

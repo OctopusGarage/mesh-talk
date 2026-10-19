@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "core-channel",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["channel::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-discovery",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["discovery::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-dm",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["dm::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-eventlog",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["eventlog::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-file",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["file::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-identity",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["identity::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-postoffice",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["postoffice::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-ratchet",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["ratchet::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-recovery",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["recovery::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-storage",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["storage::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-transport",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["transport::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-util",
+      "paths": [],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["util::"]
+        }
+      ],
+      "escalation": [
+        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+      ]
+    },
+    {
+      "id": "core-account-profile",
+      "paths": [
+        "crates/mesh-talk-core/src/node/account_profile.rs",
+        "crates/mesh-talk-core/src/node/profile.rs",
+        "crates/mesh-talk-core/src/node/profile_store.rs",
+        "crates/mesh-talk-core/src/node/profile_io.rs",
+        "crates/mesh-talk-core/src/node/language_state.rs",
+        "crates/mesh-talk-core/src/node/language_io.rs",
+        "crates/mesh-talk-core/src/node/language_tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::account_profile::tests::",
+            "node::profile::tests::",
+            "node::profile_store::tests::",
+            "node::language_state::tests::",
+            "node::language_tests::",
+            "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
+            "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers"
+          ]
+        }
+      ],
+      "escalation": [
+        "Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
+      ]
+    }
+  ]
+}
