@@ -39,10 +39,10 @@ fi
   if [[ "$platform" == windows_* ]]; then files+=(install-post-office-windows.ps1); fi
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "${files[@]}" > SHA256SUMS
-    sha256sum -c SHA256SUMS
+    sha256sum -c SHA256SUMS >&2
   else
     shasum -a 256 "${files[@]}" > SHA256SUMS
-    shasum -a 256 -c SHA256SUMS
+    shasum -a 256 -c SHA256SUMS >&2
   fi
 )
 (
