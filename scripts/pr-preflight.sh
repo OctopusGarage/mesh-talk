@@ -21,28 +21,23 @@ candidate="$(git rev-parse HEAD)"
 
 base_ref="$(node --input-type=module - "$@" <<'JS'
 import { parseFlags } from './scripts/pr-platform/plan.mjs';
-console.log(parseFlags(['--base', process.env.PATCH_COVERAGE_BASE ?? 'origin/main', ...process.argv.slice(2)]).base);
+const flags = parseFlags(['--base', process.env.PATCH_COVERAGE_BASE ?? 'origin/main', ...process.argv.slice(2)]);
+if (flags.planOnly) throw new Error('Preview with node scripts/pr-platform/run.mjs --plan; PR preflight requires execution.');
+console.log(flags.base);
 JS
 )"
 git rev-parse --verify "$base_ref" >/dev/null
 merge_base="$(git merge-base HEAD "$base_ref")"
-changed_files="$(git diff --name-only "$merge_base" HEAD)"
+changed_files="$(git diff --name-only --no-renames "$merge_base" HEAD)"
 
-# One parser owns both platform selectors and the existing positional UI specs.
-ui_specs_text="$(node --input-type=module - "$@" <<'JS'
-import { parseFlags } from './scripts/pr-platform/plan.mjs';
-const flags = parseFlags(process.argv.slice(2));
-if (flags.planOnly) throw new Error('Preview with node scripts/pr-platform/run.mjs --plan; PR preflight requires execution.');
-console.log(flags.uiSpecs.join('\n'));
-JS
-)"
+# One plan owns automatic scenarios and explicit selectors. Validate native proof
+# before spending time on local coverage or platform builds.
+scenario_plan="$(node scripts/pr-platform/run.mjs --plan --base "$base_ref" "$@")"
 ui_specs=()
 while IFS= read -r spec; do
     if [ -n "$spec" ]; then ui_specs+=("$spec"); fi
-done <<< "$ui_specs_text"
-
-# Validate selectors before local work, without starting either environment.
-node scripts/pr-platform/run.mjs --plan --base "$base_ref" "$@" >/dev/null
+done < <(printf '%s' "$scenario_plan" | node --input-type=module -e 'let input=""; for await (const chunk of process.stdin) input+=chunk; console.log(JSON.parse(input).uiSpecs.join("\n"));')
+node scripts/validation/pr-scenarios.mjs verify "$base_ref"
 
 # Reuse local work only. Required environments are checked on every invocation.
 if [ "${MESH_VALIDATION_PREFLIGHT:-0}" != 1 ]; then
@@ -63,10 +58,19 @@ if [ "${MESH_VALIDATION_PREFLIGHT:-0}" != 1 ]; then
 fi
 stage="$repo_root/scripts/validation/stage.mjs"
 
-node "$stage" diagnostics --profile shared -- node --test scripts/diagnostics/*.test.mjs
 typos
+cargo fmt --all -- --check
+if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
+    (
+        cd frontend
+        npx prettier --check src/
+        node "$stage" frontend-types --profile shared -- npm run typecheck
+        node "$stage" frontend-lint --profile shared -- npm run lint
+    )
+fi
+node "$stage" diagnostics --profile shared -- node --test scripts/diagnostics/*.test.mjs
 
-if printf '%s\n' "$changed_files" | rg -q '^(Cargo\.(toml|lock)|crates/mesh-talk-core/|src-tauri/src/|src-tauri/tests/|src-tauri/Cargo\.toml)'; then
+if printf '%s\n' "$changed_files" | node scripts/pr-platform/rust-packages.mjs --selection-needed; then
     # Tauri validates frontendDist even when listing its test executable.
     (
         cd frontend
@@ -79,8 +83,6 @@ fi
 if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
     (
         cd frontend
-        node "$stage" frontend-types --profile shared -- npm run typecheck
-        node "$stage" frontend-lint --profile shared -- npm run lint
         node "$stage" frontend-coverage --profile shared --resource heavy --artifact coverage/lcov.info -- npm run test:coverage
     )
 

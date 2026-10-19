@@ -44,6 +44,32 @@
       "escalation": [
         "Changes to health or CI entry points also require the affected workflow diagnostic tests."
       ]
+    },
+    {
+      "id": "pr-preparation",
+      "paths": [
+        "scripts/prepare-pr.sh",
+        "scripts/create-pr.sh",
+        "scripts/pr-preflight.sh",
+        "scripts/pr-platform/",
+        "scripts/validation/pr-scenarios.mjs",
+        "scripts/diagnostics/prepare-pr.test.mjs",
+        "scripts/diagnostics/pr-scenarios.test.mjs",
+        "scripts/validation/native-build.mjs",
+        "scripts/diagnostics/native-build.test.mjs"
+      ],
+      "node": [
+        "scripts/diagnostics/prepare-pr.test.mjs",
+        "scripts/diagnostics/create-pr.test.mjs",
+        "scripts/diagnostics/pr-platform.test.mjs",
+        "scripts/diagnostics/pr-scenarios.test.mjs",
+        "scripts/diagnostics/pr-preflight-output.test.mjs",
+        "scripts/diagnostics/health-workflow.test.mjs",
+        "scripts/diagnostics/native-build.test.mjs"
+      ],
+      "escalation": [
+        "Before publication run full preparation; focused diagnostic success alone does not certify native or platform execution."
+      ]
     }
   ]
 }

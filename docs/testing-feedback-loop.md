@@ -3,9 +3,10 @@
 During feature development, run the smallest tests that cross the changed
 boundary. The pre-commit hook checks staged whitespace and source formatting;
 it does not launch test suites. Record the focused commands and results in the
-PR. Before opening a PR, run `make test` and `./scripts/pr-preflight.sh` with
-the relevant Playwright specs. Run `./scripts/check-health.sh` before requesting
-review. CI also runs the comprehensive suites. Run backend or full UI E2E sooner
+PR. Before opening or updating a PR, commit the candidate and run
+`./scripts/prepare-pr.sh` with affected Rust selectors and Playwright specs.
+It runs affected platform preflight, followed by full health (including
+`make test`'s workspace test stage); `create-pr.sh` invokes it automatically before publication. CI also runs the comprehensive suites. Run backend or full UI E2E sooner
 when explicitly requested or when the changed behavior needs process/browser
 evidence.
 
@@ -157,7 +158,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, cache cleanup shell regressions on Linux/macOS/Windows                                                                                        |
+| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, dependency audits on Linux/macOS/Windows                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; Linux Rust/E2E coverage and eval smoke |
 | `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, lite checks, portable browser matrices and scheduled extended scenarios                                                                       |
@@ -216,9 +217,13 @@ Commit the candidate and use the repository's PR entry point:
 ```
 
 Arguments before `--` select tests; arguments after it go to `gh pr create`.
-Use filters and browser specs relevant to your change. Core and host filters
-can be repeated; a changed Rust crate requires at least one corresponding
-filter. Use `--core-test decoder_smoke` to select a nonignored core integration
+Use filters and browser specs relevant to your change. Core, host, integration and MCP filters can be repeated. Use
+`--integration-filter policy::` and `--mcp-filter tests::` for the two integration
+crates; a changed Rust crate requires its corresponding filter. Shared Cargo,
+toolchain or Clippy configuration requires selections for all four crates.
+Examples, benchmarks, package configuration and Tauri build inputs also select
+their owning package. Each selected guest package runs Clippy with
+`--all-targets -- -D warnings` before its focused tests. Use `--core-test decoder_smoke` to select a nonignored core integration
 target instead of a library filter. A selector matching zero tests fails rather than producing misleading
 evidence. This selects unit tests and explicitly named browser scenarios; it
 does not automatically launch the full workspace, ignored process rigs, or
@@ -231,7 +236,11 @@ workflow-only diagnostic plan does not install frontend dependencies.
 Verification archives suppress export substitutions and text/filter conversions
 in private Git metadata so the archived bytes match the committed source.
 
-Frontend changes require affected browser specs. Frontend unit coverage is a shared local stage; the two platform guests do not repeat
+Frontend changes require affected browser specs. Owning `prScenarios` rules in
+`validation.json` add required visual specs automatically, so an unrelated
+explicit spec cannot replace shell/layout/theme evidence. The plan preview
+shows the selected scenario owners and required native platforms. Renames
+include both old and new paths. Frontend unit coverage is a shared local stage; the two platform guests do not repeat
 the whole frontend unit suite. To target another PR base, pass
 `--base origin/release` before `--`; the wrapper uses that same base for
 change selection, coverage and `gh pr create --base release`. A local revision
@@ -257,8 +266,9 @@ preserves that directory's registry and network configuration without logging
 its contents. Otherwise, Cargo uses the isolated D: cache. Source, build
 output, browser downloads and temporary directories remain isolated.
 
-For an existing PR, run `scripts/pr-preflight.sh` directly before pushing the
-candidate. After a broader run has produced evidence, a focused follow-up can
+For an existing PR, run `scripts/prepare-pr.sh` before pushing the candidate.
+Use `scripts/pr-preflight.sh` alone for focused platform investigation; it does
+not certify the complete publication gate. After a broader run has produced evidence, a focused follow-up can
 use `--base <previous-candidate>` with the tests affected by the delta. Retain
 the earlier reports and record both revisions, the comparison base, remaining
 failures and exact test scope in the PR. Shared fixture changes require all
@@ -328,7 +338,7 @@ so the platform checks are part of the normal workflow. GitHub branch
 protection remains the final enforcement for CI; a local script cannot
 intercept arbitrary GitHub CLI or website actions.
 
-The current two-crate Rust workspace already separates protocol logic from
+The current four-crate Rust workspace separates protocol logic from
 the Tauri host. Within the core, `node/node.rs` still coordinates many domain
 modules; keep moving bounded parsing and state transitions behind narrow
 module interfaces so `--lib <module>` reaches them. In the host, ownership
@@ -345,6 +355,64 @@ tests after every small edit; run the focused test during the loop, then the
 appropriate static check and final gates at the triggers above. Do not change
 the CI commands or the explicit `make test`, `make e2e`, and health-check
 entries: they provide the comprehensive evidence for review and release.
+
+## Native requirements and publication evidence
+
+The owning core and desktop sidecars require native acceptance for discovery,
+process/session lifecycle and OS-specific UI boundaries. `host` resolves to the
+preparing OS. Additional `darwin`, `win32` or `linux` entries require evidence
+from each named platform; one platform cannot stand in for another. These rules
+are maintained acceptance boundaries, not exhaustive dependency inference.
+Review escalation notes and add owning rules when new runtime boundaries appear.
+
+Run the existing native runner from an unchanged, clean committed checkout with
+an unlocked desktop. Build its current binaries first:
+
+```bash
+cd frontend && npm ci && cd ..
+node scripts/validation/native-build.mjs
+node scripts/diagnostics/hidden-contacts.mjs
+MESH_PR_NATIVE_REPORTS='["target/hidden-contacts-native/report.json"]' \
+  ./scripts/prepare-pr.sh --host-filter owner_scoped_node_handle
+```
+
+Linux needs the display/session prerequisites documented in
+[platform validation](platform-validation.md) and the native CI workflow. The
+current native harness runs its complete acceptance scenario set; there is no
+claim that it supports per-scenario filtering. It runs only when the selected
+boundary requires it. Keep reports and all referenced JSON, PNG and log files
+together; paths are supplied as a JSON array to preserve spaces. Preparation
+revalidates real native observations, artifact hashes, platform, source SHA and
+the runner's clean-source observation and verified build provenance.
+The build helper pins the committed source and hashes the frontend assets and
+actual binaries. A clean checkout alone cannot certify previously built binaries. Cargo executable
+records must match the hashed paths; redirected `build.target` output is rejected
+rather than allowing old default-path binaries to be stamped as current. Old reports lacking that observation
+must be regenerated. Missing environments or evidence block preparation before
+heavy health/platform work; they never become a pass. Direct platform execution
+also verifies native requirements; `--plan` only previews them.
+
+Preparation runs the outer affected platform preflight before the comprehensive
+health gate, catching selected platform failures sooner. It forces full health
+mode even when `FAST=1` is inherited. Cheap formatting, ESLint and TypeScript checks run
+before diagnostic suites and native compilation. Existing successful stages can
+be reused under their source/tool/configuration and artifact checks; full health
+and platform evidence remain distinct. HEAD, working tree and comparison ref
+must remain stable. Hosted CI still verifies its complete matrices and external
+security policy; local success does not certify every hosted environment.
+
+For parallel agent work, one integration owner collects changes, reviews shared
+interfaces, prepares the combined candidate and pushes it. Individual agents
+commit locally and report focused tests. After a CI failure, reproduce the
+failure and run affected neighboring checks before publishing a coherent fix.
+Do not push each intermediate attempt. Keep failure evidence in untracked output
+or PR artifacts, not historical reports in the repository.
+
+Measure first-attempt PR success, corrective pushes per PR, time to the first
+actionable failure and runner minutes per merged PR. Classify failures as code,
+scenario/fixture, platform/environment or external service before deciding
+whether an earlier check or a harness correction is appropriate. Retain the
+existing cancellation, sharding and comprehensive CI gates.
 
 ## Explicit physical network acceptance
 

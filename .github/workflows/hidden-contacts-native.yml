@@ -59,17 +59,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev xvfb dbus-x11 xdotool fonts-noto-cjk fonts-noto-color-emoji
-      - name: Build actual frontend
+      - name: Install frontend dependencies
         working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+        run: npm ci
       - name: Verify fail-closed evidence validator
         run: node --test scripts/diagnostics/hidden-contacts-report.test.mjs scripts/diagnostics/png-evidence.test.mjs scripts/diagnostics/native-core-scenarios.test.mjs
-      - name: Build production app and CLI with regular KDF
-        run: cargo build --release --locked -p mesh-talk --bin mesh-talk -p mesh-talk-core --bin mesh-talk-node
-      - name: Build dev-only native driver example
-        run: cargo build --release --locked -p mesh-talk --example native-contact-eval
+      - name: Build source-pinned frontend, production app, CLI and native driver
+        run: node scripts/validation/native-build.mjs
       - name: Run native evaluation (Linux desktop session)
         if: runner.os == 'Linux'
         env:

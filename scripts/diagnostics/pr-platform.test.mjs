@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildPlan, hasSelectedTests, parseFlags, selectWindowsCargoHome, validatePlan, validateWindowsRoot } from "../pr-platform/plan.mjs";
+import * as rustSelection from "../pr-platform/rust-packages.mjs";
 import { executePlan, expectedSteps, rustTestCount, runCommand } from "../pr-platform/guest.mjs";
 import { collectPlatforms, createArchive, validateGuestReport, windowsBootstrap } from "../pr-platform/run.mjs";
 
@@ -208,13 +209,16 @@ test("Cargo home reuses canonical D registry configuration but never a physical 
 test("related workflow changes select the same bounded Node diagnostics without npm on both guests", async () => {
   const files = [
     "scripts/diagnostics/pr-platform.test.mjs",
+    "scripts/diagnostics/prepare-pr.test.mjs",
+    "scripts/diagnostics/pr-scenarios.test.mjs",
+    "scripts/diagnostics/native-build.test.mjs",
     "scripts/diagnostics/create-pr.test.mjs",
     "scripts/diagnostics/pr-preflight-awake.test.mjs",
     "scripts/diagnostics/source-identity.test.mjs",
     "scripts/diagnostics/linux-target.test.mjs",
     "scripts/diagnostics/pr-preflight-output.test.mjs",
   ];
-  for (const changed of ["scripts/pr-platform/guest.mjs", "scripts/pr-preflight.sh", "scripts/create-pr.sh", "scripts/evals/source-identity.mjs", ...files]) {
+  for (const changed of ["scripts/pr-platform/guest.mjs", "scripts/pr-preflight.sh", "scripts/create-pr.sh", "scripts/prepare-pr.sh", "scripts/validation/pr-scenarios.mjs", "scripts/validation/native-build.mjs", "scripts/evals/source-identity.mjs", ...files]) {
     const plan = { ...buildPlan(parseFlags([]), [changed]), sourceSha: sha, archiveSha: "b".repeat(64) };
     assert.deepEqual(plan.nodeDiagnostics, files, changed);
     assert.equal(hasSelectedTests(plan), true);
@@ -242,4 +246,95 @@ test("related workflow changes select the same bounded Node diagnostics without 
     assert.deepEqual(plan.nodeDiagnostics, []);
     assert.equal(hasSelectedTests(plan), false);
   }
+});
+
+
+test("all four Rust packages require explicit selectors for sources, manifests and build scripts", () => {
+  const packages = [
+    ["core", "crates/mesh-talk-core", "coreFilters"],
+    ["host", "src-tauri", "hostFilters"],
+    ["integration", "crates/mesh-talk-integrations", "integrationFilters"],
+    ["mcp", "crates/mesh-talk-mcp", "mcpFilters"],
+  ];
+  for (const [kind, directory, key] of packages) {
+    for (const file of ["src/lib.rs", "tests/smoke.rs", "Cargo.toml", "build.rs"]) {
+      assert.throws(() => buildPlan(parseFlags([]), [`${directory}/${file}`]), new RegExp(`--${kind}-filter`));
+      const plan = buildPlan(parseFlags([`--${kind}-filter`, "tests::literal;$(noop)"]), [`${directory}/${file}`]);
+      assert.deepEqual(plan[key], ["tests::literal;$(noop)"]);
+      assert.equal(hasSelectedTests(plan), true);
+      assert.equal(expectedSteps(plan).filter(step => step.args[0] === "clippy").length, 1);
+    }
+  }
+  const all = packages.flatMap(([kind]) => [`--${kind}-filter`, "tests::"]);
+  for (const file of ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-toolchain", "rust-toolchain.toml", "clippy.toml", ".clippy.toml"]) {
+    for (const [kind] of packages) {
+      assert.throws(() => buildPlan(parseFlags(all.filter((_, i) => Math.floor(i / 2) !== packages.findIndex(row => row[0] === kind))), [file]), new RegExp(`--${kind}-filter`));
+    }
+    assert.equal(expectedSteps(buildPlan(parseFlags(all), [file])).filter(step => step.args[0] === "clippy").length, 4);
+  }
+});
+
+test("new package selectors remain literal, reject zero tests and retain platform lint evidence", async () => {
+  const plan = { ...buildPlan(parseFlags(["--integration-filter", "grant;$(noop)", "--mcp-filter", "tools::"]), []), sourceSha: sha, archiveSha: "b".repeat(64) };
+  const seen = [];
+  const report = await executePlan(plan, { run: async (program, args, options) => {
+    seen.push({ program, args, options });
+    return { code: args[0] === "clippy" ? 1 : 0, output: args[0] === "test" ? "test result: ok. 0 passed; 0 failed; 0 ignored;" : "platform lint" };
+  } });
+  assert.equal(report.ok, false);
+  assert.equal(report.results.filter(step => step.kind === "rust").length, 2);
+  assert(report.results.filter(step => step.kind === "rust").every(step => /zero/.test(step.error)));
+  assert(seen.every(({ options }) => options.shell === false && options.env.EVAL_SOURCE_SHA === sha));
+  for (const crate of ["mesh-talk-integrations", "mesh-talk-mcp"]) {
+    assert(seen.some(({ args }) => JSON.stringify(args) === JSON.stringify(["clippy", "--locked", "-p", crate, "--all-targets", "--", "-D", "warnings"])));
+  }
+  assert.throws(() => validatePlan({ ...plan, mcpFilters: "tools::" }), /mcpFilters/);
+  assert.throws(() => validatePlan({ ...plan, integrationFilters: ["bad\nfilter"] }), /literal/);
+});
+
+
+test("platform reports require successful lint evidence for integration and MCP selections", async () => {
+  const plan = { ...buildPlan(parseFlags(["--integration-filter", "grants::", "--mcp-filter", "tools::"]), []), sourceSha: sha, archiveSha: "b".repeat(64) };
+  const report = await executePlan(plan, { run: async () => ({ code: 0, output: "test result: ok. 1 passed; 0 failed; 0 ignored;" }) });
+  assert.equal(report.ok, true);
+  assert.equal(validateGuestReport(report, plan, process.platform), report);
+  const omitted = { ...report, results: report.results.filter(step => step.name !== "mcp-clippy") };
+  assert.throws(() => validateGuestReport(omitted, plan, process.platform), /mismatched/);
+  const broadened = structuredClone(report);
+  broadened.results.find(step => step.name === "integration-clippy").args = ["clippy", "--workspace"];
+  assert.throws(() => validateGuestReport(broadened, plan, process.platform), /selection/);
+});
+
+
+test("all executable targets and package-local compiler configs require Rust selection", () => {
+  for (const pkg of rustSelection.rustPackages) {
+    for (const relative of ["examples/demo.rs", "benches/throughput.rs", "rust-toolchain", "rust-toolchain.toml", "clippy.toml", ".clippy.toml", ".cargo/config.toml"]) {
+      assert.throws(() => buildPlan(parseFlags([]), [`${pkg.directory}/${relative}`]), new RegExp(pkg.flag));
+      assert.equal(expectedSteps(buildPlan(parseFlags([pkg.flag, "tests::"]), [`${pkg.directory}/${relative}`])).filter(step => step.args[0] === "clippy").length, 1);
+    }
+  }
+});
+
+test("Tauri native build inputs require host selection and keep documentation outside Rust validation", () => {
+  for (const relative of ["examples/native-contact-eval.rs", "tauri.conf.json", "tauri.conf.lite.json", "tauri.windows.conf.json", "capabilities/default.json", "windows.manifest", "icons/icon.png", "icons/icon.ico", "Info.plist", "entitlements.plist"]) {
+    assert.throws(() => buildPlan(parseFlags([]), [`src-tauri/${relative}`]), /--host-filter/);
+  }
+  for (const relative of ["README.md", "icons/README.md", "validation.json", "gen/schemas/capabilities.json"]) {
+    assert.equal(hasSelectedTests(buildPlan(parseFlags([]), [`src-tauri/${relative}`])), false);
+  }
+});
+
+test("the shared classifier exposes the same selection requirement to the local gate", async () => {
+  assert.equal(typeof rustSelection.sharedRustChange, "function");
+  assert.equal(typeof rustSelection.rustSelectionNeeded, "function");
+  assert.equal(rustSelection.sharedRustChange("rust-toolchain.toml"), true);
+  assert.equal(rustSelection.sharedRustChange("src-tauri/rust-toolchain.toml"), false);
+  for (const file of ["src-tauri/build.rs", "src-tauri/examples/native-contact-eval.rs", "src-tauri/capabilities/default.json", "crates/mesh-talk-mcp/.clippy.toml", ".cargo/config.toml"]) {
+    assert.equal(rustSelection.rustSelectionNeeded([file]), true, file);
+  }
+  assert.equal(rustSelection.rustSelectionNeeded(["docs/README.md", "crates/mesh-talk-core/README.md"]), false);
+  const needed = await runCommand(process.execPath, ["scripts/pr-platform/rust-packages.mjs", "--selection-needed", "src-tauri/examples/native-contact-eval.rs"]);
+  const unneeded = await runCommand(process.execPath, ["scripts/pr-platform/rust-packages.mjs", "--selection-needed", "docs/README.md"]);
+  assert.equal(needed.code, 0);
+  assert.equal(unneeded.code, 1);
 });

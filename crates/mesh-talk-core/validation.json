@@ -186,5 +186,17 @@
         "Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
       ]
     }
+  ],
+  "prScenarios": [
+    {
+      "id": "discovery-native",
+      "paths": [
+        "crates/mesh-talk-core/src/discovery/",
+        "crates/mesh-talk-core/src/node/session.rs",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+      ],
+      "native": ["host"]
+    }
   ]
 }

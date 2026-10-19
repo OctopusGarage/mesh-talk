@@ -61,5 +61,19 @@
         "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
       ]
     }
+  ],
+  "prScenarios": [
+    {
+      "id": "frontend-visual",
+      "paths": [
+        "frontend/src/App.tsx",
+        "frontend/src/index.css",
+        "frontend/src/components/",
+        "frontend/src/features/chat/",
+        "frontend/src/lib/theme.ts",
+        "frontend/src/store/theme.ts"
+      ],
+      "browser": ["e2e/ui-visual-regression.spec.ts"]
+    }
   ]
 }

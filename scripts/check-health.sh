@@ -74,6 +74,68 @@ fi
 print_status "success" "Checking repository hygiene..."
 node scripts/check-repository-hygiene.mjs
 
+# Check Rust toolchain
+print_status "success" "Checking Rust toolchain..."
+if ! command_exists cargo; then
+    print_status "error" "Cargo not found. Please install Rust: https://www.rust-lang.org/"
+    exit 1
+fi
+
+# Check code formatting (Rust)
+print_status "success" "Checking Rust code formatting..."
+# Run from the workspace root: `cargo fmt --all` invoked inside a member crate does NOT
+# format the sibling crate, so it must run here to cover BOTH crates (mirrors CI).
+if ! cargo fmt --all -- --check; then
+    print_status "error" "Rust code formatting issues found. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
+
+# Check Node.js and npm
+print_status "success" "Checking Node.js and npm..."
+if ! command_exists node || ! command_exists npm; then
+    print_status "error" "Node.js or npm not found. Please install Node.js: https://nodejs.org/"
+    exit 1
+fi
+
+# Cargo resolves dependencies during Clippy, tests, and builds below; an eager
+# `cargo build` here compiled the app twice. Install frontend dependencies only
+# on a fresh checkout, and surface installation failures instead of hiding them.
+if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
+   [ "frontend/package-lock.json" -nt "frontend/node_modules/.package-lock.json" ]; then
+    print_status "success" "Installing frontend dependencies..."
+    if ! { cd frontend && npm ci; }; then
+        print_status "error" "Frontend dependency installation failed."
+        exit 1
+    fi
+    cd ..
+fi
+
+# Check code formatting (Frontend)
+print_status "success" "Checking frontend code formatting..."
+if ! { cd frontend && npx prettier --check src/; }; then
+    print_status "error" "Frontend code formatting issues found. Run 'npx prettier --write src/' to fix."
+    exit 1
+fi
+cd ..
+
+# Run ESLint (Frontend linter). ESLint 9 uses flat config (eslint.config.js);
+# the `--ext` flag was removed, so run the package script which lints the project.
+print_status "success" "Running frontend linter (ESLint)..."
+if ! { cd frontend && node "$stage" frontend-lint --profile shared -- npm run lint; }; then
+    print_status "error" "Frontend linting issues found. Please fix ESLint errors."
+    exit 1
+fi
+cd ..
+
+# Type-check application and E2E sources. Vite and Playwright transpilation alone
+# do not establish that the scenario/helper TypeScript contracts are valid.
+print_status "success" "Checking frontend and E2E TypeScript..."
+if ! { cd frontend && node "$stage" frontend-types --profile shared -- npm run typecheck; }; then
+    print_status "error" "Frontend or E2E TypeScript errors found."
+    exit 1
+fi
+cd ..
+
 print_status "success" "Running delivery / AI eval smoke..."
 if ! scripts/ai-eval-smoke.sh; then
     print_status "error" "Delivery / AI eval smoke failed. Fix the missing coverage or trigger wiring."
@@ -103,33 +165,6 @@ if [ -f "scripts/build-retention.py" ]; then
     fi
 fi
 
-# Check Rust toolchain
-print_status "success" "Checking Rust toolchain..."
-if ! command_exists cargo; then
-    print_status "error" "Cargo not found. Please install Rust: https://www.rust-lang.org/"
-    exit 1
-fi
-
-# Check Node.js and npm
-print_status "success" "Checking Node.js and npm..."
-if ! command_exists node || ! command_exists npm; then
-    print_status "error" "Node.js or npm not found. Please install Node.js: https://nodejs.org/"
-    exit 1
-fi
-
-# Cargo resolves dependencies during Clippy, tests, and builds below; an eager
-# `cargo build` here compiled the app twice. Install frontend dependencies only
-# on a fresh checkout, and surface installation failures instead of hiding them.
-if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
-   [ "frontend/package-lock.json" -nt "frontend/node_modules/.package-lock.json" ]; then
-    print_status "success" "Installing frontend dependencies..."
-    if ! { cd frontend && npm ci; }; then
-        print_status "error" "Frontend dependency installation failed."
-        exit 1
-    fi
-    cd ..
-fi
-
 print_status "success" "Checking public help documents and read-only MCP..."
 if ! npm ci --prefix tools/help --ignore-scripts || ! node --test tools/help/*.test.mjs; then
     print_status "error" "Public help validation failed."
@@ -154,23 +189,6 @@ if [ "$FAST" != "1" ]; then
     fi
     cd ..
 fi
-
-# Check code formatting (Rust)
-print_status "success" "Checking Rust code formatting..."
-# Run from the workspace root: `cargo fmt --all` invoked inside a member crate does NOT
-# format the sibling crate, so it must run here to cover BOTH crates (mirrors CI).
-if ! cargo fmt --all -- --check; then
-    print_status "error" "Rust code formatting issues found. Run 'cargo fmt --all' to fix."
-    exit 1
-fi
-
-# Check code formatting (Frontend)
-print_status "success" "Checking frontend code formatting..."
-if ! { cd frontend && npx prettier --check src/; }; then
-    print_status "error" "Frontend code formatting issues found. Run 'npx prettier --write src/' to fix."
-    exit 1
-fi
-cd ..
 
 # Run Clippy (Rust linter). MUST mirror CI: --all-targets covers tests/benches/bins'
 # test modules — without it, lints in test code only surface on CI (and break it).
@@ -243,24 +261,6 @@ else
 fi
 
 fi  # end FAST-skip of scan block
-
-# Run ESLint (Frontend linter). ESLint 9 uses flat config (eslint.config.js);
-# the `--ext` flag was removed, so run the package script which lints the project.
-print_status "success" "Running frontend linter (ESLint)..."
-if ! { cd frontend && node "$stage" frontend-lint --profile shared -- npm run lint; }; then
-    print_status "error" "Frontend linting issues found. Please fix ESLint errors."
-    exit 1
-fi
-cd ..
-
-# Type-check application and E2E sources. Vite and Playwright transpilation alone
-# do not establish that the scenario/helper TypeScript contracts are valid.
-print_status "success" "Checking frontend and E2E TypeScript..."
-if ! { cd frontend && node "$stage" frontend-types --profile shared -- npm run typecheck; }; then
-    print_status "error" "Frontend or E2E TypeScript errors found."
-    exit 1
-fi
-cd ..
 
 # Run frontend unit tests (Vitest); full health also enforces the store coverage floor.
 print_status "success" "Running frontend tests..."

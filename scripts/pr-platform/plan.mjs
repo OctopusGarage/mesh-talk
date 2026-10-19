@@ -3,16 +3,17 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { affectedRustPackages, rustPackages, rustSelectorFlags, rustSelectorKeys, selectedRustPackages } from "./rust-packages.mjs";
 export function parseFlags(argv) {
-  const flags = { base: "origin/main", coreFilters: [], coreTests: [], hostFilters: [], uiSpecs: [], planOnly: false };
+  const flags = { base: "origin/main", ...Object.fromEntries(rustSelectorKeys.map(key => [key, []])), uiSpecs: [], planOnly: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--plan") { flags.planOnly = true; continue; }
-    const key = { "--base": "base", "--core-filter": "coreFilters", "--core-test": "coreTests", "--host-filter": "hostFilters" }[arg];
+    const key = { "--base": "base", ...rustSelectorFlags }[arg];
     if (key) {
       const value = argv[++i];
       if (!value || value.startsWith("-") || /[\x00-\x1f\x7f]/u.test(value)) throw Error(`${arg} needs a nonempty literal value`);
-      if (key === "coreTests" && !/^[A-Za-z0-9_-]+$/u.test(value)) throw Error("--core-test requires an exact Cargo integration target name");
+      if (rustPackages.some(pkg => pkg.targets === key) && !/^[A-Za-z0-9_-]+$/u.test(value)) throw Error(`${arg} requires an exact Cargo integration target name`);
       if (key === "base") flags.base = value;
       else flags[key].push(value);
     } else {
@@ -20,12 +21,15 @@ export function parseFlags(argv) {
       flags.uiSpecs.push(arg);
     }
   }
-  for (const key of ["coreFilters", "coreTests", "hostFilters", "uiSpecs"]) flags[key] = [...new Set(flags[key])];
+  for (const key of [...rustSelectorKeys, "uiSpecs"]) flags[key] = [...new Set(flags[key])];
   return flags;
 }
 
 const workflowDiagnostics = [
   "scripts/diagnostics/pr-platform.test.mjs",
+  "scripts/diagnostics/prepare-pr.test.mjs",
+  "scripts/diagnostics/pr-scenarios.test.mjs",
+  "scripts/diagnostics/native-build.test.mjs",
   "scripts/diagnostics/create-pr.test.mjs",
   "scripts/diagnostics/pr-preflight-awake.test.mjs",
   "scripts/diagnostics/source-identity.test.mjs",
@@ -34,25 +38,25 @@ const workflowDiagnostics = [
 ];
 
 export function buildPlan(flags, changedFiles) {
-  const sharedRust = changedFiles.some(file => /^(Cargo\.(toml|lock)|\.cargo\/)/u.test(file));
-  if ((sharedRust || changedFiles.some(file => /^crates\/mesh-talk-core\/(?:src\/|tests\/|Cargo\.toml$|build\.rs$)/u.test(file))) && !flags.coreFilters.length && !flags.coreTests.length) throw Error("Backend changes require explicit --core-filter or --core-test selectors; no full-suite fallback is allowed.");
-  if ((sharedRust || changedFiles.some(file => /^src-tauri\/(?:src\/|tests\/|Cargo\.toml$|build\.rs$)/u.test(file))) && !flags.hostFilters.length) throw Error("Host changes require explicit --host-filter selectors; no full-suite fallback is allowed.");
+  for (const pkg of affectedRustPackages(changedFiles)) {
+    if (!selectedRustPackages(flags).includes(pkg)) {
+      throw Error(`${pkg.kind} changes require explicit ${pkg.flag}${pkg.targetFlag ? ` or ${pkg.targetFlag}` : ""} selectors; no full-suite fallback is allowed.`);
+    }
+  }
   if (changedFiles.some(file => file.startsWith("frontend/")) && !flags.uiSpecs.length) throw Error("Frontend changes require at least one affected Playwright spec (e2e/*.spec.ts); frontend unit coverage runs once in the local PR preflight.");
   return {
     schema: 1,
-    coreFilters: flags.coreFilters,
-    coreTests: flags.coreTests,
-    hostFilters: flags.hostFilters,
+    ...Object.fromEntries(rustSelectorKeys.map(key => [key, flags[key] ?? []])),
     uiSpecs: flags.uiSpecs,
-    frontendBuild: flags.hostFilters.length > 0,
+    frontendBuild: selectedRustPackages(flags).some(pkg => pkg.frontendBuild),
     nodeDiagnostics: changedFiles.some(file => file.startsWith("scripts/pr-platform/") ||
-      ["scripts/pr-preflight.sh", "scripts/create-pr.sh", "scripts/evals/source-identity.mjs", ...workflowDiagnostics].includes(file))
+      ["scripts/pr-preflight.sh", "scripts/create-pr.sh", "scripts/prepare-pr.sh", "scripts/validation/pr-scenarios.mjs", "scripts/validation/native-build.mjs", "scripts/evals/source-identity.mjs", ...workflowDiagnostics].includes(file))
       ? [...workflowDiagnostics] : [],
   };
 }
 
 export function hasSelectedTests(plan) {
-  return !!(plan.frontendBuild || plan.coreFilters.length || plan.coreTests.length || plan.uiSpecs.length || plan.nodeDiagnostics.length);
+  return !!(plan.frontendBuild || selectedRustPackages(plan).length || plan.uiSpecs.length || plan.nodeDiagnostics.length);
 }
 
 export function validateWindowsRoot(value) {
@@ -63,14 +67,16 @@ export function validateWindowsRoot(value) {
 
 export function validatePlan(plan) {
   if (plan.schema !== 1 || !/^[a-f0-9]{40,64}$/u.test(plan.sourceSha)) throw Error("Invalid committed source SHA in platform plan");
-  for (const key of ["coreFilters", "coreTests", "hostFilters", "uiSpecs", "nodeDiagnostics"]) if (!Array.isArray(plan[key])) throw Error(`Invalid plan field: ${key}`);
+  for (const pkg of rustPackages) {
+    if (pkg.optional && plan[pkg.filters] === undefined) continue;
+    if (!Array.isArray(plan[pkg.filters])) throw Error(`Invalid plan field: ${pkg.filters}`);
+  }
+  for (const key of [...rustPackages.flatMap(pkg => pkg.targets ? [pkg.targets] : []), "uiSpecs", "nodeDiagnostics"]) if (!Array.isArray(plan[key])) throw Error(`Invalid plan field: ${key}`);
   for (const key of ["frontendBuild"]) if (typeof plan[key] !== "boolean") throw Error(`Invalid plan field: ${key}`);
   if (plan.nodeDiagnostics.length && JSON.stringify(plan.nodeDiagnostics) !== JSON.stringify(workflowDiagnostics)) throw Error("Invalid workflow diagnostic selection: expected the fixed test files");
   // Validate guest input again: archive/JSON transport must not broaden selection.
   parseFlags([
-    ...plan.coreFilters.flatMap(filter => ["--core-filter", filter]),
-    ...plan.coreTests.flatMap(target => ["--core-test", target]),
-    ...plan.hostFilters.flatMap(filter => ["--host-filter", filter]),
+    ...rustPackages.flatMap(pkg => [...(plan[pkg.filters] ?? []).flatMap(filter => [pkg.flag, filter]), ...(pkg.targets ? plan[pkg.targets].flatMap(target => [pkg.targetFlag, target]) : [])]),
     ...plan.uiSpecs,
   ]);
 }

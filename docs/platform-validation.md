@@ -73,9 +73,15 @@ bounded RGB/RGBA PNG pixels, rejecting corrupt, truncated, blank or transparent
 screenshots. These checks prevent incomplete/stale evidence from passing; they
 do not replace the scenario's interaction and layout assertions.
 
-Definitive revision evidence comes from a committed clean checkout. A local
-uncommitted run validates the current working tree; its HEAD SHA identifies the
-base revision, not proof that the unmodified base commit has the new behavior.
+Publication evidence requires a committed clean checkout and a source-pinned
+build from `node scripts/validation/native-build.mjs` before running the native
+harness. Its ignored manifest binds actual Cargo executable records, binary
+paths/digests and frontend assets to that revision. The runner verifies the proof
+before and after evaluation. PR preparation rejects reports without successful
+`cleanSource` and `buildVerified` observations; stale binaries cannot stand in
+for a current build. See [the feedback loop](testing-feedback-loop.md#native-requirements-and-publication-evidence)
+for commands. An uncommitted or unverified local run is development evidence; its
+HEAD SHA identifies the base revision, not certification of that commit.
 
 Native attachment evidence intentionally proves incoming manifest persistence and
 generic-file rendering **only**. The OS save picker is outside the embedded DOM

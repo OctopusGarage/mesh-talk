@@ -43,5 +43,24 @@
         "Native IPC/session retirement changes require the relevant platform/native checks."
       ]
     }
+  ],
+  "prScenarios": [
+    {
+      "id": "desktop-native-lifecycle",
+      "paths": [
+        "src-tauri/src/desktop_session.rs",
+        "src-tauri/src/state.rs",
+        "src-tauri/src/runtime_bootstrap.rs",
+        "src-tauri/src/events.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/services/",
+        "src-tauri/src/owner_commands.rs",
+        "src-tauri/src/tray.rs",
+        "src-tauri/src/session_store.rs",
+        "src-tauri/src/session_store/",
+        "src-tauri/tauri.conf.json"
+      ],
+      "native": ["host"]
+    }
   ]
 }
