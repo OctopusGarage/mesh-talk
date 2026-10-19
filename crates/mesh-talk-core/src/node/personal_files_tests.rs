@@ -114,7 +114,6 @@ async fn personal_file_projection_failure_recovers_once() {
 async fn personal_file_unaccepted_wal_leaves_no_history() {
     let dir = tempfile::tempdir().unwrap();
     let profile = dir.path().join("profile");
-    let moved = dir.path().join("moved");
     let identity = DeviceIdentity::generate();
     let secret = identity.secret_bytes();
     let account = Account::generate();
@@ -127,21 +126,26 @@ async fn personal_file_unaccepted_wal_leaves_no_history() {
     let host = super::super::conversation::account_conversation_id(&target, &target);
     let proof_path = profile.join("account-file-proofs.log");
     let before = std::fs::metadata(&proof_path).unwrap().len();
+    // Use the record log's read-only append fault: Windows cannot rename a
+    // directory containing the live log handles. Proof/chunk writes stay real.
+    node.delivery
+        .lock()
+        .unwrap()
+        .fail_journal_appends_for_test(true)
+        .unwrap();
     let result = node.accept_staged_manifest_if(
         &[],
         host,
         Some(target.clone()),
         &manifest,
         None,
-        &mut |accept| {
-            // The detached proof and staged chunks already exist; fail only the
-            // final WAL acceptance after its immutable transaction is prepared.
-            std::fs::rename(&profile, &moved).unwrap();
-            let result = accept();
-            std::fs::rename(&moved, &profile).unwrap();
-            result
-        },
+        &mut |accept| accept(),
     );
+    node.delivery
+        .lock()
+        .unwrap()
+        .fail_journal_appends_for_test(false)
+        .unwrap();
     assert!(std::fs::metadata(&proof_path).unwrap().len() > before);
     assert!(result.is_err());
     assert!(

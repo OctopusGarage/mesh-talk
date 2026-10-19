@@ -321,6 +321,11 @@ struct DeliveryProfile {
 }
 
 impl DeliveryStore {
+    #[cfg(test)]
+    pub(crate) fn fail_journal_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.journal.fail_appends_for_test(enabled)
+    }
+
     pub(crate) fn bind_profile(
         &mut self,
         log_path: &Path,

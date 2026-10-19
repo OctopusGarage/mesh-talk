@@ -6477,18 +6477,25 @@ async fn personal_message_unavailable_storage_is_unaccepted() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let profile = dir.path().join("profile");
-    let moved = dir.path().join("moved");
     let identity = DeviceIdentity::generate();
     let secret = identity.secret_bytes();
     let account = Account::generate();
     let account_secret = account.secret_bytes();
     let target = account.account_id();
     let node = personal_message_node(&profile, identity, account);
-    std::fs::rename(&profile, &moved).unwrap();
+    node.delivery
+        .lock()
+        .unwrap()
+        .fail_journal_appends_for_test(true)
+        .unwrap();
     let result = node
         .enqueue_to_account(&target, b"not accepted", None)
         .await;
-    std::fs::rename(&moved, &profile).unwrap();
+    node.delivery
+        .lock()
+        .unwrap()
+        .fail_journal_appends_for_test(false)
+        .unwrap();
     assert!(matches!(result, Err(NodeError::Log(_))), "{result:?}");
     assert!(
         node.delivery
