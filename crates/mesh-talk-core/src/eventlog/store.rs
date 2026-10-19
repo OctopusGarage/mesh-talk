@@ -97,9 +97,10 @@ impl EventLog {
         let conv = event.conversation_id;
         let id = event.id;
 
-        // Profile events are kept OUT of the head frontier: they reference the current heads
-        // (so they're causally anchored + ingestable) but are never themselves referenced as
-        // a parent by future events. That makes a superseded profile an UNREFERENCED leaf,
+        // Profile events are kept OUT of the head frontier. Ordinary peer profiles
+        // reference the current heads; sibling profiles can be independent signed
+        // leaves so paused content does not block profile sync. Neither is referenced
+        // as a parent by future events. A superseded profile is an UNREFERENCED leaf,
         // which `compact_superseded_profiles` can safely drop (dropping an unreferenced event
         // can never dangle a parent) — the only safe way to bound profile-event growth in an
         // append-only DAG. Messages/reactions/files still chain normally.

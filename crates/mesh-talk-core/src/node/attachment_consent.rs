@@ -246,6 +246,13 @@ impl Node {
             if sender.is_some_and(|peer| proof.public() != *peer) {
                 continue;
             }
+            if event.conversation_id
+                == super::conversation::dm_conversation_id(&own, &proof.public())
+                && self.certified_sibling(&proof.public())
+                && !self.device_sync_policy().attachments
+            {
+                continue;
+            }
             // SDK/legacy device-only peers have no account certificate. Their
             // stable device fingerprint serves as the preference key.
             let account = proof

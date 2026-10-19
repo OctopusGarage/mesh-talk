@@ -13,7 +13,9 @@ Treat a linking code as sensitive. Do not share it with someone who should not j
 
 ## Choose what synchronizes
 
-The device dialog shows available synchronization categories and status. History synchronization shares available direct and channel message history with linked devices when permitted. Appearance can participate when its category is enabled; machine-specific and privacy choices do not all synchronize.
+The device dialog shows available synchronization categories and status. Choose history, file cards and attachment contents separately. History shares available direct, accepted-channel and Saved Messages history when permitted. A synchronized file card does not mean its contents are downloaded. Appearance can participate when its category is enabled; machine-specific and privacy choices do not all synchronize.
+
+Use **Saved Messages** for notes and files addressed to your own account. You can save them before linking another device. Linked devices synchronize eligible retained content according to your selections when a trusted source is reachable.
 
 A post-office bridge is not a substitute for the direct reachable path needed by device synchronization. Linking is not an encrypted backup, and it cannot recreate data that no device retains.
 

@@ -117,12 +117,20 @@ pub async fn list_accounts(
         })
         .map_err(CommandError::Authorization)?;
     let node = state.0.clone();
+    #[cfg(test)]
+    let captured = app.owner_command_captured.clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
-        // Match deletion's lock order: policy, session, node. Take fresh presence
-        // inside the transaction so an older poll cannot undo a later deletion.
+        // Runtime first, matching startup and runtime admission. Never wait for
+        // it while holding the session needed by an installation or producer.
+        #[cfg(test)]
+        if let Some(entered) = captured.lock().unwrap().as_ref() {
+            let _ = entered.send("contact-runtime-wait");
+        }
+        let guard = node.blocking_lock();
         policy.transaction(&session, &owner, || {
-            let guard = node.blocking_lock();
+            // Capture fresh presence inside the policy transaction so an older
+            // poll cannot undo a later contact deletion.
             let rt = guard.as_ref().ok_or("Node not started")?;
             if rt.host_account_id() != Some(owner.as_str()) {
                 return Err("Contact roster requires this account's running node".into());

@@ -10,6 +10,10 @@ Attach a file in a conversation and control whether incoming transfers require a
 
 An attachment card and completed local file bytes are separate things. A file can be visible in history while its contents are not available locally.
 
+## Keep files across your devices
+
+Open **Saved Messages** to keep a file for yourself, even before another device is linked. In **Your devices**, choose whether linked devices synchronize history, file cards and attachment contents. Contents require an eligible trusted device that still retains them and is reachable. Synchronizing a card alone does not copy the file bytes.
+
 ## Control incoming transfers
 
 Open **More → Settings → Files & receiving** to choose the default receiving policy. Individual conversations can override it through their attachment receiving settings. Review the conversation's policy when its behavior differs from the default.

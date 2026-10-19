@@ -116,9 +116,52 @@ beforeEach(async () => {
     "account:alice": [{ text: "See you on the LAN" }],
   };
   chatState.active = null;
+  chatState.myAccountId = "my-account";
+  chatState.ready = true;
   chatState.favorites = {};
   policyState.contacts = {};
+  policyState.loaded = true;
   await i18n.changeLanguage("en");
+});
+
+it("keeps Saved Messages available without peers or loaded contacts", () => {
+  chatState.accounts = [];
+  policyState.loaded = false;
+  policyState.contacts = { "my-account": true };
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html).toContain('data-testid="conversation-row-my-account"');
+  expect(html).toContain("Saved Messages");
+  expect(html).not.toContain('data-testid="contact-profile-my-account"');
+  expect(html).not.toContain('data-testid="conversation-actions-my-account"');
+});
+
+it("shows the personal conversation once even when its account is discovered", () => {
+  chatState.accounts.push({
+    account_id: "my-account",
+    names: ["My other device"],
+    device_count: 2,
+  });
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html.match(/data-testid="conversation-row-my-account"/g)).toHaveLength(
+    1,
+  );
+  expect(html).toContain("Saved Messages");
+});
+
+it("replaces the personal row with the current runtime account", () => {
+  chatState.myAccountId = "adopted-account";
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html).toContain('data-testid="conversation-row-adopted-account"');
+  expect(html).not.toContain('data-testid="conversation-row-my-account"');
+  chatState.accounts.push({
+    account_id: "adopted-account",
+    names: ["Other device"],
+    device_count: 1,
+  });
+  chatState.ready = false;
+  expect(renderToStaticMarkup(createElement(Sidebar))).not.toContain(
+    'data-testid="conversation-row-adopted-account"',
+  );
 });
 
 it("shows a contact's latest message and unread count in the peer list", () => {
@@ -213,7 +256,7 @@ it("shows a left channel status ahead of its last message", () => {
   expect(html).not.toContain("Old message");
 });
 
-it.each([81, 82])(
+it.each([80, 81])(
   "preserves account order, preview and navigation positions with %i contacts",
   (count) => {
     chatState.accounts = Array.from({ length: count }, (_, index) => ({
@@ -229,10 +272,10 @@ it.each([81, 82])(
     };
     const html = renderToStaticMarkup(createElement(Sidebar));
     expect(html).toContain('data-nav-position="1"');
-    expect(html).toContain(`data-nav-position="${count + 1}"`);
+    expect(html).toContain(`data-nav-position="${count + 2}"`);
     expect(html).toContain('aria-label="First, Offline"');
     expect(html).toContain('aria-label="Study, 3 members · 0 known online"');
-    expect(html.includes('data-testid="virtual-section"')).toBe(count === 82);
+    expect(html.includes('data-testid="virtual-section"')).toBe(count === 81);
     expect(html.indexOf('conversation-row-person-1"')).toBeLessThan(
       html.indexOf('conversation-row-group"'),
     );

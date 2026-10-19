@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
@@ -13,7 +14,7 @@ async function enterBobDm(page: Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(
     page.getByRole("log").getByText("hey, welcome to the mesh"),

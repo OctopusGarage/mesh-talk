@@ -2,7 +2,13 @@ import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/portable-evidence";
-import { enterChat, openBobDm, BOB, CHANNEL } from "./helpers/session";
+import {
+  waitForChatShell,
+  enterChat,
+  openBobDm,
+  BOB,
+  CHANNEL,
+} from "./helpers/session";
 import { seedMarketPacks } from "./helpers/packs";
 import {
   expectDialogFitsViewport,
@@ -127,7 +133,7 @@ test("portable registration sign in and sign out", async ({ page }) => {
   await expect(page.getByTestId("chat-shell")).toHaveCount(0);
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(page.getByTestId("sidebar-own-name")).toHaveText("tester");
   await page.getByTestId("sidebar-overflow").click();
   await page.getByTestId("sidebar-sign-out").click();
@@ -185,7 +191,7 @@ test("light theme persists across browser reload and sign in", async ({
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await settings(page);
   await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-light")).toHaveAttribute(

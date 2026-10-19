@@ -1,5 +1,10 @@
 # Documentation
 
+For delayed group messages, unread behavior and recovery status, see
+[group conversation reception](group-conversation-reception.md). Its
+[research note](research/group-message-reception-ux.md) records the protocol and
+UX rationale.
+
 This is the navigation hub for Mesh-Talk's current guides, technical references, and
 dated evidence. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information
@@ -64,6 +69,17 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/screenshots/README.md`](screenshots/README.md)                                         | How current demo screenshots are captured and shared with the site.                                      |
 | [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md)                                       | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing.               |
 | [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
+
+## Proposed designs and research
+
+These documents distinguish inspected behavior from proposed changes. They do not
+establish shipped capabilities or completed validation.
+
+| Doc | What it covers |
+| --- | --- |
+| [Multi-device synchronization research](research/multi-device-sync-patterns.md) | Dated primary-source comparison of Signal, Matrix, Syncthing and document CRDTs. |
+| [Personal messaging and synchronization design](multi-device-sync-design.md) | Existing-code gaps, recommended models/protocols, conflict rules, settings, offline limits and device-security boundaries. |
+| [Synchronization implementation plan](multi-device-sync-plan.md) | Sequenced work packages, file owners, focused tests, compatibility and release gates. |
 
 ## Evaluation records
 

@@ -3,7 +3,13 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
-test.use({ hasTouch: true, viewport: { width: 760, height: 520 } });
+// Touch-capable desktop devices can still hover; model a mobile touch device
+// for the no-hover assertions below.
+test.use({
+  hasTouch: true,
+  isMobile: true,
+  viewport: { width: 760, height: 520 },
+});
 
 test("frequent icon controls keep a 44px touch target", async ({ page }) => {
   await enterChat(page);
@@ -82,7 +88,8 @@ test("settings switches keep a compact track inside a usable touch target", asyn
     before === "true" ? "false" : "true",
   );
   await wallpaper.focus();
-  await page.keyboard.press("Space");
+  await expect(wallpaper).toBeFocused();
+  await wallpaper.press("Space");
   await expect(wallpaper).toHaveAttribute("aria-checked", before ?? "false");
 });
 

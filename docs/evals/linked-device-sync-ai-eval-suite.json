@@ -1,6 +1,6 @@
 {
   "name": "mesh-talk-linked-device-sync-eval",
-  "version": 1,
+  "version": 2,
   "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
   "cases": [
     {
@@ -8,13 +8,18 @@
       "name": "direct history sync authenticates and bounds transfers",
       "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
       "min_score": 0.85,
-      "scenario": "Review the linked-device direct DM history sync for cross-account disclosure, malformed-record import, unbounded transfer, and repeated full-history traffic. Judge only protections visible in this file; flag dependencies on other files as unverified.",
+      "scenario": "Review the linked-device direct DM history sync for cross-account disclosure, malformed-record import, unbounded transfer, and repeated full-history traffic. Evaluate the primary file and supplied supporting production sources together; flag dependencies not supplied as unverified. Validation may be delegated to the supplied page assembler and importer rather than duplicated in the orchestration file.",
       "rubric": [
         "The server checks the requesting peer against a certified linked-device directory and the requested account against its own account.",
         "The client checks the target peer account and linked-device identity before dialing.",
         "Each received DM record is validated for logical message ID, sender, account route, and conversation before import.",
         "Transfer pages and chunks have explicit limits, and an unchanged digest avoids retransmitting the complete history.",
         "A disabled local history policy prevents serving and importing history."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/account_sync/page.rs",
+        "crates/mesh-talk-core/src/node/linking.rs",
+        "crates/mesh-talk-core/src/node/account_sync_wire.rs"
       ]
     },
     {
@@ -106,14 +111,18 @@
       "name": "channel history archive stays bounded and membership gated",
       "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
       "min_score": 0.85,
-      "scenario": "Review historical channel plaintext reconciliation between certified siblings. Check whether an arbitrary account or pending channel invite can read history, whether records can exhaust memory or conflict with signed events, and whether local erasure remains effective on later sweeps.",
+      "scenario": "Review historical channel plaintext reconciliation between certified siblings. Check whether an arbitrary account or pending channel invite can read history, whether records can exhaust memory or conflict with signed events, and whether local erasure remains effective on later sweeps. Evaluate bounds in the supplied page assembler and codec as well as the primary orchestration file.",
       "rubric": [
-        "The server authenticates a certified sibling and exports only channels where its own device is accepted and the requester is a member.",
+        "The server authenticates a certified sibling and exports only channels where both its own device and the requester are accepted members.",
         "The importer requires accepted local membership before writing channel plaintext.",
         "Channel record size, chunks, page count, and per-request archive allocation have explicit bounds without materializing the whole plaintext history.",
         "When a signed event is present locally, its channel, kind, and author must match the imported record.",
         "The importer checks local account suppression before each channel write; marker creation and restart persistence are evaluated separately in MT-SYNC-AI-004 and its unit test.",
         "The transfer retains original event IDs, and durable import rejects conflicting reuse of an ID."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/account_sync/page.rs",
+        "crates/mesh-talk-core/src/node/account_sync_wire.rs"
       ]
     },
     {
@@ -135,21 +144,29 @@
       "name": "linked attachment transfer authenticates and verifies bytes",
       "subject_file": "crates/mesh-talk-core/src/node/account_sync.rs",
       "min_score": 0.85,
-      "scenario": "Review old file-card and byte catch-up between linked devices. Check cross-account access, accepted channel membership, signed manifest proof, local erase, transfer bounds, checksum and size checks, and independent attachment choice. Judge only behavior visible in this file.",
+      "scenario": "Review file-card and byte catch-up between linked devices across MTAHS1 and MTAHS2. Check cross-account access, accepted channel membership for both source and requester, signed ordinary and personal manifest proofs, local erase, transfer bounds, checksum and size checks, and separate metadata/byte choices. Evaluate the primary file and supplied codec/file helpers together; dependencies not supplied remain unverified.",
       "rubric": [
-        "Only certified account siblings can request history or attachment bytes; the source limits file cards to eligible account conversations or accepted channels containing the requester.",
+        "Only certified account siblings can request history or attachment bytes; channel file cards and bytes require both source and requester to be accepted channel members.",
         "Imported file cards require an accepted channel invitation or a matching account conversation and a signed manifest proof bound to the original event ID, author, and clock.",
-        "The local attachment choice gates card import and byte requests independently of message history.",
+        "MTAHS2 file cards are selected by message history OR attachments, while byte requests and installation require attachments independently of history. MTAHS1 preserves attachment-coupled cards and does not accept upgraded personal proofs. Neither category permits file cards when both choices are off.",
         "Byte transfer is chunked and writes to disk with cumulative size and manifest checksum verification before encrypted storage.",
-        "Local suppression and file erasure block reimport, and failed or incomplete transfers do not install bytes."
+        "Local suppression and file erasure block reimport, and failed or incomplete transfers do not install bytes.",
+        "Personal file evidence requires a certified own-account author, the self-account host, an intact event signature and ID, and the digest of the exact manifest plaintext; an unrelated account or altered host/digest cannot supply a personal route."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/account_sync_wire.rs",
+        "crates/mesh-talk-core/src/node/files.rs"
       ]
     },
     {
       "id": "MT-SYNC-AI-011",
       "name": "linked appearance does not overwrite a fresh device with defaults",
       "subject_file": "frontend/src/lib/linkedAppearance.ts",
+      "context_files": [
+        "frontend/src/lib/theme.ts"
+      ],
       "min_score": 0.85,
-      "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Judge only this file.",
+      "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Trace the supplied theme projection when checking whether a local value was explicitly saved.",
       "rubric": [
         "A new device does not automatically publish default appearance values that could overwrite another linked device.",
         "Before issuing a pairing code, existing saved appearance values can be published when missing.",
@@ -157,6 +174,25 @@
         "Applying a remote value does not echo the same change back as a newer local edit.",
         "Polls and subscriptions stop after cleanup, and asynchronous responses do not update state after cleanup."
       ]
+    },
+    {
+      "id": "MT-SYNC-AI-012",
+      "name": "personal sends persist freshly discovered sibling bindings before durable enqueue",
+      "subject_file": "crates/mesh-talk-core/src/node/dm.rs",
+      "context_files": [
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_routing.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs"
+      ],
+      "scenario": "A certified sibling announcement reaches the live roster before the next host peer-snapshot query has persisted its account proof. The user immediately sends a personal text or sticker. Trace the self-target path, certificate persistence, destination account binding and WAL validation. Also consider persistence errors and owner invalidation while awaiting snapshot persistence.",
+      "rubric": [
+        "Personal account sends persist verified discovery proofs before selecting sibling destinations, rather than accepting an unbound account from an endpoint hint.",
+        "Snapshot persistence failures propagate without acknowledging a message whose delivery binding cannot be validated.",
+        "Personal sends do not grant external-contact permissions or mark own-device replication as recipient delivery.",
+        "Final durable acceptance still executes through the owner authorization callback after asynchronous preparation.",
+        "The existing delivery event signature, conversation, account and receipt binding checks remain enforced."
+      ],
+      "min_score": 0.85
     }
   ]
 }

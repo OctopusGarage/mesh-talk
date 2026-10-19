@@ -88,7 +88,10 @@ fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> V
         }
         let mut archived: Option<ChannelSummary> = None;
         let mut archived_members = std::collections::HashSet::new();
-        for event in log.events(&id) {
+        let events = log.events(&id);
+        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
+        let order = super::timeline::ordered_ids(&events, &[], true);
+        for event in order.iter().filter_map(|id| by_id.get(id).copied()) {
             if archived.as_ref().is_some_and(|summary| summary.dissolved) {
                 break;
             }
@@ -293,6 +296,7 @@ pub struct Node {
     pub(in crate::node) account_preferences: Mutex<super::account_preferences::AccountPreferences>,
     pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
+    pub(in crate::node) account_history_revision: std::sync::atomic::AtomicU64,
     pub(in crate::node) account_sync_status:
         Mutex<std::collections::HashMap<String, super::account_sync::DeviceSyncStatus>>,
     /// One-time pairing code while in "link a device" mode (linker side). Set by
@@ -306,6 +310,7 @@ pub struct Node {
     pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
     pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
+    pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
     #[cfg(test)]
@@ -356,6 +361,8 @@ pub struct Node {
     pub(in crate::node) outgoing_file_consents:
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
     pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
+    pub(in crate::node) channel_recovery:
+        Mutex<HashMap<ConversationId, super::channels::ChannelRecovery>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
     /// Exact device fingerprints the host user has safety-number verified for
@@ -621,10 +628,62 @@ impl Node {
             .flat_map(|c| received.entries(c))
             .map(|e| e.event_id)
             .collect();
+        let mut account_devices = super::account_devices::AccountDevices::open(
+            &super::account_devices::file_path(dir, &account.account_id()),
+            password,
+            &account.account_id(),
+        )?;
+        account_devices.insert(super::account_devices::AccountDevice {
+            public: identity.public(),
+            certificate: account.certify(&identity.public().ed25519_pub),
+        })?;
+        let account_suppression = super::account_suppression::AccountSuppression::open(
+            &dir.join("account-suppression.log"),
+            password,
+        )?;
+        let own_device_ids: HashSet<_> = account_devices
+            .devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .collect();
         let mut channels = ChannelBook::new();
         for conv in log.conversations() {
             let events = log.events(&conv);
-            let _ = channels.process(&identity, conv, &events);
+            let mut replay = super::channel::ChannelReplay::new(&events);
+            // Reinstall projections lost between signed-log ingestion and a
+            // failed/crashed sidecar write. Erases are authoritative; recipient
+            // deadlines keep the existing conservative restart policy.
+            loop {
+                let (messages, limited) = channels.process_replay(
+                    &identity,
+                    conv,
+                    &mut replay,
+                    64,
+                    super::channel::CHANNEL_PENDING_BYTES,
+                );
+                let done = !limited;
+                for msg in messages {
+                    if received.entry(msg.event_id).is_some()
+                        || account_suppression.contains(conv, msg.event_id)
+                    {
+                        continue;
+                    }
+                    let own = own_device_ids.contains(&msg.from);
+                    if !own && crate::expiry::deadline(&msg.wrapped).is_some() {
+                        continue;
+                    }
+                    received.record_durable(&super::received_log::ReceivedEntry {
+                        event_id: msg.event_id,
+                        conversation: conv,
+                        from: msg.from,
+                        wall_clock: msg.wall_clock,
+                        plaintext: msg.wrapped,
+                    })?;
+                }
+                if done {
+                    break;
+                }
+            }
         }
         let archived_channels = archived_channel_summaries(&log, &channels);
         // Restore our persisted sending chains into each channel state. The event log
@@ -690,19 +749,6 @@ impl Node {
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
-        let mut account_devices = super::account_devices::AccountDevices::open(
-            &super::account_devices::file_path(dir, &account.account_id()),
-            password,
-            &account.account_id(),
-        )?;
-        account_devices.insert(super::account_devices::AccountDevice {
-            public: identity.public(),
-            certificate: account.certify(&identity.public().ed25519_pub),
-        })?;
-        let account_suppression = super::account_suppression::AccountSuppression::open(
-            &dir.join("account-suppression.log"),
-            password,
-        )?;
         let account_sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
             &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
             password,
@@ -736,6 +782,7 @@ impl Node {
             account_preferences: Mutex::new(account_preferences),
             account_file_proofs: Mutex::new(account_file_proofs),
             account_sync_notify: tokio::sync::Notify::new(),
+            account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             profiles: Mutex::new(profiles),
             profile_incoming: profile_tx,
@@ -752,6 +799,7 @@ impl Node {
             incoming,
             channel_incoming,
             channels: Mutex::new(channels),
+            pending_channel_plaintext: Mutex::new(Default::default()),
             archived_channels,
             recovery_origins,
             recovery_contacts,
@@ -775,6 +823,7 @@ impl Node {
             outgoing_file_acks: Mutex::new(HashMap::new()),
             outgoing_file_consents: Mutex::new(HashMap::new()),
             channel_recovery_notify: tokio::sync::Notify::new(),
+            channel_recovery: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
             delivery_status_notify: tokio::sync::Notify::new(),
             verified_dm_pull_peers: Mutex::new(HashSet::new()),
@@ -994,6 +1043,11 @@ impl Node {
         {
             return Err(NodeError::Channel("channel is dissolved".into()));
         }
+        let independent_profile = kind == EventKind::Profile
+            && self.linked_devices().iter().any(|device| {
+                super::conversation::dm_conversation_id(&self.identity.public(), &device.public)
+                    == channel
+            });
         // Accepted immutable intents reserve their author's sequence even before
         // installation. Serialize every local allocation with that reservation.
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
@@ -1001,7 +1055,12 @@ impl Node {
             .map_err(NodeError::Log)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
-        let (parents, lamport) = log.prepare(&channel);
+        let (mut parents, lamport) = log.prepare(&channel);
+        if independent_profile {
+            // Signed profile leaves must remain ingestible while sibling content
+            // categories are paused. The event log permits sparse author sequences.
+            parents.clear();
+        }
         let seq = log
             .version_vector(&channel)
             .get(&self_author)

@@ -231,7 +231,20 @@
     "clearHistory": "清除聊天記錄",
     "clearHistoryConfirm": "此操作將永久刪除本地端此對話的訊息，無法恢復，亦不會影響對方的記錄。",
     "noPeersHint": "Mesh-Talk 會搜尋本地網絡。請將兩部裝置連接到同一個區域網絡。",
-    "messageChannel": "發送訊息至 #{{name}}"
+    "messageChannel": "發送訊息至 #{{name}}",
+    "earlierMessages": "收到較早嘅訊息",
+    "newMessages": "新訊息",
+    "catchingUp": "補緊已收到嘅歷史記錄…",
+    "waitingForPeer": "等緊可以連線嘅節點",
+    "delayedMessage": "遲啲收到",
+    "receivedLocally": "呢部裝置收到嘅時間：{{time}}",
+    "unreadSummary": "{{count}} 則未讀訊息",
+    "unreadSummary_one": "{{count}} 則未讀訊息",
+    "unreadUnavailable": "呢則訊息唔喺呢部裝置可用嘅歷史記錄入面。",
+    "markConversationRead": "將對話標為已讀",
+    "peerChecked": "已檢查連到線嘅成員",
+    "peerCheckedDetail": "上次檢查連到線嘅成員：{{time}}。離線成員可能仲有其他訊息。",
+    "moreUnread": "仲有更多未讀訊息"
   },
   "presence": {
     "online": "在線",
@@ -567,9 +580,9 @@
   "linkDevice": {
     "syncTitle": "喺呢部裝置同步",
     "historySync": "訊息紀錄",
-    "historySyncDescription": "同已連結嘅裝置分享同接收私訊同頻道訊息紀錄。",
+    "historySyncDescription": "同已連結裝置分享同接收現有私訊、群組訊息同檔案資料。",
     "attachmentsSync": "附件",
-    "attachmentsSyncDescription": "由已連結嘅裝置複製可用嘅舊附件同經驗證嘅檔案資料。",
+    "attachmentsSyncDescription": "同已連結裝置分享同下載現有檔案內容。檔案資料亦會跟訊息記錄同步。",
     "profileSync": "帳戶頭像",
     "profileSyncDescription": "接收已連結裝置嘅頭像變更。",
     "appearanceSync": "外觀",
@@ -605,7 +618,8 @@
     "rotateIdentity": "切換至全新的帳戶身份。",
     "rekey": "重設金鑰",
     "rekeyed": "已重設金鑰。新帳戶：{{id}}…",
-    "rekeyFailed": "重設金鑰失敗：{{error}}"
+    "rekeyFailed": "重設金鑰失敗：{{error}}",
+    "legacyFileMetadata": "升級呢部已連結裝置，就可以分開同步檔案資料而唔下載檔案。"
   },
   "webrtcTest": {
     "trigger": "語音/視像自我測試",
@@ -910,6 +924,12 @@
     "endpointHint": "呢個係最後已知嘅網絡路徑，可能指向中繼節點；唔代表實際地理位置。",
     "view": "睇資料",
     "viewNamed": "睇{{name}}嘅資料"
+  },
+  "personal": {
+    "title": "收藏訊息",
+    "description": "喺你嘅裝置之間同步筆記同檔案",
+    "saved": "已儲存喺呢部裝置",
+    "fileCardSaved": "檔案資料已儲存喺呢部裝置"
   },
   "help": {
     "title": "使用說明",

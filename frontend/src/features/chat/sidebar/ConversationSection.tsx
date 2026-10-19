@@ -39,6 +39,7 @@ export function ConversationSection({
       subtitle={row.subtitle}
       prioritizeSubtitle={row.prioritizeSubtitle}
       channel={row.channel}
+      personal={row.personal}
       pinned={row.pinned}
       navIndex={virtual ? index : undefined}
       listPosition={firstPosition + index}

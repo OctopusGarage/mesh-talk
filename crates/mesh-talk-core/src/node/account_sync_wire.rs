@@ -7,6 +7,31 @@ use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8] = b"MTAHS1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AccountSyncVersion {
+    V1,
+    V2,
+}
+
+impl AccountSyncVersion {
+    pub(super) fn number(self) -> u16 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+    fn magic(self) -> &'static [u8] {
+        match self {
+            Self::V1 => MAGIC,
+            Self::V2 => b"MTAHS2",
+        }
+    }
+    pub(super) fn includes_file_cards(self, history: bool, attachments: bool) -> bool {
+        attachments || (self == Self::V2 && history)
+    }
+}
+#[cfg(test)]
 pub(super) const VERSION: u16 = 1;
 pub(super) const MAX_CHUNK: usize = 16 * 1024;
 pub(super) const MAX_RECORD: usize = 256 * 1024;
@@ -80,26 +105,52 @@ pub(super) enum AccountHistoryFrame {
 }
 
 impl AccountHistoryFrame {
+    #[cfg(test)]
     pub(super) fn encode(&self) -> Option<Vec<u8>> {
-        if !self.valid() {
+        self.encode_version(AccountSyncVersion::V1)
+    }
+
+    pub(super) fn encode_version(&self, version: AccountSyncVersion) -> Option<Vec<u8>> {
+        if !self.valid_for(version) {
             return None;
         }
-        let bytes = super::wire::frame(MAGIC, self);
+        let bytes = super::wire::frame(version.magic(), self);
         (bytes.len() <= super::wire::MAX_WIRE_FRAME).then_some(bytes)
     }
 
+    #[cfg(test)]
     pub(super) fn decode(bytes: &[u8]) -> Option<Self> {
+        Self::decode_versioned(bytes).map(|(_, frame)| frame)
+    }
+
+    pub(super) fn decode_versioned(bytes: &[u8]) -> Option<(AccountSyncVersion, Self)> {
         if bytes.len() > super::wire::MAX_WIRE_FRAME {
             return None;
         }
-        let body = bytes.strip_prefix(MAGIC)?;
+        let (version, body) = if let Some(body) = bytes.strip_prefix(MAGIC) {
+            (AccountSyncVersion::V1, body)
+        } else {
+            (AccountSyncVersion::V2, bytes.strip_prefix(b"MTAHS2")?)
+        };
         let frame: Self = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(super::wire::MAX_WIRE_FRAME as u64)
             .reject_trailing_bytes()
             .deserialize(body)
             .ok()?;
-        frame.valid().then_some(frame)
+        frame.valid_for(version).then_some((version, frame))
+    }
+
+    fn valid_for(&self, codec: AccountSyncVersion) -> bool {
+        match self {
+            Self::Request { version, .. } | Self::AttachmentRequest { version, .. }
+                if *version != codec.number() =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+        self.valid()
     }
 
     fn valid(&self) -> bool {
@@ -117,7 +168,7 @@ impl AccountHistoryFrame {
                 wanted,
                 ..
             } => {
-                *version == VERSION
+                matches!(*version, 1 | 2)
                     && account_id(id)
                     && cursor.is_none_or(|position| position.tag <= 2)
                     && (wanted.history || wanted.attachments || cursor.is_none())
@@ -148,7 +199,7 @@ impl AccountHistoryFrame {
                 version,
                 account_id: id,
                 ..
-            } => *version == VERSION && account_id(id),
+            } => matches!(*version, 1 | 2) && account_id(id),
             Self::AttachmentStart { name, size, .. } => {
                 !name.is_empty() && name.len() <= 255 && *size <= super::node::MAX_FILE_SIZE
             }
@@ -165,6 +216,56 @@ impl AccountHistoryFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versioned_codec_preserves_v1_and_binds_request_version_to_magic() {
+        let v1 = AccountHistoryFrame::Request {
+            version: 1,
+            account_id: "a".repeat(32),
+            cursor: None,
+            known_digest: [0; 32],
+            wanted: DeviceSyncPolicy::default(),
+        };
+        let legacy = v1.encode().unwrap();
+        let mut fixture = b"MTAHS1".to_vec();
+        fixture.extend_from_slice(&0u32.to_le_bytes());
+        fixture.extend_from_slice(&1u16.to_le_bytes());
+        fixture.extend_from_slice(&32u64.to_le_bytes());
+        fixture.extend_from_slice(&[b'a'; 32]);
+        fixture.push(0); // absent cursor
+        fixture.extend_from_slice(&[0; 32]);
+        fixture.extend_from_slice(&[1, 0, 1, 0, 0]); // frozen policy field order
+        assert_eq!(legacy, fixture);
+        let mut complete_fixture = b"MTAHS1".to_vec();
+        complete_fixture.extend_from_slice(&4u32.to_le_bytes());
+        complete_fixture.push(0);
+        complete_fixture.extend_from_slice(&[7; 32]);
+        assert_eq!(
+            AccountHistoryFrame::Complete {
+                next_cursor: None,
+                digest: [7; 32]
+            }
+            .encode()
+            .unwrap(),
+            complete_fixture
+        );
+        assert_eq!(v1.encode_version(AccountSyncVersion::V1).unwrap(), legacy);
+        assert_eq!(&legacy[..6], b"MTAHS1");
+        let mut v2 = v1.clone();
+        if let AccountHistoryFrame::Request { version, .. } = &mut v2 {
+            *version = 2;
+        }
+        assert!(v2.encode_version(AccountSyncVersion::V1).is_none());
+        let bytes = v2.encode_version(AccountSyncVersion::V2).unwrap();
+        assert_eq!(&bytes[..6], b"MTAHS2");
+        assert_eq!(
+            AccountHistoryFrame::decode_versioned(&bytes),
+            Some((AccountSyncVersion::V2, v2))
+        );
+        let mut mismatch = bytes;
+        mismatch[..6].copy_from_slice(b"MTAHS1");
+        assert!(AccountHistoryFrame::decode_versioned(&mismatch).is_none());
+    }
 
     #[test]
     fn valid_frames_round_trip() {
