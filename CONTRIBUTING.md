@@ -3,7 +3,9 @@
 Mesh-Talk is a serverless, end-to-end-encrypted LAN chat app: a Rust
 ([Tauri](https://tauri.app/)) backend in `src-tauri/` and a React + Vite frontend in
 `frontend/`. A headless CLI (`mesh-talk-node`) drives the same core for testing without
-the GUI. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design.
+the GUI. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and
+[documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md) when changing
+user-facing copy or guides.
 
 ## Development setup
 
@@ -27,9 +29,11 @@ cargo run -p mesh-talk-core --bin mesh-talk-node -- \
 | Command | What it does |
 |---------|--------------|
 | `make build` | `cargo build --release` |
-| `make test` | Rust workspace test suite (`cargo test --workspace`) |
+| `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` | Affected Rust unit tests during development |
+| `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts` | Affected frontend unit test file |
+| `make test` | Full Rust workspace suite before PR submission or in CI |
 | `make e2e` | Multi-process backend E2E (real `mesh-talk-node` rigs over UDP/TCP) |
-| `make lint` | `cargo clippy --workspace -- -D warnings` |
+| `make lint` | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `make format` | `cargo fmt` + `prettier` on the frontend |
 | `make check` | full health check (`scripts/check-health.sh`) |
 
@@ -39,8 +43,8 @@ cargo run -p mesh-talk-core --bin mesh-talk-node -- \
    params via `cfg(test)` / the `fast-test-kdf` feature, so the security KDF is real in
    release but instant in tests).
 2. **Backend E2E** — `make e2e`: the `#[ignore]`d multi-process rigs (two-node DM,
-   history-across-restart, post-office offline delivery). Fast + reliable; CI runs them in
-   `e2e-backend.yml`.
+   history-across-restart, post-office offline delivery). Run for explicit validation,
+   PR/release gates, or CI (`e2e-backend.yml`).
 3. **UI E2E** — `cd frontend && npm run e2e`: Playwright drives the real React app against
    mocked Tauri IPC and walks the full business flow. It includes large-roster stress,
    keyboard and touch checks, seven default-edition theme snapshots, and representative WCAG A/AA scans.
@@ -52,7 +56,9 @@ cargo run -p mesh-talk-core --bin mesh-talk-node -- \
 
 > **CPU note.** `.cargo/config.toml` caps `jobs`/`RUST_TEST_THREADS` so a parallel build
 > doesn't saturate the machine; for ad-hoc runs prefer `cargo test -- --test-threads=2`.
-> Filter while iterating: `cargo test -p mesh-talk-core node::node`.
+> Filter while iterating: `make test-focused TEST_PACKAGE=mesh-talk-core
+> TEST_FILTER=node::account_sync`. See the [feedback loop](docs/testing-feedback-loop.md)
+> and [script index](scripts/README.md) for the gate triggers.
 
 ## Coding style
 

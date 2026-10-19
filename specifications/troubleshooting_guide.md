@@ -1,6 +1,8 @@
 # Mesh-Talk Troubleshooting Guide
 
-This guide helps you diagnose and resolve common issues with Mesh-Talk. If you're experiencing problems with the application, this guide will help you identify and fix the most common issues.
+Start with the symptom you see, then check the relevant network path, listening
+port, and application state. LAN discovery, routed discovery, and post-office
+bridges have different reachability requirements.
 
 ## Table of Contents
 
@@ -28,10 +30,8 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
    - Mesh-Talk discovers peers via signed UDP **multicast** (group `224.0.0.167`,
      port `47474` by default) plus a unicast /24 scan fallback
    - Ensure your firewall allows UDP traffic on port 47474 (and the OS-assigned TCP port)
-   - On macOS:
-     ```bash
-     sudo pfctl -f /etc/pf.conf
-     ```
+   - On macOS, check that the application is allowed through the system firewall;
+     its multicast entitlement is bundled with the app
    - On Ubuntu/Debian:
      ```bash
      sudo ufw allow 47474/udp
@@ -42,9 +42,13 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
      - Add Mesh-Talk or allow port 47474 UDP
 
 2. **Network Segmentation**
-   - Mesh-Talk only works within the same local network segment
-   - Routers and switches may block multicast traffic
-   - Verify all users are on the same subnet (e.g., 192.168.1.x)
+   - Automatic multicast discovery is scoped to the local network segment;
+     routers and access points may block it
+   - For a peer on another reachable network, use
+     [routed discovery](../docs/routed-network-discovery.md). For opted-in
+     cross-LAN introductions through post offices, see
+     [network topologies](../docs/network-topologies.md)
+   - Both paths still need reachable discovery UDP and peer or relay TCP ports
 
 3. **Multicast Disabled**
    - Some networks (guest / AP-isolated Wi-Fi) block multicast and inter-host UDP
@@ -86,25 +90,25 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
 **Solutions:**
 1. **Use a Different Port** (headless node)
    ```bash
-   ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore --password "<pw>" \
+   ./mesh-talk-node --keystore ~/.mesh-talk/node.keystore --password 'your-password' \
      --name "YourName" --port 7001
    ```
 
-2. **Find and Kill the Process Using the Port**
+2. **Find the Process Using the Port**
    - On macOS/Linux:
      ```bash
      lsof -i :7000
-     kill -9 <PID>
      ```
    - On Windows:
      ```cmd
      netstat -ano | findstr :7000
-     taskkill /PID <PID> /F
      ```
+   - Stop a process you own through its normal shutdown path before reusing the port
 
-3. **Enable Dynamic Port Allocation**
-   - Mesh-Talk automatically tries dynamic allocation if the requested port is in use
-   - The application will display the actual port being used
+3. **Use an OS-assigned Port**
+   - Omit `--port` or pass `--port 0` on the CLI; an explicitly requested
+     occupied port fails to bind
+   - The startup line and in-app Diagnostics show the actual listening port
 
 ### Connection Refused Errors
 
@@ -116,15 +120,13 @@ This guide helps you diagnose and resolve common issues with Mesh-Talk. If you'r
 **Solutions:**
 1. **Verify Peer Status**
    - Ensure the peer application is running
-   - Check if the peer is on the same network
+   - Confirm that a LAN peer is reachable locally, or that the configured routed
+     path to the peer or post office is up
 
 2. **Firewall Settings**
-   - Mesh-Talk uses dynamic TCP ports for communication
-   - Configure your firewall to allow connections on a range of ports
-   - Example for Ubuntu/Debian:
-     ```bash
-     sudo ufw allow 7000:8000/tcp
-     ```
+   - Allow the actual TCP listening port shown at startup or in Diagnostics;
+     the CLI can use a fixed `--port` when a firewall rule needs one
+   - Allow discovery UDP on the configured discovery port (47474 by default)
 
 3. **Network Connectivity**
    - Test basic connectivity:
@@ -459,9 +461,5 @@ If you're unable to resolve your issue using this guide:
    - Ask in the project's GitHub Discussions if that feature is enabled, or open an issue
      for a reproducible non-security bug
 
-## Version Information
-
-This troubleshooting guide applies to Mesh-Talk version 0.3.0.
-Last updated: October 8, 2026
-
-For the latest version of this guide, please refer to the official documentation.
+For release-specific differences, check the
+[release notes](https://github.com/OctopusGarage/mesh-talk/releases) alongside this guide.

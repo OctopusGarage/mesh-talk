@@ -4,11 +4,16 @@ import { readFileSync } from "node:fs";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
+import { waitForPackBootstrap } from "./helpers/packs";
 
 const BOB = { account: "acc_bob_bbbb2222" };
 
 async function enterBobDm(page: Page) {
-  test.setTimeout(60_000);
+  test.setTimeout(
+    process.platform === "win32" || process.env.MESH_TALK_E2E_COVERAGE === "1"
+      ? 90_000
+      : 60_000,
+  );
   await page.goto("/");
   if (!(await page.getByTestId("chat-shell").isVisible())) {
     await page.getByTestId("login-tab-signin").click();
@@ -19,6 +24,7 @@ async function enterBobDm(page: Page) {
   await expect(page.getByTestId("chat-shell")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByText("hey, welcome to the mesh")).toBeVisible();
+  await waitForPackBootstrap(page);
 }
 
 test.use({ viewport: { width: 1100, height: 800 } });
@@ -98,18 +104,33 @@ test("the default edition installs the cat sticker collection", async ({
 test("install and remove a sticker ZIP with fallback for sent messages", async ({
   page,
 }) => {
+  const files = unzipSync(
+    readFileSync(resolve("../site/market/packs/google-noto.zip")),
+  );
+  const manifest = JSON.parse(new TextDecoder().decode(files["manifest.json"]));
+  manifest.id = "imported-noto";
+  manifest.name = "Imported Noto";
+  files["manifest.json"] = strToU8(JSON.stringify(manifest));
   await enterBobDm(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
   await page.getByText("Manage sticker packs").click();
   const manager = page.getByTestId("pack-manager-sticker");
-  await manager
-    .locator('input[type="file"]')
-    .setInputFiles(resolve("../site/market/packs/google-noto.zip"));
-  await expect(manager.getByText("Google Noto")).toBeVisible();
-  await page.getByTestId("sticker-pack-google-noto").click();
-  await page.getByTestId("sticker-option-pack:google-noto:1f602").click();
+  // A distinct ID keeps bundled seeding separate from the manual import lifecycle.
+  const remove = manager.getByRole("button", { name: "Remove Imported Noto" });
+  await expect(remove).toHaveCount(0);
+  await manager.locator('input[type="file"]').setInputFiles({
+    name: "imported-noto.zip",
+    mimeType: "application/zip",
+    buffer: Buffer.from(zipSync(files)),
+  });
+  // This validates every image in a large archive before committing it.
+  await expect(remove).toBeVisible({
+    timeout: 30_000,
+  });
+  await page.getByTestId("sticker-pack-imported-noto").click();
+  await page.getByTestId("sticker-option-pack:imported-noto:1f602").click();
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "src",
     /^data:image\/webp;base64,/,
@@ -120,10 +141,10 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
   await page.getByText("Manage sticker packs").click();
   await page
     .getByTestId("pack-manager-sticker")
-    .getByRole("button", { name: "Remove Google Noto" })
+    .getByRole("button", { name: "Remove Imported Noto" })
     .click();
   await expect(
-    page.getByTestId("sticker-option-pack:google-noto:1f602"),
+    page.getByTestId("sticker-option-pack:imported-noto:1f602"),
   ).toHaveCount(0);
   await expect(page.getByTestId("message-sticker-fallback").last()).toHaveText(
     "😂",
@@ -133,7 +154,7 @@ test("install and remove a sticker ZIP with fallback for sent messages", async (
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
   await page.getByTestId("composer-stickers").click();
-  await expect(page.getByTestId("sticker-pack-google-noto")).toHaveCount(0);
+  await expect(page.getByTestId("sticker-pack-imported-noto")).toHaveCount(0);
 });
 
 test("a custom noto pack has its own sticker tab", async ({ page }) => {

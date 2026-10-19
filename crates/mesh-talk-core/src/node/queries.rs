@@ -1,11 +1,11 @@
 //! Read-only conversation queries on [`Node`]: per-conversation history (channel, DM,
-//! account), the unified `history`, and full-text `search`. Split out of `node.rs`.
+//! account), and the unified `history`. Full-text search lives in `search.rs`.
 //! All are pure reads that serve plaintext from the sent/received stores — the wire
 //! keys are single-use and gone, which IS the forward-secrecy property, not a gap.
 
 use super::conversation::{account_conversation_id, dm_conversation_id};
 use super::node::FileHistoryInfo;
-use super::{DmEnvelope, HistoryEntry, MessageBody, Node, SearchHit};
+use super::{DmEnvelope, HistoryEntry, MessageBody, Node};
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
 
@@ -25,6 +25,11 @@ impl Node {
             .recovery_origins
             .iter()
             .map(|author| author.user_id())
+            .collect();
+        let linked_me: std::collections::HashSet<_> = self
+            .linked_devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
             .collect();
         let delivery = self.delivery.lock().expect("delivery lock not poisoned");
         let mut entries = self
@@ -46,9 +51,17 @@ impl Node {
         entries
             .into_iter()
             .filter(|entry| !delivery.file_erased(entry.conversation, entry.event_id))
+            .filter(|entry| {
+                entry.from == me
+                    || linked_me.contains(&entry.from)
+                    || recovered_me.contains(&entry.from)
+                    || !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
+            })
             .filter_map(|entry| {
                 let manifest = crate::file::decode_manifest(&entry.plaintext)?;
-                let from_me = entry.from == me || recovered_me.contains(&entry.from);
+                let from_me = entry.from == me
+                    || recovered_me.contains(&entry.from)
+                    || linked_me.contains(&entry.from);
                 Some(HistoryEntry {
                     id: entry.event_id,
                     from_me,
@@ -75,7 +88,7 @@ impl Node {
             .collect()
     }
 
-    /// The last `limit` messages of a channel (all directions), sorted by wall-clock.
+    /// The last `limit` messages of a channel in deterministic causal order.
     /// Sender-key wire keys are single-use and gone after one decrypt, so history is
     /// served from the stores — our own sent plaintext from the sent sidecar, plus the
     /// plaintext of others' messages we decrypted on receipt (the received store). That
@@ -89,9 +102,6 @@ impl Node {
         {
             return Vec::new();
         }
-        // A channel conversation's history is built exactly like a DM's (sent sidecar +
-        // received store, seq->id mapped, wall-clock + id sorted) — so delegate to `history`
-        // rather than duplicate it.
         self.history(channel, limit)
     }
 
@@ -135,6 +145,14 @@ impl Node {
             .expect("received mutex not poisoned")
             .entries(&conv)
         {
+            let envelope = super::dm_envelope::DmEnvelope::decode(&rcv.plaintext);
+            let inner = envelope
+                .as_ref()
+                .map_or(rcv.plaintext.as_slice(), |e| e.body.as_slice());
+            if rcv.from != my_account && self.recipient_expired(inner, rcv.event_id, rcv.wall_clock)
+            {
+                continue;
+            }
             let (id, body) = decode_account_entry(&rcv.plaintext);
             let from_me = rcv.from == my_account;
             entries.push(HistoryEntry {
@@ -154,6 +172,11 @@ impl Node {
         // Merge file/media messages (FileManifest events) so they're ordered inline with
         // text by wall-clock.
         entries.extend(self.conversation_files(conv));
+
+        // A logical account DM can arrive directly and later be imported from a
+        // sibling with a different transport-event id. Keep its first local copy.
+        let mut seen = std::collections::HashSet::new();
+        entries.retain(|entry| seen.insert(entry.id));
 
         // Tombstone recalled messages: keep the slot (sender + position) but drop the content.
         tombstone_recalled(
@@ -181,6 +204,11 @@ impl Node {
     /// stores — that IS the forward-secrecy property, not a limitation.
     pub fn history(&self, conversation: ConversationId, limit: usize) -> Vec<HistoryEntry> {
         let mut entries: Vec<HistoryEntry> = Vec::new();
+        let own_devices: std::collections::HashSet<_> = self
+            .linked_devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .collect();
         for (id, sent) in self.raw_sent_history(conversation) {
             let body = MessageBody::decode(&sent.plaintext);
             entries.push(HistoryEntry {
@@ -202,11 +230,17 @@ impl Node {
             .expect("received mutex not poisoned")
             .entries(&conversation)
         {
+            if !own_devices.contains(&rcv.from)
+                && self.recipient_expired(&rcv.plaintext, rcv.event_id, rcv.wall_clock)
+            {
+                continue;
+            }
             let body = MessageBody::decode(&rcv.plaintext);
+            let from_me = own_devices.contains(&rcv.from);
             entries.push(HistoryEntry {
                 id: rcv.event_id,
-                from_me: false,
-                who: rcv.from,
+                from_me,
+                who: if from_me { "you".to_string() } else { rcv.from },
                 text: body.text,
                 wall_clock: rcv.wall_clock,
                 reply_to: body.reply_to,
@@ -219,6 +253,8 @@ impl Node {
         // Merge file/media messages (FileManifest events) so they're ordered inline with
         // text by wall-clock.
         entries.extend(self.conversation_files(conversation));
+        let mut seen = std::collections::HashSet::new();
+        entries.retain(|entry| seen.insert(entry.id));
         // Tombstone recalled messages. Recall is only wired for channels (1:1 chats go
         // through `account_history`); a device-pair DM has no Delete events, so this is an
         // empty set there.
@@ -235,179 +271,34 @@ impl Node {
         }
         // Tie-break equal wall-clocks by the (global, content-addressed) event id so
         // both participants render the same order on a same-millisecond collision.
-        entries.sort_by(|a, b| {
-            a.wall_clock
-                .cmp(&b.wall_clock)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        if is_channel {
+            let log = self.log.lock().expect("log mutex not poisoned");
+            let events = log.events(&conversation);
+            let archive: Vec<_> = entries
+                .iter()
+                .map(|entry| (entry.id, entry.wall_clock))
+                .collect();
+            let order = super::timeline::ordered_ids(&events, &archive, false);
+            let ranks: std::collections::HashMap<_, _> = order
+                .into_iter()
+                .enumerate()
+                .map(|(rank, id)| (id, rank))
+                .collect();
+            entries.sort_by_key(|entry| ranks.get(&entry.id).copied().unwrap_or(usize::MAX));
+        } else {
+            entries.sort_by(|a, b| {
+                a.wall_clock
+                    .cmp(&b.wall_clock)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+        }
         if entries.len() > limit {
             entries.drain(0..entries.len() - limit);
         }
         entries
     }
-
-    /// Search decrypted history across all known DMs + channels for `query`
-    /// (case-insensitive substring). Empty/whitespace query → no hits.
-    ///
-    /// Scans the sent + received stores BY REFERENCE — it never clones a full
-    /// conversation Vec, only the plaintext of the lines that actually match — and skips
-    /// the seq->id log scan `history` does (search results carry no event id), so a
-    /// keystroke no longer copies every plaintext in every conversation.
-    pub fn search(&self, query: &str) -> Vec<SearchHit> {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return Vec::new();
-        }
-        const PER_CONV: usize = 2000;
-        let mut hits: Vec<SearchHit> = Vec::new();
-
-        let peers = self
-            .roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .peers();
-        for peer in peers.iter().filter(|p| !p.post_office) {
-            let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-            for m in self.scan_conversation(conv, &q, PER_CONV, false) {
-                hits.push(SearchHit {
-                    is_channel: false,
-                    target: peer.public.user_id(),
-                    account_id: peer.account_id.clone(),
-                    label: peer.name.clone(),
-                    from_me: m.from_me,
-                    who: m.who,
-                    text: m.text,
-                    wall_clock: m.wall_clock,
-                });
-            }
-        }
-        // Account-addressed DMs (the multi-device path the app uses) live under account
-        // conversations, not device-pair ones — scan them too, deduped by account id.
-        let my_account = self.account.account_id();
-        let mut seen_accounts = std::collections::HashSet::new();
-        for peer in peers.iter().filter(|p| !p.post_office) {
-            let Some(acct) = peer.account_id.clone() else {
-                continue;
-            };
-            if !seen_accounts.insert(acct.clone()) {
-                continue;
-            }
-            let conv = account_conversation_id(&my_account, &acct);
-            for m in self.scan_conversation(conv, &q, PER_CONV, true) {
-                hits.push(SearchHit {
-                    is_channel: false,
-                    target: acct.clone(),
-                    account_id: Some(acct.clone()),
-                    label: peer.name.clone(),
-                    from_me: m.from_me,
-                    who: m.who,
-                    text: m.text,
-                    wall_clock: m.wall_clock,
-                });
-            }
-        }
-        for ch in self.list_channels() {
-            for m in self.scan_conversation(ch.id, &q, PER_CONV, false) {
-                hits.push(SearchHit {
-                    is_channel: true,
-                    account_id: None,
-                    target: hex::encode(ch.id.as_bytes()),
-                    label: ch.name.clone(),
-                    from_me: m.from_me,
-                    who: m.who,
-                    text: m.text,
-                    wall_clock: m.wall_clock,
-                });
-            }
-        }
-        hits.sort_by_key(|b| std::cmp::Reverse(b.wall_clock)); // most recent first
-        hits
-    }
-
-    /// Scan one conversation's sent + received plaintext for a lowercased substring `q`,
-    /// matching the same most-recent-`limit` window and the same `from_me`/`who`/`text`
-    /// derivation as [`Node::history`] / [`Node::account_history`], but borrowing the
-    /// stores (no full-Vec clone) and cloning only the matching lines. `account` selects
-    /// the account-conversation envelope decode + sender derivation.
-    fn scan_conversation(
-        &self,
-        conv: ConversationId,
-        q: &str,
-        limit: usize,
-        account: bool,
-    ) -> Vec<ScanMatch> {
-        let my_account = self.account.account_id();
-        // Materialize (wall_clock, from_me, who, text) for the window, borrowing the
-        // stores; only the decoded body bytes of kept lines are owned. Mirror `history`'s
-        // ordering (wall_clock, then a sent-before-received tiebreak is irrelevant to a
-        // substring scan) and most-recent-`limit` truncation.
-        let mut lines: Vec<(u64, bool, String, Vec<u8>)> = Vec::new();
-        {
-            let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            for e in sentlog.entries_ref(&conv) {
-                let (from_me, who, body) = if account {
-                    let (_, body) = decode_account_entry(&e.plaintext);
-                    (true, "you".to_string(), body.text)
-                } else {
-                    (
-                        true,
-                        "you".to_string(),
-                        MessageBody::decode(&e.plaintext).text,
-                    )
-                };
-                lines.push((e.wall_clock, from_me, who, body));
-            }
-        }
-        {
-            let received = self.received.lock().expect("received mutex not poisoned");
-            for e in received.entries_ref(&conv) {
-                let (from_me, who, body) = if account {
-                    let (_, body) = decode_account_entry(&e.plaintext);
-                    let from_me = e.from == my_account;
-                    let who = if from_me {
-                        "you".to_string()
-                    } else {
-                        e.from.clone()
-                    };
-                    (from_me, who, body.text)
-                } else {
-                    (
-                        false,
-                        e.from.clone(),
-                        MessageBody::decode(&e.plaintext).text,
-                    )
-                };
-                lines.push((e.wall_clock, from_me, who, body));
-            }
-        }
-        lines.sort_by_key(|l| l.0);
-        if lines.len() > limit {
-            lines.drain(0..lines.len() - limit);
-        }
-        lines
-            .into_iter()
-            .filter(|(_, _, _, text)| String::from_utf8_lossy(text).to_lowercase().contains(q))
-            .map(|(wall_clock, from_me, who, text)| ScanMatch {
-                from_me,
-                who,
-                text,
-                wall_clock,
-            })
-            .collect()
-    }
 }
 
-/// One matching line from [`Node::scan_conversation`] (the fields `search` needs).
-struct ScanMatch {
-    from_me: bool,
-    who: String,
-    text: Vec<u8>,
-    wall_clock: u64,
-}
-
-/// Decode an account-history store entry (a full `DmEnvelope`) into its logical id
-/// and inner body. A malformed or legacy entry falls back to a bare `MessageBody`
-/// with a zero id, so it still renders rather than breaking history.
 /// Blank the content of any entry whose id was recalled, keeping its slot (sender +
 /// position) so the UI can render an "X recalled a message" placeholder. The plaintext /
 /// file metadata of a recalled message is never returned.
@@ -429,6 +320,9 @@ fn tombstone_recalled(entries: &mut [HistoryEntry], recalled: &std::collections:
     }
 }
 
+/// Decode an account-history store entry (a full `DmEnvelope`) into its logical id
+/// and inner body. A malformed or legacy entry falls back to a bare `MessageBody`
+/// with a zero id, so it still renders rather than breaking history.
 pub(in crate::node) fn decode_account_entry(plaintext: &[u8]) -> (EventId, MessageBody) {
     match DmEnvelope::decode(plaintext) {
         Some(env) => (EventId::new(env.msg_id), MessageBody::decode(&env.body)),

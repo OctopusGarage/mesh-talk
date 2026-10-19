@@ -15,13 +15,14 @@ const base: ChatMessage = {
   replyTo: null,
   delivery: "awaiting",
 };
-const render = (m: ChatMessage, isChannel = false) =>
+const render = (m: ChatMessage, isChannel = false, isPersonal = false) =>
   renderToStaticMarkup(
     createElement(MessageBubble, {
       m,
       parent: null,
       showAuthor: false,
       isChannel,
+      isPersonal,
       reactions: [],
       selfReactionId: "me",
       myName: "Me",
@@ -35,6 +36,38 @@ const render = (m: ChatMessage, isChannel = false) =>
   );
 
 describe("automatic delivery footer", () => {
+  it("distinguishes personal file metadata from bytes and external upload progress", async () => {
+    await i18n.changeLanguage("en");
+    const html = render(
+      {
+        ...base,
+        file: {
+          fileConv: "personal-file",
+          name: "note.txt",
+          size: 12,
+          mime: "text/plain",
+          media: false,
+        },
+      },
+      false,
+      true,
+    );
+    expect(html).toContain("File card saved on this device");
+    expect(html).not.toContain('role="progressbar"');
+    expect(html).not.toContain("data-delivery=");
+  });
+  it("labels personal messages as locally saved without claiming external delivery", async () => {
+    await i18n.changeLanguage("en");
+    const html = render(base, false, true);
+    expect(html).toContain("Saved on this device");
+    expect(html).not.toContain("data-delivery=");
+    expect(render({ ...base, pending: true }, false, true)).not.toContain(
+      "Saved on this device",
+    );
+    expect(render({ ...base, failed: true }, false, true)).not.toContain(
+      "Saved on this device",
+    );
+  });
   it("renders accessible static awaiting/delivered for text, sticker and file cards", async () => {
     await i18n.changeLanguage("en");
     for (const m of [
@@ -66,6 +99,17 @@ describe("automatic delivery footer", () => {
       "data-delivery=",
     );
   });
+  it("shows channel custody separately from delivery", async () => {
+    await i18n.changeLanguage("en");
+    for (const copies of [0, 1, 2]) {
+      const markup = render({ ...base, replicas: copies }, true);
+      expect(markup).toContain(`data-custody="${copies}"`);
+      expect(markup).not.toContain("data-delivery=");
+      expect(markup).toContain("not a delivery or read receipt");
+      if (copies > 0) expect(markup).toContain("Last confirmed");
+      else expect(markup).toContain("No member copy confirmed");
+    }
+  });
   it("has explicit automatic-receipt wording in all six locales and hides guessed file metadata", async () => {
     for (const language of ["en", "es", "ja", "yue", "zh-Hans", "zh-Hant"]) {
       for (const key of [
@@ -96,4 +140,19 @@ describe("automatic delivery footer", () => {
     }
     await i18n.changeLanguage("en");
   });
+});
+
+it("keeps authored time distinct from local receipt detail for recovered content", async () => {
+  await i18n.changeLanguage("en");
+  const html = render(
+    { ...base, fromMe: false, arrivalKind: "catch_up", receivedAt: 500000 },
+    true,
+  );
+  expect(html).toContain("Received later");
+  expect(html).toContain("Received on this device:");
+  expect(html).toContain('data-testid="message-time"');
+  expect(html).not.toContain("synchronized");
+  expect(
+    render({ ...base, fromMe: false, receivedAt: 500000 }, true),
+  ).not.toContain("Received later");
 });

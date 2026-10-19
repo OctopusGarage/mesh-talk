@@ -1,4 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
+
+export type SyncCategory =
+  "history" | "attachments" | "profile" | "appearance" | "contacts";
+
+export type DeviceSyncPolicy = Record<SyncCategory, boolean>;
+
+export interface AccountPreference {
+  category: "appearance" | "contacts";
+  key: string;
+  value: string | null;
+  revision: number;
+  device_id: string;
+}
+
+export interface DeviceSyncStatus {
+  device_id: string;
+  phase: "offline" | "catching_up" | "up_to_date" | "error" | "disabled";
+  pending_attachments: number;
+  /** Older cores omit this; V1 peers cannot separate file cards from file bytes. */
+  legacy_file_metadata?: boolean;
+  error: string | null;
+}
 import type {
   AccountInfo,
   ChannelInfo,
@@ -21,29 +43,69 @@ function nextBadgeRevision(): number {
   return lastBadgeRevision;
 }
 
+// Tauri's normal IPC transport returns raw Response bytes as an ArrayBuffer. If it falls
+// back to postMessage (for example when the custom IPC protocol is blocked), it serializes
+// the same bytes as a JSON number array. Blob([numberArray]) would encode comma-separated
+// text instead of the image, so normalize at the API boundary.
+function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
+  return Array.isArray(bytes) ? new Uint8Array(bytes).buffer : bytes;
+}
+
 export const chat = {
+  getDeviceSyncPolicy: () => invoke<DeviceSyncPolicy>("get_device_sync_policy"),
+  getDeviceSyncStatus: () =>
+    invoke<DeviceSyncStatus[]>("get_device_sync_status"),
+  setDeviceSyncCategory: (category: SyncCategory, enabled: boolean) =>
+    invoke<DeviceSyncPolicy>("set_device_sync_category", {
+      category,
+      enabled,
+    }),
+  getAccountPreferences: (category: "appearance" | "contacts") =>
+    invoke<AccountPreference[]>("get_account_preferences", { category }),
+  setAccountPreference: (
+    category: "appearance" | "contacts",
+    key: string,
+    value: string | null,
+  ) =>
+    invoke<AccountPreference>("set_account_preference", {
+      category,
+      key,
+      value,
+    }),
   ownerIdentity: (owner: string) =>
-    invoke<{ owner: string; device_id: string; account_id: string }>(
-      "owner_node_identity",
-      { owner },
-    ),
+    invoke<{
+      owner: string;
+      device_id: string;
+      account_id: string;
+      history_revision?: number;
+    }>("owner_node_identity", { owner }),
   enqueueText: (
     owner: string,
     account: string,
     text: string,
     replyTo: string | null,
-  ) => invoke<string>("owner_enqueue_text", { owner, account, text, replyTo }),
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<string>("owner_enqueue_text", {
+      owner,
+      account,
+      text,
+      replyTo,
+      expiresAtMs,
+    }),
   enqueueSticker: (
     owner: string,
     account: string,
     stickerId: string,
     fallback: string,
+    expiresAtMs?: number | null,
   ) =>
     invoke<string>("owner_enqueue_sticker", {
       owner,
       account,
       stickerId,
       fallback,
+      expiresAtMs,
     }),
   enqueueFile: (
     owner: string,
@@ -51,12 +113,14 @@ export const chat = {
     path: string,
     media: boolean,
     progressKey?: string,
+    expiresAtMs?: number | null,
   ) =>
     invoke<{ id: string; fileConv: string }>("owner_enqueue_file", {
       owner,
       account,
       path,
       media,
+      expiresAtMs,
       ...(progressKey ? { progressKey } : {}),
     }),
   ownerHistory: (owner: string, account: string, limit: number) =>
@@ -107,7 +171,15 @@ export const chat = {
     stickerId: string,
     fallback: string,
     isChannel: boolean,
-  ) => invoke<void>("send_sticker", { convId, stickerId, fallback, isChannel }),
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<void>("send_sticker", {
+      convId,
+      stickerId,
+      fallback,
+      isChannel,
+      expiresAtMs,
+    }),
 
   // Direct messages (device-addressed)
   sendDm: (recipient: string, text: string, replyTo: string | null = null) =>
@@ -148,6 +220,16 @@ export const chat = {
     invoke<string>("create_channel", { name, memberIds }),
   channelMembers: (channelId: string) =>
     invoke<ChannelMembersInfo>("channel_members", { channelId }),
+  setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>
+    invoke<void>("set_channel_replica_enabled", { channelId, enabled }),
+  channelCustodyStatuses: (channelId: string, ids: string[]) =>
+    invoke<Array<{ id: string; replicas: number }>>(
+      "channel_custody_statuses",
+      {
+        channelId,
+        ids,
+      },
+    ),
   channelActivity: (channelId: string) =>
     invoke<ChannelActivityInfo[]>("channel_activity", { channelId }),
   addChannelMember: (channelId: string, memberId: string) =>
@@ -168,7 +250,14 @@ export const chat = {
     channelId: string,
     text: string,
     replyTo: string | null = null,
-  ) => invoke<void>("send_channel_message", { channelId, text, replyTo }),
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<void>("send_channel_message", {
+      channelId,
+      text,
+      replyTo,
+      expiresAtMs,
+    }),
   channelHistory: (channelId: string, limit: number) =>
     invoke<HistoryItem[]>("channel_history", { channelId, limit }),
   channelReactions: (channelId: string) =>
@@ -184,11 +273,13 @@ export const chat = {
     path: string,
     media: boolean,
     progressKey?: string,
+    expiresAtMs?: number | null,
   ) =>
     invoke<string>("send_file_channel", {
       channelId,
       path,
       media,
+      expiresAtMs,
       ...(progressKey ? { progressKey } : {}),
     }),
 
@@ -225,11 +316,11 @@ export const chat = {
   openDownloadDir: (owner: string) =>
     invoke<void>("open_download_dir", { owner }),
   readFile: (fileConv: string) =>
-    invoke<ArrayBuffer>("read_file", { fileConv }),
+    invoke<ArrayBuffer | number[]>("read_file", { fileConv }).then(mediaBytes),
   /** Read DURABLE media bytes (image/screenshot/video) from the chat-media store. Survives
    * chunk prune + restart, unlike readFile (transient chunks). Rejects if none is stored. */
   readMedia: (fileConv: string) =>
-    invoke<ArrayBuffer>("read_media", { fileConv }),
+    invoke<ArrayBuffer | number[]>("read_media", { fileConv }).then(mediaBytes),
   /** Write picked/pasted bytes to a temp file and return its path, to feed the file-send
    *  pipeline. `name` (the picker has one) is kept verbatim so the real filename + extension
    *  survive; without it a `pasted-<ts>.<ext>` name is synthesized for clipboard bytes. */

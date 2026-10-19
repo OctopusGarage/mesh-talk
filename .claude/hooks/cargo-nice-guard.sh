@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # PreToolUse(Bash) guard for mesh-talk.
 #
-# This project's test suite generates RSA-2048 keys in many tests, and cargo
-# parallelizes compilation and tests across all cores by default. Running a bare
-# `cargo test`/`build`/`clippy`/`run`/`check` pins every core and makes the
-# machine unresponsive.
+# Compilation and concurrent crypto/network tests can occupy available cores.
+# Test builds use cheap KDF parameters, but heavy cargo work can still
+# compete with interactive applications even under the configured job limits.
 #
 # `.cargo/config.toml` already caps `jobs` and `RUST_TEST_THREADS`, but that
 # does not lower scheduling priority. This hook additionally requires heavy
@@ -31,7 +30,7 @@ if printf '%s' "$cmd" \
   if printf '%s' "$cmd" | grep -Eq '(^|[[:space:];&|(])nice([[:space:]]|$)'; then
     exit 0
   fi
-  reason='CPU guard: heavy cargo commands must run under `nice` so they do not saturate the CPU. Re-run prefixed with: nice -n 10 RUST_TEST_THREADS=4 <your cargo command>. (.cargo/config.toml already caps jobs and test-threads; nice keeps the machine responsive. For the full suite use: nice -n 10 cargo test -- --test-threads=2)'
+  reason='CPU guard: heavy cargo commands must run under nice so they do not saturate the CPU. Re-run prefixed with: RUST_TEST_THREADS=4 nice -n 10 <your cargo command>. (.cargo/config.toml already caps jobs and test-threads; nice keeps the machine responsive. For the full suite use: nice -n 10 cargo test -- --test-threads=2)'
   jq -n --arg r "$reason" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",

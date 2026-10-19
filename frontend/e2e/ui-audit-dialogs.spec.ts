@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import type { Locator } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
@@ -81,13 +82,9 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
       surface: "settings-dialog",
       hasDialogClose: true,
       ready: async () => {
-        await expect(page.getByTestId("invisible-switch")).toBeEnabled();
+        await expect(page.getByTestId("settings-page-general")).toBeVisible();
         await expect(page.getByTestId("settings-dialog")).toContainText(
           "Manage privacy, appearance, messages, files, and app behavior.",
-        );
-        await expect(page.getByTestId("settings-scroll-more")).toBeVisible();
-        await expect(page.getByTestId("settings-dialog")).toContainText(
-          "/home/tester/Downloads",
         );
       },
     },
@@ -134,21 +131,27 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
   }
 });
 
-test("settings scroll cue reveals more controls", async ({ page }) => {
+test("settings page scrolls independently while the header remains visible", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 760, height: 520 });
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
-
-  const cue = page.getByTestId("settings-scroll-more");
-  await expect(cue).toBeVisible();
-  await cue.click();
+  await selectSettingsCategory(page, "privacy");
+  await expect(page.locator("#setting-privacy-level")).toBeVisible();
+  const panel = page.locator("#settings-category-panel");
+  await panel.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
   await expect
-    .poll(() =>
-      page.getByTestId("settings-dialog").evaluate((dialog) => {
-        const scroller = dialog.querySelector(".overflow-y-auto");
-        return scroller?.scrollTop ?? 0;
-      }),
-    )
+    .poll(() => panel.evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0);
+  await expect(
+    page
+      .getByTestId("settings-dialog")
+      .getByRole("heading", { name: "Settings", exact: true }),
+  ).toBeInViewport();
+  await expect(page.getByTestId("settings-nav-privacy")).toBeInViewport();
 });
 
 test("settings section navigation reaches the requested controls", async ({
@@ -158,10 +161,7 @@ test("settings section navigation reaches the requested controls", async ({
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   const dialog = page.getByTestId("settings-dialog");
-  await dialog
-    .getByRole("navigation", { name: "Settings" })
-    .getByRole("button", { name: "Messages & files" })
-    .click();
+  await selectSettingsCategory(page, "history");
   await expect(
     dialog.getByTestId("settings-retention-select"),
   ).toBeInViewport();
@@ -175,16 +175,15 @@ test("settings navigation keeps the dialog header and sidebar in place", async (
   await openSidebarMenuAction(page, "sidebar-nav-settings");
 
   const dialog = page.getByTestId("settings-dialog");
-  const nav = dialog.getByRole("navigation", { name: "Settings" });
-  await nav.getByRole("button", { name: "Data and recovery" }).click();
+  await selectSettingsCategory(page, "history");
 
   await expect(
     dialog.getByRole("heading", { name: "Settings" }),
   ).toBeInViewport();
-  await expect(nav.getByRole("button", { name: "Privacy" })).toBeInViewport();
+  await expect(page.getByTestId("settings-nav-connection")).toBeInViewport();
   await expect.poll(() => dialog.evaluate((node) => node.scrollTop)).toBe(0);
 
-  await nav.getByRole("button", { name: "Privacy" }).click();
+  await selectSettingsCategory(page, "connection");
   await expect(dialog.getByTestId("invisible-switch")).toBeInViewport();
 });
 

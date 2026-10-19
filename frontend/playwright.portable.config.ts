@@ -2,7 +2,8 @@ import { defineConfig } from "@playwright/test";
 
 const browser = process.env.EVAL_BROWSER ?? "chromium";
 const tier = process.env.EVAL_TIER ?? "core";
-const evidenceRoot = `eval-results/portable/${browser}/${tier}`;
+const evidenceRoot =
+  process.env.EVAL_EVIDENCE_ROOT ?? `eval-results/portable/${browser}/${tier}`;
 if (!["chromium", "webkit", "firefox"].includes(browser))
   throw new Error(`Unsupported EVAL_BROWSER: ${browser}`);
 if (!["core", "extended"].includes(tier))

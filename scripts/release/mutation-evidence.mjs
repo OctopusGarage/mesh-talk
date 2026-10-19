@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 
-export function mutationShard(runNumber) {
+export function mutationShard(runNumber, worker = 0, workers = 1) {
   assert.ok(Number.isSafeInteger(runNumber) && runNumber > 0, "invalid workflow run number");
-  return `${(runNumber - 1) % 256}/256`;
+  assert.ok(Number.isSafeInteger(workers) && workers > 0 && Number.isSafeInteger(256 * workers), "invalid mutation worker count");
+  assert.ok(Number.isSafeInteger(worker) && worker >= 0 && worker < workers, "invalid mutation worker index");
+  // Subdivide the original round-robin sample without increasing or shrinking it.
+  return `${(runNumber - 1) % 256 + 256 * worker}/${256 * workers}`;
 }
 
 export function parseSelectedMutants(output, status) {

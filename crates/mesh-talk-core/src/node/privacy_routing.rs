@@ -9,6 +9,12 @@ use std::{
 };
 
 impl Node {
+    /// Infrastructure classification from a validated full device binding.
+    pub fn device_is_post_office(&self, device: &crate::identity::device::PublicIdentity) -> bool {
+        self.historical_author(&device.ed25519_pub)
+            .is_some_and(|proof| proof.public() == *device && proof.post_office)
+    }
+
     /// A verified account binding for a channel member, including members no longer in
     /// the live roster. Match the full device identity before trusting the stored proof.
     pub fn account_id_for_device(
@@ -115,6 +121,7 @@ impl Node {
                     PeerRecord {
                         public,
                         addr: std::net::SocketAddr::new(ip, proof.tcp_port),
+                        routes: Vec::new(),
                         name: proof.name,
                         post_office: proof.post_office,
                         account_id: Some(account),

@@ -71,6 +71,7 @@ fix(ratchet): resolve session establishment failure
 
 Commits **must be GPG-signed**. `scripts/setup-hooks.sh` (run by `make dev`) points
 `core.hooksPath` at `hooks/` and enables `commit.gpgsign`; the `pre-push` hook rejects any
-commit lacking a `gpgsig`. The `commit-msg` and `pre-commit` hooks run a fast quality slice
-locally before each commit. Generate a key with `gpg --full-generate-key` and set it via
+commit lacking a `gpgsig`. The `pre-commit` hook checks staged whitespace and
+source formatting; run affected tests during development and full gates before
+PR review. Generate a key with `gpg --full-generate-key` and set it via
 `git config --global user.signingkey <KEY_ID>` if you don't have one.

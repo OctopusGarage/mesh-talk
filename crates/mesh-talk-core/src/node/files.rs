@@ -67,6 +67,7 @@ impl Write for ChecksumWriter<'_> {
 
 pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
     use bincode::Options;
+    let (_, bytes) = crate::expiry::split(bytes)?;
     if bytes.len() > crate::transport::MAX_PLAINTEXT {
         return None;
     }
@@ -146,6 +147,13 @@ pub(in crate::node) fn compact_manifest_needed(
         ciphertext: vec![0; 16],
     })
     .map_err(|_| NodeError::File("manifest encoding failed".into()))?;
+    // Staging is shared by account and direct sends. Reserve the largest
+    // existing wrapper so adding a personal proof or deadline cannot overflow
+    // an otherwise frame-sized MFM3 hash list after its chunks are staged.
+    let sealed_overhead = sealed_overhead
+        + PERSONAL_FILE_PROOF_MAGIC.len() as u64
+        + 32
+        + crate::expiry::wrap(&[], Some(1)).len() as u64;
     let fits_frame = |size: u64| {
         if size > crate::transport::MAX_PLAINTEXT as u64 {
             return false;
@@ -183,6 +191,41 @@ pub(in crate::node) fn compact_manifest_needed(
     }
 }
 
+const PERSONAL_FILE_PROOF_MAGIC: &[u8] = b"MTPFM1";
+const PERSONAL_FILE_PROOF_DOMAIN: &[u8] = b"mesh-talk/personal-file-manifest/v1\0";
+
+fn personal_manifest_digest(plaintext: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(PERSONAL_FILE_PROOF_DOMAIN);
+    hash.update(plaintext);
+    hash.finalize().into()
+}
+
+pub(in crate::node) fn is_personal_file_proof(proof: &crate::eventlog::Event) -> bool {
+    proof.ciphertext.starts_with(PERSONAL_FILE_PROOF_MAGIC)
+}
+
+/// Account certification and the expected personal host are checked by the
+/// importer. The original signature binds the exact cached plaintext and host.
+pub(in crate::node) fn personal_file_proof_matches(
+    row: &ReceivedEntry,
+    proof: &crate::eventlog::Event,
+) -> bool {
+    let Some(body) = proof.ciphertext.strip_prefix(PERSONAL_FILE_PROOF_MAGIC) else {
+        return false;
+    };
+    body.len() > 32
+        && body[..32] == personal_manifest_digest(&row.plaintext)
+        && proof.id == row.event_id
+        && proof.conversation_id == row.conversation
+        && proof.wall_clock == row.wall_clock
+        && proof.author.user_id() == row.from
+        && proof.kind == EventKind::FileManifest
+        && proof.is_canonical()
+        && proof.verify_integrity()
+        && proof.verify_signature()
+}
+
 /// A durable plaintext row is a local metadata cache, not authority without its
 /// retained signed original. Host conversations may legitimately differ from
 /// the original device-pair conversation; neither may alias the chunk stream.
@@ -197,6 +240,7 @@ pub(in crate::node) fn eligible_manifest_row(
         && original.kind == EventKind::FileManifest
         && original.verify_integrity()
         && original.verify_signature()
+        && (!is_personal_file_proof(original) || personal_file_proof_matches(entry, original))
         && entry.from == original.author.user_id()
         && entry.wall_clock == original.wall_clock
         && manifest.file_conv() != original.conversation_id
@@ -233,6 +277,10 @@ impl Node {
         {
             let records = self.received_files.lock().expect("files lock not poisoned");
             let log = self.log.lock().expect("log lock not poisoned");
+            let proofs = self
+                .account_file_proofs
+                .lock()
+                .expect("file proofs lock not poisoned");
             for conversation in records.conversations() {
                 for entry in records.entries(&conversation) {
                     if delivery.file_erased(entry.conversation, entry.event_id)
@@ -240,7 +288,9 @@ impl Node {
                     {
                         continue;
                     }
-                    let original = log.get(&entry.event_id);
+                    let original = log
+                        .get(&entry.event_id)
+                        .or_else(|| proofs.get(&entry.event_id));
                     let decoded = validated_manifest(&entry.plaintext);
                     let existing = decoded.as_ref().and_then(|m| book.manifest(&m.file_conv()));
                     if let Some(manifest) = eligible_manifest_row(&entry, original, existing) {
@@ -420,8 +470,34 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
+        self.send_file_to_account_progress_if(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            |accept| accept(),
+        )
+        .await
+    }
+
+    /// Legacy immediate-send policy with authorization at the same grant and
+    /// durable-acceptance seams used by queued account delivery.
+    pub async fn send_file_to_account_progress_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<ConversationId, NodeError> {
         let (id, file) = self
-            .enqueue_file_to_account_progress(target_account_id, path, kind, on_progress)
+            .enqueue_file_to_account_progress_if(
+                target_account_id,
+                path,
+                kind,
+                on_progress,
+                authorize,
+            )
             .await?;
         self.flush_delivery(id).await;
         self.flush_file_delivery(id).await;
@@ -465,25 +541,50 @@ impl Node {
         path: &Path,
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_to_account_progress_expiring_if(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            None,
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn enqueue_file_to_account_progress_expiring_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         authorize(&mut || Ok(()))?;
-        let dests = self.account_fanout_targets(target_account_id);
-        if !dests
-            .iter()
-            .any(|p| p.account_id.as_deref() == Some(target_account_id))
+        let personal = target_account_id == self.account_id();
+        // Own devices receive one account-history card and optionally pull blobs.
+        let dests = self
+            .account_fanout_targets(target_account_id)
+            .into_iter()
+            .filter(|peer| peer.account_id.as_deref() != Some(self.account_id().as_str()))
+            .collect::<Vec<_>>();
+        if !personal
+            && !dests
+                .iter()
+                .any(|p| p.account_id.as_deref() == Some(target_account_id))
         {
             return Err(NodeError::UnknownPeer(target_account_id.to_string()));
         }
-        self.initiate_contact_locally_if(target_account_id, &mut authorize)
-            .await?;
+        if !personal {
+            self.initiate_contact_locally_if(target_account_id, &mut authorize)
+                .await?;
+        }
 
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
-        // Record the outgoing file ONCE under the account conversation (the UI's host
-        // conversation for this contact), so it shows as our own message in account
-        // history. The per-device manifest events below each get a distinct event id; we
-        // record the first that lands (its id keys the durable store) rather than once per
-        // device — which would duplicate the bubble.
         let account_conv = super::conversation::account_conversation_id(
             &self.account.account_id(),
             target_account_id,
@@ -493,6 +594,7 @@ impl Node {
             account_conv,
             Some(target_account_id.to_owned()),
             &manifest,
+            expires_at_ms,
             &mut authorize,
         )?;
         Ok((id, file_conv))
@@ -505,7 +607,7 @@ impl Node {
         target_account: Option<String>,
         manifest: &FileManifestV3,
     ) -> Result<crate::eventlog::EventId, NodeError> {
-        self.accept_staged_manifest_if(peers, host, target_account, manifest, &mut |accept| {
+        self.accept_staged_manifest_if(peers, host, target_account, manifest, None, &mut |accept| {
             accept()
         })
     }
@@ -516,15 +618,17 @@ impl Node {
         host: ConversationId,
         target_account: Option<String>,
         manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         let own = self.identity.public();
         let author = Author::from_ed25519(own.ed25519_pub);
         let clock = super::node::now_millis();
-        let plaintext = outgoing_manifest_bytes(manifest);
+        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
         let mut destinations = Vec::with_capacity(peers.len());
         {
             let log = self.log.lock().expect("log lock not poisoned");
@@ -560,11 +664,31 @@ impl Node {
             }
             log.sync().map_err(NodeError::Log)?;
         }
-        let id = destinations
-            .first()
-            .ok_or_else(|| NodeError::File("no file destinations".into()))?
-            .event
-            .id;
+        let personal = target_account.as_deref() == Some(self.account_id().as_str())
+            && host
+                == super::conversation::account_conversation_id(
+                    &self.account_id(),
+                    &self.account_id(),
+                )
+            && destinations.is_empty();
+        let id = if personal {
+            let proof = self.build_personal_manifest_proof(host, clock, &plaintext)?;
+            let id = proof.id;
+            // Detached proofs precede WAL acceptance. Export is row-driven, so a
+            // failed acceptance can leave only an invisible orphan proof.
+            self.account_file_proofs
+                .lock()
+                .expect("file proofs lock not poisoned")
+                .insert(proof)
+                .map_err(NodeError::Log)?;
+            id
+        } else {
+            destinations
+                .first()
+                .ok_or_else(|| NodeError::File("no file destinations".into()))?
+                .event
+                .id
+        };
         let transaction = {
             let log = self.log.lock().expect("log lock not poisoned");
             store.prepare_outgoing_manifest(
@@ -590,7 +714,49 @@ impl Node {
                 outgoing_manifest(manifest),
             );
         }
+        self.account_sync_notify.notify_one();
         Ok(id)
+    }
+
+    pub(in crate::node) fn build_personal_manifest_proof(
+        &self,
+        host: ConversationId,
+        clock: u64,
+        plaintext: &[u8],
+    ) -> Result<crate::eventlog::Event, NodeError> {
+        let log = self.log.lock().expect("log lock not poisoned");
+        let author = Author::from_ed25519(self.identity.public().ed25519_pub);
+        // This event is detached signed evidence, never grafted into the DAG.
+        // Its immutable ID binds the random self-seal and exact manifest digest;
+        // sequence/lamport describe only the observed host frontier, not a new
+        // per-author DAG position or an independent persisted counter.
+        let (parents, lamport) = log.prepare(&host);
+        let seq = log.version_vector(&host).get(&author).copied().unwrap_or(0) + 1;
+        let sealed = crate::dm::seal(
+            &self.identity,
+            &self.identity.public().x25519_pub,
+            plaintext,
+        )
+        .map_err(NodeError::Seal)?;
+        let mut ciphertext = PERSONAL_FILE_PROOF_MAGIC.to_vec();
+        ciphertext.extend_from_slice(&personal_manifest_digest(plaintext));
+        ciphertext.extend_from_slice(&sealed);
+        let proof = crate::eventlog::Event::new(
+            &self.identity,
+            host,
+            seq,
+            parents,
+            lamport,
+            clock,
+            EventKind::FileManifest,
+            ciphertext,
+        );
+        if !super::session::event_fits_frame(&proof) {
+            return Err(NodeError::InvalidInput(
+                "file manifest exceeds transport frame".into(),
+            ));
+        }
+        Ok(proof)
     }
 
     /// Send the file at `path` to a channel we hold the key for.
@@ -612,6 +778,19 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
+        self.send_file_channel_progress_expiring(channel, path, kind, on_progress, None)
+            .await
+    }
+
+    pub async fn send_file_channel_progress_expiring(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+    ) -> Result<ConversationId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let state = book
@@ -622,6 +801,7 @@ impl Node {
             }
         }
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         // Publish our sender-key distribution before the first seal (see
         // `send_channel_message_reply`).
         let (members, already_distributed) = {
@@ -641,13 +821,16 @@ impl Node {
                 .state_mut(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
             state
-                .seal_sender_message(&outgoing_manifest_bytes(&manifest))
+                .seal_sender_message(&crate::expiry::wrap(
+                    &outgoing_manifest_bytes(&manifest),
+                    expires_at_ms,
+                ))
                 .map_err(|e| NodeError::File(format!("manifest sealing failed: {e}")))?
         };
         // Persist our advanced sending chain (see `send_channel_message_reply`).
         self.persist_my_senders(channel);
         let seq = self.append_event(channel, EventKind::FileManifest, sealed)?;
-        self.record_sent_manifest(channel, channel, seq, &manifest)?;
+        self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)?;
         // A file/folder manifest is an offer. Members pull its chunks only after
         // their own receive policy permits it; pushing the chunk conversation here
         // would transmit the bytes before they could approve. Inline media keeps
@@ -669,11 +852,20 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        let permit = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| NodeError::File("participant runtime is stopping".into()))?;
         let node = Arc::clone(self);
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || node.stage_file(&path, kind, on_progress))
-            .await
-            .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
+        // The async sender may be aborted during retirement. Keep admission in
+        // the actual writer, whose blocking operation cannot be canceled.
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            node.stage_file(&path, kind, on_progress)
+        })
+        .await
+        .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
     }
 
     /// Stream `path` from disk, sealing each `CHUNK_SIZE` piece (deterministic-nonce v2
@@ -822,6 +1014,7 @@ impl Node {
         event_conv: ConversationId,
         seq: u64,
         manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
     ) -> Result<(), NodeError> {
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         // Resolve the just-appended manifest event's content-addressed id + wall-clock.
@@ -839,7 +1032,7 @@ impl Node {
         };
         self.remember_sent_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id)
             .map_err(NodeError::Log)?;
-        let plaintext = outgoing_manifest_bytes(manifest);
+        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
         self.received_files
             .lock()
             .expect("received_files mutex not poisoned")
@@ -931,6 +1124,9 @@ impl Node {
     /// How many chunks of `file_conv` we hold vs. how many the manifest expects.
     /// `None` if the manifest hasn't synced yet. Drives resume + progress in the UI.
     pub fn file_progress(&self, file_conv: ConversationId) -> Option<FileProgress> {
+        if self.expired_received_file(file_conv) {
+            return None;
+        }
         let total = self
             .files
             .lock()
@@ -977,6 +1173,9 @@ impl Node {
     /// chunks have synced, or verification fails. For large files prefer
     /// [`Node::save_file`], which streams to disk.
     pub fn read_file(&self, file_conv: ConversationId) -> Result<Vec<u8>, NodeError> {
+        if self.expired_received_file(file_conv) {
+            return Err(NodeError::File("file expired".into()));
+        }
         let manifest = self
             .files
             .lock()
@@ -1030,6 +1229,9 @@ impl Node {
         file_conv: ConversationId,
         dir: &Path,
     ) -> Result<std::path::PathBuf, NodeError> {
+        if self.expired_received_file(file_conv) {
+            return Err(NodeError::File("file expired".into()));
+        }
         let manifest = self
             .files
             .lock()
@@ -1064,6 +1266,9 @@ impl Node {
         dest: &Path,
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(), NodeError> {
+        if self.expired_received_file(file_conv) {
+            return Err(NodeError::File("file expired".into()));
+        }
         self.save_file_progress_inner(file_conv, dest, on_progress, true)
     }
 
@@ -1205,6 +1410,24 @@ impl Node {
         part_guard.disarm();
         super::media_store::sync_parent(dest)
             .map_err(|e| NodeError::File(format!("sync directory: {e}")))?;
+        let personal_host =
+            super::conversation::account_conversation_id(&self.account_id(), &self.account_id());
+        let personal = self
+            .delivery
+            .lock()
+            .expect("delivery lock not poisoned")
+            .cards_for_file(file_conv)
+            .iter()
+            .any(|card| {
+                card.conversation == personal_host
+                    && card.destinations.is_empty()
+                    && card.completion_binding.is_none()
+            });
+        if personal {
+            self.media
+                .store_from_path(file_conv, manifest.name(), dest)
+                .map_err(|e| NodeError::File(format!("preserve personal file: {e}")))?;
+        }
         // The file is fully reassembled + verified on disk: reclaim its chunk events.
         if commit_completion {
             self.commit_file_completion(file_conv, &candidates);
@@ -1363,3 +1586,7 @@ mod part_guard_tests {
         assert!(part.exists(), "disarmed guard must NOT remove the file");
     }
 }
+
+#[cfg(test)]
+#[path = "personal_files_tests.rs"]
+mod personal_files_tests;

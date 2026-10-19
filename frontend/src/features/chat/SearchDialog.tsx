@@ -17,6 +17,7 @@ import { useChat, type Conversation } from "@/store/chat";
 import type { SearchHitInfo } from "@/lib/types";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visibleSearchHits } from "@/lib/contactVisibility";
+import { rosterProjection } from "@/lib/rosterProjection";
 
 /** Highlight every case-insensitive occurrence of `term` in `text` with the signal hue. */
 function Highlighted({ text, term }: { text: string; term: string }) {
@@ -51,6 +52,7 @@ export function SearchDialog() {
   const { t } = useTranslation();
   const open = useChat((s) => s.open);
   const peers = useChat((s) => s.peers);
+  const roster = rosterProjection(peers);
   const ready = useChat((s) => s.ready);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -65,6 +67,7 @@ export function SearchDialog() {
   const [searchError, setSearchError] = useState(false);
   const [retryTick, setRetryTick] = useState(0);
   const [activeIdx, setActiveIdx] = useState(0);
+  const selectedIdx = Math.min(activeIdx, Math.max(0, hits.length - 1));
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const resultsScroll = useRef<HTMLDivElement>(null);
   const resultRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -72,7 +75,7 @@ export function SearchDialog() {
   useEffect(() => {
     if (searching || searchError) return;
     const container = resultsScroll.current;
-    const result = resultRefs.current[activeIdx];
+    const result = resultRefs.current[selectedIdx];
     if (!container || !result) return;
     const containerRect = container.getBoundingClientRect();
     const resultRect = result.getBoundingClientRect();
@@ -81,7 +84,7 @@ export function SearchDialog() {
     } else if (resultRect.bottom > containerRect.bottom) {
       container.scrollTop += resultRect.bottom - containerRect.bottom;
     }
-  }, [activeIdx, hits, searching, searchError]);
+  }, [selectedIdx, hits, searching, searchError]);
 
   useEffect(() => {
     // Don't invoke backend search before the node is up (gates the one node-dependent
@@ -127,10 +130,9 @@ export function SearchDialog() {
       conv = { kind: "channel", id: h.target, name: h.label };
     } else {
       // Resolve a device-id target to its account so account_history works.
-      const peer = peers.find((p) => p.user_id === h.target);
       conv = {
         kind: "account",
-        id: h.account_id ?? peer?.account_id ?? h.target,
+        id: h.account_id ?? roster.accountForDevice(h.target) ?? h.target,
         name: h.label,
       };
     }
@@ -147,13 +149,13 @@ export function SearchDialog() {
     if (searching || searchError || hits.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIdx((i) => Math.min(i + 1, hits.length - 1));
+      setActiveIdx(Math.min(selectedIdx + 1, hits.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActiveIdx((i) => Math.max(i - 1, 0));
+      setActiveIdx(Math.max(selectedIdx - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const h = hits[activeIdx];
+      const h = hits[selectedIdx];
       if (h) go(h);
     }
   };
@@ -207,7 +209,7 @@ export function SearchDialog() {
             aria-expanded={!searching && !searchError && hits.length > 0}
             aria-activedescendant={
               !searching && !searchError && hits.length > 0
-                ? `search-result-${activeIdx}`
+                ? `search-result-${selectedIdx}`
                 : undefined
             }
           />
@@ -266,10 +268,10 @@ export function SearchDialog() {
                   data-testid="search-result"
                   onClick={() => go(h)}
                   onMouseEnter={() => setActiveIdx(i)}
-                  aria-selected={i === activeIdx}
+                  aria-selected={i === selectedIdx}
                   className={
                     "flex w-full items-start gap-3 rounded-lg px-2.5 py-2 text-left transition-colors " +
-                    (i === activeIdx ? "bg-accent" : "hover:bg-accent/50")
+                    (i === selectedIdx ? "bg-accent" : "hover:bg-accent/50")
                   }
                 >
                   {h.is_channel ? (

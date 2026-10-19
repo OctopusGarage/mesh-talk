@@ -20,6 +20,10 @@ pub struct SecureChannel<S> {
     session: Session,
     peer: VerifiedPeer,
     io_admission: Option<IoAdmission>,
+    sent_frame_bytes: u64,
+    connection_permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    host_generation: Option<u64>,
+    pairing_only: bool,
 }
 
 #[derive(Clone)]
@@ -101,6 +105,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             session,
             peer,
             io_admission: None,
+            sent_frame_bytes: 0,
+            connection_permits: Vec::new(),
+            host_generation: None,
+            pairing_only: false,
         })
     }
 
@@ -191,7 +199,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             session,
             peer,
             io_admission: None,
+            sent_frame_bytes: 0,
+            connection_permits: Vec::new(),
+            host_generation: None,
+            pairing_only: false,
         })
+    }
+
+    pub(crate) fn retain_connection_permits(
+        &mut self,
+        permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        self.connection_permits = permits;
+    }
+
+    pub(crate) fn set_host_generation(&mut self, generation: u64) {
+        self.host_generation = Some(generation);
+    }
+
+    pub(crate) fn host_generation(&self) -> Option<u64> {
+        self.host_generation
+    }
+
+    pub(crate) fn restrict_to_pairing(&mut self) {
+        self.pairing_only = true;
+    }
+
+    pub(crate) fn pairing_only(&self) -> bool {
+        self.pairing_only
     }
 
     /// The cryptographically authenticated identity of the peer.
@@ -223,23 +258,33 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     pub fn io_admitted(&self) -> bool {
         self.io_admission.as_ref().is_none_or(|a| (a.check)())
     }
+    /// Encrypted application-frame bytes written on this connection, including
+    /// the four-byte length prefix. The Noise handshake is excluded.
+    pub fn sent_frame_bytes(&self) -> u64 {
+        self.sent_frame_bytes
+    }
 
     /// Encrypt and send one application message.
     pub async fn send(&mut self, plaintext: &[u8]) -> Result<(), TransportError> {
         if let Some(admission) = self.io_admission.clone() {
-            return tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let _guard = admission.gate.read().await;
                 if !(admission.check)() {
                     return Err(TransportError::AdmissionDenied);
                 }
                 let ct = self.session.encrypt(plaintext)?;
-                write_frame(&mut self.stream, &ct).await
+                write_frame(&mut self.stream, &ct).await?;
+                Ok(ct.len() as u64 + 4)
             })
             .await
             .map_err(|_| TransportError::Noise("policy-gated send timed out".into()))?;
+            self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(bytes?);
+            return Ok(());
         }
         let ct = self.session.encrypt(plaintext)?;
-        write_frame(&mut self.stream, &ct).await
+        write_frame(&mut self.stream, &ct).await?;
+        self.sent_frame_bytes = self.sent_frame_bytes.saturating_add(ct.len() as u64 + 4);
+        Ok(())
     }
 
     /// Receive and decrypt one application message.
@@ -252,6 +297,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             return Err(TransportError::AdmissionDenied);
         }
         self.session.decrypt(&ct)
+    }
+}
+
+impl SecureChannel<tokio::net::TcpStream> {
+    pub(crate) fn tcp_peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.stream.peer_addr()
+    }
+
+    /// A reusable session has no unsolicited bytes. EOF, pending frames and
+    /// socket errors all require a fresh handshake rather than nonce reuse.
+    pub(crate) fn idle_tcp_alive(&self) -> bool {
+        let mut byte = [0u8; 1];
+        matches!(self.stream.try_read(&mut byte), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
     }
 }
 
@@ -402,7 +460,9 @@ mod tests {
             .expect("connect");
         // Client confirms it is talking to B.
         assert_eq!(ch.peer_identity(), &b_pub);
+        assert_eq!(ch.sent_frame_bytes(), 0);
         ch.send(b"ping").await.expect("send");
+        assert_eq!(ch.sent_frame_bytes(), 4 + 4 + 16);
         let got = ch.recv().await.expect("recv");
         assert_eq!(got, b"pong");
 

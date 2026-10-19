@@ -33,6 +33,7 @@ pub mod channel;
 pub mod discovery;
 pub mod dm;
 pub mod eventlog;
+pub(crate) mod expiry;
 pub mod file;
 pub mod identity;
 pub mod node;

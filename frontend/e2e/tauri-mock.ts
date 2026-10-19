@@ -1,4 +1,5 @@
 import { test as base, expect } from "@playwright/test";
+import type { PeerInfo, PresenceInfo } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -74,12 +75,13 @@ export const test = base.extend({
         CHANNEL.name = "Barcelona × Argentina";
       }
 
-      const peers = [
+      const peers: PeerInfo[] = [
         {
           user_id: BOB.device_id,
           name: BOB.name,
           addr: "192.168.1.20:47100",
           post_office: false,
+          discovered_on_lan: true,
           account_id: BOB.account_id,
         },
         {
@@ -87,9 +89,37 @@ export const test = base.extend({
           name: CAROL.name,
           addr: "192.168.1.30:47100",
           post_office: false,
+          discovered_on_lan: true,
           account_id: CAROL.account_id,
         },
       ];
+      if (dataMode === "post-office") {
+        peers.push({
+          user_id: "44444444444444444444444444444444",
+          name: "relay node",
+          addr: "192.168.1.50:47100",
+          post_office: true,
+          discovered_on_lan: true,
+          account_id: "acc_relay_eeee5555",
+        });
+        peers.push({
+          user_id: "55555555555555555555555555555555",
+          name: "remote relay node",
+          addr: "192.168.1.50:47477",
+          post_office: true,
+          discovered_on_lan: false,
+          account_id: "acc_relay_ffff6666",
+        });
+        peers.push({
+          user_id: "66666666666666666666666666666666",
+          name: "Tailscale relay node",
+          addr: "100.101.1.50:47475",
+          post_office: true,
+          discovered_on_lan: false,
+          directly_reachable: true,
+          account_id: "acc_relay_aaaa7777",
+        });
+      }
 
       (window as unknown as Record<string, unknown>).__mockRotateBobDevice =
         () => {
@@ -107,6 +137,7 @@ export const test = base.extend({
           name,
           addr: "192.168.1.40:47100",
           post_office: false,
+          discovered_on_lan: true,
         });
         accounts.push({
           account_id: accountId,
@@ -159,9 +190,8 @@ export const test = base.extend({
         name: string;
         pending?: boolean;
       }> = [
-        // Self is a member of its own channel. We never appear in our own discovery
-        // roster, so the backend can only fall back to our raw user_id for the name and
-        // there is no presence entry for us — the UI must fill in our name + online state.
+        // Self is absent from discovery but has explicit runtime presence in the shared snapshot.
+        // The raw name exercises the UI's local display-name fallback.
         { user_id: SELF.device, name: SELF.device },
         { user_id: BOB.device_id, name: BOB.name },
         { user_id: CAROL.device_id, name: CAROL.name },
@@ -205,6 +235,7 @@ export const test = base.extend({
             name,
             addr: `192.168.1.${40 + i}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         });
@@ -234,6 +265,7 @@ export const test = base.extend({
             name: `Colleague ${String(i + 1).padStart(4, "0")}`,
             addr: `10.0.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         }
@@ -250,6 +282,7 @@ export const test = base.extend({
             name,
             addr: `10.1.${Math.floor(i / 250)}.${(i % 250) + 1}:47100`,
             post_office: false,
+            discovered_on_lan: true,
             account_id,
           });
         }
@@ -493,6 +526,11 @@ export const test = base.extend({
         last_user: null as string | null,
         retention_days: 0,
         calls_enabled: false,
+        post_office_enabled: true,
+        post_office_send_enabled: true,
+        post_office_receive_enabled: true,
+        physical_lan_only: false,
+        bridge_discovery_enabled: false,
         ringtone: "classic",
         privacy_level: "balanced",
         notification_preview: true,
@@ -507,13 +545,67 @@ export const test = base.extend({
       const attachmentDecisions: Record<string, boolean> = {};
 
       // --- Presence (account DM + channel) ----------------------------------
-      const presenceMap: Record<
-        string,
-        { online: boolean; last_seen_secs: number | null }
-      > = {
-        [BOB.account_id]: { online: true, last_seen_secs: 2 },
-        [CAROL.account_id]: { online: false, last_seen_secs: 120 },
-        [CHANNEL.channel_id]: { online: true, last_seen_secs: 5 },
+      const presenceMap: Record<string, PresenceInfo> = {
+        [BOB.account_id]: {
+          online: true,
+          last_seen_secs: 2,
+          devices: [
+            {
+              user_id: BOB.device_id,
+              evidence: [
+                { source: "local", last_seen_secs: 2, expires_in_secs: 28 },
+              ],
+            },
+          ],
+        },
+        [CAROL.account_id]: { online: false, last_seen_secs: 120, devices: [] },
+      };
+      let presenceFailure = false;
+      (window as unknown as Record<string, unknown>).__mockPresenceFailure = (
+        failed: boolean,
+      ) => {
+        presenceFailure = failed;
+      };
+      const presenceSnapshot = () => {
+        if (presenceFailure)
+          throw new Error("Presence temporarily unavailable");
+        const snapshot: Record<string, PresenceInfo> = {
+          ...presenceMap,
+          [SELF.account]: {
+            online: true,
+            last_seen_secs: 0,
+            devices: [
+              {
+                user_id: SELF.device,
+                evidence: [
+                  { source: "self", last_seen_secs: 0, expires_in_secs: 30 },
+                ],
+              },
+            ],
+          },
+        };
+        const acceptedAccounts = new Set<string>();
+        const unbound = new Set<string>();
+        for (const member of channelMembers) {
+          const peer = peers.find((p) => p.user_id === member.user_id);
+          if (member.pending || peer?.post_office) continue;
+          const account =
+            member.user_id === SELF.device ? SELF.account : peer?.account_id;
+          if (account) acceptedAccounts.add(account);
+          else unbound.add(member.user_id);
+        }
+        snapshot[CHANNEL.channel_id] = {
+          online: false,
+          last_seen_secs: null,
+          devices: [],
+          member_keys: [...acceptedAccounts],
+          member_count: acceptedAccounts.size,
+          online_count: [...acceptedAccounts].filter(
+            (id) => snapshot[id]?.online,
+          ).length,
+          unbound_member_count: unbound.size,
+        };
+        return snapshot;
       };
 
       // --- Trust / safety numbers -------------------------------------------
@@ -530,7 +622,7 @@ export const test = base.extend({
         name: p.name,
         ip: p.addr.split(":")[0],
         tcp_port: 47100,
-        post_office: false,
+        post_office: p.post_office,
         account_id: p.account_id,
         last_seen_secs: i === 0 ? 3 : 90,
       }));
@@ -560,7 +652,16 @@ export const test = base.extend({
         build_profile: "release",
       };
 
+      let contactOwner = "u_self";
+      const deletedKey = () => `mock-deleted-${contactOwner}`;
+      const deletedContacts = (): string[] =>
+        JSON.parse(localStorage.getItem(deletedKey()) ?? "[]");
+      const erasedHistory = (): string[] =>
+        JSON.parse(localStorage.getItem(`mock-erased-${contactOwner}`) ?? "[]");
       const ok = () => null;
+      const probedEndpoints: string[] = [];
+      (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
+        probedEndpoints;
       let failNextCommand: string | null = null;
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
@@ -650,14 +751,19 @@ export const test = base.extend({
             success: true,
             user: { id: "u_self", username: "tester", display_name: "tester" },
           }),
-          login: (a) => ({
-            success: true,
-            user: {
-              id: a.username === "other_user" ? "u_other" : "u_self",
-              username: String(a.username ?? "tester"),
-              display_name: String(a.username ?? "tester"),
-            },
-          }),
+          login: (a) => {
+            contactOwner = a.username === "other_user" ? "u_other" : "u_self";
+            for (const account of erasedHistory())
+              clearConversation(`acc:${account}`);
+            return {
+              success: true,
+              user: {
+                id: contactOwner,
+                username: String(a.username ?? "tester"),
+                display_name: String(a.username ?? "tester"),
+              },
+            };
+          },
           rename_account: (a) => ({
             id: "u_self",
             username: "tester",
@@ -675,11 +781,18 @@ export const test = base.extend({
 
           // roster
           list_peers: () => peers.map((peer) => ({ ...peer })),
-          list_accounts: () =>
-            accounts.map((account) => ({
-              ...account,
-              names: [...account.names],
-            })),
+          list_accounts: () => {
+            const deleted = deletedContacts().filter(
+              (id) => !presenceMap[id]?.online,
+            );
+            localStorage.setItem(deletedKey(), JSON.stringify(deleted));
+            return accounts
+              .filter((account) => !deleted.includes(account.account_id))
+              .map((account) => ({
+                ...account,
+                names: [...account.names],
+              }));
+          },
           list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
@@ -692,8 +805,13 @@ export const test = base.extend({
           // history
           history: (a) => msgs[`dm:${a.peer}`] ?? [],
           account_history: (a) => msgs[`acc:${a.account}`] ?? [],
-          channel_history: (a) =>
-            dataMode === "invite" ? [] : (msgs[`ch:${a.channelId}`] ?? []),
+          channel_history: (a) => {
+            const history =
+              dataMode === "invite" ? [] : (msgs[`ch:${a.channelId}`] ?? []);
+            return dataMode === "group-reception-window"
+              ? history.slice(-Number(a.limit ?? 200))
+              : history;
+          },
 
           // reactions
           reactions: (a) => reacts[`dm:${a.peer}`] ?? [],
@@ -842,6 +960,12 @@ export const test = base.extend({
           // The durable chat-media store accessor. The mock has no store, so reject like the
           // real "no stored media" path → the preview hook falls back to read_file.
           read_media: () => {
+            if (dataMode === "screenshot-ipc-fallback") {
+              return (
+                (window as unknown as { __lastWrittenFileBytes?: number[] })
+                  .__lastWrittenFileBytes ?? []
+              );
+            }
             throw new Error("no stored media for this file");
           },
           write_temp_file: (a) => {
@@ -858,8 +982,9 @@ export const test = base.extend({
           // supplies a decodable image for the selection and annotation flow.
           capture_screen: () => {
             const canvas = document.createElement("canvas");
-            canvas.width = 320;
-            canvas.height = 180;
+            const desktop = dataMode === "screenshot-desktop";
+            canvas.width = desktop ? window.innerWidth * 2 : 320;
+            canvas.height = desktop ? window.innerHeight * 2 : 180;
             const context = canvas.getContext("2d");
             if (!context)
               throw new Error("Canvas unavailable in screenshot mock");
@@ -870,6 +995,42 @@ export const test = base.extend({
               context.fillStyle = gradient;
             } else context.fillStyle = "#1c293d";
             context.fillRect(0, 0, canvas.width, canvas.height);
+            if (desktop) {
+              context.scale(2, 2);
+              context.fillStyle = "#d9e2e7";
+              context.fillRect(0, 0, window.innerWidth, window.innerHeight);
+              context.fillStyle = "#fff";
+              context.fillRect(
+                45,
+                55,
+                window.innerWidth - 90,
+                window.innerHeight - 100,
+              );
+              context.fillStyle = "#eef1f4";
+              context.fillRect(45, 55, window.innerWidth - 90, 36);
+              context.fillStyle = "#263c48";
+              context.font = "16px sans-serif";
+              context.fillText("Demo desktop — project notes", 66, 79);
+              context.font = "28px sans-serif";
+              context.fillText("Screenshot interaction review", 84, 147);
+              context.font = "16px sans-serif";
+              context.fillText(
+                "Select an area. Annotate it. Add it to your message.",
+                84,
+                183,
+              );
+              const gradient = context.createLinearGradient(80, 220, 600, 420);
+              gradient.addColorStop(0, "#b7d8ce");
+              gradient.addColorStop(1, "#618c9d");
+              context.fillStyle = gradient;
+              context.fillRect(84, 220, window.innerWidth - 180, 180);
+              context.fillStyle = "#526777";
+              context.fillText(
+                "Synthetic fixture · no personal desktop content",
+                84,
+                window.innerHeight - 80,
+              );
+            }
             const b64 = canvas.toDataURL("image/png").split(",")[1];
             const bin = atob(b64);
             return Array.from(bin, (char) => char.charCodeAt(0));
@@ -924,10 +1085,103 @@ export const test = base.extend({
           },
 
           // device linking
+          get_device_sync_policy: () =>
+            JSON.parse(
+              localStorage.getItem(`mock-device-sync-policy-${SELF.device}`) ??
+                '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
+            ),
+          get_device_sync_status: () => [],
+          set_device_sync_category: (a) => {
+            if (
+              ![
+                "history",
+                "attachments",
+                "profile",
+                "appearance",
+                "contacts",
+              ].includes(String(a.category))
+            )
+              throw new Error("this sync category is not available yet");
+            const policy = responses.get_device_sync_policy({}) as Record<
+              string,
+              boolean
+            >;
+            const next = {
+              ...policy,
+              [String(a.category)]: Boolean(a.enabled),
+            };
+            localStorage.setItem(
+              `mock-device-sync-policy-${SELF.device}`,
+              JSON.stringify(next),
+            );
+            return next;
+          },
+          get_account_preferences: (a) =>
+            JSON.parse(
+              localStorage.getItem(
+                `mock-account-preferences-${SELF.device}-${String(a.category)}`,
+              ) ?? "[]",
+            ),
+          set_account_preference: (a) => {
+            const key = `mock-account-preferences-${SELF.device}-${String(a.category)}`;
+            const rows = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<
+              Record<string, unknown>
+            >;
+            const record = {
+              category: String(a.category),
+              key: String(a.key),
+              value: a.value ?? null,
+              revision: Date.now(),
+              device_id: SELF.device,
+            };
+            localStorage.setItem(
+              key,
+              JSON.stringify([
+                ...rows.filter((row) => row.key !== record.key),
+                record,
+              ]),
+            );
+            return record;
+          },
           start_linking: () => "0123456789abcdef0123456789abcdef", // 32 hex, like a real PairingCode
           stop_linking: ok,
           link_device: () => SELF.account,
           rekey_account: () => "acc_rekeyed_ffff6666",
+
+          // Local contact deletion mirrors the native roster/history contract.
+          delete_contact: (a) => {
+            const account = String(a.account);
+            if (
+              a.owner !== contactOwner ||
+              account === SELF.account ||
+              presenceMap[account]?.online
+            )
+              throw new Error(
+                "Only another offline contact can be deleted by the current owner",
+              );
+            clearConversation(`acc:${account}`);
+            localStorage.setItem(
+              deletedKey(),
+              JSON.stringify([...new Set([...deletedContacts(), account])]),
+            );
+            localStorage.setItem(
+              `mock-erased-${contactOwner}`,
+              JSON.stringify([...new Set([...erasedHistory(), account])]),
+            );
+            const key = `mock-hidden-${contactOwner}`;
+            const contacts = (
+              JSON.parse(localStorage.getItem(key) ?? "[]") as Array<{
+                account_id: string;
+                name: string;
+              }>
+            ).filter((c) => c.account_id !== account);
+            localStorage.setItem(key, JSON.stringify(contacts));
+            return {
+              owner: contactOwner,
+              contacts,
+              deleted: deletedContacts(),
+            };
+          },
 
           // favorites
           get_hidden_contacts: (a) => ({
@@ -1031,6 +1285,11 @@ export const test = base.extend({
           clear_saved_session: ok,
           media_migration_warning: () => false,
 
+          // Synthetic recovery fixture; never use this key outside browser tests.
+          prepare_backup_key: () =>
+            "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+          backup_status: () => null,
+
           // settings
           get_app_settings: () => appSettings,
           set_app_settings: (a) => {
@@ -1091,12 +1350,16 @@ export const test = base.extend({
           }),
 
           // presence
-          get_presence: () => presenceMap,
+          get_presence: presenceSnapshot,
 
           // diagnostics / observability
           diag_get_peers: () => diagPeers,
           diag_network_info: () => networkInfo,
           rescan_peers: ok,
+          probe_peer_endpoint: (a) => {
+            probedEndpoints.push(String(a.host));
+            return null;
+          },
           set_badge: ok,
           network_name: () => "TestNet-5G",
           env_info: () => envInfo,
@@ -1117,10 +1380,7 @@ export const test = base.extend({
       };
 
       (window as unknown as Record<string, unknown>).__mockSetPresence = (
-        next: Record<
-          string,
-          { online: boolean; last_seen_secs: number | null }
-        >,
+        next: Record<string, PresenceInfo>,
       ) => {
         Object.assign(presenceMap, next);
       };
@@ -1131,8 +1391,14 @@ export const test = base.extend({
         conv: string,
         text: string,
         who: string,
+        metadata?: { id?: string; index?: number; wall_clock?: number },
       ) => {
-        (msgs[conv] ||= []).push(msg({ from_me: false, who, text }));
+        const entry = msg({ from_me: false, who, text, ...metadata });
+        const history = (msgs[conv] ||= []);
+        if (metadata?.index !== undefined)
+          history.splice(metadata.index, 0, entry);
+        else history.push(entry);
+        return entry.id;
       };
 
       Object.defineProperty(window, "__TAURI_INTERNALS__", {

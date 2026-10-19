@@ -5,29 +5,31 @@ The UI-free protocol core of [Mesh-Talk](https://github.com/OctopusGarage/mesh-t
 SDK is built on: it has **no UI and no Tauri dependency**, so it can be embedded in a CLI,
 a daemon, a desktop shell (as the Mesh-Talk app does), or any other Rust program.
 
-There are no servers. Peers discover each other on the local network (signed UDP **multicast**
+No vendor-operated service is required. Peers discover each other on the local network (signed UDP **multicast**
 announces — group `224.0.0.167`, default port `47474` — plus a `/24` unicast scan fallback),
+and use optional routed signed queries for candidate endpoints. They
 talk directly over an authenticated, encrypted Noise channel, and converge a signed,
-content-addressed event log. An elected "post office" peer store-and-forwards ciphertext so a
-message still reaches a recipient who was offline. DMs and channels are account-addressed, so a
-message fans out to every device a user has linked.
+content-addressed event log. Optional equal post offices hold recipient-encrypted opaque events temporarily,
+subject to capacity and a 30-day maximum age. Opt-in bridge directories and explicit
+mutual federation trust extend introductions and custody across reachable sites. DMs can fan out to certified account devices; group delivery follows accepted
+membership and the separate certified-sibling enrollment rules.
 
 ## What's inside
 
-| Module | Responsibility |
-| --- | --- |
-| [`identity`] | Ed25519/X25519 device identities, cross-device accounts, and device certificates. |
-| [`eventlog`] | Content-addressed, hash-linked, encrypted event log + peer reconciliation (sync). |
-| [`ratchet`] | Double Ratchet — per-message forward secrecy for DMs. |
-| [`channel`] | Sender-key group ratchet — forward secrecy for group channels. |
-| [`dm`] | Sealed direct-message envelopes. |
-| [`transport`] | A Noise (`snow`) secure channel with identity binding over TCP (dual-stack); `transport::net` holds the low-level socket + multicast-join helpers shared by the CLI and the desktop runtime. |
-| [`discovery`] | Signed-announce LAN peer discovery (multicast + `/24` scan) + roster. |
-| [`postoffice`] | A durable store-and-forward relay for offline delivery (holds ciphertext only). |
-| [`file`] | Chunked, per-chunk-AEAD file transfer with resume + a versioned manifest (48 KiB chunks; files up to ~4 GiB). |
-| [`storage`] | At-rest crypto: PBKDF2/AES-GCM encryption and `EncryptedRecordLog` (`storage::record_log`), the generic append-only encrypted log every on-disk sidecar store is built on. |
-| [`recovery`] | Versioned, authenticated `.mtbackup` archive and logical snapshot primitives for manual backup and restore. |
-| [`node`] | The runtime that wires the above into a working peer (DMs, channels, files, history, sync). |
+| Module                          | Responsibility                                                                                                                                                                               |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`identity`](src/identity/)     | Ed25519/X25519 device identities, cross-device accounts, and device certificates.                                                                                                            |
+| [`eventlog`](src/eventlog/)     | Content-addressed, hash-linked, encrypted event log + peer reconciliation (sync).                                                                                                            |
+| [`ratchet`](src/ratchet/)       | Double Ratchet — per-message forward secrecy for DMs.                                                                                                                                        |
+| [`channel`](src/channel/)       | Sender-key group ratchet — forward secrecy for group channels.                                                                                                                               |
+| [`dm`](src/dm.rs)               | Sealed direct-message envelopes.                                                                                                                                                             |
+| [`transport`](src/transport/)   | A Noise (`snow`) secure channel with identity binding over TCP (dual-stack); `transport::net` holds the low-level socket + multicast-join helpers shared by the CLI and the desktop runtime. |
+| [`discovery`](src/discovery/)   | Signed LAN/routed discovery, interface scope, bounded roster and route provenance.                                                                                                           |
+| [`postoffice`](src/postoffice/) | Bounded opaque custody, eligible presence and mutually trusted equal-relay federation.                                                                                                       |
+| [`file`](src/file/)             | Chunked, per-chunk-AEAD file transfer with resume + a versioned manifest (48 KiB chunks; files up to ~4 GiB).                                                                                |
+| [`storage`](src/storage/)       | At-rest crypto: PBKDF2/AES-GCM encryption and `EncryptedRecordLog` (`storage::record_log`), the generic append-only encrypted log every on-disk sidecar store is built on.                   |
+| [`recovery`](src/recovery/)     | Versioned, authenticated `.mtbackup` archive and logical snapshot primitives for manual backup and restore.                                                                                  |
+| [`node`](src/node/)             | The runtime that wires the above into a working peer (DMs, channels, files, history, sync).                                                                                                  |
 
 Wire formats are `bincode` and versioned (magic byte + version) for forward-compatible parsing.
 
@@ -94,9 +96,9 @@ cargo run --bin mesh-talk-node -- \
 
 REPL commands: `/peers`, `/msg <user_id-prefix> <text>`, `/history <user_id-prefix> [n]`, `/quit`.
 
-> A post office cold-starts slowly (~15 s on first run): it does two password-KDF unlocks
-> back to back (the keystore and the relay log). Wait for its `post-office … listening` line
-> rather than a fixed sleep.
+> Production startup derives keys for independent encrypted stores; timing depends
+> on the machine. Wait for `post-office … listening` rather than a fixed sleep.
+> Test-only `fast-test-kdf` builds must not be deployed as permanent services.
 
 ## Tests
 
@@ -110,9 +112,10 @@ cargo test -p mesh-talk-core
 make e2e
 ```
 
-`make e2e` runs the `two_node_cli`, `persistent_history`, and `post_office_offline` rigs with
-`--ignored --test-threads=1` (serial, to avoid discovery-port and CPU contention between the
-heavy processes).
+During development, select the affected `--lib <filter>` or `--test <target>`
+only. `make e2e` is the explicit comprehensive backend rig defined by the root
+[Makefile](../../Makefile); do not copy its target list into another runner. See
+[the testing workflow](../../docs/testing-feedback-loop.md) for escalation triggers.
 
 ## Security model (summary)
 
@@ -123,11 +126,14 @@ heavy processes).
 - **Authenticated transport.** Sessions run over Noise with the peer's device identity bound
   into the handshake (canonical, `verify_strict` Ed25519 signatures).
 - **Integrity.** The event log is content-addressed and hash-linked; the at-rest log is
-  AEAD-authenticated; a tampered or reordered local cache is self-healing via re-sync.
-- **Known, by-design limits:** a relay inevitably sees an event's author and can derive the
-  participant pair from the conversation id (content stays encrypted); device linking relies
-  on the one-time pairing code as its authenticator (no separate SAS UX). See
-  [`specifications/TODO.md`](../../specifications/TODO.md).
+  AEAD-authenticated. Recovery requires an authorized retained source or backup; it
+  must not silently treat corruption as valid history.
+- **Metadata limits.** Relays see connecting identities, pseudonymous mailbox IDs,
+  size buckets and timing; original signed-event headers are inside encrypted
+  wrappers. See [relay privacy](../../docs/post-office-metadata-privacy.md).
+- **Feature boundaries.** Calls use live direct signaling and separate media;
+  sibling replay has its own authenticated route. Neither follows automatically
+  from mailbox discovery. See the [network baseline](../../docs/network-design-reference.md).
 
 This is research-grade software; it has not had an independent security audit.
 
@@ -136,15 +142,15 @@ This is research-grade software; it has not had an independent security audit.
 MIT. Part of the [Mesh-Talk](https://github.com/OctopusGarage/mesh-talk) workspace; see
 [`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) for the full design.
 
-[`identity`]: src/identity
-[`eventlog`]: src/eventlog
-[`ratchet`]: src/ratchet
-[`channel`]: src/channel
-[`dm`]: src/dm.rs
-[`transport`]: src/transport
-[`discovery`]: src/discovery
-[`postoffice`]: src/postoffice
-[`file`]: src/file
-[`storage`]: src/storage
-[`recovery`]: src/recovery
-[`node`]: src/node
+[`identity`](src/identity/): src/identity
+[`eventlog`](src/eventlog/): src/eventlog
+[`ratchet`](src/ratchet/): src/ratchet
+[`channel`](src/channel/): src/channel
+[`dm`](src/dm.rs): src/dm.rs
+[`transport`](src/transport/): src/transport
+[`discovery`](src/discovery/): src/discovery
+[`postoffice`](src/postoffice/): src/postoffice
+[`file`](src/file/): src/file
+[`storage`](src/storage/): src/storage
+[`recovery`](src/recovery/): src/recovery
+[`node`](src/node/): src/node

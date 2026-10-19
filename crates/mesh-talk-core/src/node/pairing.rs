@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 const PAIR_DOMAIN: &[u8] = b"mesh-talk-pairing-v1";
 const REQ_MAGIC: &[u8] = b"MTPQ1";
+const SELECTED_REQ_MAGIC: &[u8] = b"MTPQ2";
+const SELECTED_PAIR_DOMAIN: &[u8] = b"mesh-talk-pairing-v2";
 const RESP_MAGIC: &[u8] = b"MTPS1";
 const BACKFILL_MAGIC: &[u8] = b"MTBF1";
 
@@ -61,6 +63,36 @@ impl PairingCode {
         h.finalize().into()
     }
 
+    /// V2 proof binds the requested history choice before any history is sent.
+    pub fn authenticator_selected(
+        &self,
+        linker_ed: &[u8; 32],
+        joiner_ed: &[u8; 32],
+        history: bool,
+    ) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(SELECTED_PAIR_DOMAIN);
+        h.update(self.0);
+        h.update(linker_ed);
+        h.update(joiner_ed);
+        h.update([u8::from(history)]);
+        h.finalize().into()
+    }
+
+    /// Verify a V2 selection without accepting a V1 proof in its place.
+    pub fn verify_selected(
+        &self,
+        linker_ed: &[u8; 32],
+        joiner_ed: &[u8; 32],
+        history: bool,
+        tag: &[u8; 32],
+    ) -> bool {
+        ct_eq(
+            &self.authenticator_selected(linker_ed, joiner_ed, history),
+            tag,
+        )
+    }
+
     /// Constant-time check that `tag` is the expected authenticator.
     pub fn verify(&self, linker_ed: &[u8; 32], joiner_ed: &[u8; 32], tag: &[u8; 32]) -> bool {
         ct_eq(&self.authenticator(linker_ed, joiner_ed), tag)
@@ -98,8 +130,23 @@ impl PairingRequest {
     pub fn encode(&self) -> Vec<u8> {
         frame(REQ_MAGIC, self)
     }
+    /// Encode a V2 request; `tag` must authenticate the same history choice.
+    pub fn encode_selected(&self, history: bool) -> Vec<u8> {
+        frame(SELECTED_REQ_MAGIC, &(self, history))
+    }
+
+    /// Recognize either version. Authorization must use `decode_selected` so the
+    /// selection and its proof domain are preserved.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        unframe(REQ_MAGIC, bytes)
+        Self::decode_selected(bytes).map(|(request, _)| request)
+    }
+
+    /// `None` selection denotes the unchanged V1 request, which requests history.
+    pub fn decode_selected(bytes: &[u8]) -> Option<(Self, Option<bool>)> {
+        if let Some((request, history)) = unframe(SELECTED_REQ_MAGIC, bytes) {
+            return Some((request, Some(history)));
+        }
+        unframe(REQ_MAGIC, bytes).map(|request| (request, None))
     }
 }
 
@@ -148,6 +195,72 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn pairing_v2_request_is_recognized_without_changing_legacy_bytes() {
+        let req = PairingRequest {
+            joiner: DeviceIdentity::generate().public(),
+            tag: [7; 32],
+        };
+        let legacy = frame(b"MTPQ1", &req);
+        assert_eq!(req.encode(), legacy);
+        assert_eq!(PairingRequest::decode(&legacy), Some(req.clone()));
+        let selected = frame(b"MTPQ2", &(req.clone(), false));
+        assert_eq!(PairingRequest::decode(&selected), Some(req));
+    }
+
+    #[test]
+    fn pairing_v2_authenticator_binds_choice_code_and_both_keys() {
+        let code = PairingCode::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
+        let linker = [1; 32];
+        let joiner = [2; 32];
+        let tag = code.authenticator_selected(&linker, &joiner, false);
+        assert!(code.verify_selected(&linker, &joiner, false, &tag));
+        assert!(!code.verify_selected(&linker, &joiner, true, &tag));
+        assert!(!code.verify_selected(&[3; 32], &joiner, false, &tag));
+        assert!(!code.verify_selected(&linker, &[3; 32], false, &tag));
+        assert!(!PairingCode::generate().verify_selected(&linker, &joiner, false, &tag));
+        assert!(!code.verify(&linker, &joiner, &tag));
+        assert!(!code.verify_selected(
+            &linker,
+            &joiner,
+            false,
+            &code.authenticator(&linker, &joiner)
+        ));
+        for history in [true, false] {
+            let request = PairingRequest {
+                joiner: PublicIdentity {
+                    ed25519_pub: linker,
+                    x25519_pub: joiner,
+                },
+                tag: code.authenticator_selected(&linker, &joiner, history),
+            };
+            assert_eq!(
+                PairingRequest::decode_selected(&request.encode_selected(history)),
+                Some((request, Some(history)))
+            );
+        }
+    }
+
+    #[test]
+    fn pairing_v1_request_fixed_fixture_remains_unchanged() {
+        let request = PairingRequest {
+            joiner: PublicIdentity {
+                ed25519_pub: [1; 32],
+                x25519_pub: [2; 32],
+            },
+            tag: [3; 32],
+        };
+        let mut fixture = b"MTPQ1".to_vec();
+        fixture.extend_from_slice(&[1; 32]);
+        fixture.extend_from_slice(&[2; 32]);
+        fixture.extend_from_slice(&[3; 32]);
+        assert_eq!(request.encode(), fixture);
+        assert_eq!(
+            PairingRequest::decode_selected(&fixture),
+            Some((request, None))
+        );
+    }
 
     #[test]
     fn code_hex_round_trips() {

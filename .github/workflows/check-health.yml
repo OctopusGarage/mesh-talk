@@ -1,14 +1,14 @@
 name: Code Quality and Health Check
 
-# Full native health checks run before merging, as well as on main and on demand.
-# Branch pushes use the lighter CI matrix; PRs require complete scanner evidence.
+# Static checks run independently of native builds and browsers. CI owns Rust
+# compilation/unit tests; UI E2E owns full Chromium on all desktop platforms.
+# scripts/check-health.sh remains the standalone comprehensive local gate.
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   schedule:
-    - cron: '0 6 * * 1' # Mondays 06:00 UTC
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 concurrency:
@@ -20,81 +20,61 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Node 22+ required: Vitest 5 needs Node >=22.12.
-  NODE_VERSION: '22'
 
 jobs:
-  check:
-    name: Code Quality and Health Check
+  platform:
+    name: Static checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-
+    defaults:
+      run:
+        shell: bash
     steps:
-      # 1️⃣ Checkout code
-      - name: Checkout code
-        uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
         with:
-          fetch-depth: 0
-
-      # 2️⃣ Install Rust toolchain
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            protobuf-compiler
-
-      # 3️⃣ Install system dependencies (macOS)
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew install protobuf
-
-      # 4️⃣ Install system dependencies (Windows)
-      - name: Install system dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          choco install protoc
-
-      # 5️⃣ Cache Rust dependencies
-      - name: Cache Rust dependencies
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            src-tauri/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      # 6️⃣ Install Node.js
-      - name: Install Node.js
-        uses: actions/setup-node@v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+          node-version: '22'
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
-
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend static checks
+        working-directory: frontend
+        run: |
+          npm run format:check
+          npm run lint
+          npm run typecheck
+      - name: Audit frontend dependencies
+        working-directory: frontend
+        run: npx --yes audit-ci --config audit-ci.json
+      - name: Build cache cleanup safeguards (all platforms)
+        run: |
+          scripts/test-clean-target-cache.sh
+          scripts/test-auto-clean-targets.sh
 
-      - name: Install required Rust and shell scanners
+  source:
+    name: Source and supply-chain checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # Source/policy scanners have identical inputs on each OS; run them once.
+      # Gitleaks owns the full-history secret scan in its independent workflow.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Install source scanners
         uses: taiki-e/install-action@v2.87.27
         with:
           tool: cargo-deny,cargo-machete,typos-cli,shellcheck
@@ -102,32 +82,33 @@ jobs:
         with:
           go-version: '1.25'
           cache: false
-      - name: Install pinned secret and workflow scanners
-        shell: bash
+      - name: Install workflow scanner
         run: |
-          go install github.com/zricethezav/gitleaks/v8@v8.30.1
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      # 7️⃣ Cache Node.js dependencies
-      - name: Cache Node.js dependencies
-        uses: actions/cache@v6
-        with:
-          path: frontend/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
-
-      # The health gate builds the frontend before Tauri checks.
-      - name: Install frontend dependencies
+      - name: Source and supply-chain policy
         run: |
-          make frontend-install
+          typos
+          cargo deny check
+          cargo machete
+          shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/*
+          actionlint
 
-      - name: Install Playwright system dependencies (Linux)
-        if: runner.os == 'Linux'
-        working-directory: frontend
-        run: npx playwright install-deps chromium
-
-      # 🔟 Run unified health check
-      - name: Run unified health check
-        shell: bash
+  check:
+    # Every protected/release check requires scanners AND all platform checks.
+    name: Code Quality and Health Check (${{ matrix.os }})
+    needs: [source, platform]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete health checks
+        env:
+          SOURCE: ${{ needs.source.result }}
+          PLATFORM: ${{ needs.platform.result }}
         run: |
-          bash scripts/check-health.sh
+          test "$SOURCE" = success
+          test "$PLATFORM" = success

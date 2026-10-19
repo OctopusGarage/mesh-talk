@@ -5,15 +5,20 @@ import { test, expect } from "@playwright/test";
 
 const site = pathToFileURL(resolve("../site/index.html")).href;
 
-for (const width of [390, 1280]) {
+for (const width of [390, 721, 1280]) {
   test(`static site is readable and accessible at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 800 });
     await page.goto(site);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Across LANs, when you choose." }),
+    ).toBeVisible();
     await expect(page.locator(".shot img")).toHaveCount(5);
-    for (const image of await page.locator(".shot img").all()) {
+    for (const image of await page
+      .locator(".shot img, .security-shot img")
+      .all()) {
       await image.scrollIntoViewIfNeeded();
       await expect
         .poll(() =>

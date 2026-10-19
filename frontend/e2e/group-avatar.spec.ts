@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // A channel shows a WeChat-style composite group avatar: one tile per member (self + bob +
@@ -15,7 +16,7 @@ test("channel renders a composite group avatar (one tile per member)", async ({
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
 

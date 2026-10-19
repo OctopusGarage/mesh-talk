@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   applyPlatformClass,
   isMacOverlay,
+  isLinuxDesktop,
   needsCustomWindowControls,
 } from "./platform";
 
@@ -38,4 +39,14 @@ it("keeps browser preview free of native window insets", () => {
   expect(setAttribute).not.toHaveBeenCalled();
   expect(isMacOverlay()).toBe(false);
   expect(needsCustomWindowControls()).toBe(false);
+});
+
+it.each([
+  ["Mozilla/5.0 (X11; Linux x86_64)", true],
+  ["Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", false],
+  ["Mozilla/5.0 (Windows NT 10.0)", false],
+])("detects the Linux portal host for %s", (agent, expected) => {
+  vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+  vi.stubGlobal("navigator", { userAgent: agent });
+  expect(isLinuxDesktop()).toBe(expected);
 });

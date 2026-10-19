@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // "Received files" is for ATTACHMENTS only, decided by the sender's INTENT (which button),
@@ -17,7 +18,7 @@ test("received-files tray lists attachments by intent, not extension", async ({
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 
   await page.evaluate(
     ({ dev, acct }) => {

@@ -1,0 +1,473 @@
+{
+  "schemaVersion": 1,
+  "language": "en",
+  "topics": [
+    {
+      "id": "first-run",
+      "title": "Start using Mesh-Talk",
+      "summary": "Create a local identity, find someone nearby, and send your first message.",
+      "category": "getting-started",
+      "keywords": [
+        "quick start",
+        "install",
+        "sign in",
+        "account",
+        "首次使用",
+        "注册",
+        "登录",
+        "怎么用"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/first-run.md"
+    },
+    {
+      "id": "find-people",
+      "title": "Find people on your network",
+      "summary": "Check discovery, visibility and connectivity when someone is missing from the sidebar.",
+      "category": "connection",
+      "keywords": [
+        "discovery",
+        "LAN",
+        "wifi",
+        "Wi-Fi",
+        "offline",
+        "看不到对方",
+        "找不到人",
+        "局域网",
+        "发现",
+        "连接不上"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/find-people.md",
+      "target": {
+        "kind": "settings",
+        "category": "connection",
+        "controlId": "setting-discovery-scope"
+      }
+    },
+    {
+      "id": "routed-networks",
+      "title": "Connect across networks",
+      "summary": "Use an existing routed network or a configured post-office bridge to reach another site.",
+      "category": "connection",
+      "keywords": [
+        "Tailscale",
+        "EasyTier",
+        "VPN",
+        "address",
+        "跨网络",
+        "异地",
+        "手动地址",
+        "路由发现"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/routed-networks.md",
+      "target": {
+        "kind": "settings",
+        "category": "connection",
+        "controlId": "setting-discovery-scope"
+      }
+    },
+    {
+      "id": "post-offices",
+      "title": "Use post offices for offline delivery",
+      "summary": "A peer-operated post office can temporarily hold encrypted events while a recipient is offline.",
+      "category": "connection",
+      "keywords": [
+        "relay",
+        "bridge",
+        "offline delivery",
+        "preferred post office",
+        "邮局",
+        "中继",
+        "离线消息",
+        "离线投递"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/post-offices.md",
+      "target": {
+        "kind": "settings",
+        "category": "connection",
+        "controlId": "setting-post-office"
+      }
+    },
+    {
+      "id": "delivery",
+      "title": "Understand message delivery",
+      "summary": "Distinguish a local send, relay custody and confirmation from the recipient account.",
+      "category": "messaging",
+      "keywords": [
+        "sent",
+        "pending",
+        "failed",
+        "receipt",
+        "read receipt",
+        "消息未送达",
+        "发送失败",
+        "已读",
+        "送达",
+        "一直等待"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/delivery.md",
+      "target": {
+        "kind": "diagnostics"
+      }
+    },
+    {
+      "id": "send-files",
+      "title": "Send and receive files",
+      "summary": "Attach a file in a conversation and control whether incoming transfers require approval.",
+      "category": "messaging",
+      "keywords": [
+        "attachment",
+        "transfer",
+        "receive approval",
+        "文件传输",
+        "发送文件",
+        "接收文件",
+        "附件",
+        "自动接收"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/send-files.md",
+      "target": {
+        "kind": "settings",
+        "category": "files"
+      }
+    },
+    {
+      "id": "download-location",
+      "title": "Change where received files are saved",
+      "summary": "Choose a download folder without changing incoming-file approval.",
+      "category": "messaging",
+      "keywords": [
+        "download directory",
+        "save location",
+        "Downloads",
+        "下载目录",
+        "保存位置",
+        "文件存哪里",
+        "下载位置"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/download-location.md",
+      "target": {
+        "kind": "settings",
+        "category": "files",
+        "controlId": "setting-download-folder"
+      }
+    },
+    {
+      "id": "channels",
+      "title": "Create and manage a channel",
+      "summary": "Start a group conversation and review its members from the conversation header.",
+      "category": "messaging",
+      "keywords": [
+        "group",
+        "members",
+        "invite",
+        "群聊",
+        "频道",
+        "创建群",
+        "群成员"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/channels.md"
+    },
+    {
+      "id": "calls",
+      "title": "Enable experimental voice and video calls",
+      "summary": "Enable calling in settings, then use a reachable direct conversation.",
+      "category": "messaging",
+      "keywords": [
+        "voice",
+        "video",
+        "microphone",
+        "camera",
+        "WebRTC",
+        "打电话",
+        "视频通话",
+        "语音",
+        "麦克风"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/calls.md",
+      "target": {
+        "kind": "settings",
+        "category": "notifications",
+        "controlId": "setting-calls"
+      }
+    },
+    {
+      "id": "verify-contact",
+      "title": "Verify a contact identity",
+      "summary": "Compare the contact verification information through a separate trusted channel.",
+      "category": "privacy",
+      "keywords": [
+        "safety number",
+        "fingerprint",
+        "identity",
+        "trust",
+        "身份验证",
+        "安全码",
+        "指纹",
+        "验证联系人"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/verify-contact.md"
+    },
+    {
+      "id": "link-devices",
+      "title": "Use your identity on another device",
+      "summary": "Link devices through Your devices so they share an account after local setup.",
+      "category": "getting-started",
+      "keywords": [
+        "multi-device",
+        "pair",
+        "sync",
+        "Your devices",
+        "多设备",
+        "关联设备",
+        "同步",
+        "配对",
+        "我的设备"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/link-devices.md"
+    },
+    {
+      "id": "privacy",
+      "title": "Choose privacy and visibility controls",
+      "summary": "Device privacy, invisible mode and hidden contacts solve different problems.",
+      "category": "privacy",
+      "keywords": [
+        "lock",
+        "invisible",
+        "hidden contacts",
+        "clipboard",
+        "隐私",
+        "隐身",
+        "锁定",
+        "隐藏联系人",
+        "剪贴板"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/privacy.md",
+      "target": {
+        "kind": "settings",
+        "category": "privacy",
+        "controlId": "setting-privacy-level"
+      }
+    },
+    {
+      "id": "notifications",
+      "title": "Control notifications and message previews",
+      "summary": "Choose whether notifications appear and whether they include message content.",
+      "category": "privacy",
+      "keywords": [
+        "alerts",
+        "preview",
+        "ringtone",
+        "通知",
+        "消息预览",
+        "铃声",
+        "通知内容"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/notifications.md",
+      "target": {
+        "kind": "settings",
+        "category": "notifications",
+        "controlId": "setting-notification-preview"
+      }
+    },
+    {
+      "id": "history",
+      "title": "Search and retain message history",
+      "summary": "Search available local conversations and choose how long this device keeps history.",
+      "category": "messaging",
+      "keywords": [
+        "search messages",
+        "retention",
+        "delete history",
+        "搜索消息",
+        "聊天记录",
+        "历史记录",
+        "保留时间"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/history.md",
+      "target": {
+        "kind": "settings",
+        "category": "history",
+        "controlId": "setting-retention"
+      }
+    },
+    {
+      "id": "backup",
+      "title": "Back up and restore your account",
+      "summary": "Create an encrypted archive and keep its recovery key separately.",
+      "category": "getting-started",
+      "keywords": [
+        "recovery",
+        "password reset",
+        "lost device",
+        "restore",
+        "备份",
+        "恢复",
+        "忘记密码",
+        "恢复密钥"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/backup.md",
+      "target": {
+        "kind": "settings",
+        "category": "history"
+      }
+    },
+    {
+      "id": "appearance",
+      "title": "Change the theme and wallpaper",
+      "summary": "Personalize the interface while keeping conversation content readable.",
+      "category": "personalization",
+      "keywords": [
+        "theme",
+        "wallpaper",
+        "dark mode",
+        "customization",
+        "主题",
+        "壁纸",
+        "深色模式",
+        "外观"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/appearance.md",
+      "target": {
+        "kind": "settings",
+        "category": "appearance"
+      }
+    },
+    {
+      "id": "language",
+      "title": "Change language and startup behavior",
+      "summary": "Choose an interface language and decide how the app behaves at login or when closed.",
+      "category": "personalization",
+      "keywords": [
+        "translation",
+        "launch at login",
+        "close to tray",
+        "语言",
+        "中文",
+        "开机启动",
+        "关闭到托盘"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/language.md",
+      "target": {
+        "kind": "settings",
+        "category": "general",
+        "controlId": "setting-language"
+      }
+    },
+    {
+      "id": "updates",
+      "title": "Check for and install updates",
+      "summary": "Check GitHub Releases on demand, then install the downloaded package yourself.",
+      "category": "getting-started",
+      "keywords": [
+        "version",
+        "upgrade",
+        "release",
+        "更新",
+        "升级",
+        "版本",
+        "检查更新"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/updates.md"
+    },
+    {
+      "id": "diagnostics",
+      "title": "Troubleshoot a connection",
+      "summary": "Use the connection diagnostics to gather evidence before changing network settings.",
+      "category": "connection",
+      "keywords": [
+        "logs",
+        "firewall",
+        "interfaces",
+        "troubleshooting",
+        "诊断",
+        "日志",
+        "防火墙",
+        "排查",
+        "网络故障"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/diagnostics.md",
+      "target": {
+        "kind": "diagnostics"
+      }
+    },
+    {
+      "id": "profile",
+      "title": "Change your name and avatar",
+      "summary": "Open your profile from the sidebar to change your display name or picture.",
+      "category": "personalization",
+      "keywords": [
+        "profile",
+        "avatar",
+        "nickname",
+        "photo",
+        "头像",
+        "昵称",
+        "个人资料"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/profile.md"
+    },
+    {
+      "id": "screenshots",
+      "title": "Capture and annotate a screenshot",
+      "summary": "Choose an area, add annotations, and review the result in the composer before sending.",
+      "category": "messaging",
+      "keywords": [
+        "screenshot",
+        "capture",
+        "annotation",
+        "mosaic",
+        "截图",
+        "截屏",
+        "标注",
+        "马赛克"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/screenshots.md"
+    },
+    {
+      "id": "customization-packs",
+      "title": "Install themes, avatars and sticker packs",
+      "summary": "Use the marketplace or a local ZIP to extend your personal libraries.",
+      "category": "personalization",
+      "keywords": [
+        "marketplace",
+        "ZIP",
+        "sticker",
+        "emoji",
+        "pack",
+        "install theme",
+        "表情包",
+        "贴纸",
+        "主题包",
+        "头像库",
+        "安装素材"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/customization-packs.md",
+      "target": {
+        "kind": "settings",
+        "category": "appearance"
+      }
+    }
+  ]
+}

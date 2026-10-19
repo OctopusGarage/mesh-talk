@@ -16,22 +16,29 @@
 // Tauri desktop shell over it.
 pub mod app_lock;
 pub mod avatars;
+mod channel_reception;
 pub mod chat_commands;
 pub mod commands;
 pub mod config_store;
 pub mod contact_policy;
 pub mod diagnostics;
+mod easytier_discovery;
 pub mod events;
 pub mod favorites;
+mod linked_account;
 pub mod logger;
 pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
 pub mod recovery;
+mod routed_discovery;
+mod runtime_admission;
+mod runtime_bootstrap;
 pub mod services;
 pub mod session_store;
 pub mod settings;
 pub mod state;
+mod tailscale_discovery;
 pub mod tray;
 pub mod trust;
 pub mod updates;
@@ -218,17 +225,8 @@ pub fn run_tauri_configured(
                             let node = {
                                 let node_state =
                                     app_handle.state::<crate::chat_commands::NodeState>();
-                                let guard = node_state.0.lock().await;
-                                guard.as_ref().and_then(|rt| {
-                                    (rt.host_account_id() == Some(owner.as_str())
-                                        && matches!(
-                                            app_handle.state::<crate::state::AppState>()
-                                                .session()
-                                                .capture(),
-                                            Ok(ref lease) if lease.owner() == owner
-                                        ))
-                                    .then(|| rt.handle())
-                                })
+                                let app_state = app_handle.state::<crate::state::AppState>();
+                                node_state.node_for_owner(app_state.session(), &owner).await
                             };
                             if let Some(node) = node {
                                 let _ = tokio::task::spawn_blocking(move || {
@@ -333,6 +331,7 @@ pub fn run_tauri_configured(
                 commands::login,
                 crate::contact_policy::get_hidden_contacts,
                 crate::contact_policy::set_contact_hidden,
+                crate::contact_policy::delete_contact,
                 crate::privacy_commands::get_privacy,
                 crate::privacy_commands::set_invisible,
                 crate::privacy_commands::set_privacy_allowed,
@@ -366,6 +365,11 @@ pub fn run_tauri_configured(
                 crate::chat_commands::start_linking,
                 crate::chat_commands::stop_linking,
                 crate::chat_commands::link_device,
+                crate::chat_commands::get_device_sync_policy,
+                crate::chat_commands::get_device_sync_status,
+                crate::chat_commands::set_device_sync_category,
+                crate::chat_commands::get_account_preferences,
+                crate::chat_commands::set_account_preference,
                 crate::chat_commands::rekey_account,
                 crate::chat_commands::list_accounts,
                 crate::chat_commands::send_file_to_account,
@@ -381,6 +385,8 @@ pub fn run_tauri_configured(
                 crate::chat_commands::rename_channel,
                 crate::chat_commands::dissolve_channel,
                 crate::chat_commands::channel_members,
+                crate::chat_commands::set_channel_replica_enabled,
+                crate::chat_commands::channel_custody_statuses,
                 crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,
                 crate::chat_commands::channel_history,
@@ -412,6 +418,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::diag_network_info,
                 crate::chat_commands::get_presence,
                 crate::chat_commands::rescan_peers,
+                crate::chat_commands::probe_peer_endpoint,
                 crate::chat_commands::write_temp_file,
                 crate::chat_commands::delete_temp_file,
                 crate::chat_commands::capture_screen,

@@ -15,9 +15,10 @@ there is no central server. Key security properties:
 
 - **No central trust** — peers are discovered over signed UDP multicast and connect
   directly over a Noise-encrypted TCP channel on the local network.
-- **End-to-end encryption + forward secrecy** — DMs use a Double Ratchet, group
+- **End-to-end encryption** — DMs use a Double Ratchet, group
   channels a sender-key ratchet; transport is Noise (`snow`) with the peer's device
-  identity bound into the handshake. Relays only ever see ciphertext.
+  identity bound into the handshake. Relays only ever see ciphertext. Forward
+  secrecy has the bootstrap and key-distribution limitations described below.
 - **Encryption at rest** — per-device/account keystores and the message stores are
   encrypted with a key derived from the user's password (PBKDF2-600k + AES-256-GCM);
   they are unlocked only after login. Locally managed media uses authenticated
@@ -34,6 +35,18 @@ there is no central server. Key security properties:
 
 This is an experimental project. The following are tracked, not yet hardened:
 
+- The initial DM sending chain uses the recipient's permanent X25519 key as
+  its bootstrap ratchet key. Recorded messages from that chain can be recovered
+  after later compromise of that recipient key, even if the conversation has
+  since advanced. The affected chain lasts until the initiator processes the
+  responder's first fresh DH ratchet header; this can include a long offline
+  burst. This does not expose all subsequent DH chains.
+- Group sender distributions are sealed to members' permanent X25519 keys and
+  retained in the event log. Later compromise of one member's recipient key
+  permits recovery of recorded distributions addressed to that member and the
+  corresponding historical group messages. Sender-chain advancement alone does
+  not provide forward secrecy against this attack. A new client or post office
+  without a recipient's secret cannot perform either retrospective attack.
 - Contact requests/responses are signed with the sender's ed25519 key and
   verified on receipt (a present-but-invalid signature is rejected). However,
   the binding between a `user_id` and its public key is trust-on-first-use —

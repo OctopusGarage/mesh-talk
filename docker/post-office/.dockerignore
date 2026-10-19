@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!binaries/
+!binaries/amd64/
+!binaries/arm64/
+!binaries/amd64/mesh-talk-node
+!binaries/arm64/mesh-talk-node

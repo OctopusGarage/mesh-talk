@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { sourceIdentity } from "../../../scripts/evals/source-identity.mjs";
 import { writeFile } from "node:fs/promises";
 import { test as mocked, expect } from "../tauri-mock";
 
@@ -10,9 +10,7 @@ export const test = mocked.extend<{ portableEvidence: void }>({
       let fixtureFailed = false;
       let fixtureError: string | undefined;
       let screenshotError: string | undefined;
-      const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], {
-        encoding: "utf8",
-      }).trim();
+      const sourceSha = sourceIdentity();
       // Portable scenarios are offline and must not depend on the public catalog.
       // WebKit reports failed cross-origin catalog requests as page errors.
       await page.route("**/marketplace/catalog.json", (route) =>
