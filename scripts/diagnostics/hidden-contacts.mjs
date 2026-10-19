@@ -148,7 +148,13 @@ async function focusOwnedWindow() {
     throw error;
   }
 }
-async function click(id) { await command("POST", `/element/${await element(id)}/click`, {}); }
+async function click(id) {
+  // Embedded WebDriver dispatches DOM clicks without activating an application
+  // relaunched in the background. Real pointer input activates the window first;
+  // do the same so WKWebView can commit history and virtual-list rendering.
+  await focusOwnedWindow();
+  await command("POST", `/element/${await element(id)}/click`, {});
+}
 async function openDialog(id) {
   await element(id);
   // Driver 1.4 click_element calls click() then focus(), moving focus outside
