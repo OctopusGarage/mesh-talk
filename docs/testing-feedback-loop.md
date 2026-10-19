@@ -25,6 +25,31 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+## Validation stages and agent responsibilities
+
+Validation depth and business capability are separate dimensions. Use the same
+owning contracts at each depth; a development result never promotes itself into
+candidate acceptance. This follows staged pipelines and actionable feedback as
+described by [Fowler](https://martinfowler.com/bliki/DeploymentPipeline.html) and
+[Software Engineering at Google](https://abseil.io/resources/swe-book/html/ch23.html).
+
+| Stage                | Trigger and purpose                                                                          | Entry or evidence                                                                    |
+| -------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Understand and plan  | Start work or change its scope; identify business owner, consumers and obligations           | Owning guides, `make verify-plan`                                                    |
+| Change feedback      | Validate a small change with affected static checks and executable tests                     | `make verify-changed`, development feedback JSON                                     |
+| Boundary validation  | Change cross-module interfaces, runtime IPC, visible behavior, persistence or lifecycle      | Plan requirements and escalation review; focused integration/browser/native evidence |
+| Candidate acceptance | Prepare the committed candidate for publication and review                                   | `prepare-pr.sh`, full health and protected CI                                        |
+| Extended validation  | Scheduled, release or explicitly triggered compatibility, stress and long-running properties | Owning backend/UI/native workflows and evaluation guides                             |
+
+Read the selected capability's authoritative guide before changing behavior.
+Declare semantic risks that source imports cannot express, inspect automatic
+consumers and boundary requirements, and add missing owners/scenarios with a
+reason. AI may expand scope; it cannot remove mandatory selections because it
+judges a change low risk. Preserve the distinction between local acceptance,
+recipient delivery and read state, and between frontend ownership and host
+session authority. Summarize observed results and remaining obligations before
+moving to candidate acceptance.
+
 ## Change-aware development plans
 
 Use the affected-test planner during development:
@@ -32,6 +57,9 @@ Use the affected-test planner during development:
 ```bash
 make test-plan
 make test-changed
+# Compose affected tests with formatting, lint, types and necessary builds:
+make verify-plan
+make verify-changed
 # Include committed changes since a comparison branch, plus current edits:
 node scripts/validation/changed.mjs --base origin/main --json
 ```
@@ -43,13 +71,46 @@ as deletion plus addition. Preview reads source/contracts only: it does not
 compile, start browsers or run tests. It exits with status 2 when selection is
 blocked. `--json` emits the same plan as structured data for agents.
 
+The plan also includes `requirements.browser`, `requirements.native` and their
+owning scenario IDs, loaded from the same `prScenarios` used by PR preparation.
+They include deleted/renamed source boundaries and remain pending during a
+focused development run. Semantic review can add evidence with repeatable options:
+
+```bash
+node scripts/validation/changed.mjs --checks \
+  --browser e2e/personal-messages.spec.ts --native host \
+  --reason "Reviewed dynamic IPC consumers and session lifecycle"
+```
+
+These additions require `--reason`, validate existing browser specs and supported
+platforms, and union with mandatory rules; they do not launch browser/native work
+or replace PR preparation. Carry extra selections into candidate preparation.
+Source analysis and these explicit additions do not prove all semantic risks
+were identified.
+
 `validation.json` files beside each Rust crate, `src-tauri/`, `frontend/` and the
 validation tooling own focused selectors, explicit downstream consumers and
 escalation notes. Paths are repository-relative exact names or prefixes ending
 in `/`; IDs are unique across contracts. Consumer links expand transitively and
-selected Rust filters are combined per package. Add shared fixture consumers at
-the owner's contract rather than copying selection rules into callers. Contract
+selected Rust filters are combined per package. A broad owner can declare literal
+`excludePaths` for source with an established focused owner; exclusions affect
+path matching only and never suppress explicit or transitive consumer selection.
+Unowned exclusions still block. The Node fallback excludes the four existing
+profile-owner files so their established five-filter slice remains focused. Its
+private `file_consent_tests.rs` module also has a test-only owner selecting that
+module alone; production and shared-fixture changes still expand to consumers.
+Add shared fixture consumers at the owner's contract rather than copying
+selection rules into callers. Contract
 changes themselves select the planner's regression tests.
+
+An optional `capability` adds a concise `summary`, an authoritative local Markdown
+`guide`, and `invariants` containing `{name, reference}` links. It describes why
+an owner is selected without duplicating business specifications or task mappings.
+The first pilots are `frontend-outgoing` and `desktop-session`: their selectors
+and consumers retain their existing meaning. The planner validates metadata and
+referenced files; pilot diagnostics also check their maintained anchors and
+executable obligation tests. Other contracts can adopt the same metadata as their
+business boundaries change.
 
 Frontend selection also follows transitive source imports, type imports,
 re-exports, literal dynamic imports and literal Vitest mocks. It includes all
@@ -60,27 +121,51 @@ imports, glob discovery and configuration dependencies cannot be established
 completely through static imports. Computed discovery produces an escalation
 note; review runtime wiring and select browser/native evidence where needed.
 
-Automatic Rust contracts initially cover account-profile ownership, desktop
-session/admission and integration/MCP boundaries. Integration policy expands
-through its service, host, IPC, client and desktop/MCP consumers. Most other core
-modules have **explicit-selection-only** IDs such as `core-transport`: their
-public Node/host consumers need a contextual decision. Shared configuration,
-lockfiles, CLI entry points, unassigned fixtures and other unmapped changes block
-execution. Extend the owning contract or explicitly select all affected owners
-and explain the decision:
+Rust contracts cover the tracked sources, crate manifests, shared fixtures and
+entry points of all four crates. Core owners conservatively include Node and
+known desktop/integration/MCP consumers; shared Cargo/lockfile/toolchain changes
+select every crate. Some package, binary and integration-harness inputs use
+library fallback selectors with explicit escalation, because this development
+runner does not automatically launch binaries, integration targets or native
+checks. Library coverage is not evidence that those scenarios ran. Frontend
+configuration, package/lockfiles, bundled marketplace assets and public help inputs
+select all registered frontend unit files; dynamic runtime dependencies still
+need browser/native review.
+
+Unknown inputs continue to block. Add their owning contract, or explicitly select
+all affected owners and explain the decision:
 
 ```bash
 node scripts/validation/changed.mjs \
   --owner core-transport --owner desktop-session \
   --reason "Reviewed transport consumers; this change affects session retirement" \
-  --run
+  --checks --run
 ```
 
 An explicit selection acknowledges every otherwise unmapped path, so inspect the
-preview first. The plan preserves those paths and the reason for review. This is
-a developer decision, not evidence that all dependencies have been inferred.
-Contracts with no executable tests (including after consumer expansion), invalid
-references and missing registered test files fail rather than producing a pass.
+preview first. This records judgment, not proof of complete dependency inference.
+Missing/invalid selectors and owners with no executable tests still fail closed.
+
+`make verify-changed` runs the same affected tests as `make test-changed`, preceded
+by the applicable static checks: Rust formatting and package-scoped Clippy with
+`--all-targets -- -D warnings`; frontend formatting, ESLint, source/E2E TypeScript
+and production build; workflow actionlint and changed-shell shellcheck. Cheap
+format/lint/type checks acquire `focused-static` before the runner queues for the
+heavy build/test resource; they can fail while another worktree is compiling or
+running browsers. The Make entry acquires the managed build-retention guard only
+after this phase; it then acquires the shared build resource in the existing
+lock order. Build/Clippy and tests retain the existing resource isolation. The
+outer attempt includes retention waiting in its execution envelope; the inner
+`affected-heavy` attempt reports the shared-resource queue separately. Composed
+receipts bind required build outputs as well as source inputs.
+Each phase recomputes its plan and checks a fingerprint of the source revision,
+changed source bytes (including untracked/deleted paths), obligations and ignored
+frontend environment inputs. Edits while queued or executing require fresh
+validation, including for dirty development worktrees. The two phases share the
+existing cancellation group and overall deadline. Tauri checks prepare real
+frontend assets before compiling the host. The test-only
+entry remains useful during edits; the composed entry is the task-completion
+check. Both remain development commands, not publication certification.
 
 Execution uses existing cross-worktree stage locks and keeps child processes
 within its cancellation group, with a 30-minute overall queue/run deadline. Rust
@@ -99,18 +184,77 @@ After combining their changes, one integration owner reruns the combined plan
 and the applicable mandatory gates. Reuse remains limited to the existing clean,
 revision-bound evidence policy; dirty edits never create reusable success.
 
-This command selects development tests, not static checks or release evidence.
-Run affected formatting/lint/type checks separately. Expand validation for public
+The test-only command selects development tests, not static checks or release
+evidence. Use `make verify-changed` for its composed static checks. Expand validation for public
 interface, persistence, crypto, authorization, browser and native behavior changes,
 using the boundary table above. Existing PR preflight, full-health, protected CI
 and release obligations remain unchanged. Compare median/p95 feedback latency,
 compile time, resource queue time, first-attempt failures and defects caught only
 by broader tests before claiming a speedup.
 
+## Structured development feedback
+
+Every affected execution writes a unique JSON report under
+`target/validation/feedback/` and prints its path. A preview writes no evidence.
+To select a stable destination for a consumer:
+
+```bash
+make verify-changed \
+  VALIDATION_ARGS="--report target/validation/feedback/current.json"
+```
+
+Custom destinations must be JSON files under the worktree's ignored `target/` or
+`tmp/`; they cannot overwrite source. Reports identify source/base, dirty state,
+input fingerprint, selected capability references, phase obligations and observed
+command outcomes. Both test-only and composed execution check the fingerprint
+before and after work, including edits to a dirty worktree while queued.
+
+Phase status distinguishes `not-run`, `running`, `passed`, `failed`,
+`unavailable`, `invalidated` and `cancelled`. Planning blockers produce `blocked`;
+an empty selection produces `no-checks`, never passing tests. `unavailable` means
+an observed command/environment launch failure, including a missing tool below a
+static stage wrapper. A nonzero executed check is `failed`; an interrupted run is
+not evidence of a failed assertion. Missing browser/native evidence remains
+`not-run` until separately attempted. An abrupt supervisor kill can leave a
+`running` report; treat it as incomplete.
+
+Passing test-case counts establish nonempty execution, not assertion-call counts
+or assertion quality. Evaluate test quality separately; a named passing test can
+still contain no useful assertion.
+
+Command records describe process execution, not test assertions: successful Rust
+inventory or wrapper commands alone cannot make a phase pass. Existing nonempty
+inventory/assertion checks and unchanged-input checks must also succeed. Reused
+phase evidence is explicit and includes its receipt, with no fabricated command
+executions. Reports omit command output and environment values; use the phase
+logs for failure details. They are development observations, not acceptance
+certificates or a second receipt store.
+
+`remaining` and `next` retain browser/native requirements, semantic escalation
+review and candidate preparation. `candidateReady` is always `false`, including
+when all selected local checks pass. Review those obligations and carry manual
+browser/native additions into preparation; the report does not verify or import
+external acceptance evidence.
+
+When CI finds something local feedback missed, fix the owning cause:
+
+| Cause                                      | Owning correction                                                                   |
+| ------------------------------------------ | ----------------------------------------------------------------------------------- |
+| Relevant test was omitted                  | Update the capability's consumer/selection contract and selector regressions        |
+| Local and CI flags/features differ         | Align the existing task definition and toolchain inputs                             |
+| Platform or real-environment behavior      | Add the affected boundary's platform/scenario requirement                           |
+| Flaky timing, ports or resource contention | Fix isolation and the wait being proved; measure repeated results                   |
+| Requirement was misunderstood              | Clarify the authoritative business rule and add an independent regression assertion |
+
+Use `make validation-audit` with same-source broader evidence to track selection
+misses. Keep complete candidate gates while gathering that evidence; do not add
+a global mandatory check for every isolated incident or narrow gates from one
+successful sample.
+
 ## Local evidence reuse and resource ownership
 
 Local gates use `scripts/validation/stage.mjs` for diagnostics, frontend builds,
-lint/typechecking, unit coverage, workspace tests, and browser runs. An identical
+lint/typechecking, unit coverage, workspace tests, and browser runs. By default an identical
 successful stage on a clean committed HEAD can be reused for up to 24 hours.
 Receipts bind the revision, working directory, platform, tool versions, command
 arguments, relevant environment and required output digests. Base-sensitive local
@@ -123,6 +267,19 @@ scans continue to run directly rather than reusing time-sensitive scan verdicts.
 health share frontend static/unit stages. The PR wrapper still invokes preflight;
 its local work can reuse intact evidence, while both required remote platforms
 always execute. An unavailable environment therefore still blocks publication.
+Deterministic frontend formatting/lint/type/build/unit stages may opt into
+`--inputs frontend`. Their explicit closure includes tracked frontend sources,
+configuration/tests, public help code/content, marketplace assets, workspace
+version, validation scripts and root npm/Git configuration. Ignored frontend
+`.env` files and `VITE_*` environment values also invalidate reuse. Identical
+inputs can reuse a successful local stage across unrelated clean commits, with
+the original source SHA retained as provenance. Required build/coverage artifacts
+must still exist with matching digests. Dirty trees, source/input changes during
+execution, tool/environment changes, failures, cancellation, TTL expiry and
+`CI=1`/fresh requests prevent reuse. Browser, native, platform, security and Rust
+stages retain revision-bound/fresh policies; this is trusted local acceleration,
+not a claim of hermetic execution or transferable signed evidence.
+
 No local receipt replaces a protected GitHub check. Local receipts are trusted
 workspace acceleration, not signed attestations against a hostile local user.
 
@@ -144,11 +301,42 @@ selector. Choose module filters present on the preparing platform for tests whos
 individual names are platform-specific. Remote execution still rejects selectors
 that run zero tests on either guest.
 
-Per-stage logs and atomic success receipts live under `target/validation/`.
+Per-stage logs, atomic success receipts and per-attempt JSON history (including
+failures, cancellation and reuse) live under `target/validation/`. Cancellation
+retains resource ownership through descendant-process cleanup. Nested POSIX
+stage commands share the outer managed group and its single escalation owner;
+nested leases are not released before group termination. Subsequent waiters
+recover locks whose nested owner was terminated.
+POSIX cleanup confirms that the managed group has no runnable descendants after
+escalation; unreaped zombies do not count as running work. Dead nested owners
+cannot release a lease while their group still runs. If process-state inspection
+is unavailable or Windows `taskkill /T /F` fails, termination is unverified:
+the cancelled attempt produces no successful receipt and its locks remain
+quarantined. Inspect the attempt log and the lock's `owner.json`, establish that
+all descendants have stopped, and remove only those quarantined lock directories
+to recover. Automatic dead-owner recovery never clears quarantine. A Windows
+taskkill success is OS process-tree evidence, not a native UI acceptance test.
+It relies on the OS command's result; it does not independently enumerate and
+verify every terminated Windows descendant.
+Tool versions and mutable configuration digests are rechecked after queueing,
+before reuse and after execution; changes invalidate evidence rather than
+publishing success under the earlier identity.
+Tracked input and configuration inode/time metadata is sampled through
+finalization to detect ordinary edits restored before the final content snapshot.
+These are trusted local accelerators, not isolation from hostile editors or
+unobserved transient creation/removal of ignored inputs; stop editing while
+validating. Publication still requires committed
+platform archives and fresh protected CI. Log-write failures take the same
+descendant-cleanup path as cancellation. Reuse reports avoided historical
+execution time; its legacy `savedExecutionMs` field is not a measured wall-clock
+speedup.
 Console output reports queue time, execution time, reuse, and running-stage
 heartbeats. Platform preflight reports each platform's completion immediately and
 prints progress while the other continues. Missing/corrupted evidence is a cache
 miss; it is never a successful verification result.
+On macOS, preparation holds a child-scoped `caffeinate -is` assertion through both
+platform preflight and full health. It ends with preparation and changes no power
+settings; browser timeouts must not be masked by a retry after idle sleep.
 
 ## CI ownership and browser sharding
 
@@ -182,11 +370,17 @@ in place. Sharding trades more concurrent runner slots and setup work for shorte
 elapsed time; account concurrency limits can reduce the gain.
 
 Each Linux shard uploads raw browser coverage plus its source SHA and shard
-identity. The coverage job generates the unit line map once, then requires all
-four distinct current-source shards before collecting their parts and producing
+identity. A single same-workflow Linux unit-coverage producer supplies the line map to
+the full and lite consumers. Consumers check source SHA, workflow/run/attempt,
+platform/architecture, Node major and LCOV digest before restoring it. The
+coverage job requires that producer and all four distinct current-source shards before collecting their parts and producing
 one browser LCOV upload. It prefixes filenames so reports from different runners
 cannot overwrite each other and clears old output only after validating every
-input. The final UI gate requires successful browser, coverage, merged-report,
+input. Unit coverage artifacts are attempt-bound: use **Re-run all jobs** for this
+workflow when retrying a failed attempt, so producer and shards belong to the
+same attempt. The extra producer job adds setup/queue/transfer cost; benchmark
+its net latency and runner-minute effect before claiming a speedup.
+The final UI gate requires successful browser, coverage, merged-report,
 lite and portable jobs, plus Firefox when selected. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
@@ -203,6 +397,158 @@ steps, total runner minutes, and first-attempt failures. The pre-change October 
 sample had 27–38 minute health jobs and a 31.5 minute full Linux UI job. These are
 baseline observations, not promised speedups; hosted runs must establish the new
 latency and reliability.
+
+## Measure feedback before tuning capacity
+
+Use the measurement entry point with local attempt history, an offline snapshot,
+or a read-only GitHub sample:
+
+```bash
+make validation-report
+make validation-report VALIDATION_ARGS="--repo OctopusGarage/mesh-talk --limit 20 --json --output tmp/validation-latency.json"
+make validation-report VALIDATION_ARGS="--input tmp/validation-latency.json"
+```
+
+The JSON output retains its raw snapshot for replay. Reports separate queue and
+execution time, named jobs and OSes, setup/compilation/test steps, cancellations,
+unfinished work, reuse and measured runner-minutes. Quantiles use nearest rank;
+small samples are descriptive, not stable p95 estimates. Queue can include job
+dependency waits; step categories use names. Workflow elapsed and execution-span
+are observed envelopes, not a reconstructed dependency DAG or a sum of jobs.
+Legacy receipts contain successful executions only and are labeled accordingly.
+Failures and cancellation require attempt history; absent records mean unknown.
+Source/dirty labels describe provenance, not reusable verification proof.
+
+Local reports also read `target/validation/feedback/` for observed development
+feedback. JSON snapshots retain those source reports for replay. An offline
+`--input` or GitHub `--repo` sample does not silently append local evidence;
+`--feedback-dir <directory>` explicitly adds it. Only root development reports
+are collected, not command-progress files or nested stage results. If a live
+append revisits the same report path and invocation start, the latest observation
+replaces that invocation; later retries remain separate samples.
+
+The feedback section reports the first observed command result, first actionable
+issue, overall completion and selected-scope passed completion, with outcome and
+platform groups. A command result may be compilation, test inventory or a cached
+stage wrapper; it is not proof of business correctness. Reused phase evidence
+produces no fabricated command result. Issues retain their `failed`, `unavailable`,
+`invalidated` or `blocked` classification; cancellation alone is not a test
+failure and cannot erase an earlier observed failure. These observations cannot
+identify flaky tests, regressions or escaped defects without separate evidence.
+
+New reports time from CLI planning/execution entry after argument parsing;
+`timingOrigin` identifies that boundary. Older reports may start after planning
+and are labelled `legacy-report-start`. Missing, backwards or out-of-envelope
+timestamps remain unknown; unfinished reports can expose an issue while completion
+stays unknown. Compare equivalent selected scopes, modes, platforms and timing
+origins before claiming an improvement. `passedCompletion` covers selected local
+validation, with browser/native and candidate acceptance still pending.
+
+Compare representative docs, frontend, integration, core and dependency changes,
+including cold/warm caches. Record first useful failure, full-green wall time,
+queue, compile, fixture/test execution, cache restore/upload and rerun cost.
+Benchmark shard count against actual capacity before adding concurrency. Keep
+local resource limits and network-test isolation unless measured evidence supports
+a different budget. Native production/driver builds and coverage instrumentation
+have distinct inputs; do not treat their outputs as interchangeable. Cargo
+`--timings` identifies compilation bottlenecks before another crate or a compiler
+cache is introduced. nextest can improve execution scheduling but not compilation;
+sccache trades away rustc incremental support and cannot cache every link target.
+
+Check eviction as well as cache hits. [Local build retention](build-retention.md)
+keeps recently used compiler caches during automatic post-command cleanup, with
+a bounded idle window, so an over-budget machine does not immediately discard a
+fresh build after each task. Explicit/scheduled cleanup retains its budget policy;
+measure available capacity and active/preserved outputs before changing the budget.
+
+### Locate slow serial Rust tests
+
+For an existing timestamped Windows Cargo log whose command/environment confirms
+`--test-threads=1` or `RUST_TEST_THREADS=1`, inspect completion gaps without
+changing the runner or recompiling:
+
+```bash
+# Download only the Windows test-step log, or retain its original timestamped log.
+gh run view RUN_ID --job WINDOWS_JOB_ID --log > tmp/windows-test.log
+make test-timing VALIDATION_ARGS="--input tmp/windows-test.log --serial --top 20"
+```
+
+`--json` emits test/binary/module context, passed/failed/ignored/unfinished states,
+suite totals and diagnostics. The serial assertion is mandatory: concurrent
+completion gaps cannot identify per-test duration. Estimates include harness and
+reporting overhead plus timestamp buffering; missing/backwards timestamps stay
+unknown. Compilation/binary/suite transitions reset timing anchors. Compare sums
+with the suite's declared runtime, then repeat a specific compiled executable's
+`--exact <name> --test-threads=1` run for a controlled wall-time measurement.
+Rust stable's JSON output and `--report-time` are still [unstable libtest
+options](https://doc.rust-lang.org/rustc/tests/); the offline profiler does not
+enable nightly features or change acceptance.
+
+Optimize the wait being proved. A federation test that needs unavailable direct
+clients can use an endpoint that accepts then closes before authentication,
+avoiding OS-specific closed-port refusal delays while preserving relay/consent
+and complete-byte assertions. Keep actual socket/refusal acceptance in tests
+whose purpose is connection failure. For purely in-memory Tokio timeout tests,
+consider paused virtual time only after checking every clock source; mixed
+`std::time::Instant`/Tokio timers cannot be paused indiscriminately. Replace a
+reconciliation sleep with an observed completed round when that round is the
+actual invariant. Preserve real loopback, restart, expiry and concurrency budgets;
+neither reducing delays nor increasing Windows workers is a default speed fix.
+
+## Qualify affected selection alongside full gates
+
+Generate a clean committed candidate's explainable plan against the intended
+base, then compare it with normalized broader failure evidence for that exact SHA:
+
+```bash
+node scripts/validation/changed.mjs --base origin/main --json > tmp/affected-plan.json
+make validation-audit VALIDATION_ARGS="--plan tmp/affected-plan.json --results tmp/broader-results.json --json"
+```
+
+The supplying test-report adapter owns this normalized results shape:
+
+```json
+{
+  "source": "0123456789abcdef0123456789abcdef01234567",
+  "complete": true,
+  "suites": ["document the actual broader scope here"],
+  "failures": [
+    { "kind": "rust", "package": "mesh-talk-core", "test": "node::example" },
+    { "kind": "frontend", "path": "src/store/chat.test.ts" },
+    { "kind": "node", "path": "scripts/diagnostics/affected-plan.test.mjs" },
+    { "kind": "native", "test": "describe the failed native scenario" }
+  ]
+}
+```
+
+Rust entries refer to library tests selected by this runner; integration/process
+failures require a scenario/native review entry rather than assuming a matching
+library name proves execution. Complete/source/suite fields are assertions made
+by the adapter; the comparison tool does not collect or authenticate full-suite
+execution. It rejects dirty, blocked, incomplete or mismatched-source samples,
+reports selected failures and missed applicable failures, and keeps browser/native
+failures as separate required review. Exit 0 means no misses observed in that
+finite sample, 1 identifies a missed regression, and 2 means unqualified, invalid
+or scenario review required. No result removes current full gates. Investigate
+misses and strengthen the owning contract; a green sample is not proof that
+future selection is sound.
+
+## Merge queues and unchanged publication guarantees
+
+Required Actions workflows accept `merge_group: checks_requested`, including
+actual base/head dependency review. This prepares them for a queue without
+changing strict branch protection or enabling a queue. Check GitHub plan support,
+required external CodeQL/Codecov statuses, candidate SHA/evidence semantics and
+actual hosted completion before activation. Workflows cancel superseded candidate
+work where safe; publication/release operations retain their own policies.
+
+Full local PR preparation, protected platform/browser/native checks and review
+health remain required. A future fast-publication or selective-merge policy needs
+measured selector reliability and coordinated updates to this guide, AGENTS,
+entry points and protected checks. Queueing protects combined changes against
+the latest base; it can add verification work and does not itself make tests
+faster. Keep agent tasks small, identify owner/acceptance commands before edits,
+and validate the combined diff after integration.
 
 ## Automatic platform checks before PR creation
 

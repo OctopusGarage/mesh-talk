@@ -2,7 +2,8 @@ import { notifyIncomingFileDismissed } from "@/lib/incomingFileDismissal";
 import { saveAttachment } from "@/lib/attachmentSave";
 import { create } from "zustand";
 import { createChannelActions, type ChannelActions } from "./channelActions";
-import { chat, contactPolicy, favorites as favoritesApi } from "@/lib/api";
+import { chat } from "@/lib/api/chat";
+import { contactPolicy, favorites as favoritesApi } from "@/lib/api/contacts";
 import { errorMessage } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import {

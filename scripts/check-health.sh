@@ -5,7 +5,8 @@
 
 set -e  # Exit on any error
 
-stage="$(pwd)/scripts/validation/stage.mjs"
+health_root="$(pwd)"
+stage="$health_root/scripts/validation/stage.mjs"
 
 # FAST mode (FAST=1, or `check-health.sh --fast`): an optional partial local gate with
 # formatting, clippy, frontend lint/tests, and the in-memory Rust
@@ -59,6 +60,37 @@ if [ ! -f "Makefile" ] || [ ! -d "src-tauri" ] || [ ! -d "frontend" ]; then
     exit 1
 fi
 
+# Check Node.js and npm
+print_status "success" "Checking Node.js and npm..."
+if ! command_exists node || ! command_exists npm; then
+    print_status "error" "Node.js or npm not found. Please install Node.js: https://nodejs.org/"
+    exit 1
+fi
+
+# Cargo resolves dependencies during Clippy, tests, and builds below; an eager
+# `cargo build` here compiled the app twice. Install frontend dependencies only
+# on a fresh checkout, and surface installation failures instead of hiding them.
+if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
+   [ "frontend/package-lock.json" -nt "frontend/node_modules/.package-lock.json" ]; then
+    print_status "success" "Installing frontend dependencies..."
+    if ! { cd frontend && npm ci; }; then
+        print_status "error" "Frontend dependency installation failed."
+        exit 1
+    fi
+    cd ..
+fi
+
+if [ "${MESH_VALIDATION_HEALTH_GUARDED:-0}" != 1 ]; then
+    # Cargo releases its compiler lock before running test executables. Keep a
+    # managed checkout lease across build/test execution, including browser gaps,
+    # so scheduled cleanup cannot remove pending executables or warm caches.
+    # The aggregate always executes; individual stages retain their own reuse.
+    health_requested_fresh="${MESH_VALIDATION_FRESH:-0}"
+    MESH_VALIDATION_FRESH=1 exec node "$stage" full-health --profile shared --resource health -- \
+        env MESH_VALIDATION_FRESH="$health_requested_fresh" MESH_VALIDATION_HEALTH_GUARDED=1 \
+        python3 "$health_root/scripts/build-retention.py" run -- bash "$health_root/scripts/check-health.sh" "$@"
+fi
+
 # A full gate must not silently skip its scans and still claim everything passed.
 if [ "$FAST" != "1" ]; then
     for tool in cargo-deny cargo-machete typos gitleaks shellcheck actionlint; do
@@ -90,29 +122,9 @@ if ! cargo fmt --all -- --check; then
     exit 1
 fi
 
-# Check Node.js and npm
-print_status "success" "Checking Node.js and npm..."
-if ! command_exists node || ! command_exists npm; then
-    print_status "error" "Node.js or npm not found. Please install Node.js: https://nodejs.org/"
-    exit 1
-fi
-
-# Cargo resolves dependencies during Clippy, tests, and builds below; an eager
-# `cargo build` here compiled the app twice. Install frontend dependencies only
-# on a fresh checkout, and surface installation failures instead of hiding them.
-if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
-   [ "frontend/package-lock.json" -nt "frontend/node_modules/.package-lock.json" ]; then
-    print_status "success" "Installing frontend dependencies..."
-    if ! { cd frontend && npm ci; }; then
-        print_status "error" "Frontend dependency installation failed."
-        exit 1
-    fi
-    cd ..
-fi
-
 # Check code formatting (Frontend)
 print_status "success" "Checking frontend code formatting..."
-if ! { cd frontend && npx prettier --check src/; }; then
+if ! { cd frontend && node "$stage" frontend-format --profile shared --inputs frontend -- npx prettier --check src/; }; then
     print_status "error" "Frontend code formatting issues found. Run 'npx prettier --write src/' to fix."
     exit 1
 fi
@@ -121,7 +133,7 @@ cd ..
 # Run ESLint (Frontend linter). ESLint 9 uses flat config (eslint.config.js);
 # the `--ext` flag was removed, so run the package script which lints the project.
 print_status "success" "Running frontend linter (ESLint)..."
-if ! { cd frontend && node "$stage" frontend-lint --profile shared -- npm run lint; }; then
+if ! { cd frontend && node "$stage" frontend-lint --profile shared --inputs frontend -- npm run lint; }; then
     print_status "error" "Frontend linting issues found. Please fix ESLint errors."
     exit 1
 fi
@@ -130,7 +142,7 @@ cd ..
 # Type-check application and E2E sources. Vite and Playwright transpilation alone
 # do not establish that the scenario/helper TypeScript contracts are valid.
 print_status "success" "Checking frontend and E2E TypeScript..."
-if ! { cd frontend && node "$stage" frontend-types --profile shared -- npm run typecheck; }; then
+if ! { cd frontend && node "$stage" frontend-types --profile shared --inputs frontend -- npm run typecheck; }; then
     print_status "error" "Frontend or E2E TypeScript errors found."
     exit 1
 fi
@@ -183,7 +195,7 @@ fi
 # runs in Clippy/tests; stale local dist must not hide this dependency.
 if [ "$FAST" != "1" ]; then
     print_status "success" "Building the frontend before Tauri checks..."
-    if ! { cd frontend && node "$stage" frontend-build --profile shared --resource heavy --artifact dist -- npm run build; }; then
+    if ! { cd frontend && node "$stage" frontend-build --profile shared --inputs frontend --resource heavy --artifact dist -- npm run build; }; then
         print_status "error" "Frontend build failed."
         exit 1
     fi
@@ -276,7 +288,7 @@ if [ "$FAST" = "1" ]; then
 else
     frontend_test_args=(--artifact coverage/lcov.info)
 fi
-if ! { cd frontend && node "$stage" "$FRONTEND_TEST_STAGE" --profile shared --resource heavy "${frontend_test_args[@]}" -- npm run "$FRONTEND_TEST_SCRIPT"; }; then
+if ! { cd frontend && node "$stage" "$FRONTEND_TEST_STAGE" --profile shared --inputs frontend --resource heavy "${frontend_test_args[@]}" -- npm run "$FRONTEND_TEST_SCRIPT"; }; then
     print_status "error" "Frontend tests or coverage failed. Please fix the failing gate."
     exit 1
 fi

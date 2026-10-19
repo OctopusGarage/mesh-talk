@@ -4,6 +4,8 @@ name: Code Quality and Health Check
 # compilation/unit tests; UI E2E owns full Chromium on all desktop platforms.
 # scripts/check-health.sh remains the standalone comprehensive local gate.
 on:
+  merge_group:
+    types: [checks_requested]
   pull_request:
   push:
     branches: [main]

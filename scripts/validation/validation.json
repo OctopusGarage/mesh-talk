@@ -20,13 +20,36 @@
         "crates/mesh-talk-core/validation.json",
         "src-tauri/validation.json",
         "crates/mesh-talk-integrations/validation.json",
-        "crates/mesh-talk-mcp/validation.json"
+        "crates/mesh-talk-mcp/validation.json",
+        "scripts/validation/checks.mjs",
+        "scripts/validation/stage-inputs.mjs",
+        "scripts/validation/latency.mjs",
+        "scripts/diagnostics/validation-checks.test.mjs",
+        "scripts/diagnostics/validation-latency.test.mjs",
+        "scripts/diagnostics/rust-contracts.test.mjs",
+        "scripts/validation/selection-audit.mjs",
+        "scripts/diagnostics/selection-audit.test.mjs",
+        "scripts/validation/libtest-timing.mjs",
+        "scripts/diagnostics/libtest-timing.test.mjs",
+        "scripts/build-retention.py",
+        "scripts/test_build_retention.py",
+        "scripts/validation/feedback.mjs",
+        "scripts/diagnostics/validation-feedback.test.mjs",
+        "scripts/diagnostics/capability-contracts.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/affected-plan.test.mjs",
         "scripts/diagnostics/changed-validation.test.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
-        "scripts/diagnostics/validation-stage.test.mjs"
+        "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/validation-checks.test.mjs",
+        "scripts/diagnostics/validation-latency.test.mjs",
+        "scripts/diagnostics/rust-contracts.test.mjs",
+        "scripts/diagnostics/selection-audit.test.mjs",
+        "scripts/diagnostics/libtest-timing.test.mjs",
+        "scripts/diagnostics/validation-feedback.test.mjs",
+        "scripts/diagnostics/capability-contracts.test.mjs",
+        "scripts/diagnostics/pr-scenarios.test.mjs"
       ],
       "escalation": [
         "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI."
@@ -69,6 +92,68 @@
       ],
       "escalation": [
         "Before publication run full preparation; focused diagnostic success alone does not certify native or platform execution."
+      ]
+    },
+    {
+      "id": "workspace-toolchain",
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        ".cargo/",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        "clippy.toml",
+        ".clippy.toml"
+      ],
+      "consumers": [
+        "core-node",
+        "desktop-session",
+        "integration-service",
+        "mcp-adapter"
+      ],
+      "escalation": [
+        "Shared compiler, dependency or feature inputs invalidate every workspace consumer. Inspect production/test feature differences, platform checks and native requirements before publication."
+      ]
+    },
+    {
+      "id": "ci-verification",
+      "paths": [
+        "scripts/check-health.sh",
+        "scripts/diagnostics/ci-latency.test.mjs",
+        "scripts/diagnostics/ui-coverage-shards.test.mjs",
+        "scripts/diagnostics/merge-queue.test.mjs",
+        ".github/workflows/ci.yml",
+        ".github/workflows/check-health.yml",
+        ".github/workflows/e2e-ui.yml",
+        ".github/workflows/e2e-backend.yml",
+        ".github/workflows/sanitizers.yml",
+        ".github/workflows/mutants.yml",
+        ".github/workflows/codeql.yml",
+        ".github/workflows/gitleaks.yml",
+        ".github/workflows/dependency-review.yml",
+        "scripts/ci/collect-ui-coverage.mjs",
+        "scripts/ci/unit-coverage-artifact.mjs"
+      ],
+      "node": [
+        "scripts/diagnostics/ci-latency.test.mjs",
+        "scripts/diagnostics/ui-coverage-shards.test.mjs",
+        "scripts/diagnostics/merge-queue.test.mjs",
+        "scripts/diagnostics/health-workflow.test.mjs"
+      ],
+      "escalation": [
+        "Run actionlint and affected workflow regressions; source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+      ]
+    },
+    {
+      "id": "public-help",
+      "paths": ["tools/help/", "docs/help/"],
+      "node": [
+        "tools/help/corpus.test.mjs",
+        "tools/help/help.test.mjs",
+        "tools/help/server.test.mjs"
+      ],
+      "escalation": [
+        "Public help content is bundled into the frontend and published independently; review the public help build/publication and settings-navigation consumers."
       ]
     }
   ]

@@ -26,7 +26,7 @@ test("health owns fast checks without repeating Rust or browser suites", () => {
 
 test("full browser coverage remains on every desktop OS with bounded shards", () => {
   const ui = read("e2e-ui.yml");
-  const baseline = ui.split("  e2e:\n")[1].split("  coverage:\n")[0];
+  const baseline = ui.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(baseline, /os: \[ubuntu-24.04, macos-latest, windows-latest\]/);
   assert.match(baseline, /shard: \[1, 2, 3, 4\]/);
   assert.match(baseline, /fail-fast: false/);
@@ -40,7 +40,7 @@ test("the stable UI gate requires coverage merged from all Linux shards", () => 
   const ui = read("e2e-ui.yml");
   const coverage = ui.split("  coverage:\n")[1]?.split("  lite:\n")[0];
   assert.ok(coverage);
-  assert.match(coverage, /needs: e2e/);
+  assert.match(coverage, /needs: \[e2e, unit-coverage\]/);
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
@@ -83,6 +83,30 @@ test("the protected Full Linux UI regression name remains a fail-closed check", 
   assert.match(coverage, /name: Full Linux UI regression/);
   assert.match(coverage, /if: always\(\)/);
   for (const result of ["success", "failure", "cancelled", "skipped"]) {
-    assert.equal(runGate("e2e-ui.yml", "Require all browser shards", { BASELINE: result }).status === 0, result === "success");
+    assert.equal(runGate("e2e-ui.yml", "Require all browser shards", { BASELINE: result, UNIT_COVERAGE: "success" }).status === 0, result === "success");
   }
+});
+
+
+test("UI coverage consumers share one same-workflow Linux unit run", () => {
+  const ui = read("e2e-ui.yml");
+  assert.equal((ui.match(/run: npm run test:coverage/g) || []).length, 1);
+  const producer = ui.split("  unit-coverage:\n")[1]?.split("  coverage:\n")[0];
+  assert.ok(producer);
+  assert.match(producer, /runs-on: ubuntu-24.04/);
+  assert.match(producer, /unit-coverage-artifact.mjs seal/);
+  assert.match(producer, /name: ui-unit-coverage-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
+  for (const job of ["coverage", "lite"]) {
+    const consumer = ui.split(`  ${job}:\n`)[1].split(/^  [a-z][\w-]*:\n/m)[0];
+    assert.match(consumer, /needs:.*unit-coverage/);
+    assert.match(consumer, /unit-coverage-artifact.mjs restore/);
+    assert.match(consumer, /actions\/download-artifact@/);
+    assert.doesNotMatch(consumer, /run-id:|github-token:/);
+  }
+});
+
+test("CI runs release workflow diagnostics only through the shared glob", () => {
+  const ci = read("ci.yml");
+  assert.match(ci, /node --test scripts\/diagnostics\/\*.test.mjs/);
+  assert.doesNotMatch(ci, /node --test scripts\/diagnostics\/release-workflow.test.mjs/);
 });

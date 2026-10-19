@@ -6,6 +6,66 @@ use crate::identity::{account::Account, device::DeviceIdentity};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
+struct RejectingDirectEndpoint {
+    address: std::net::SocketAddr,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RejectingDirectEndpoint {
+    async fn bind() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                // Never authenticate or serve a Node protocol. A closed port
+                // can spend the TCP connect budget on Windows; EOF is immediate.
+                drop(stream);
+            }
+        });
+        Self {
+            address,
+            task: Some(task),
+        }
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for RejectingDirectEndpoint {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn unavailable_direct_endpoint_closes_without_waiting_for_protocol_bytes() {
+    use tokio::io::AsyncReadExt;
+
+    let rejecting = RejectingDirectEndpoint::bind().await;
+    // A silent first connection must not prevent subsequent connections from
+    // receiving EOF. The fixture never waits for a handshake or spawns a server.
+    let mut first = tokio::net::TcpStream::connect(rejecting.address)
+        .await
+        .unwrap();
+    let mut second = tokio::net::TcpStream::connect(rejecting.address)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        assert_eq!(first.read(&mut [0]).await.unwrap(), 0);
+        assert_eq!(second.read(&mut [0]).await.unwrap(), 0);
+    })
+    .await
+    .expect("unavailable direct endpoints must close without protocol progress");
+    rejecting.shutdown().await;
+}
+
 #[tokio::test]
 async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route() {
     use crate::postoffice::{PostOffice, federation::FederationDirectory};
@@ -21,9 +81,11 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     let bob = DeviceIdentity::generate();
     let bob_account = Account::generate();
     let bob_keys = bob.secret_bytes();
-    // Neither client has a listener. Only the two relay endpoints are reachable.
-    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
-    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
+    // Neither client serves direct connections. The unavailable direct endpoint
+    // closes before authentication; only the two relays can serve the protocol.
+    let rejecting = RejectingDirectEndpoint::bind().await;
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", rejecting.address.port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", rejecting.address.port());
     let (a, mut messages, _) = node_with_files(ad.path(), alice, aa, &bp);
     let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
     a.set_bridge_discovery_enabled(true);
@@ -360,6 +422,9 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     );
     pt.abort();
     qt.abort();
+    let _ = pt.await;
+    let _ = qt.await;
+    rejecting.shutdown().await;
 }
 
 #[tokio::test]

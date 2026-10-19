@@ -63,9 +63,9 @@ cargo fmt --all -- --check
 if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
     (
         cd frontend
-        npx prettier --check src/
-        node "$stage" frontend-types --profile shared -- npm run typecheck
-        node "$stage" frontend-lint --profile shared -- npm run lint
+        node "$stage" frontend-format --profile shared --inputs frontend -- npx prettier --check src/
+        node "$stage" frontend-types --profile shared --inputs frontend -- npm run typecheck
+        node "$stage" frontend-lint --profile shared --inputs frontend -- npm run lint
     )
 fi
 node "$stage" diagnostics --profile shared -- node --test scripts/diagnostics/*.test.mjs
@@ -74,7 +74,7 @@ if printf '%s\n' "$changed_files" | node scripts/pr-platform/rust-packages.mjs -
     # Tauri validates frontendDist even when listing its test executable.
     (
         cd frontend
-        node "$stage" frontend-build --profile shared --resource heavy --artifact dist -- npm run build
+        node "$stage" frontend-build --profile shared --inputs frontend --resource heavy --artifact dist -- npm run build
     )
     node "$stage" rust-selectors --profile shared --resource heavy --artifact target/validation/selector-inventory.json \
         -- node scripts/validation/selectors.mjs "$@"
@@ -83,7 +83,7 @@ fi
 if printf '%s\n' "$changed_files" | rg -q '^frontend/'; then
     (
         cd frontend
-        node "$stage" frontend-coverage --profile shared --resource heavy --artifact coverage/lcov.info -- npm run test:coverage
+        node "$stage" frontend-coverage --profile shared --inputs frontend --resource heavy --artifact coverage/lcov.info -- npm run test:coverage
     )
 
     coverage_reports=(frontend/coverage/lcov.info)

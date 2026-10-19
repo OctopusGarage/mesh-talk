@@ -28,7 +28,16 @@
 - During feature development, preview changed-boundary validation with `make test-plan`
   and run it with `make test-changed`. Unmapped changes require an explicit owner
   and reason; inspect escalation notes for browser/native or consumer checks.
-  These commands do not replace required PR/review gates or static checks.
+  Use `make verify-plan` / `make verify-changed` at task completion to compose the
+  same affected tests with applicable formatting, lint/types and builds. The
+  test-only commands do not include static checks; neither mode replaces required
+  PR/review, browser/native or release gates. `make validation-report` separates
+  queue and execution costs; `make validation-audit` compares a clean affected
+  plan with same-source broader failure evidence before narrowing any gate.
+  Read selected capability references and inspect pending browser/native requirements.
+  Execution prints a structured feedback report; follow the
+  [validation protocol](docs/testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
+  for completed work, remaining evidence and additive semantic selections.
 - During feature development, run affected tests only: `make test-focused
 TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.

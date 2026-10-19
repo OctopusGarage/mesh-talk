@@ -11,7 +11,11 @@
         "src-tauri/src/commands.rs",
         "src-tauri/src/owner_commands.rs",
         "src-tauri/src/services/auth_service.rs",
-        "src-tauri/src/chat_commands/state.rs"
+        "src-tauri/src/chat_commands/state.rs",
+        "src-tauri/src/services/",
+        "src-tauri/src/session_store.rs",
+        "src-tauri/src/session_store/",
+        "src-tauri/src/linked_account.rs"
       ],
       "rust": [
         {
@@ -28,7 +32,33 @@
       "escalation": [
         "Session/authorization changes require review of app-lock, integrations and contact-policy admission; native startup/retirement changes require focused native evidence."
       ],
-      "consumers": ["desktop-integrations"]
+      "consumers": [
+        "desktop-integrations",
+        "desktop-chat",
+        "desktop-contact-policy",
+        "desktop-app-lock",
+        "desktop-settings",
+        "desktop-recovery",
+        "desktop-privacy"
+      ],
+      "capability": {
+        "summary": "Authorize desktop work against the exact login generation and serialize runtime replacement with retirement.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "Replacement and logout invalidate captured session authority",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Stale startup cannot launch participant producers",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Runtime replacement awaits prior runtime retirement",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      }
     },
     {
       "id": "desktop-integrations",
@@ -41,6 +71,212 @@
       ],
       "escalation": [
         "Native IPC/session retirement changes require the relevant platform/native checks."
+      ]
+    },
+    {
+      "id": "desktop-chat",
+      "paths": [
+        "src-tauri/src/chat_commands/",
+        "src-tauri/src/avatars.rs",
+        "src-tauri/src/favorites.rs",
+        "src-tauri/src/channel_reception.rs",
+        "src-tauri/src/events.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["chat_commands::", "channel_reception::"]
+        }
+      ],
+      "escalation": [
+        "IPC command names/payloads and emitted events require typed frontend API/store consumer checks and affected browser behavior; file/native side effects require focused native evidence."
+      ]
+    },
+    {
+      "id": "desktop-contact-policy",
+      "paths": [
+        "src-tauri/src/contact_policy.rs",
+        "src-tauri/src/contact_policy/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["contact_policy::"]
+        }
+      ],
+      "escalation": [
+        "Contact deletion/admission changes require session-authority, persistence and native mesh acceptance evidence."
+      ]
+    },
+    {
+      "id": "desktop-app-lock",
+      "paths": ["src-tauri/src/app_lock.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["app_lock::"]
+        }
+      ],
+      "escalation": [
+        "OS authentication and unlock/session lifecycle changes require focused native platform evidence."
+      ]
+    },
+    {
+      "id": "desktop-settings",
+      "paths": ["src-tauri/src/settings.rs", "src-tauri/src/config_store.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["settings::", "config_store::"]
+        }
+      ],
+      "consumers": ["desktop-chat"],
+      "escalation": [
+        "Persisted settings and live policy application require frontend settings and native session/revision evidence."
+      ]
+    },
+    {
+      "id": "desktop-recovery",
+      "paths": ["src-tauri/src/recovery.rs", "src-tauri/src/trust.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["recovery::", "trust::"]
+        }
+      ],
+      "consumers": ["desktop-session"],
+      "escalation": [
+        "Crypto, archive and trust persistence changes require affected core recovery integration tests and frontend/native restore evidence."
+      ]
+    },
+    {
+      "id": "desktop-discovery",
+      "paths": [
+        "src-tauri/src/background_command.rs",
+        "src-tauri/src/routed_discovery.rs",
+        "src-tauri/src/easytier_discovery.rs",
+        "src-tauri/src/tailscale_discovery.rs",
+        "src-tauri/tests/support/",
+        "src-tauri/tests/fixtures/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "routed_discovery::tests::",
+            "easytier_discovery::tests::",
+            "tailscale_discovery::tests::"
+          ]
+        }
+      ],
+      "node": ["scripts/diagnostics/background-command.test.mjs"],
+      "consumers": ["desktop-session"],
+      "escalation": [
+        "Discovery inventories/fixtures and routing require focused native live-network acceptance; nonignored parser tests do not execute ignored physical client tests."
+      ]
+    },
+    {
+      "id": "desktop-privacy",
+      "paths": ["src-tauri/src/privacy_commands.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["privacy_commands::"]
+        }
+      ],
+      "consumers": ["desktop-session"],
+      "escalation": [
+        "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks."
+      ]
+    },
+    {
+      "id": "desktop-window",
+      "paths": [
+        "src-tauri/src/tray.rs",
+        "src-tauri/src/window_geometry.rs",
+        "src-tauri/src/window_visibility.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["tray::", "window_geometry::"]
+        }
+      ],
+      "escalation": [
+        "Tray visibility, window controls and native geometry require focused native platform and browser acceptance."
+      ]
+    },
+    {
+      "id": "desktop-diagnostics",
+      "paths": [
+        "src-tauri/src/diagnostics.rs",
+        "src-tauri/src/perf.rs",
+        "src-tauri/src/logger/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["diagnostics::", "perf::", "logger::"]
+        }
+      ],
+      "escalation": [
+        "Logging/privacy and diagnostics IO changes require affected integration/native evidence."
+      ]
+    },
+    {
+      "id": "desktop-updates",
+      "paths": ["src-tauri/src/updates.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": ["updates::"]
+        }
+      ],
+      "escalation": [
+        "Updater/native process and release artifact changes require explicit native/release validation."
+      ]
+    },
+    {
+      "id": "desktop-package",
+      "paths": [
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/main.rs",
+        "src-tauri/src/linux_renderer.rs",
+        "src-tauri/build.rs",
+        "src-tauri/Cargo.toml",
+        "src-tauri/tauri.conf.json",
+        "src-tauri/tauri.macos.conf.json",
+        "src-tauri/Info.plist",
+        "src-tauri/entitlements.plist",
+        "src-tauri/windows.manifest",
+        "src-tauri/capabilities/",
+        "src-tauri/icons/",
+        "src-tauri/icons-src",
+        "src-tauri/examples/",
+        "src-tauri/tests/window_controls_capability.rs",
+        "src-tauri/tests/logging_privacy.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "desktop_session::",
+            "commands::tests::",
+            "chat_commands::",
+            "tray::",
+            "window_geometry::",
+            "logger::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-session",
+        "desktop-discovery",
+        "desktop-recovery",
+        "desktop-updates"
+      ],
+      "escalation": [
+        "Desktop entry points/build configuration, binary-only Linux renderer, native capabilities and integration harnesses use conservative library coverage. Explicitly build changed binary/example targets, run affected integration targets and native platform/renderer/capability checks; library filters do not execute them."
       ]
     }
   ],

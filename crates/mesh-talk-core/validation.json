@@ -3,7 +3,7 @@
   "contracts": [
     {
       "id": "core-channel",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/channel/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -11,12 +11,13 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": ["core-node"]
     },
     {
       "id": "core-discovery",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/discovery/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -24,12 +25,13 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": ["core-node", "core-postoffice", "core-transport"]
     },
     {
       "id": "core-dm",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/dm.rs"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -37,12 +39,13 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": ["core-node", "core-channel", "core-postoffice"]
     },
     {
       "id": "core-eventlog",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/eventlog/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -50,12 +53,21 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": [
+        "core-node",
+        "core-channel",
+        "core-dm",
+        "core-file",
+        "core-postoffice",
+        "core-recovery",
+        "core-storage"
       ]
     },
     {
       "id": "core-file",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/file/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -63,12 +75,13 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": ["core-node", "core-eventlog", "core-recovery"]
     },
     {
       "id": "core-identity",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/identity/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -76,12 +89,25 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": [
+        "core-node",
+        "desktop-session",
+        "desktop-recovery",
+        "core-channel",
+        "core-discovery",
+        "core-dm",
+        "core-eventlog",
+        "core-postoffice",
+        "core-recovery",
+        "core-storage",
+        "core-transport"
       ]
     },
     {
       "id": "core-postoffice",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/postoffice/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -89,12 +115,13 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": ["core-node"]
     },
     {
       "id": "core-ratchet",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/ratchet/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -102,25 +129,28 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": ["core-node", "core-channel"]
     },
     {
       "id": "core-recovery",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/recovery/"],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["recovery::"]
+          "filters": ["node::"]
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
+        "Recovery has no local library tests: use conservative Node coverage and explicitly run affected recovery_key, recovery_archive and recovery_snapshot integration targets for crypto/archive/storage changes."
+      ],
+      "consumers": ["core-node", "desktop-recovery"]
     },
     {
       "id": "core-storage",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/storage/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -128,12 +158,20 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": [
+        "core-node",
+        "desktop-session",
+        "desktop-recovery",
+        "core-eventlog",
+        "core-identity",
+        "core-postoffice"
       ]
     },
     {
       "id": "core-transport",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/transport/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -141,12 +179,18 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": [
+        "core-node",
+        "core-discovery",
+        "core-eventlog",
+        "core-postoffice"
       ]
     },
     {
       "id": "core-util",
-      "paths": [],
+      "paths": ["crates/mesh-talk-core/src/util/"],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -154,8 +198,9 @@
         }
       ],
       "escalation": [
-        "Explicit selection only: inspect affected Node/host/integration consumers when this public core module changes. Add a narrowly owned automatic contract when consumer obligations are established."
-      ]
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+      ],
+      "consumers": ["core-node", "core-file"]
     },
     {
       "id": "core-account-profile",
@@ -179,6 +224,98 @@
       ],
       "escalation": [
         "Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
+      ],
+      "consumers": ["desktop-chat"]
+    },
+    {
+      "id": "core-node",
+      "paths": ["crates/mesh-talk-core/src/node/"],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["node::"]
+        }
+      ],
+      "consumers": ["desktop-session", "integration-service"],
+      "escalation": [
+        "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance."
+      ],
+      "excludePaths": [
+        "crates/mesh-talk-core/src/node/account_profile.rs",
+        "crates/mesh-talk-core/src/node/profile.rs",
+        "crates/mesh-talk-core/src/node/profile_store.rs",
+        "crates/mesh-talk-core/src/node/profile_io.rs",
+        "crates/mesh-talk-core/src/node/file_consent_tests.rs"
+      ]
+    },
+    {
+      "id": "core-expiry",
+      "paths": ["crates/mesh-talk-core/src/expiry.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["expiry::"]
+        }
+      ],
+      "consumers": ["core-node", "core-file"],
+      "escalation": [
+        "Deadline framing is a wire/storage boundary; verify legacy compatibility and affected message delivery consumers."
+      ]
+    },
+    {
+      "id": "core-package",
+      "paths": [
+        "crates/mesh-talk-core/Cargo.toml",
+        "crates/mesh-talk-core/src/lib.rs"
+      ],
+      "consumers": [
+        "core-channel",
+        "core-discovery",
+        "core-dm",
+        "core-eventlog",
+        "core-file",
+        "core-identity",
+        "core-postoffice",
+        "core-ratchet",
+        "core-recovery",
+        "core-storage",
+        "core-transport",
+        "core-util",
+        "core-node",
+        "core-expiry"
+      ],
+      "escalation": [
+        "Public exports, features and dependency/build changes require affected package builds and public consumer compile checks; library tests alone do not prove binary, feature or platform compatibility."
+      ]
+    },
+    {
+      "id": "core-cli-harness",
+      "paths": [
+        "crates/mesh-talk-core/src/bin/",
+        "crates/mesh-talk-core/tests/",
+        "crates/mesh-talk-core/examples/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["node::"]
+        }
+      ],
+      "escalation": [
+        "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets."
+      ]
+    },
+    {
+      "id": "core-file-consent-tests",
+      "paths": ["crates/mesh-talk-core/src/node/file_consent_tests.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["node::file_consent_tests::"]
+        }
+      ],
+      "escalation": [
+        "This private cfg(test) module owns only its federation/consent fixture and assertions; shared fixture or production transport/consent changes must select their owning consumers separately."
       ]
     }
   ],

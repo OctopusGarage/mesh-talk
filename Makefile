@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test test-focused test-plan test-changed e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
+.PHONY: dev build test test-focused test-plan test-changed verify-plan verify-changed validation-report validation-audit test-timing e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
 
 # Managed commands coordinate with cache eviction across all local worktrees.
 MANAGED_BUILD = python3 scripts/build-retention.py run --
@@ -34,6 +34,21 @@ test-plan:
 
 test-changed:
 	$(MANAGED_BUILD) node scripts/validation/changed.mjs --run $(VALIDATION_ARGS)
+
+verify-plan:
+	node scripts/validation/changed.mjs --checks $(VALIDATION_ARGS)
+
+verify-changed:
+	node scripts/validation/changed.mjs --checks --run --managed $(VALIDATION_ARGS)
+
+validation-report:
+	@node scripts/validation/latency.mjs $(VALIDATION_ARGS)
+
+validation-audit:
+	@node scripts/validation/selection-audit.mjs $(VALIDATION_ARGS)
+
+test-timing:
+	@node scripts/validation/libtest-timing.mjs $(VALIDATION_ARGS)
 
 # End-to-end integration tests: real `mesh-talk-node` processes over UDP discovery +
 # TCP (two-node DM, history-across-restart, post-office offline delivery,
@@ -118,6 +133,11 @@ help:
 	@echo "  make test-focused TEST_PACKAGE=... TEST_FILTER=...  Run affected Rust tests"
 	@echo "  make test-plan        Preview affected development tests and selection reasons"
 	@echo "  make test-changed     Run the affected plan; block unknown/no-test selections"
+	@echo "  make verify-plan      Preview affected tests and static obligations"
+	@echo "  make verify-changed   Run affected formatting, lint/types, builds and tests"
+	@echo "  make validation-report Report local validation latency; pass --repo/--input via VALIDATION_ARGS"
+	@echo "  make validation-audit Compare an affected plan with broader failure evidence"
+	@echo "  make test-timing      Estimate serial libtest gaps; pass --input and --serial via VALIDATION_ARGS"
 	@echo "  make e2e              Run the end-to-end multi-process tests (slow)"
 	@echo "  make eval-smoke       Run delivery and AI regression smoke checks"
 	@echo "  make ai-eval          Run real model-backed AI evals (requires AI_EVAL_COMMAND)"

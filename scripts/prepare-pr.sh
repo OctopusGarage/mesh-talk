@@ -3,6 +3,11 @@
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+if [ "$(uname -s)" = Darwin ] && [ "${MESH_PR_KEEP_AWAKE:-0}" != 1 ]; then
+    # Preparation includes full health after platform preflight. Keep its browser
+    # and workspace gates awake too; release the assertion with this child.
+    exec caffeinate -is env MESH_PR_KEEP_AWAKE=1 bash "$repo_root/scripts/prepare-pr.sh" "$@"
+fi
 if [ -n "$(git status --porcelain)" ]; then
     echo "Commit or stash changes before preparing a PR candidate." >&2
     exit 1

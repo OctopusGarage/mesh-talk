@@ -41,3 +41,27 @@ export interface ChatMessage {
     media: boolean;
   } | null;
 }
+
+export type SendPayload =
+  | {
+      kind: "text";
+      text: string;
+      replyTo: string | null;
+      expiresAtMs?: number | null;
+    }
+  | {
+      kind: "sticker";
+      stickerId: string;
+      fallback: string;
+      expiresAtMs?: number | null;
+    }
+  | { kind: "file"; path: string; media: boolean; expiresAtMs?: number | null };
+export interface SendIntent {
+  conversation: Conversation;
+  payload: SendPayload;
+  message: ChatMessage;
+  /** Exact deletion protection owned by the bounded intent, never by an LRU scope. */
+  deletedIds?: string[];
+  /** Capacity fallback: accepted messages need canonical history, never an overlay. */
+  acceptanceHistoryOnly?: boolean;
+}

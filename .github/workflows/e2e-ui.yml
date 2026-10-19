@@ -4,6 +4,8 @@ name: UI E2E
 # app with a mocked Tauri IPC layer — guards the rendering/wiring that black-screened v0.1.0.
 # The Rust multi-process backend E2E lives separately (`make e2e`).
 on:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: ["main", "dev"]
   pull_request:
@@ -87,11 +89,40 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  unit-coverage:
+    # Both Linux browser variants use the same default-mode unit line map.
+    # Keep this producer in this workflow: no cross-workflow evidence reuse.
+    name: Linux unit coverage for browser line maps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Prepare shared coverable line map
+        run: npm run test:coverage
+      - name: Seal unit coverage provenance
+        run: node ../scripts/ci/unit-coverage-artifact.mjs seal coverage/lcov.info ../target/ui-unit-coverage
+      - name: Upload source-pinned unit coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ui-unit-coverage/
+          if-no-files-found: error
+          retention-days: 7
+
   coverage:
     # This existing name is required by branch protection. It now certifies
     # successful shards plus their complete current-source coverage upload.
     name: Full Linux UI regression
-    needs: e2e
+    needs: [e2e, unit-coverage]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -103,8 +134,10 @@ jobs:
         working-directory: .
         env:
           BASELINE: ${{ needs.e2e.result }}
+          UNIT_COVERAGE: ${{ needs.unit-coverage.result }}
         run: |
           test "$BASELINE" = success
+          test "$UNIT_COVERAGE" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@v7.1.0
         with:
@@ -117,8 +150,13 @@ jobs:
         with:
           pattern: ui-coverage-*-${{ github.run_attempt }}
           path: target/ui-coverage
-      - name: Prepare coverable line map once
-        run: npm run test:coverage
+      - name: Download this run's unit coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ui-unit-coverage
+      - name: Validate unit coverage provenance and restore line map
+        run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
       - name: Validate and collect all coverage parts
         run: node ../scripts/ci/collect-ui-coverage.mjs ../target/ui-coverage coverage/e2e-parts "$SOURCE_SHA" 4
         env:
@@ -175,6 +213,7 @@ jobs:
 
   lite:
     name: Lite UI and asset check
+    needs: unit-coverage
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -193,8 +232,13 @@ jobs:
         run: npm run build:lite && node ../scripts/release/check-variant-assets.mjs lite
       - name: Check lite JavaScript for macOS 12 WKWebView
         run: npm run check:build-syntax
-      - name: Prepare coverable line map
-        run: npm run test:coverage
+      - name: Download this run's unit coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ui-unit-coverage
+      - name: Validate unit coverage provenance and restore line map
+        run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
       - name: Run lite sticker and installation flows
         run: npx playwright test e2e/stickers.spec.ts e2e/packs-lite.spec.ts --grep "lite sends built-in stickers|lite starts without" --workers=1 --retries=0
         env:

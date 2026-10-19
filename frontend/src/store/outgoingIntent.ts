@@ -1,4 +1,4 @@
-import { chat } from "@/lib/api";
+import { chat } from "@/lib/api/chat";
 import { errorMessage, sendFailReason } from "@/lib/error";
 import { captureChatOwner } from "./ownership";
 import { useTransfers } from "./transfers";
@@ -13,7 +13,13 @@ export {
   applyProjection,
   fromHistoryItem,
 } from "./conversationState";
-import type { ChatMessage, Conversation } from "./conversationModel";
+import type {
+  ChatMessage,
+  Conversation,
+  SendIntent,
+  SendPayload,
+} from "./conversationModel";
+export type { SendIntent, SendPayload } from "./conversationModel";
 /** Outgoing work owns intent/cache transitions and serial delivery projection. */
 export interface OutgoingIntentState extends ConversationCacheState {
   statusBusy: boolean;
@@ -37,29 +43,6 @@ type Set = (
 ) => void;
 
 export const SEND_INTENT_CAP = 256;
-export type SendPayload =
-  | {
-      kind: "text";
-      text: string;
-      replyTo: string | null;
-      expiresAtMs?: number | null;
-    }
-  | {
-      kind: "sticker";
-      stickerId: string;
-      fallback: string;
-      expiresAtMs?: number | null;
-    }
-  | { kind: "file"; path: string; media: boolean; expiresAtMs?: number | null };
-export interface SendIntent {
-  conversation: Conversation;
-  payload: SendPayload;
-  message: ChatMessage;
-  /** Exact deletion protection owned by the bounded intent, never by an LRU scope. */
-  deletedIds?: string[];
-  /** Capacity fallback: accepted messages need canonical history, never an overlay. */
-  acceptanceHistoryOnly?: boolean;
-}
 
 let clientIdCounter = 0;
 /** A process-unique id for an optimistic message bubble. */

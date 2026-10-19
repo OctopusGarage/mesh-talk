@@ -1,0 +1,83 @@
+{
+  "name": "mesh-talk-validation-velocity-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-VALIDATION-001",
+      "name": "selection preserves dependency and acceptance obligations",
+      "subject_file": "docs/testing-feedback-loop.md",
+      "context_files": [
+        "scripts/validation/affected.mjs",
+        "scripts/validation/checks.mjs",
+        "scripts/validation/changed.mjs",
+        "src-tauri/validation.json"
+      ],
+      "min_score": 0.9,
+      "scenario": "Review the changed-boundary development runner for false-green selections after a Rust, frontend or shared-input change. Evaluate current implementation, not aspirations.",
+      "rubric": [
+        "Unmapped changes block unless explicitly assigned with a reason; shared inputs reach consumers and deleted-source dependencies are considered.",
+        "Cheap static checks precede heavy work, and changed inputs invalidate the queued handoff and final verdict.",
+        "Test selectors must execute nonignored tests and each selected frontend or diagnostic file must execute at least one passing declared test case; skipped-only runs and file wrappers cannot qualify. Test-case counts are not proof of assertion-call counts or test quality.",
+        "Browser/native escalation and full publication gates remain explicit obligations; selected development success cannot authorize a merge."
+      ]
+    },
+    {
+      "id": "MT-VALIDATION-002",
+      "name": "reuse and cancellation cannot turn stale work into proof",
+      "subject_file": "scripts/validation/stage.mjs",
+      "context_files": [
+        "scripts/validation/stage-inputs.mjs",
+        "scripts/build-retention.py",
+        "docs/build-retention.md",
+        "docs/testing-feedback-loop.md",
+        "scripts/check-health.sh"
+      ],
+      "min_score": 0.9,
+      "scenario": "Assess trusted local reuse, process cancellation and cache cleanup. Identify concrete paths to stale success or premature resource release. Do not infer measured speedups from mechanisms.",
+      "rubric": [
+        "Reuse checks source or registered input closure, tool/config/environment identity, artifacts and log integrity, and expires evidence.",
+        "Dirty source, CI and explicit fresh execution do not reuse successful local verdicts; source changes during work cannot publish reusable success.",
+        "POSIX nested cancellation retains resource ownership through descendant cleanup; platform-specific limitations are disclosed rather than treated as proved.",
+        "Automatic cleanup protects recently used verified caches and active builds; explicit cleanup policy and soft budget limits are accurately described."
+      ]
+    },
+    {
+      "id": "MT-VALIDATION-003",
+      "name": "CI acceleration preserves protected checks and coverage identity",
+      "subject_file": ".github/workflows/e2e-ui.yml",
+      "context_files": [
+        "scripts/ci/unit-coverage-artifact.mjs",
+        ".github/workflows/ci.yml",
+        ".github/workflows/check-health.yml",
+        ".github/workflows/dependency-review.yml"
+      ],
+      "min_score": 0.9,
+      "scenario": "Evaluate workflow optimization for missing checks, skipped-success aggregates and cross-run artifact substitution. Source review is not evidence of hosted execution or enabled branch settings.",
+      "rubric": [
+        "Stable aggregate checks use always() and explicitly require successful dependencies instead of trusting skipped checks.",
+        "Merge groups trigger the affected checks and dependency review uses the queued base/head delta.",
+        "Shared coverage stays in the same workflow/run/attempt/source/platform identity and validates content before restoring output.",
+        "Required desktop platform matrices and full suites remain present; claimed redundant work removal does not remove its owning validation."
+      ]
+    },
+    {
+      "id": "MT-VALIDATION-004",
+      "name": "feedback measurements cannot exaggerate quality or speed",
+      "subject_file": "scripts/validation/feedback.mjs",
+      "context_files": [
+        "scripts/validation/latency.mjs",
+        "scripts/validation/selection-audit.mjs",
+        "docs/testing-feedback-loop.md"
+      ],
+      "min_score": 0.9,
+      "scenario": "Assess whether reports distinguish first observed command, first actionable issue, total completion, cache reuse and actual acceptance. Look for unsupported zero-miss, regression-rate or latency-improvement claims.",
+      "rubric": [
+        "Command completion is distinct from successful assertions and from final acceptance; candidateReady remains false for development reports.",
+        "Failures, unavailable tools, invalidated source, cancellation, blocked and empty selections are kept distinct; cancellation does not erase an earlier issue.",
+        "Missing or invalid timestamps stay unknown, snapshots are replayable, repeated observations deduplicate without collapsing distinct invocations.",
+        "Scope/platform/timing origin and cache reuse stay visible; selection audits and small sample quantiles do not prove zero misses or unmeasured speed improvements."
+      ]
+    }
+  ]
+}
