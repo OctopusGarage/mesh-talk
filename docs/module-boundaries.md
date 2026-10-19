@@ -100,6 +100,23 @@ state. Chat supplies these capabilities; standalone send/status tests use the
 same cache defaults without initializing chat. Feature work should extend these
 owners instead of importing the aggregate chat getter/setter into them.
 
+`ui/store/channelActions.ts` owns channel creation, member edits, ownership
+transfer, invitation acceptance, leaving, dissolution and renaming. Its narrow
+state/context defines channel projections and explicit capture, command,
+navigation, refresh and error capabilities. `chat.ts` supplies these capabilities
+and preserves its existing public actions. The common member-mutation sequence
+is private to the owner; distinct leave/dissolve/acceptance transitions remain
+explicit. Standalone tests exercise the owner without initializing chat.
+
+Attachment approval ordering and stale-session checks belong to
+`ui/features/chat/attachments/attachmentDecision.ts`, reused by message bubbles
+and the files tray. Those views retain their translated errors and local controls;
+core remains authoritative for consent and byte readiness. `HighlightedText.tsx`
+owns shared search/history highlighting. `StickerThumb.tsx` owns decoded static
+frames and bitmap cleanup, while `ui/lib/motion.ts` owns the live reduced-motion
+preference. Unknown preferences disable animation; mounted consumers react to
+operating-system preference changes. None of these modules owns global chat state.
+
 `core/node/account_profile.rs` owns signed Account profile state: startup
 reconstruction, local revision allocation, legacy/modern incoming merge and
 coordinated avatar/language persistence. Its internal state owns the journals and
@@ -121,7 +138,8 @@ Module-owned `validation.json` contracts link these boundaries to development
 checks. Account profiles use `core-account-profile`; desktop session/admission
 uses `desktop-session`; history, outgoing intents, shared conversation state and
 chat composition use `frontend-history`, `frontend-outgoing`,
-`frontend-conversation-state` and `frontend-chat`. Contracts declare downstream
+`frontend-conversation-state` and `frontend-chat`. Channel actions use
+`frontend-channel-actions`, with chat as a declared consumer. Contracts declare downstream
 consumer IDs and escalation notes; frontend source imports add affected unit
 consumers automatically. Integration grant policy expands through service,
 headless host, IPC, client and desktop/MCP adapters. Most other core module IDs

@@ -1,5 +1,6 @@
 import { saveAttachment } from "@/lib/attachmentSave";
 import { create } from "zustand";
+import { createChannelActions, type ChannelActions } from "./channelActions";
 import { chat, contactPolicy, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
@@ -211,7 +212,7 @@ function reactFor(
 const isChannelConv = (c: Conversation) => c.kind === "channel";
 
 export interface ChatState
-  extends ConversationHistoryState, OutgoingIntentContext {
+  extends ConversationHistoryState, OutgoingIntentContext, ChannelActions {
   bootBusy: boolean;
   bootRequest: number;
   rosterRequest: number;
@@ -283,15 +284,6 @@ export interface ChatState
     fallback: string,
     expiresAtMs?: number | null,
   ) => Promise<void>;
-  createChannel: (name: string, memberIds: string[]) => Promise<boolean>;
-  dissolveChannel: (channelId: string) => Promise<boolean>;
-  addMember: (memberId: string) => Promise<boolean>;
-  removeMember: (memberId: string) => Promise<boolean>;
-  transferChannelOwner: (memberId: string) => Promise<boolean>;
-  leaveChannel: () => Promise<boolean>;
-  acceptChannelInvite: () => Promise<boolean>;
-  /** Rename a channel for everyone (owner-only; the new name syncs to all members). */
-  renameChannel: (channelId: string, name: string) => Promise<void>;
 }
 
 function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
@@ -1069,195 +1061,15 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
   },
 
-  createChannel: async (name, memberIds) => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return false;
-    const request = get().activeRequest + 1;
-    set({ activeRequest: request });
-    const id = await chat.createChannel(name, memberIds);
-    if (!lease.current() || get().activeRequest !== request) return false;
-    await get().refreshRoster();
-    if (!lease.current() || get().activeRequest !== request) return false;
-    await get().open({ kind: "channel", id, name });
-    return lease.current();
-  },
-
-  addMember: async (memberId) => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return false;
-    const c = get().active;
-    if (!c || c.kind !== "channel") return false;
-    const request = get().activeRequest + 1;
-    set({ activeRequest: request });
-    try {
-      await chat.addChannelMember(c.id, memberId);
-      if (!lease.current() || get().activeRequest !== request) return false;
-      const info = await chat.channelMembers(c.id);
-      if (!lease.current() || get().activeRequest !== request) return false;
-      set({ members: info.members, channelOwner: info.owner });
-      void get().refreshRoster();
-      return true;
-    } catch (e) {
-      if (get().activeRequest === request)
-        set({ error: `Couldn't add member: ${errorMessage(e)}` });
-      return false;
-    }
-  },
-
-  removeMember: async (memberId) => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return false;
-    const c = get().active;
-    if (!c || c.kind !== "channel") return false;
-    const request = get().activeRequest + 1;
-    set({ activeRequest: request });
-    try {
-      await chat.removeChannelMember(c.id, memberId);
-      if (!lease.current() || get().activeRequest !== request) return false;
-      const info = await chat.channelMembers(c.id);
-      if (!lease.current() || get().activeRequest !== request) return false;
-      set({ members: info.members, channelOwner: info.owner });
-      void get().refreshRoster();
-      return true;
-    } catch (e) {
-      if (get().activeRequest === request)
-        set({ error: `Couldn't remove member: ${errorMessage(e)}` });
-      return false;
-    }
-  },
-
-  transferChannelOwner: async (memberId) => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return false;
-    const c = get().active;
-    if (!c || c.kind !== "channel") return false;
-    const request = get().activeRequest + 1;
-    set({ activeRequest: request });
-    try {
-      await chat.transferChannelOwner(c.id, memberId);
-      if (!lease.current() || get().activeRequest !== request) return false;
-      const info = await chat.channelMembers(c.id);
-      if (!lease.current() || get().activeRequest !== request) return false;
-      set({ members: info.members, channelOwner: info.owner });
-      void get().refreshRoster();
-      return true;
-    } catch (e) {
-      if (get().activeRequest === request)
-        set({
-          error: `Couldn't transfer channel ownership: ${errorMessage(e)}`,
-        });
-      return false;
-    }
-  },
-
-  leaveChannel: async () => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return false;
-    const c = get().active;
-    if (!c || c.kind !== "channel") return false;
-    try {
-      await chat.leaveChannel(c.id);
-      if (!lease.current()) return false;
-      set((state) => {
-        const unread = { ...state.unread };
-        delete unread[convKey(c)];
-        const leavingActive =
-          state.active?.kind === "channel" && state.active.id === c.id;
-        return {
-          active: leavingActive ? null : state.active,
-          members: leavingActive ? [] : state.members,
-          channelOwner: leavingActive ? "" : state.channelOwner,
-          unread,
-        };
-      });
-      await get().refreshRoster();
-      return lease.current();
-    } catch (e) {
-      set({ error: `Couldn't leave channel: ${errorMessage(e)}` });
-      return false;
-    }
-  },
-
-  acceptChannelInvite: async () => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return false;
-    const c = get().active;
-    if (!c || c.kind !== "channel") return false;
-    const request = get().activeRequest;
-    try {
-      await chat.acceptChannelInvite(c.id);
-      if (!lease.current()) return false;
-      await get().refreshRoster();
-      if (
-        lease.current() &&
-        get().activeRequest === request &&
-        get().active?.id === c.id
-      ) {
-        try {
-          const info = await chat.channelMembers(c.id);
-          if (
-            lease.current() &&
-            get().activeRequest === request &&
-            get().active?.id === c.id
-          )
-            set({ members: info.members, channelOwner: info.owner });
-        } catch {
-          // Acceptance succeeded; opening the member list can retry its details.
-        }
-      }
-      return lease.current();
-    } catch (e) {
-      set({ error: `Couldn't accept invitation: ${errorMessage(e)}` });
-      return false;
-    }
-  },
-
-  dissolveChannel: async (channelId) => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return false;
-    try {
-      await chat.dissolveChannel(channelId);
-      if (!lease.current()) return false;
-      set((state) => ({
-        channels: state.channels.map((channel) =>
-          channel.channel_id === channelId
-            ? { ...channel, dissolved: true }
-            : channel,
-        ),
-      }));
-      await get().refreshRoster();
-      return lease.current();
-    } catch (e) {
-      set({ error: `Couldn't dissolve channel: ${errorMessage(e)}` });
-      return false;
-    }
-  },
-
-  renameChannel: async (channelId, name) => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return;
-    try {
-      await chat.renameChannel(channelId, name);
-      if (!lease.current()) return;
-      await get().refreshRoster();
-      if (!lease.current()) return;
-      // Keep the open conversation's header in sync if it's the one we renamed.
-      const active = get().active;
-      if (active?.kind === "channel" && active.id === channelId) {
-        set({ active: { ...active, name } });
-      }
-    } catch (e) {
-      set({ error: `Couldn't rename channel: ${errorMessage(e)}` });
-    }
-  },
+  ...createChannelActions({
+    read: get,
+    write: rawSet,
+    capture: () => captureChat(get),
+    commands: chat,
+    refreshRoster: () => get().refreshRoster(),
+    open: (conversation) => get().open(conversation),
+    reportError: (message) => rawSet({ error: message }),
+  }),
 }));
 
 // --- incoming event handlers (module fns to keep the store object lean) -----

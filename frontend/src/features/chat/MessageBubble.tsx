@@ -1,3 +1,4 @@
+import { createAttachmentDecision } from "./attachments/attachmentDecision";
 import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -125,17 +126,14 @@ function FileBubble({
     }
   };
 
-  const decide = async (accept: boolean) => {
-    const lease = captureChatOwnership();
-    if (!lease.current() || !file.fileConv) return;
-    try {
-      await chat.decideAttachment(file.fileConv, accept);
-      if (lease.current()) await refreshFileAvailability([file.fileConv]);
-    } catch (error) {
-      if (lease.current())
-        setError(t("files.approvalFailed", { error: errorMessage(error) }));
-    }
-  };
+  const decideAttachment = createAttachmentDecision({
+    captureOwnership: captureChatOwnership,
+    decideAttachment: chat.decideAttachment,
+    refreshAvailability: refreshFileAvailability,
+    reportError: (error) =>
+      setError(t("files.approvalFailed", { error: errorMessage(error) })),
+  });
+  const decide = (accept: boolean) => decideAttachment(file.fileConv, accept);
 
   // Media (image/video, sent via the media button) that is small enough to render inline:
   // show ONLY the preview. Its filename, size, and download live in the detail view that

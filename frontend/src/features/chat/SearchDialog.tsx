@@ -1,3 +1,4 @@
+import { HighlightedText } from "./HighlightedText";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Hash, Search, SearchX } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -18,35 +19,6 @@ import type { SearchHitInfo } from "@/lib/types";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { visibleSearchHits } from "@/lib/contactVisibility";
 import { rosterProjection } from "@/lib/rosterProjection";
-
-/** Highlight every case-insensitive occurrence of `term` in `text` with the signal hue. */
-function Highlighted({ text, term }: { text: string; term: string }) {
-  const parts = useMemo(() => {
-    const q = term.trim();
-    if (!q) return [text];
-    const re = new RegExp(
-      `(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-      "gi",
-    );
-    return text.split(re);
-  }, [text, term]);
-  return (
-    <>
-      {parts.map((p, i) =>
-        i % 2 === 1 ? (
-          <mark
-            key={i}
-            className="rounded-sm bg-signal/20 px-0.5 font-medium text-signal"
-          >
-            {p}
-          </mark>
-        ) : (
-          <span key={i}>{p}</span>
-        ),
-      )}
-    </>
-  );
-}
 
 export function SearchDialog() {
   const { t } = useTranslation();
@@ -299,7 +271,7 @@ export function SearchDialog() {
                       <span className="text-foreground/70">
                         {h.from_me ? t("common.you") : h.who}:
                       </span>{" "}
-                      <Highlighted text={h.text} term={query} />
+                      <HighlightedText text={h.text} term={query} />
                     </div>
                   </div>
                 </button>

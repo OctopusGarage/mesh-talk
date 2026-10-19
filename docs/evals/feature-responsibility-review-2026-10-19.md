@@ -1,5 +1,10 @@
 # Feature responsibility and reuse review — 2026-10-19
 
+**Follow-up:** F1–F4 are resolved. The same scoped balanced rubric now gives
+**100/100**, exceeding the requested 95 threshold. The baseline findings and graph
+below remain historical evidence; see [implementation follow-up](#implementation-follow-up)
+for verification, intentional behavior corrections, and limits.
+
 **Mode:** Architecture Audit  
 **Scope:** Feature inventory across all four Rust crates, the React application,
 desktop/platform adapters, help, and development tooling at `f0cc58d`. All source
@@ -326,3 +331,54 @@ Concentrate channel coordination first, then share the three small repeated
 frontend decisions when touching those features. Preserve the current core/host/
 frontend division and existing deep workflow owners; a wholesale rewrite or a
 general-purpose component framework is not justified by the evidence.
+
+## Implementation follow-up
+
+The reviewed changes resolve all four findings rather than changing the scoring
+weights. Independent spec review and subsequent code-quality review found no
+actionable gaps in the implementation. Under the original balanced formula,
+zero remaining Critical, Warning or Suggestion findings give **100/100**. This
+is a scoped finding-based score, not a claim that the repository is perfect or
+that every runtime/platform combination was tested. The separate five-dimension
+architecture assessment remains 95/100; it was not numerically reassessed here.
+
+| Finding | Implemented ownership                                                                                        | Preserved responsibility                                                                                                               |
+| ------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| F1      | `store/channelActions.ts`: all eight channel actions, narrow state/context, private member mutation sequence | Chat remains composition; core retains signed membership authority. Leave, dissolve, acceptance and creation retain distinct outcomes. |
+| F2      | `attachments/attachmentDecision.ts`: shared decision, refresh and stale-session continuation                 | Bubble/tray retain local controls and translated errors; existing attachment saving stays separate.                                    |
+| F3      | `HighlightedText.tsx`: one implementation used by both dialogs                                               | Literal escaping, matching, text and mark styling remain equivalent.                                                                   |
+| F4      | `StickerThumb.tsx`: static-frame rendering and bitmap lifetime; `lib/motion.ts`: shared live preference      | Composer retains input behavior; unknown motion preferences conservatively render static fallback.                                     |
+
+The motion change intentionally improves behavior beyond extraction: the previous
+shared Framer Motion hook captured a snapshot rather than reacting to later OS
+changes. A focused test reproduced this before the replacement. The shared
+observer now updates mounted consumers and disables animation when a preference
+cannot be determined. Sticker frames are keyed to their source, stale asynchronous
+decodes cannot replace the current image, and bitmaps close even when drawing or
+encoding fails. These are behavior corrections, so this follow-up does not claim
+that every observable behavior is unchanged.
+
+Validation executed:
+
+```sh
+node scripts/validation/changed.mjs --json
+make test-changed
+cd frontend
+node node_modules/typescript/bin/tsc --noEmit
+node node_modules/typescript/bin/tsc --noEmit -p tsconfig.e2e.json
+npm run build
+```
+
+The selected run passed **380 frontend tests in 34 files** and **44 Node
+validation-tooling tests** in 33 seconds. The selection includes standalone
+channel coordination, actual chat/members consumers, attachment decision/caller
+behavior, highlight rendering, sticker lifecycle and shared preference updates.
+The new `frontend-channel-actions` contract declares its chat consumer; source
+dependency selection includes the extracted component consumers. Targeted ESLint,
+Prettier, spelling, local link and diff checks also passed.
+
+The build retained its existing main-chunk size advisory. Node/Vitest emitted the
+existing experimental localStorage warning. No Rust implementation or wire format
+changed, so no Rust build/test run was added. Full suites, browser/native animation,
+physical-media acceptance, comprehensive health and PR/preflight gates were not
+run; those remain separate requirements before publishing a PR or release.

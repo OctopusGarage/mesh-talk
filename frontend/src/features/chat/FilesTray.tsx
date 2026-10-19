@@ -1,3 +1,4 @@
+import { createAttachmentDecision } from "./attachments/attachmentDecision";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -64,17 +65,13 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   }, [open, visibleFileKeys]);
   const dismissFile = useChat((s) => s.dismissFile);
   const setError = useChat((s) => s.setError);
-  const decide = async (fileConv: string, accept: boolean) => {
-    const lease = captureChatOwnership();
-    if (!lease.current()) return;
-    try {
-      await chat.decideAttachment(fileConv, accept);
-      if (lease.current()) await refreshFileAvailability([fileConv]);
-    } catch (error) {
-      if (lease.current())
-        setError(t("files.approvalFailed", { error: errorMessage(error) }));
-    }
-  };
+  const decide = createAttachmentDecision({
+    captureOwnership: captureChatOwnership,
+    decideAttachment: chat.decideAttachment,
+    refreshAvailability: refreshFileAvailability,
+    reportError: (error) =>
+      setError(t("files.approvalFailed", { error: errorMessage(error) })),
+  });
 
   // Remembered default download folder ("" = use the OS Downloads folder). Loaded on open, kept as
   // a primitive (memory: zustand selectors returning fresh objects can black-screen).

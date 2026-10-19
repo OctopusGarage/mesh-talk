@@ -48,6 +48,18 @@
       ],
       "frontend": ["src/store/ownership.test.ts"],
       "consumers": ["frontend-history", "frontend-outgoing"]
+    },
+    {
+      "id": "frontend-channel-actions",
+      "paths": [
+        "frontend/src/store/channelActions.ts",
+        "frontend/src/store/channelActions.test.ts"
+      ],
+      "frontend": ["src/store/channelActions.test.ts"],
+      "consumers": ["frontend-chat"],
+      "escalation": [
+        "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
+      ]
     }
   ]
 }

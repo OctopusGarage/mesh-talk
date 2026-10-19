@@ -101,7 +101,7 @@ establish shipped capabilities or completed validation.
 
 ## Evaluation records
 
-[Feature responsibility and reuse review — 2026-10-19](evals/feature-responsibility-review-2026-10-19.md) maps feature owners, existing reuse, justified component extractions, and selective validation. It records one coordination hotspot and three smaller reuse opportunities.
+[Feature responsibility and reuse review — 2026-10-19](evals/feature-responsibility-review-2026-10-19.md) maps feature owners, existing reuse, justified component extractions, and selective validation. Its implementation follow-up records the resolution of all four findings and focused validation limits.
 
 [Bot integration implementation evidence, 2026-10-19](evals/bot-integrations-2026-10-19.md) records focused test commands, standalone binary checks and platform limits.
 

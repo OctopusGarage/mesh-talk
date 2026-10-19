@@ -1,3 +1,4 @@
+import { HighlightedText } from "./HighlightedText";
 import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useEffect, useMemo, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -56,35 +57,6 @@ import { ClearHistoryButton } from "./ClearHistoryButton";
 // single page can return — so this view is complete up to the durable-store window.
 const FULL_HISTORY_LIMIT = 500;
 const NO_HISTORY: ChatMessage[] = [];
-
-/** Highlight every case-insensitive occurrence of `term` in `text` (mirrors SearchDialog). */
-function Highlighted({ text, term }: { text: string; term: string }) {
-  const parts = useMemo(() => {
-    const q = term.trim();
-    if (!q) return [text];
-    const re = new RegExp(
-      `(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-      "gi",
-    );
-    return text.split(re);
-  }, [text, term]);
-  return (
-    <>
-      {parts.map((p, i) =>
-        i % 2 === 1 ? (
-          <mark
-            key={i}
-            className="rounded-sm bg-signal/20 px-0.5 font-medium text-signal"
-          >
-            {p}
-          </mark>
-        ) : (
-          <span key={i}>{p}</span>
-        ),
-      )}
-    </>
-  );
-}
 
 /** Author + timestamp line shared by the text + link rows. */
 function RowMeta({ m }: { m: ChatMessage }) {
@@ -375,13 +347,13 @@ export function ConversationHistoryDialog({
                         ) : m.file ? (
                           <span className="inline-flex items-center gap-1.5">
                             {fileGlyph(m.file.name, m.file.mime)}
-                            <Highlighted
+                            <HighlightedText
                               text={attachmentLabel(m.file.name, m.file.mime)}
                               term={query}
                             />
                           </span>
                         ) : (
-                          <Highlighted
+                          <HighlightedText
                             text={messageDisplayText(m.text, t)}
                             term={query}
                           />
