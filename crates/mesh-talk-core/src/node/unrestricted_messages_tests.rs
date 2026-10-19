@@ -83,20 +83,20 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
     let bob_secret = bob.secret_bytes();
-    let ba = Account::generate();
-    let ba_secret = ba.secret_bytes();
+    let bob_account = Account::generate();
+    let bob_account_secret = bob_account.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _, _) = test_support::node_with_files(ad.path(), alice, aa, &bp);
     let text = "你好，今天我们一起讨论这个项目。";
     let id = a
-        .enqueue_to_account(&ba.account_id(), text.as_bytes(), None)
+        .enqueue_to_account(&bob_account.account_id(), text.as_bytes(), None)
         .await
         .unwrap();
-    seed_retired_preferences(bd.path(), &ba, Some(id));
-    let (b, mut received, _) = test_support::node_with_files(bd.path(), bob, ba, &ap);
+    seed_retired_preferences(bd.path(), &bob_account, Some(id));
+    let (b, mut received, _) = test_support::node_with_files(bd.path(), bob, bob_account, &ap);
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     timeout(Duration::from_secs(8), a.flush_delivery(id))
@@ -121,7 +121,7 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
     let (reopened, _, _) = test_support::node_with_files(
         bd.path(),
         DeviceIdentity::from_secret_bytes(bob_secret.0, bob_secret.1),
-        Account::from_secret_bytes(ba_secret),
+        Account::from_secret_bytes(bob_account_secret),
         &ap,
     );
     assert_eq!(
@@ -150,7 +150,7 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
     // Reconstruct a schema-2 backup containing both retired records, as shipped previously.
     records.push(SnapshotRecordV1::DmLanguageProfile {
         payload: profile::ProfilePayload::new_with_language(
-            &Account::from_secret_bytes(ba_secret),
+            &Account::from_secret_bytes(bob_account_secret),
             None,
             100,
             Some("en".into()),
