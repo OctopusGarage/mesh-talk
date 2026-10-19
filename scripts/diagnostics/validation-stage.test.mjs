@@ -478,3 +478,18 @@ test("cancellation at final result delivery removes published success", async t 
   assert.equal(result.code, 130);
   await assert.rejects(readFile(result.receipt));
 });
+
+test("an ignored frontend environment file created during finalization invalidates success", async t => {
+  const f = await fixture(t);
+  const { writeFileSync } = await import("node:fs");
+  await mkdir(path.join(f.root, "frontend"));
+  await writeFile(path.join(f.root, ".gitignore"), "target/\ncount\nartifact\nfrontend/.env*\n");
+  f.git(["add", ".gitignore"]);
+  f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "ignore local environment"]);
+  const result = await f.run({ log: message => {
+    if (message.startsWith("passed in")) writeFileSync(path.join(f.root, "frontend/.env.local"), "VITE_LOCAL=changed\n");
+  } });
+  assert.equal(result.code, 1);
+  assert.equal(result.failureKind, "invalidated");
+  await assert.rejects(readFile(result.receipt));
+});

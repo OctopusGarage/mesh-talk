@@ -221,6 +221,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   try { initial = source(root); } catch { initial = { dirty: true }; }
   const declared = inputs === undefined ? undefined : await inputIdentity(root, inputs);
   const frontendEnvironment = await frontendEnvironmentIdentity(root);
+  const frontendUnchanged = async () => JSON.stringify(await frontendEnvironmentIdentity(root)) === JSON.stringify(frontendEnvironment);
   const identity = { schema: 2, source: declared ? undefined : initial.head, inputs: declared, cwd: path.relative(root, cwd), name, command, context, platform: process.platform, arch: process.arch,
     node: process.version, executable: process.execPath, environment: environmentIdentity(env, profile), frontendEnvironment, profile, artifacts };
   // Executable versions invalidate cached results after toolchain upgrades.
@@ -332,7 +333,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     // ordinary reverted edit even when its final content hash is unchanged.
     await new Promise(resolve => setImmediate(resolve));
     const finalSource = source(root);
-    if (record.code === 0 && (await observation.changed() || !initial.dirty &&
+    if (record.code === 0 && (await observation.changed() || !await frontendUnchanged() || !initial.dirty &&
         (finalSource.dirty || finalSource.head !== initial.head || !await runtimeUnchanged()))) {
       record.code = 1; record.failureKind = "invalidated";
       record.error = "Stage inputs changed during validation finalization";
@@ -341,7 +342,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     await cancelledDuringFinalization();
     await recordAttempt(directory, record);
     await new Promise(resolve => setImmediate(resolve));
-    if (record.code === 0 && await observation.changed()) {
+    if (record.code === 0 && (await observation.changed() || !await frontendUnchanged())) {
       record.code = 1; record.failureKind = "invalidated";
       record.error = "Stage inputs changed during validation finalization";
       await rm(receipt, { force: true });
@@ -359,12 +360,18 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     if (!cleanupUnverified) { await releaseResource?.(); await release(); }
     // The returned object is shared with this finalizer: cancellation while
     // asynchronous lease release runs must not deliver a successful verdict.
-    if (delivered?.code === 0 && signal?.aborted) {
-      delivered.code = 130; delivered.reused = false;
-      delivered.error = "Validation cancelled during finalization";
-      delivered.finished = Date.now(); delivered.elapsedMs = delivered.finished - started;
-      await rm(receipt, { force: true });
-      await recordAttempt(directory, delivered);
+    if (delivered?.code === 0) {
+      const current = source(root);
+      const invalidated = await observation.changed() || !await frontendUnchanged() ||
+        !initial.dirty && (current.dirty || current.head !== initial.head);
+      if (signal?.aborted || invalidated) {
+        delivered.code = signal?.aborted ? 130 : 1; delivered.reused = false;
+        delivered.failureKind = signal?.aborted ? undefined : "invalidated";
+        delivered.error = signal?.aborted ? "Validation cancelled during finalization" : "Stage inputs changed during validation finalization";
+        delivered.finished = Date.now(); delivered.elapsedMs = delivered.finished - started;
+        await rm(receipt, { force: true });
+        await recordAttempt(directory, delivered);
+      }
     }
   }
 }

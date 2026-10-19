@@ -6,6 +6,14 @@ newly generated native bundles. Keep the latest **five successful build sets**
 across all registered checkouts and worktrees. Each set includes its commit,
 branch, dirty-worktree status, source path, and timestamp.
 
+The complete local health gate also holds a managed checkout lease, including
+browser execution and the intervals between Cargo phases. Cargo's own compiler
+lock ends before its test executables finish; it cannot protect a long test run
+from scheduled cache eviction. The health supervisor uses the existing process
+group cleanup contract and always runs the aggregate gate freshly, while its
+individual stages retain their input-bound reuse. This protects checkout-local
+targets through full health without disabling cleanup for other idle checkouts.
+
 After a successful managed command, cleanup measures the combined Cargo targets
 and evicts compiler caches from the least recently used checkout until usage is
 at most **40 GiB**, where possible. A checkout's `deps`, `.fingerprint`, `build`,

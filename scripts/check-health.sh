@@ -5,7 +5,8 @@
 
 set -e  # Exit on any error
 
-stage="$(pwd)/scripts/validation/stage.mjs"
+health_root="$(pwd)"
+stage="$health_root/scripts/validation/stage.mjs"
 
 # FAST mode (FAST=1, or `check-health.sh --fast`): an optional partial local gate with
 # formatting, clippy, frontend lint/tests, and the in-memory Rust
@@ -57,6 +58,17 @@ command_exists() {
 if [ ! -f "Makefile" ] || [ ! -d "src-tauri" ] || [ ! -d "frontend" ]; then
     print_status "error" "Please run this script from the project root directory"
     exit 1
+fi
+
+if [ "${MESH_VALIDATION_HEALTH_GUARDED:-0}" != 1 ]; then
+    # Cargo releases its compiler lock before running test executables. Keep a
+    # managed checkout lease across the complete gate, including browser gaps,
+    # so scheduled cleanup cannot remove pending executables or warm caches.
+    # The aggregate always executes; individual stages retain their own reuse.
+    health_requested_fresh="${MESH_VALIDATION_FRESH:-0}"
+    MESH_VALIDATION_FRESH=1 exec node "$stage" full-health --profile shared --resource health -- \
+        env MESH_VALIDATION_FRESH="$health_requested_fresh" MESH_VALIDATION_HEALTH_GUARDED=1 \
+        python3 "$health_root/scripts/build-retention.py" run -- bash "$health_root/scripts/check-health.sh" "$@"
 fi
 
 # A full gate must not silently skip its scans and still claim everything passed.

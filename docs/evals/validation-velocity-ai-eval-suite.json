@@ -30,7 +30,8 @@
         "scripts/validation/stage-inputs.mjs",
         "scripts/build-retention.py",
         "docs/build-retention.md",
-        "docs/testing-feedback-loop.md"
+        "docs/testing-feedback-loop.md",
+        "scripts/check-health.sh"
       ],
       "min_score": 0.9,
       "scenario": "Assess trusted local reuse, process cancellation and cache cleanup. Identify concrete paths to stale success or premature resource release. Do not infer measured speedups from mechanisms.",
