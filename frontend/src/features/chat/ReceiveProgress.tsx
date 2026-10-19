@@ -8,6 +8,12 @@ export function ReceiveProgress({
 }) {
   const { t } = useTranslation();
   if (status?.ready) return null;
+  if (status?.unavailable)
+    return (
+      <div className="mt-2 text-[11px] opacity-75" role="status">
+        {t("files.unavailable")}
+      </div>
+    );
   if (status?.consent === "pending" || status?.consent === "declined")
     return (
       <div className="mt-2 text-[11px] opacity-75" role="status">

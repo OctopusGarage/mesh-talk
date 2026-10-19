@@ -18,7 +18,9 @@ const REQUEST_V3: &[u8] = b"MTBD3Q";
 const REQUEST_V4: &[u8] = b"MTBD4Q";
 const RESPONSE_V4: &[u8] = b"MTBD4R";
 const RESPONSE: &[u8] = b"MTBD1R";
-const TTL: Duration = Duration::from_secs(45);
+const TTL: Duration = crate::discovery::roster::PUBLIC_PRESENCE_TTL;
+/// Accept the original deployed wire lease while new registrations use the shorter TTL.
+const MAX_WIRE_TTL: Duration = Duration::from_secs(45);
 pub(crate) const MAX_MEMBERS: usize = 1024;
 pub(crate) const LEGACY_MAX_MEMBERS: usize = 128;
 
@@ -35,6 +37,13 @@ fn unix_seconds_now() -> u64 {
 pub struct FederatedPresence {
     pub announce: Announce,
     pub expires_at_secs: u64,
+}
+
+/// Both clocks are needed: monotonic aging and exact origin identity across re-queries.
+#[derive(Clone, Copy)]
+pub(crate) struct PresenceDeadline {
+    pub expires_at: Instant,
+    pub origin_secs: u64,
 }
 
 pub type GatewayRoute = (String, u16);
@@ -165,7 +174,7 @@ impl BridgeDirectory {
             if proof.announce.post_office
                 || !valid_directory_proof(&proof.announce)
                 || proof.expires_at_secs <= unix_now
-                || proof.expires_at_secs > unix_now.saturating_add(TTL.as_secs())
+                || proof.expires_at_secs > unix_now.saturating_add(MAX_WIRE_TTL.as_secs())
                 || self.members.contains_key(&proof.announce.user_id)
             {
                 continue;
@@ -389,7 +398,7 @@ pub(crate) struct DirectoryResponse {
     proofs: Vec<Announce>,
     gateway: Option<GatewayRoute>,
     finished: bool,
-    pub(crate) expiries: HashMap<String, Instant>,
+    pub(crate) expiries: HashMap<String, PresenceDeadline>,
     freshness_version: Option<bool>,
 }
 
@@ -436,11 +445,15 @@ impl DirectoryResponse {
             for entry in entries {
                 if !entry.announce.post_office
                     && entry.expires_at_secs > now
-                    && entry.expires_at_secs <= now.saturating_add(TTL.as_secs())
+                    && entry.expires_at_secs <= now.saturating_add(MAX_WIRE_TTL.as_secs())
                 {
                     self.expiries.insert(
                         entry.announce.user_id.clone(),
-                        Instant::now() + Duration::from_secs(entry.expires_at_secs - now),
+                        PresenceDeadline {
+                            expires_at: Instant::now()
+                                + Duration::from_secs(entry.expires_at_secs - now),
+                            origin_secs: entry.expires_at_secs,
+                        },
                     );
                 }
                 page.push(entry.announce);
@@ -525,7 +538,9 @@ mod tests {
         );
         assert!(response.expiries.contains_key(&valid_id));
         assert!(
-            response.expiries[&valid_id].saturating_duration_since(Instant::now())
+            response.expiries[&valid_id]
+                .expires_at
+                .saturating_duration_since(Instant::now())
                 <= Duration::from_secs(7)
         );
     }
@@ -551,6 +566,63 @@ mod tests {
     }
 
     #[test]
+    fn logged_out_directory_member_expires_within_twenty_seconds_across_federation() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Messi10", 1);
+        let observed = Instant::now();
+        let unix_now = unix_seconds_now();
+        let mut origin = BridgeDirectory::default();
+        origin
+            .register(&device.public(), Some(&proof), true, observed)
+            .unwrap();
+        let exported = origin.export_federated(observed, unix_now);
+        assert_eq!(exported[0].expires_at_secs, unix_now + 15);
+        let mut relay = BridgeDirectory::default();
+        relay.import_federated(&exported, unix_now);
+        let forwarded = relay.export_federated(observed + Duration::from_secs(10), unix_now + 10);
+        assert_eq!(forwarded[0].expires_at_secs, unix_now + 15);
+        relay.import_federated(&forwarded, unix_now + 14);
+        assert!(
+            relay
+                .export_federated(observed + Duration::from_secs(20), unix_now + 20)
+                .is_empty()
+        );
+        assert!(
+            origin
+                .export_federated(observed + Duration::from_secs(20), unix_now + 20)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deployed_forty_five_second_directory_proof_still_decodes_and_forwards() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Legacy", 1);
+        let now = unix_seconds_now();
+        let origin = now + 45;
+        let mut directory = BridgeDirectory::default();
+        directory.import_federated(
+            &[FederatedPresence {
+                announce: proof.clone(),
+                expires_at_secs: origin,
+            }],
+            now,
+        );
+        assert_eq!(
+            directory.export_federated(Instant::now(), now)[0].expires_at_secs,
+            origin
+        );
+        let pages = directory
+            .encode_snapshot(freshness_request(), &[proof])
+            .unwrap();
+        let mut response = DirectoryResponse::new(DeviceIdentity::generate().public());
+        for page in pages {
+            assert!(response.add_page(&page).is_some());
+        }
+        assert_eq!(response.expiries.len(), 1);
+    }
+
+    #[test]
     fn freshness_response_preserves_forwarded_origin_deadline() {
         let device = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&device, &Account::generate(), "remote", 1);
@@ -573,7 +645,9 @@ mod tests {
                 assert!(response.add_page(&page).is_some());
             }
             assert!(
-                response.expiries[&proof.user_id].saturating_duration_since(Instant::now())
+                response.expiries[&proof.user_id]
+                    .expires_at
+                    .saturating_duration_since(Instant::now())
                     <= Duration::from_secs(3)
             );
             assert_eq!(
@@ -753,7 +827,7 @@ mod tests {
         remote.import_federated(
             &[FederatedPresence {
                 announce: relay_proof,
-                expires_at_secs: unix_now + 45,
+                expires_at_secs: unix_now + TTL.as_secs(),
             }],
             unix_now,
         );
@@ -796,7 +870,7 @@ mod tests {
                 announce.user_id.clone(),
                 FederatedPresence {
                     announce,
-                    expires_at_secs: unix_now + 45,
+                    expires_at_secs: unix_now + TTL.as_secs(),
                 },
             );
         }

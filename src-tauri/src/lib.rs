@@ -16,6 +16,7 @@
 // Tauri desktop shell over it.
 pub mod app_lock;
 pub mod avatars;
+mod background_command;
 mod channel_reception;
 pub mod chat_commands;
 pub mod commands;

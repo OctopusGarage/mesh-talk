@@ -260,6 +260,7 @@
     "groupSummary": "{{total}} 位成员 · 已知在线 {{online}} 人",
     "groupUpdating": "正在更新成员在线信息…",
     "groupUnbound": "{{summary}} · 另有 {{count}} 个未绑定账号的成员设备",
+    "queuePersistenceFailed": "无法保存自动下载队列，重启后可能需要重新接收：{{error}}",
     "unavailable": "在线状态暂无法更新，已有在线信息将正常过期；正在自动重试。",
     "observedDevices": "发现 {{count}} 台在线设备",
     "source_local": "本地网络发现",
@@ -544,6 +545,7 @@
     "nothingReceived": "尚未接收到任何文件。",
     "couldntSave": "无法保存文件：{{error}}",
     "savedTo": "已保存到 {{path}}",
+    "unavailable": "附件已不可用",
     "alreadyDownloaded": "已经下载过了 — 点“显示”查看位置。",
     "couldntOpen": "无法打开：{{error}}",
     "chooseFolder": "选择默认下载文件夹",
@@ -912,6 +914,8 @@
     "idConflict": "其他类型的资源库已使用这个资源包 ID。"
   },
   "memberProfile": {
+    "originalName": "原始名称",
+    "remark": "备注",
     "title": "成员资料",
     "description": "此成员的身份和已知网络信息。",
     "presenceUnavailable": "在线状态不可用",

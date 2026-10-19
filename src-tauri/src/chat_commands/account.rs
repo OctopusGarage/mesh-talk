@@ -163,13 +163,15 @@ pub async fn list_accounts(
             if rt.host_account_id() != Some(owner.as_str()) {
                 return Err("Contact roster requires this account's running node".into());
             }
-            let peers = rt.peers();
+            let mut peers = rt.peers();
+            peers.sort_by_key(|peer| std::cmp::Reverse(peer.last_seen));
             let online = online_account_ids(peers.clone());
             let live = peers
                 .into_iter()
                 .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
                 .collect();
             let mut rows = merge_account_rows(live, rt.known_account_ids());
+            fill_account_names(&mut rows, rt.known_account_names());
             let accounts = rows.iter().map(|row| row.account_id.clone()).collect();
             let visible = policy.visible_accounts(&owner, &online, accounts)?;
             rows.retain(|row| visible.contains(&row.account_id));
@@ -215,9 +217,20 @@ fn merge_account_rows(live: Vec<(String, String, bool)>, known: Vec<String>) -> 
         .collect()
 }
 
+fn fill_account_names(
+    rows: &mut [AccountInfo],
+    known: std::collections::HashMap<String, Vec<String>>,
+) {
+    for row in rows {
+        if let Some(names) = known.get(&row.account_id).filter(|names| !names.is_empty()) {
+            row.names = names.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod recovery_accounts_tests {
-    use super::merge_account_rows;
+    use super::{fill_account_names, merge_account_rows};
 
     #[test]
     fn deletion_presence_uses_the_same_source_evidence_as_ui() {
@@ -236,6 +249,7 @@ mod recovery_accounts_tests {
                 last_seen: now,
                 last_authenticated: None,
                 presence_expires_at: None,
+                presence_origin_expires_at: None,
             }],
             name: "Alice".into(),
             post_office: false,
@@ -251,8 +265,8 @@ mod recovery_accounts_tests {
         );
 
         let mut routed = fresh.clone();
-        routed.last_seen -= Duration::from_secs(60);
-        routed.routes[0].last_seen -= Duration::from_secs(60);
+        routed.last_seen -= Duration::from_secs(10);
+        routed.routes[0].last_seen -= Duration::from_secs(10);
         routed.routes[0].source = RouteSource::RoutedQuery;
         assert_eq!(super::online_account_ids(vec![routed]), vec!["alice"]);
 
@@ -268,6 +282,25 @@ mod recovery_accounts_tests {
         let mut route_only = fresh;
         route_only.routes.clear();
         assert!(super::online_account_ids(vec![route_only]).is_empty());
+    }
+
+    #[test]
+    fn offline_account_keeps_known_name_without_live_devices() {
+        let mut rows = merge_account_rows(vec![], vec!["abcd".into()]);
+        fill_account_names(
+            &mut rows,
+            std::collections::HashMap::from([("abcd".into(), vec!["Messi10".into()])]),
+        );
+        assert_eq!(rows[0].names, vec!["Messi10"]);
+        assert_eq!(rows[0].device_count, 0);
+
+        let mut live = merge_account_rows(vec![("abcd".into(), "New name".into(), false)], vec![]);
+        fill_account_names(
+            &mut live,
+            std::collections::HashMap::from([("abcd".into(), vec!["New name".into()])]),
+        );
+        assert_eq!(live[0].names, vec!["New name"]);
+        assert_eq!(live[0].device_count, 1);
     }
 
     #[test]

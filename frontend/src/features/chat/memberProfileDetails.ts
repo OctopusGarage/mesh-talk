@@ -3,6 +3,7 @@ import { rosterProjection } from "@/lib/rosterProjection";
 
 export interface MemberProfileTarget {
   name: string;
+  canonicalName?: string;
   accountId?: string | null;
   deviceId?: string | null;
   isSelf?: boolean;

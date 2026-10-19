@@ -402,7 +402,7 @@ async fn run_broadcast_with_visibility(
 /// slow interval (multicast/broadcast carry the steady-state load; the scan is
 /// the fallback for when those are blocked but unicast is allowed).
 const SCAN_STARTUP_DELAYS_SECS: [u64; 3] = [1, 3, 7];
-const SCAN_STEADY_INTERVAL: Duration = Duration::from_secs(20);
+const SCAN_STEADY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Unicast-UDP /24 scan fallback (the analog of LocalSend's HTTP /24 scan, adapted
 /// to our fixed UDP discovery port). For each local non-loopback IPv4 interface,

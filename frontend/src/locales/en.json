@@ -260,6 +260,7 @@
     "groupSummary": "{{total}} members · {{online}} known online",
     "groupUpdating": "Updating member presence…",
     "groupUnbound": "{{summary}} · {{count}} unbound device members",
+    "queuePersistenceFailed": "Automatic downloads can't be remembered across restarts: {{error}}",
     "unavailable": "Presence updates are unavailable. Retained observations will expire normally; retrying automatically.",
     "observedDevices": "Freshly observed devices: {{count}}",
     "source_local": "Local network discovery",
@@ -544,6 +545,7 @@
     "nothingReceived": "Nothing received yet.",
     "couldntSave": "Couldn't save file: {{error}}",
     "savedTo": "Saved to {{path}}",
+    "unavailable": "Attachment unavailable",
     "alreadyDownloaded": "Already downloaded — use Reveal to find it.",
     "couldntOpen": "Couldn't open: {{error}}",
     "chooseFolder": "Choose default download folder",
@@ -912,6 +914,8 @@
     "idConflict": "A different library type already uses this pack ID."
   },
   "memberProfile": {
+    "originalName": "Original name",
+    "remark": "Remark",
     "title": "Member profile",
     "description": "Identity and known network details for this member.",
     "presenceUnavailable": "Presence unavailable",

@@ -71,7 +71,7 @@ test("an incomplete attachment shows progress and cannot be saved from chat or t
     "aria-valuenow",
     "50",
   );
-  await expect(bubble.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(bubble.getByRole("button", { name: "Loading…" })).toBeDisabled();
 
   await page.getByTestId("conversation-history-trigger").click();
   const history = page.getByTestId("conversation-history-dialog");
@@ -95,9 +95,9 @@ test("an incomplete attachment shows progress and cannot be saved from chat or t
     "50",
   );
   await expect(
-    tray.getByRole("button", { name: "Save", exact: true }),
+    tray.getByRole("button", { name: "Loading…", exact: true }),
   ).toBeDisabled();
-  await expect(tray.getByRole("button", { name: "Save as…" })).toBeDisabled();
+  await expect(tray.getByRole("button", { name: "Save as…" })).toHaveCount(0);
   expect(
     await page.evaluate(
       () => (window as unknown as { __transferSaves: number }).__transferSaves,
@@ -107,11 +107,8 @@ test("an incomplete attachment shows progress and cannot be saved from chat or t
   await page.evaluate(() => {
     (window as unknown as { __transferReady: boolean }).__transferReady = true;
   });
-  await expect(
-    tray.getByRole("button", { name: "Save", exact: true }),
-  ).toBeEnabled();
+  await expect(tray.getByRole("button", { name: "Reveal" })).toBeVisible();
   await expect(bubble.getByRole("progressbar")).toHaveCount(0);
-  await tray.getByRole("button", { name: "Save", exact: true }).click();
   await expect(tray.getByRole("button", { name: "Reveal" })).toBeVisible();
   expect(
     await page.evaluate(

@@ -1,3 +1,4 @@
+import { displayIdentity } from "@/lib/displayIdentity";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Crown, LogOut, MessageCircle, Users, UserPlus, X } from "lucide-react";
@@ -19,7 +20,7 @@ import {
   useMotionOK,
 } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
-import { displayName, useChat } from "@/store/chat";
+import { useChat } from "@/store/chat";
 import { chat as chatApi } from "@/lib/api";
 import type { ChannelActivityInfo, ChannelMemberInfo } from "@/lib/types";
 import {
@@ -66,6 +67,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const channelOwner = liveSnapshot?.owner ?? storedOwner;
   const animateMembers = motionOK && members.length <= MAX_STAGGER_ITEMS;
   const peers = useChat((s) => s.peers);
+  const accounts = useChat((s) => s.accounts);
   const roster = rosterProjection(peers);
   const hiddenContacts = useContactPolicy((s) => s.contacts);
   const policyLoaded = useContactPolicy((s) => s.loaded);
@@ -327,10 +329,17 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               // Self presence uses the same expiring runtime snapshot as other accounts.
               const isSelf = m.user_id === myId;
               const accountId = roster.accountForMember(m);
+              const identity = displayIdentity({
+                accountId,
+                deviceId: m.user_id,
+                fallbackName: m.name,
+                accounts,
+                peers,
+                favorites,
+              });
               const name = isSelf
                 ? myName || m.name || t("common.unnamed")
-                : displayName(favorites, accountId ?? m.user_id, m.name) ||
-                  t("common.unnamed");
+                : identity.name;
               const memberPresence =
                 presenceMap[
                   isSelf
@@ -374,6 +383,9 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                     onClick={() =>
                       setProfileTarget({
                         name,
+                        canonicalName: isSelf
+                          ? myName || identity.canonicalName
+                          : identity.canonicalName,
                         accountId: accountId ?? (isSelf ? myAccountId : null),
                         deviceId: m.user_id,
                         isSelf,
@@ -573,7 +585,16 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                   <div className="min-w-0 flex-1">
                     <IdentityCrest
                       id={peerAccountKey(p)}
-                      name={p.name || t("common.unnamed")}
+                      name={
+                        displayIdentity({
+                          accountId: p.account_id,
+                          deviceId: p.user_id,
+                          fallbackName: p.name,
+                          accounts,
+                          peers,
+                          favorites,
+                        }).name
+                      }
                       status={statusFor(p.account_id)}
                       variant="compact"
                     />
@@ -596,10 +617,21 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 .map((entry, index) => {
                   const date = new Date(entry.wall_clock);
                   const dateValid = Number.isFinite(date.getTime());
-                  const nameFor = (id: string) =>
-                    members.find((member) => member.user_id === id)?.name ||
-                    roster.nameForDevice(id) ||
-                    `${id.slice(0, 8)}…`;
+                  const nameFor = (id: string) => {
+                    const member = members.find(
+                      (entry) => entry.user_id === id,
+                    );
+                    return displayIdentity({
+                      accountId: roster.accountForMember(
+                        member ?? { user_id: id },
+                      ),
+                      deviceId: id,
+                      fallbackName: member?.name,
+                      accounts,
+                      peers,
+                      favorites,
+                    }).name;
+                  };
                   return (
                     <li
                       key={`${entry.wall_clock}-${index}`}

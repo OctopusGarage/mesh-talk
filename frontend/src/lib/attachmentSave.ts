@@ -3,13 +3,16 @@ import { chat } from "./api";
 import { defaultSavePath, effectiveDownloadDir } from "./download";
 import { isDirectoryAttachment } from "./directoryAttachment";
 import { rememberSavedDownload } from "./savedDownloads";
-import { useFileAvailability } from "@/store/fileAvailability";
+import {
+  refreshFileAvailability,
+  useFileAvailability,
+} from "@/store/fileAvailability";
 
 /** One save continuation for every attachment surface. A lease belongs to the
  * initiating chat session; readiness must still hold after any native dialog. */
 export async function saveAttachment(
   file: { fileConv: string; name: string; mime?: string },
-  lease: { current: () => boolean },
+  lease: { current: () => boolean; owner?: string | null },
   options: { mode: "as" | "default"; destination?: string },
 ): Promise<string | null> {
   const current = () =>
@@ -39,8 +42,14 @@ export async function saveAttachment(
     }
   }
   if (!current()) return null;
+  await refreshFileAvailability([file.fileConv]);
+  if (!current()) return null;
   const path = toDirectory
-    ? await chat.saveFileToDir(file.fileConv, destination)
+    ? await chat.saveFileToDir(
+        file.fileConv,
+        destination,
+        lease.owner ?? undefined,
+      )
     : (await chat.saveFile(file.fileConv, destination), destination);
   if (!lease.current()) return null;
   rememberSavedDownload(file.fileConv, path);

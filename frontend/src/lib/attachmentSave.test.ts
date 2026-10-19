@@ -5,6 +5,7 @@ const m = vi.hoisted(() => ({
   saveFile: vi.fn(),
   saveFileToDir: vi.fn(),
   remember: vi.fn(),
+  refresh: vi.fn(),
   ready: true,
   dir: "/configured",
 }));
@@ -18,6 +19,7 @@ vi.mock("./download", () => ({
 }));
 vi.mock("./savedDownloads", () => ({ rememberSavedDownload: m.remember }));
 vi.mock("@/store/fileAvailability", () => ({
+  refreshFileAvailability: m.refresh,
   useFileAvailability: {
     getState: () => ({ statuses: { fc: { ready: m.ready } } }),
   },
@@ -28,8 +30,25 @@ beforeEach(() => {
   vi.clearAllMocks();
   m.ready = true;
   m.dir = "/configured";
+  m.refresh.mockResolvedValue(undefined);
   m.save.mockResolvedValue("/chosen/report.txt");
   m.saveFileToDir.mockResolvedValue("/configured/report (2).txt");
+});
+it("refreshes cached readiness after the dialog before exporting", async () => {
+  m.refresh.mockImplementationOnce(async () => {
+    m.ready = false;
+  });
+  await saveAttachment(file, { current: () => true }, { mode: "as" });
+  expect(m.refresh).toHaveBeenCalledWith(["fc"]);
+  expect(m.saveFile).not.toHaveBeenCalled();
+});
+it("passes the originating owner to native directory exports", async () => {
+  await saveAttachment(
+    file,
+    { current: () => true, owner: "alice" },
+    { mode: "default" },
+  );
+  expect(m.saveFileToDir).toHaveBeenCalledWith("fc", "/configured", "alice");
 });
 it("Save as prompts at the configured directory and remembers the selected path", async () => {
   await saveAttachment(file, { current: () => true }, { mode: "as" });
@@ -42,7 +61,7 @@ it("Save as prompts at the configured directory and remembers the selected path"
 it("Save default remembers the actual collision-resolved path", async () => {
   await saveAttachment(file, { current: () => true }, { mode: "default" });
   expect(m.save).not.toHaveBeenCalled();
-  expect(m.saveFileToDir).toHaveBeenCalledWith("fc", "/configured");
+  expect(m.saveFileToDir).toHaveBeenCalledWith("fc", "/configured", undefined);
   expect(m.remember).toHaveBeenCalledWith("fc", "/configured/report (2).txt");
 });
 it.each(["owner", "availability"])(
@@ -92,6 +111,6 @@ it("a directory Save as prompts even with a configured default and remembers its
     directory: true,
     defaultPath: "/configured/report.txt",
   });
-  expect(m.saveFileToDir).toHaveBeenCalledWith("fc", "/chosen");
+  expect(m.saveFileToDir).toHaveBeenCalledWith("fc", "/chosen", undefined);
   expect(m.remember).toHaveBeenCalledWith("fc", "/chosen/folder (2)");
 });

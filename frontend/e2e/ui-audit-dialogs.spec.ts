@@ -60,6 +60,11 @@ test("high-frequency dialogs fit the viewport and expose usable close targets", 
       ready: async () => {
         await expect(page.getByText("report.pdf")).toBeVisible();
         await expect(page.getByText("clip.mov")).toBeVisible();
+        await expect(
+          page
+            .getByTestId("files-tray")
+            .getByRole("button", { name: "Reveal" }),
+        ).toHaveCount(2);
         await page.getByTestId("files-search").fill("report");
         await expect(page.getByText("clip.mov")).toHaveCount(0);
         await page.getByTestId("files-search").clear();

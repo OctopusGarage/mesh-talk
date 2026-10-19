@@ -341,9 +341,20 @@ pub async fn save_file_to_dir(
     state: tauri::State<'_, NodeState>,
     file_conv: String,
     dir: String,
+    expected_owner: Option<String>,
 ) -> Result<String, CommandError> {
-    let admission = RuntimeAdmission::capture_current(&session, &state)?;
     let id = parse_channel_id(&file_conv)?;
+    if let Some(owner) = expected_owner {
+        return save_file_to_dir_for_owner(
+            session.inner().clone(),
+            state.inner().clone(),
+            &owner,
+            id,
+            dir,
+        )
+        .await;
+    }
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
     admission
         .blocking(move |runtime, _| {
             runtime
@@ -353,6 +364,31 @@ pub async fn save_file_to_dir(
                 .map_err(CommandError::from)
         })
         .await
+}
+
+async fn save_file_to_dir_for_owner(
+    app: AppState,
+    state: NodeState,
+    owner: &str,
+    id: mesh_talk_core::eventlog::ConversationId,
+    dir: String,
+) -> Result<String, CommandError> {
+    // Capture before waiting, then retain runtime and session authority through
+    // the actual disk write. A frontend lease check cannot protect native I/O.
+    let admission = RuntimeAdmission::capture(&app, &state, owner)?;
+    let guard = state.0.clone().lock_owned().await;
+    let path = tokio::task::spawn_blocking(move || {
+        let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
+        admission.checked(runtime, || {
+            runtime
+                .handle()
+                .save_file_into_dir(id, std::path::Path::new(&dir))
+                .map_err(CommandError::from)
+        })
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Write raw bytes (e.g. an image pasted from the clipboard) to a temp file in the app
@@ -561,6 +597,40 @@ pub async fn read_media<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn automatic_save_rejects_another_account_before_waiting_for_its_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new(crate::services::auth_service::AuthService::new(
+            std::sync::Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "bob".into(),
+            name: "bob".into(),
+            display_name: "Bob".into(),
+            address: "local".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        app.session().publish("session".into(), user, "pw".into());
+        let error = save_file_to_dir_for_owner(
+            app,
+            NodeState::empty(),
+            "alice",
+            mesh_talk_core::eventlog::ConversationId::new([1; 32]),
+            root.path().join("downloads").to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("session owner mismatch"),
+            "{error}"
+        );
+        assert!(!root.path().join("downloads").exists());
+    }
 
     #[test]
     fn pasted_bytes_use_an_isolated_cache_path_and_reject_oversized_input() {

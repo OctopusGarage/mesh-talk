@@ -69,17 +69,30 @@ export function useSavedDownloads(): Record<string, string> {
 
 export function rememberSavedDownload(fileConv: string, path: string): void {
   const owner = useAuth.getState().user?.id;
-  if (!owner) return;
-  const next = { ...snapshot(owner), [fileConv]: path };
+  if (owner) rememberSavedDownloadForOwner(owner, fileConv, path);
+}
+
+/** Native exports may finish after logout. Record their captured owner without
+ * publishing that path into another account's in-memory snapshot. */
+export function rememberSavedDownloadForOwner(
+  owner: string,
+  fileConv: string,
+  path: string,
+): void {
+  const active = useAuth.getState().user?.id === owner;
+  const next = {
+    ...(active ? snapshot(owner) : load(owner)),
+    [fileConv]: path,
+  };
   const keys = Object.keys(next);
   const evicted = keys.slice(0, Math.max(0, keys.length - CAP));
   for (const key of evicted) delete next[key];
-  if (evicted.length) invalidateFileAvailability(evicted);
-  paths = next;
+  if (active && evicted.length) invalidateFileAvailability(evicted);
+  if (active) paths = next;
   try {
     localStorage.setItem(key(owner), JSON.stringify(next));
   } catch {
     // The in-memory location remains available for this session.
   }
-  listeners.forEach((listener) => listener());
+  if (active) listeners.forEach((listener) => listener());
 }

@@ -156,6 +156,12 @@ review before renaming.
    - Handle file permissions correctly
    - Follow platform conventions for data storage locations
 3. **System Integration**:
+   - Desktop background CLI queries must use `crate::background_command::command`
+     for asynchronous subprocesses. It suppresses Windows console creation with
+     `CREATE_NO_WINDOW`; redirecting output alone does not prevent periodic window
+     flashes. Synchronous background commands must apply the same flag.
+   - Keep `scripts/diagnostics/background-command.test.mjs` passing. It runs in the
+     health gate and prevents bypassing the shared asynchronous command factory.
    - Integrate with system notifications appropriately
    - Respect platform-specific user settings
    - Handle system events (sleep, shutdown, etc.) properly

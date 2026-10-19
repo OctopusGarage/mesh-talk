@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { create } from "zustand";
 import { chat } from "@/lib/api";
+import { errorMessage } from "@/lib/error";
 import type { FileStatus } from "@/lib/types";
 
 interface AvailabilityState {
@@ -17,8 +18,16 @@ export const useFileAvailability = create<AvailabilityState>((set) => ({
     set((state) => {
       const next = { ...state.statuses };
       for (const status of statuses) {
+        const previous = next[status.file_conv];
         delete next[status.file_conv];
-        next[status.file_conv] = status;
+        next[status.file_conv] =
+          !status.ready &&
+          (status.total === 0 || status.done >= status.total) &&
+          status.consent !== "pending" &&
+          status.consent !== "declined" &&
+          (previous?.ready || previous?.unavailable)
+            ? { ...status, unavailable: true }
+            : status;
       }
       return {
         statuses: Object.fromEntries(
@@ -58,9 +67,8 @@ export async function refreshFileAvailability(fileConvs: string[]) {
 
 async function poll() {
   if (inFlight) return;
-  const pending = [...watched.keys()].filter(
-    (key) => !useFileAvailability.getState().statuses[key]?.ready,
-  );
+  // Ready manifests can expire or be removed while a card remains mounted.
+  const pending = [...watched.keys()];
   if (!pending.length) return;
   inFlight = true;
   try {
@@ -85,6 +93,39 @@ export function watchFileAvailability(fileConv: string) {
       timer = undefined;
     }
   };
+}
+
+/** Readiness can change before a native save. Missing content is unavailable;
+ * incomplete transfers remain pending so background recovery can resume them. */
+export function markUnavailableFileError(
+  fileConv: string,
+  error: unknown,
+): boolean {
+  const message = errorMessage(error);
+  if (/incomplete/i.test(message)) {
+    const previous = useFileAvailability.getState().statuses[fileConv];
+    useFileAvailability.getState().merge([
+      {
+        file_conv: fileConv,
+        ready: false,
+        done: 0,
+        total: Math.max(1, previous?.total ?? 1),
+        consent: previous?.consent,
+      },
+    ]);
+    return true;
+  }
+  if (!/unknown\s*file|expired/i.test(message)) return false;
+  useFileAvailability.getState().merge([
+    {
+      file_conv: fileConv,
+      ready: false,
+      done: 0,
+      total: 0,
+      unavailable: true,
+    },
+  ]);
+  return true;
 }
 
 export function resetFileAvailability() {
