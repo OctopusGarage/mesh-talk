@@ -44,3 +44,46 @@ it("allows adapters to depend on shared types and sibling adapters", async () =>
     ),
   ).toEqual([]);
 });
+
+it.each(
+  [
+    "src/lib/api/nested/adapter.ts",
+    "src/store/nested/state.ts",
+    "src/store/auth.ts",
+  ].flatMap((filePath) =>
+    [
+      "@/components/identity",
+      "../../../components/identity",
+      "@/features/chat/Sidebar",
+      "../../../features/chat/Sidebar",
+    ].map((source) => ({ filePath, source })),
+  ),
+)(
+  "rejects rendering dependencies in $filePath via $source",
+  async ({ filePath, source }) => {
+    const [result] = await eslint.lintText(
+      `import type { View } from "${source}";\nexport type State = View;`,
+      { filePath },
+    );
+    expect(
+      result.messages.some(
+        (message) => message.ruleId === "no-restricted-imports",
+      ),
+    ).toBe(true);
+  },
+);
+
+it.each(["src/lib/api/nested/adapter.ts", "src/store/nested/state.ts"])(
+  "allows shared presence models in %s",
+  async (filePath) => {
+    const [result] = await eslint.lintText(
+      'import type { PresenceStatus } from "@/lib/presence";\nexport type Status = PresenceStatus;',
+      { filePath },
+    );
+    expect(
+      result.messages.filter(
+        (message) => message.ruleId === "no-restricted-imports",
+      ),
+    ).toEqual([]);
+  },
+);

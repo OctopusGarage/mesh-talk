@@ -49,6 +49,12 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 
 ## Architecture & Components
 
+- Before adding business logic, consult [module ownership and reuse](docs/module-boundaries.md),
+  inspect the owning module and its callers, and extend its existing implementation.
+  Parallel tasks should name their owned paths and shared-interface dependencies;
+  coordinate changes to shared interfaces through one integration owner. Keep
+  feature-specific helpers local and share rules when their meaning and lifecycle
+  are the same. The guide owns the detailed assignment and handoff contract.
 - Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
 - The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
   (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,

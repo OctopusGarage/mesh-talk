@@ -34,6 +34,13 @@ at the application seam; adapters never import stores. ESLint enforces that rule
 for alias imports and relative imports at any nesting depth. The auth store uses
 low-level adapters to avoid recreating the facade/settings/auth runtime cycle.
 
+ESLint also rejects static imports of rendering modules (`components/` and
+`features/`) from stores and IPC adapters, including type-only imports and nested
+relative paths. Shared presence vocabulary lives in `lib/presence.ts`; identity
+controls re-export it for compatibility. Stores own evidence expiry and state
+transitions; controls own visual mapping. These checks cover direct static
+dependencies, not transitive dependencies or dynamic imports.
+
 ## 2. Feature owners and shared decisions
 
 Paths below are relative to the repository root. `core/` abbreviates
@@ -116,6 +123,25 @@ serial polling is not an authorization mechanism.
 7. **Test at the owning interface.** Pure projections use table/scenario tests;
    hooks use mounted lifecycle tests; protocol changes need the relevant core
    integration assertion. Avoid source-text tests that punish harmless moves.
+
+Before parallel implementation, record each task's owned paths, the existing
+decision owner it will reuse, any required shared-interface change, and its
+focused verification command. Include behavioral contracts (authority, ordering,
+cancellation, errors and persistence) when agreeing on an interface. A shared
+helper should own the decision and its invariants so callers do not each repeat
+the same validation or transition sequence.
+
+One integration owner coordinates edits to shared types, command registrations,
+module declarations, dependency manifests and composition roots. Agents can
+propose these edits in their handoff while implementing their own modules.
+Separate worktrees isolate edits but do not resolve overlapping responsibilities.
+Avoid broad formatting, unrelated moves and feature-private global exports.
+
+Each handoff lists changed paths, interface changes, reused owners, executed
+checks and any assumptions that affect other tasks. After integrating, rerun the
+owner's focused tests and affected callers' checks; a clean Git merge alone does
+not establish behavioral compatibility. Update this ownership map when a decision
+moves, rather than maintaining a second competing map.
 
 Module division reduces overlapping edits; it cannot guarantee conflict-free
 parallel work. Cross-feature policy changes still need coordination and review.
