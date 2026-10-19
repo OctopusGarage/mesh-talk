@@ -631,7 +631,7 @@ test(
     f.write(manifest, JSON.stringify(changed));
     await rm(lock, { recursive: true });
     assert.notEqual(await exited, 0, output);
-    assert.match(output, /resource class changed/i);
+    assert.match(output, /resource class changed|inputs changed/i);
   },
 );
 

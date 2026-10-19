@@ -218,6 +218,10 @@ not evidence of a failed assertion. Missing browser/native evidence remains
 `not-run` until separately attempted. An abrupt supervisor kill can leave a
 `running` report; treat it as incomplete.
 
+Passing test-case counts establish nonempty execution, not assertion-call counts
+or assertion quality. Evaluate test quality separately; a named passing test can
+still contain no useful assertion.
+
 Command records describe process execution, not test assertions: successful Rust
 inventory or wrapper commands alone cannot make a phase pass. Existing nonempty
 inventory/assertion checks and unchanged-input checks must also succeed. Reused
@@ -312,9 +316,20 @@ quarantined. Inspect the attempt log and the lock's `owner.json`, establish that
 all descendants have stopped, and remove only those quarantined lock directories
 to recover. Automatic dead-owner recovery never clears quarantine. A Windows
 taskkill success is OS process-tree evidence, not a native UI acceptance test.
+It relies on the OS command's result; it does not independently enumerate and
+verify every terminated Windows descendant.
 Tool versions and mutable configuration digests are rechecked after queueing,
 before reuse and after execution; changes invalidate evidence rather than
 publishing success under the earlier identity.
+Tracked input and configuration inode/time metadata is sampled through
+finalization to detect ordinary edits restored before the final content snapshot.
+These are trusted local accelerators, not isolation from hostile editors or
+unobserved transient creation/removal of ignored inputs; stop editing while
+validating. Publication still requires committed
+platform archives and fresh protected CI. Log-write failures take the same
+descendant-cleanup path as cancellation. Reuse reports avoided historical
+execution time; its legacy `savedExecutionMs` field is not a measured wall-clock
+speedup.
 Console output reports queue time, execution time, reuse, and running-stage
 heartbeats. Platform preflight reports each platform's completion immediately and
 prints progress while the other continues. Missing/corrupted evidence is a cache

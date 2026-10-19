@@ -11,6 +11,22 @@ import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function observeInputs(root, configuration) {
+  const tracked = git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
+  const filenames = [...tracked.map(name => path.join(root, name)), ...configuration];
+  try { for (const name of await readdir(path.join(root, "frontend"))) if (/^\.env(?:\.|$)/u.test(name)) filenames.push(path.join(root, "frontend", name)); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  const metadata = () => Promise.all(filenames.map(async filename => {
+    try {
+      const info = await stat(filename, { bigint: true });
+      return [filename, ...[info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].map(String)];
+    } catch (error) { if (error.code === "ENOENT") return [filename, null]; throw error; }
+  }));
+  const initial = JSON.stringify(await metadata());
+  return { changed: async () => JSON.stringify(await metadata()) !== initial,
+    close: () => {} };
+}
+
 function processGroupRunning(group) {
   const result = spawnSync("ps", ["-eo", "pgid=,stat="], { encoding: "utf8", timeout: 5000 });
   if (result.status !== 0) throw Error("Cannot verify process-group termination");
@@ -118,10 +134,10 @@ function executableCommand(command, env) {
   const cli = candidates.find(candidate => existsSync(candidate));
   return cli ? [process.execPath, cli, ...command.slice(1)] : command;
 }
-async function execute(command, { cwd, env, logPath, signal }) {
+async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream }) {
   signal?.throwIfAborted();
   return new Promise(resolve => {
-    const output = createWriteStream(logPath);
+    const output = createLogStream(logPath);
     let error;
     let failureKind;
     let cleanupUnverified = false;
@@ -137,7 +153,7 @@ async function execute(command, { cwd, env, logPath, signal }) {
     const child = spawn(argv[0], argv.slice(1), { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== "win32" && !nestedGroup });
     const forward = chunk => { output.write(chunk); process.stdout.write(chunk); };
     child.stdout?.on("data", forward); child.stderr?.on("data", forward);
-    output.on("error", failure => { error = failure.message; child.kill(); });
+    output.on("error", failure => { error = failure.message; failureKind = "failed"; abort(); });
     child.on("error", failure => { error = failure.message; failureKind = ["ENOENT", "EACCES"].includes(failure.code) ? "unavailable" : "failed"; });
     let cleanup;
     const abort = () => {
@@ -158,6 +174,16 @@ async function execute(command, { cwd, env, logPath, signal }) {
         // ignored-stdio descendants have exited. Dead-owner locks are reaped
         // by the next waiter after the group's processes have stopped.
         cleanup = new Promise(() => {});
+        if (!signal?.aborted) {
+          // A local log failure must also notify the outer CLI owner; otherwise
+          // nobody would start its group escalation and this lease would hang.
+          try { process.kill(Number(env.MESH_VALIDATION_PROCESS_GROUP_OWNER), "SIGTERM"); }
+          catch {
+            cleanupUnverified = true;
+            error ||= "Outer process-group owner is unavailable";
+            cleanup = Promise.resolve();
+          }
+        }
         child.kill("SIGTERM");
       } else {
         try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill(); }
@@ -174,14 +200,18 @@ async function execute(command, { cwd, env, logPath, signal }) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
     child.on("close", async code => {
-      signal?.removeEventListener("abort", abort);
+      await new Promise(done => output.end(failure => {
+        if (failure) { error ||= failure.message; failureKind ||= "failed"; abort(); }
+        done();
+      }));
       await cleanup;
-      output.end(() => resolve({ code: signal?.aborted ? 130 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified }));
+      signal?.removeEventListener("abort", abort);
+      resolve({ code: signal?.aborted ? 130 : error ? 1 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified });
     });
   });
 }
 
-export async function runStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, signal, log = message => console.log(`[validation:${name}] ${message}`) }) {
+export async function runStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }) {
   if (!/^[\w:.-]+$/u.test(name) || !command?.length) throw Error("A stage needs a safe name and command");
   if (!["all", "shared"].includes(profile)) throw Error("Unknown validation environment profile");
   env = { ...env, VITEST_MAX_WORKERS: env.VITEST_MAX_WORKERS || "2", RUST_TEST_THREADS: env.RUST_TEST_THREADS || "1" };
@@ -217,20 +247,25 @@ export async function runStage({ root, cwd = root, name, command, env = process.
   const release = await lock(path.join(directory, "locks", key), { log, signal });
   let releaseResource;
   let cleanupUnverified = false;
+  let observation;
+  let delivered;
   try {
+    observation = await observeInputs(root, configuration);
     if (reusable) {
       try {
         const record = JSON.parse(await readFile(receipt, "utf8"));
         if (record.schema === 1 && record.key === key && record.code === 0 && Date.now() >= record.finished && Date.now() - record.finished < 86_400_000 &&
             await digest(record.logPath) === record.logDigest && JSON.stringify(await artifactDigests(cwd, artifacts)) === JSON.stringify(record.artifacts)) {
           const current = source(root);
-          if (!current.dirty && current.head === initial.head && await runtimeUnchanged() && JSON.stringify(await frontendEnvironmentIdentity(root)) === JSON.stringify(frontendEnvironment) && (!declared || JSON.stringify(await inputIdentity(root, inputs)) === JSON.stringify(declared))) {
+          if (!current.dirty && current.head === initial.head && await runtimeUnchanged() && !await observation.changed() && JSON.stringify(await frontendEnvironmentIdentity(root)) === JSON.stringify(frontendEnvironment) && (!declared || JSON.stringify(await inputIdentity(root, inputs)) === JSON.stringify(declared))) {
             const reused = { ...record, source: initial.head, reusedFromSource: record.source, reused: true, receipt,
               savedExecutionMs: record.executionMs ?? record.elapsedMs - record.queuedMs,
               executionMs: 0, queuedMs: Date.now() - started, elapsedMs: Date.now() - started, finished: Date.now() };
             await recordAttempt(directory, reused);
-            log(`reused successful evidence (${Math.round(reused.savedExecutionMs / 1000)}s saved) from ${record.source}: ${receipt}`);
-            return reused;
+            log(`reused successful evidence (avoided ${Math.round(reused.savedExecutionMs / 1000)}s of prior execution; wall-clock saving unmeasured) from ${record.source}: ${receipt}`);
+            signal?.throwIfAborted();
+            delivered = reused;
+            return delivered;
           }
         }
       } catch { /* Missing, stale or damaged evidence requires execution. */ }
@@ -246,7 +281,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       if (JSON.stringify(await frontendEnvironmentIdentity(root)) !== JSON.stringify(frontendEnvironment)) throw Error("Frontend environment changed while waiting for validation");
       if (declared && JSON.stringify(await inputIdentity(root, inputs)) !== JSON.stringify(declared)) throw Error("Stage inputs changed while waiting for validation");
     }
-    if (!await runtimeUnchanged()) throw Error("Stage inputs changed while waiting for validation (tool/configuration identity)");
+    if (!await runtimeUnchanged() || await observation.changed()) throw Error("Stage inputs changed while waiting for validation (tool/configuration identity or observed edit)");
     // A new attempt supersedes previous proof even if it fails or is cancelled.
     await rm(receipt, { force: true });
     const runId = `${Date.now()}-${randomUUID()}`;
@@ -256,7 +291,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     log(`started after ${Math.round(queuedMs / 1000)}s queue; log ${logPath}`);
     const timer = setInterval(() => log(`running for ${Math.round((Date.now() - started) / 1000)}s; log ${logPath}`), 30_000);
     let result;
-    try { result = await execute(command, { cwd, env, logPath, signal }); }
+    try { result = await execute(command, { cwd, env, logPath, signal, createLogStream }); }
     finally { clearInterval(timer); }
     cleanupUnverified = result.cleanupUnverified;
     if (cleanupUnverified) {
@@ -265,6 +300,8 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       await releaseResource?.quarantine(reason);
       log(`resource locks quarantined: ${reason}; verify descendant termination before manual recovery`);
     }
+    if (result.code === 0 && await observation.changed())
+      result = { code: 1, error: "Source changed during validation (source/configuration metadata)", failureKind: "invalidated" };
     if (result.code === 0 && !await runtimeUnchanged())
       result = { code: 1, error: "Stage inputs changed during validation (tool/configuration identity)", failureKind: "invalidated" };
     let measured = [];
@@ -279,15 +316,57 @@ export async function runStage({ root, cwd = root, name, command, env = process.
       else if (declared && JSON.stringify(await inputIdentity(root, inputs)) !== JSON.stringify(declared)) result = { code: 1, error: "Stage inputs changed during validation", failureKind: "invalidated" };
     }
     const record = { schema: 1, key, name, platform: process.platform, arch: process.arch, source: initial.head, inputs: declared, reused: false, code: result.code, error: result.error, failureKind: result.failureKind, cleanupUnverified, artifacts: measured, logPath, logDigest: await digest(logPath), elapsedMs: Date.now() - started, executionMs: Date.now() - started - queuedMs, queuedMs, finished: Date.now() };
-    await recordAttempt(directory, record);
+    const cancelledDuringFinalization = async () => {
+      if (record.code !== 0 || !signal?.aborted) return false;
+      record.code = 130; record.error = "Validation cancelled during finalization";
+      record.finished = Date.now(); record.elapsedMs = record.finished - started;
+      await rm(receipt, { force: true });
+      return true;
+    };
     if (result.code === 0 && !initial.dirty && !signal?.aborted) {
       await mkdir(path.dirname(receipt), { recursive: true });
       const temporary = `${receipt}.${randomUUID()}.tmp`;
       await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`); await rename(temporary, receipt);
     }
-    log(`${result.code === 0 ? "passed" : "failed"} in ${Math.round(record.elapsedMs / 1000)}s${result.error ? `: ${result.error}` : ""}`);
-    return { ...record, reused: false, receipt };
-  } finally { if (!cleanupUnverified) { await releaseResource?.(); await release(); } }
+    // Resample after asynchronous log/artifact/receipt I/O. Metadata detects an
+    // ordinary reverted edit even when its final content hash is unchanged.
+    await new Promise(resolve => setImmediate(resolve));
+    const finalSource = source(root);
+    if (record.code === 0 && (await observation.changed() || !initial.dirty &&
+        (finalSource.dirty || finalSource.head !== initial.head || !await runtimeUnchanged()))) {
+      record.code = 1; record.failureKind = "invalidated";
+      record.error = "Stage inputs changed during validation finalization";
+      await rm(receipt, { force: true });
+    }
+    await cancelledDuringFinalization();
+    await recordAttempt(directory, record);
+    await new Promise(resolve => setImmediate(resolve));
+    if (record.code === 0 && await observation.changed()) {
+      record.code = 1; record.failureKind = "invalidated";
+      record.error = "Stage inputs changed during validation finalization";
+      await rm(receipt, { force: true });
+      await recordAttempt(directory, record);
+    }
+    log(`${record.code === 0 ? "passed" : "failed"} in ${Math.round(record.elapsedMs / 1000)}s${record.error ? `: ${record.error}` : ""}`);
+    if (await cancelledDuringFinalization()) {
+      await recordAttempt(directory, record);
+      log("cancelled during finalization; successful receipt removed");
+    }
+    delivered = { ...record, reused: false, receipt };
+    return delivered;
+  } finally {
+    observation?.close();
+    if (!cleanupUnverified) { await releaseResource?.(); await release(); }
+    // The returned object is shared with this finalizer: cancellation while
+    // asynchronous lease release runs must not deliver a successful verdict.
+    if (delivered?.code === 0 && signal?.aborted) {
+      delivered.code = 130; delivered.reused = false;
+      delivered.error = "Validation cancelled during finalization";
+      delivered.finished = Date.now(); delivered.elapsedMs = delivered.finished - started;
+      await rm(receipt, { force: true });
+      await recordAttempt(directory, delivered);
+    }
+  }
 }
 
 async function main(args) {

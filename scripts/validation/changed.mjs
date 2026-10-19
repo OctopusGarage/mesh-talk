@@ -274,7 +274,7 @@ export function validateFrontendReport(report, files, directory) {
       ).length ?? 0;
     if (!passed)
       throw Error(
-        `Selected frontend file ran zero passing assertions: ${file}`,
+        `Selected frontend file ran zero passing tests: ${file}`,
       );
     count += passed;
   }
@@ -347,7 +347,7 @@ export async function executePlan(
         path.join(cwd, "frontend"),
       );
       log(
-        `Frontend: ${count} passing assertions in ${plan.frontend.length} selected files`,
+        `Frontend: ${count} passing test cases in ${plan.frontend.length} selected files`,
       );
     } finally {
       await rm(directory, { recursive: true, force: true });

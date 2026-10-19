@@ -441,3 +441,40 @@ test("quarantined locks and dead nested owners with live groups cannot be reaped
     await rm(directory, { recursive: true });
   }
 });
+
+test("transient source edits that are restored before completion invalidate evidence", async t => {
+  const f = await fixture(t);
+  const result = await f.run({ command: [process.execPath, "-e", "const fs=require('node:fs');fs.writeFileSync('source','temporary');setTimeout(()=>fs.writeFileSync('source','one'),30)"] });
+  assert.notEqual(result.code, 0);
+  assert.equal(result.failureKind, "invalidated");
+  await assert.rejects(readFile(result.receipt));
+});
+
+test("log-write errors terminate descendants before releasing resources", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const { Writable } = await import("node:stream");
+  const { writeFileSync } = await import("node:fs");
+  const descendant = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync('target/log-descendant',String(process.pid));setInterval(()=>{},1000)";
+  const command = [process.execPath, "-e", `process.on('SIGTERM',()=>process.exit(0));const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});const timer=setInterval(()=>{if(fs.existsSync('target/log-descendant')){clearInterval(timer);console.log('trigger log write');}},10);setInterval(()=>{},1000)`];
+  const result = await f.run({ command, resource: "heavy", createLogStream: filename => {
+    writeFileSync(filename, "");
+    return new Writable({ write(_chunk, _encoding, callback) { callback(Error("simulated log disk failure")); } });
+  } });
+  assert.notEqual(result.code, 0);
+  assert.match(result.error, /simulated log disk failure/);
+  const pid = Number(await readFile(path.join(f.root, "target/log-descendant"), "utf8"));
+  const state = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" });
+  assert.ok(state.status !== 0 || !state.stdout.trim() || state.stdout.trim().startsWith("Z"));
+  assert.equal((await f.run({ resource: "heavy" })).code, 0);
+});
+
+
+test("cancellation at final result delivery removes published success", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  const result = await f.run({ signal: controller.signal, log: message => {
+    if (message.startsWith("passed in")) controller.abort();
+  } });
+  assert.equal(result.code, 130);
+  await assert.rejects(readFile(result.receipt));
+});
