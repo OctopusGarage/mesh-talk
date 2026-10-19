@@ -48,8 +48,11 @@ constructor for SDK callers. The shell owns the session and translates inbound
 events to Tauri events; it does not own protocol or wire types. Desktop IPC
 commands live in `src-tauri/src/chat_commands/`, grouped by account, messaging,
 channels, files, platform, and diagnostics. `mod.rs` re-exports the established
-command names for Tauri registration. Commands clone a node handle from
-`NodeState` before asynchronous node work, releasing the session lock first.
+command names for Tauri registration. Sensitive IPC commands capture `RuntimeAdmission` before waiting on `NodeState`.
+Blocking operations retain runtime lifecycle and matching session authority until
+completion, even when their IPC waiter is cancelled. Asynchronous producers use
+guarded core commit seams; plaintext queries recheck the originating admission
+before returning results. A cloned node handle alone conveys no session authority.
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 

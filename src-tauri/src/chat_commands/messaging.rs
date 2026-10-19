@@ -3,6 +3,7 @@ use super::{
 };
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
+use tauri::Manager;
 
 #[tauri::command]
 pub async fn send_dm(
@@ -362,25 +363,26 @@ pub async fn search<R: tauri::Runtime>(
     state: tauri::State<'_, NodeState>,
     query: String,
 ) -> Result<Vec<SearchHitInfo>, CommandError> {
-    // Snapshot the node handle and DROP the state lock before the scan, so a search can't
-    // serialize all other node IPC behind the synchronous scan; run the scan on the
-    // blocking pool (it reads/decrypts every conversation's stores).
-    let node = state.node_handle().await?;
-    let hits = tokio::task::spawn_blocking(move || node.search(&query))
-        .await
-        .map_err(|e| format!("join error: {e}"))?;
-    crate::app_lock::reject_if_locked(&app)?;
-    Ok(hits
-        .into_iter()
-        .map(|h| SearchHitInfo {
-            is_channel: h.is_channel,
-            account_id: h.account_id,
-            target: h.target,
-            label: h.label,
-            from_me: h.from_me,
-            who: h.who,
-            text: String::from_utf8_lossy(&h.text).into_owned(),
-            wall_clock: h.wall_clock,
+    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
+    let hits = admission
+        .clone()
+        .blocking(move |runtime, _| Ok(runtime.handle().search(&query)))
+        .await?;
+    admission
+        .with_runtime(move |_| {
+            Ok(hits
+                .into_iter()
+                .map(|h| SearchHitInfo {
+                    is_channel: h.is_channel,
+                    account_id: h.account_id,
+                    target: h.target,
+                    label: h.label,
+                    from_me: h.from_me,
+                    who: h.who,
+                    text: String::from_utf8_lossy(&h.text).into_owned(),
+                    wall_clock: h.wall_clock,
+                })
+                .collect())
         })
-        .collect())
+        .await
 }

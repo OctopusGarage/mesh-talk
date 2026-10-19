@@ -80,73 +80,23 @@ pub struct ChannelSummary {
 }
 
 fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> Vec<ChannelSummary> {
-    let mut channels = Vec::new();
-    for id in log.conversations() {
-        if book.state(&id).is_some() {
-            continue;
-        }
-        let mut archived: Option<ChannelSummary> = None;
-        let mut archived_members = std::collections::HashSet::new();
-        let events = log.events(&id);
-        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
-        let order = super::timeline::ordered_ids(&events, &[], true);
-        for event in order.iter().filter_map(|id| by_id.get(id).copied()) {
-            if archived.as_ref().is_some_and(|summary| summary.dissolved) {
-                break;
-            }
-            if event.kind == EventKind::MembershipChange {
-                if let Some(meta) = crate::channel::ChannelMeta::decode(&event.ciphertext) {
-                    let author = event.author.user_id();
-                    match &mut archived {
-                        None if author == meta.owner && meta.is_member(&meta.owner) => {
-                            archived_members =
-                                meta.members.iter().map(PublicIdentity::user_id).collect();
-                            archived = Some(ChannelSummary {
-                                id,
-                                name: meta.name,
-                                member_count: meta.members.len(),
-                                owner: meta.owner,
-                                archived: true,
-                                dissolved: false,
-                                left: false,
-                                pending_invite: false,
-                            });
-                        }
-                        Some(summary) if author == summary.owner && meta.owner == summary.owner => {
-                            archived_members =
-                                meta.members.iter().map(PublicIdentity::user_id).collect();
-                            summary.name = meta.name;
-                            summary.member_count = meta.members.len();
-                        }
-                        _ => {}
-                    }
-                }
-            } else if event.kind == EventKind::ChannelRename
-                && let Some(summary) = &mut archived
-                && event.author.user_id() == summary.owner
-                && let Ok(name) = std::str::from_utf8(&event.ciphertext)
-            {
-                summary.name = name.to_string();
-            } else if event.kind == EventKind::ChannelDissolve
-                && let Some(summary) = &mut archived
-                && event.author.user_id() == summary.owner
-                && event.ciphertext.is_empty()
-            {
-                summary.dissolved = true;
-            } else if event.kind == EventKind::ChannelOwnerTransfer
-                && let Some(summary) = &mut archived
-                && event.author.user_id() == summary.owner
-                && let Ok(next) = std::str::from_utf8(&event.ciphertext)
-                && archived_members.contains(next)
-            {
-                summary.owner = next.to_string();
-            }
-        }
-        if let Some(summary) = archived {
-            channels.push(summary);
-        }
-    }
-    channels
+    log.conversations()
+        .into_iter()
+        .filter(|id| book.state(id).is_none())
+        .filter_map(|id| {
+            let state = ChannelBook::projected_metadata(id, &log.events(&id))?;
+            Some(ChannelSummary {
+                id,
+                name: state.name().to_string(),
+                member_count: state.members().len(),
+                owner: state.owner().to_string(),
+                archived: true,
+                dissolved: state.is_dissolved(),
+                left: false,
+                pending_invite: false,
+            })
+        })
+        .collect()
 }
 
 /// A search match: a message whose text contains the query, with enough context to

@@ -164,10 +164,13 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   before waiting for the runtime; synchronous operations retain matching session
   authority through the operation. `NodeState::with_session_runtime` owns the
   shared session/installation decision. A raw node handle remains a snapshot,
-  not authority for future mutations.
+  not authority for future mutations or plaintext release.
   Registered channel, device, file, reaction, recall and call mutations use the
   same entry lease and guarded core commit. Native file writers keep lifecycle
-  ownership through cancellation. Contact mutations acquire runtime, then policy,
+  ownership through cancellation. Search and file/media queries use the same
+  blocking lifecycle and recheck the entry lease before releasing plaintext.
+  Trust verification encloses its durable write and live recovery-policy update
+  in that authority. Contact mutations acquire runtime, then policy,
   then the matching entry session; owner strings alone do not authorize them.
   Legacy payloads without an owner cannot identify a frontend intent created
   before IPC execution. A post-result check cannot prevent prior side effects.
@@ -175,22 +178,41 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   a settings revision. Policy commits and blocking retention pruning check the
   latest revision while holding its guard; periodic pruning uses the same path.
   A superseded document cannot apply policy or erase history after a newer save.
+  Startup follow-up retains its originating authority and uses the same guarded
+  settings application; matching an account name alone is insufficient.
 - `ui/lib/attachmentSave.ts` owns configured destinations, save dialogs,
   post-dialog owner/readiness checks and remembered paths for bubbles, previews,
   history, the files tray and store saves. Native writes already admitted may
   finish; stale continuations do not record paths into a replacement session.
 - The call store owns local terminal signaling before resource disposal and an
   independent incoming-ring deadline. Disposing local media alone is not a
-  distributed call termination.
+  distributed call termination. The local WebRTC diagnostic separately owns a
+  run generation; closing or unmounting disposes its peers, timers and tracks,
+  stops late captures and settles its pending media waits.
 - Own DM/account reaction state uses an account-scoped encrypted projection with
   latest-action compaction and local erase integration. Retained peer reactions
   resolve verified historical identities rather than live presence. Reactions
   retain best-effort fanout; portable recovery snapshots do not include them.
 - Causal traversal lives in `core/eventlog/order.rs` and is reused by node history
-  and persistence. Compaction checks retained ancestry before replacing records;
+  persistence and sync exports before filtering/pagination. Signed logical clocks
+  alone do not prove ancestry. Compaction checks retained ancestry before replacing records;
   authenticated replay can recover earlier noncausal file ordering. Local clock
   and author-sequence allocation return errors on exhaustion. Public `prepare`
   now returns `Result`; SDK callers must handle it despite unchanged wire formats.
+- Archived channel summaries and admission use `ChannelBook::projected_metadata`
+  and its signed control reducer. Key distribution/decryption remains separate;
+  archives share membership epochs, leaves, acceptance, ownership, rename and
+  terminal dissolution rules with the metadata projection.
+- Peer-avatar and language-profile journals reclaim obsolete versions using
+  encrypted record-log rewrites. They compact on opening older redundant logs
+  and amortize subsequent rewrites by profile-version count, independently of
+  immutable receive-decision count. Latest clear tombstones and every retained
+  language decision survive compaction; the budget is relative to live profiles,
+  rather than a cap on the number of distinct accounts.
+- Auth registration builds the complete encrypted user aggregate in an unpublished
+  same-volume staging directory, then publishes it by directory rename. Existing
+  partial directories are preserved for recovery. Subsequent encrypted metadata
+  writes replace a synchronized sibling file instead of truncating the live file.
 - Privacy commands reuse the same admission for checked observations and
   operation-enclosing IO commits. Core `*_guarded` methods await the privacy gate
   without host session authority, then enclose synchronous policy/proof/route

@@ -405,10 +405,15 @@ mod tests {
                 .manage(app_state.clone())
                 .manage(app_state.app_lock().clone())
                 .manage(node.clone())
+                .manage(crate::trust::TrustState::default())
                 .manage(crate::settings::SettingsState::isolated(
                     root.path().join("settings.json"),
                 ))
                 .invoke_handler(tauri::generate_handler![
+                    crate::chat_commands::search,
+                    crate::chat_commands::read_file,
+                    crate::chat_commands::read_media,
+                    crate::trust::mark_verified,
                     crate::chat_commands::send_file_to_account,
                     crate::chat_commands::send_to_account,
                     crate::chat_commands::send_sticker,
@@ -1207,6 +1212,67 @@ mod tests {
                         .list_channels()
                         .is_empty()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn registered_plaintext_and_trust_commands_reject_replaced_entry_authority() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let trust_path =
+            crate::config_store::account_path(&crate::data_dir(), "alice", "trust.json").unwrap();
+        let before = std::fs::read(&trust_path).ok();
+        for change in ["relogin", "logout", "lock"] {
+            for (command, body) in [
+                ("search", serde_json::json!({"query":"private"})),
+                ("read_file", serde_json::json!({"fileConv":"00".repeat(32)})),
+                (
+                    "read_media",
+                    serde_json::json!({"fileConv":"00".repeat(32)}),
+                ),
+                (
+                    "mark_verified",
+                    serde_json::json!({"owner":"alice","accountId":"contact","fingerprint":"fp"}),
+                ),
+            ] {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("entry".into(), user("alice"), "pw".into());
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_lock();
+                let webview = fixture.webview.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
+                match change {
+                    "logout" => fixture.app_state.session().clear(),
+                    "relogin" => fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    ),
+                    _ => crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap(),
+                }
+                drop(lifecycle);
+                let result = pending.join().unwrap();
+                assert!(
+                    captured.is_ok(),
+                    "{command} must capture authority before waiting"
+                );
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "{command}: {change}"
+                );
+                assert_eq!(std::fs::read(&trust_path).ok(), before);
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
             }
         }
     }

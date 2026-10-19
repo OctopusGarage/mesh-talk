@@ -57,20 +57,17 @@ export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
 
   const localVideo = useRef<HTMLVideoElement>(null);
   const remoteVideo = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const pcsRef = useRef<RTCPeerConnection[]>([]);
+  const generation = useRef(0);
+  const disposeRun = useRef<(() => void) | null>(null);
 
   const setStep = useCallback((key: StepKey, next: StepState) => {
     setSteps((s) => ({ ...s, [key]: next }));
   }, []);
 
   const cleanup = useCallback(() => {
-    for (const pc of pcsRef.current) pc.close();
-    pcsRef.current = [];
-    if (streamRef.current) {
-      for (const tr of streamRef.current.getTracks()) tr.stop();
-      streamRef.current = null;
-    }
+    generation.current += 1;
+    disposeRun.current?.();
+    disposeRun.current = null;
     if (localVideo.current) localVideo.current.srcObject = null;
     if (remoteVideo.current) remoteVideo.current.srcObject = null;
   }, []);
@@ -83,6 +80,25 @@ export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
 
   const run = useCallback(async () => {
     cleanup();
+    const owner = generation.current;
+    const isCurrent = () => generation.current === owner;
+    const resources: { stream?: MediaStream } = {};
+    const peers: RTCPeerConnection[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelConnectionWait: (() => void) | undefined;
+    let cancelMediaWait: (() => void) | undefined;
+    disposeRun.current = () => {
+      clearTimeout(timer);
+      cancelConnectionWait?.();
+      cancelMediaWait?.();
+      for (const pc of peers) {
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+      }
+      for (const track of resources.stream?.getTracks() ?? []) track.stop();
+    };
     setCandidates({});
     setSteps(freshSteps());
     setRunning(true);
@@ -97,11 +113,16 @@ export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
         audio: true,
       });
     } catch (e) {
+      if (!isCurrent()) return;
       setStep("capture", { status: "fail", detail: errorMessage(e) });
       setRunning(false);
       return;
     }
-    streamRef.current = stream;
+    if (!isCurrent()) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
+    resources.stream = stream;
     if (localVideo.current) {
       localVideo.current.srcObject = stream;
       void localVideo.current.play().catch(() => {});
@@ -117,6 +138,7 @@ export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
     setStep("devices", { status: "running" });
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
+      if (!isCurrent()) return;
       const cams = devices.filter((d) => d.kind === "videoinput").length;
       const mics = devices.filter((d) => d.kind === "audioinput").length;
       setStep("devices", {
@@ -124,6 +146,7 @@ export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
         detail: t("webrtcTest.devicesDetail", { cameras: cams, mics }),
       });
     } catch (e) {
+      if (!isCurrent()) return;
       setStep("devices", { status: "fail", detail: errorMessage(e) });
     }
 
@@ -132,63 +155,82 @@ export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
     //    that real media frames flow end to end inside this webview.
     setStep("connect", { status: "running" });
     setStep("media", { status: "running" });
-    const pc1 = new RTCPeerConnection({ iceServers: [] });
-    const pc2 = new RTCPeerConnection({ iceServers: [] });
-    pcsRef.current = [pc1, pc2];
-
-    pc1.onicecandidate = (e) => {
-      if (e.candidate) {
-        void pc2.addIceCandidate(e.candidate);
-        const type = e.candidate.type ?? "unknown";
-        setCandidates((c) => ({ ...c, [type]: (c[type] ?? 0) + 1 }));
-      }
-    };
-    pc2.onicecandidate = (e) => {
-      if (e.candidate) void pc1.addIceCandidate(e.candidate);
-    };
-
-    const gotRemoteMedia = new Promise<void>((resolve) => {
-      pc2.ontrack = (e) => {
-        if (remoteVideo.current && e.streams[0]) {
-          remoteVideo.current.srcObject = e.streams[0];
-          void remoteVideo.current.play().catch(() => {});
-        }
-        resolve();
-      };
-    });
-
-    const connected = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error(t("webrtcTest.timeout"))),
-        10_000,
-      );
-      pc1.onconnectionstatechange = () => {
-        if (pc1.connectionState === "connected") {
-          clearTimeout(timer);
-          resolve();
-        } else if (pc1.connectionState === "failed") {
-          clearTimeout(timer);
-          reject(new Error("connection failed"));
-        }
-      };
-    });
-
     try {
+      const pc1 = new RTCPeerConnection({ iceServers: [] });
+      peers.push(pc1);
+      const pc2 = new RTCPeerConnection({ iceServers: [] });
+      peers.push(pc2);
+
+      pc1.onicecandidate = (e) => {
+        if (isCurrent() && e.candidate) {
+          void pc2.addIceCandidate(e.candidate).catch(() => {});
+          const type = e.candidate.type ?? "unknown";
+          setCandidates((c) => ({ ...c, [type]: (c[type] ?? 0) + 1 }));
+        }
+      };
+      pc2.onicecandidate = (e) => {
+        if (isCurrent() && e.candidate)
+          void pc1.addIceCandidate(e.candidate).catch(() => {});
+      };
+
+      const gotRemoteMedia = new Promise<void>((resolve) => {
+        cancelMediaWait = resolve;
+        pc2.ontrack = (e) => {
+          if (!isCurrent()) return;
+          if (remoteVideo.current && e.streams[0]) {
+            remoteVideo.current.srcObject = e.streams[0];
+            void remoteVideo.current.play().catch(() => {});
+          }
+          resolve();
+        };
+      });
+
+      const connected = new Promise<void>((resolve, reject) => {
+        cancelConnectionWait = resolve;
+        timer = setTimeout(
+          () => reject(new Error(t("webrtcTest.timeout"))),
+          10_000,
+        );
+        pc1.onconnectionstatechange = () => {
+          if (!isCurrent()) return;
+          if (pc1.connectionState === "connected") {
+            clearTimeout(timer);
+            resolve();
+          } else if (pc1.connectionState === "failed") {
+            clearTimeout(timer);
+            reject(new Error("connection failed"));
+          }
+        };
+      });
+
+      // Negotiation can still be pending when the timeout rejects.
+      void connected.catch(() => {});
+
       for (const tr of stream.getTracks()) pc1.addTrack(tr, stream);
       const offer = await pc1.createOffer();
+      if (!isCurrent()) return;
       await pc1.setLocalDescription(offer);
+      if (!isCurrent()) return;
       await pc2.setRemoteDescription(offer);
+      if (!isCurrent()) return;
       const answer = await pc2.createAnswer();
+      if (!isCurrent()) return;
       await pc2.setLocalDescription(answer);
+      if (!isCurrent()) return;
       await pc1.setRemoteDescription(answer);
+      if (!isCurrent()) return;
       await connected;
+      if (!isCurrent()) return;
       setStep("connect", {
         status: "ok",
         detail: t("webrtcTest.connectDetail"),
       });
       await gotRemoteMedia;
+      if (!isCurrent()) return;
       setStep("media", { status: "ok", detail: t("webrtcTest.mediaDetail") });
     } catch (e) {
+      if (!isCurrent()) return;
+      for (const pc of peers) pc.close();
       const msg = errorMessage(e);
       setSteps((s) => ({
         connect:
@@ -200,14 +242,26 @@ export function WebRtcTestDialog({ menuItem = false }: { menuItem?: boolean }) {
         media: { status: "fail", detail: msg },
       }));
     } finally {
-      setRunning(false);
+      clearTimeout(timer);
+      if (isCurrent()) setRunning(false);
     }
   }, [cleanup, setStep, t]);
+
+  const onOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (!nextOpen) {
+        cleanup();
+        setRunning(false);
+      }
+      setOpen(nextOpen);
+    },
+    [cleanup],
+  );
 
   const candidateEntries = Object.entries(candidates);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>
         <Button
           variant="ghost"

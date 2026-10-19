@@ -1,6 +1,6 @@
 //! A local, password-encrypted store of the avatars peers PROPAGATED to us, keyed by the
-//! sender's account id. One current avatar per account (newest `updated_at` wins), so a
-//! peer spamming profile updates can never grow this without bound. Survives restart.
+//! sender's account id. One current avatar per account (newest `updated_at` wins);
+//! obsolete versions are periodically compacted on disk. Survives restart.
 //!
 //! On-disk framing is the shared [`EncryptedRecordLog`] (append-only); on load and on
 //! `record` we collapse to the newest record per account, so reads are O(1) and an old
@@ -28,6 +28,7 @@ struct ProfileEntry {
 pub struct ProfileStore {
     file: EncryptedRecordLog<ProfileEntry>,
     by_account: HashMap<String, ProfileEntry>,
+    records: usize,
 }
 
 impl ProfileStore {
@@ -35,11 +36,21 @@ impl ProfileStore {
     /// per account.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, entries) = EncryptedRecordLog::<ProfileEntry>::open(path, password, MAGIC)?;
+        let records = entries.len();
         let mut by_account: HashMap<String, ProfileEntry> = HashMap::new();
         for entry in entries {
             Self::merge(&mut by_account, entry);
         }
-        Ok(Self { file, by_account })
+        let mut store = Self {
+            file,
+            by_account,
+            records,
+        };
+        // Upgrade older append-only journals, preserving clear tombstones.
+        if store.records > store.by_account.len() {
+            store.compact()?;
+        }
+        Ok(store)
     }
 
     /// Insert `entry` only if it is newer than what we hold (newest-wins, ties keep the
@@ -77,9 +88,23 @@ impl ProfileStore {
             updated_at,
             avatar,
         };
+        // Reclaim obsolete versions before publishing the next update, so a
+        // failed rewrite cannot make an unsuccessful update visible in memory.
+        if self.records >= self.by_account.len().saturating_mul(2).saturating_add(64) {
+            self.compact()?;
+        }
         self.file.append(&entry)?;
+        self.records += 1;
         self.by_account.insert(account_id.to_string(), entry);
         Ok(true)
+    }
+
+    fn compact(&mut self) -> Result<(), LogError> {
+        let mut current: Vec<_> = self.by_account.values().cloned().collect();
+        current.sort_by(|a, b| a.account_id.cmp(&b.account_id));
+        self.file.rewrite(&current)?;
+        self.records = current.len();
+        Ok(())
     }
 
     /// The current avatar for `account_id` (`None` if unknown OR the peer cleared it).
@@ -125,6 +150,67 @@ impl ProfileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_avatar_updates_have_bounded_journal_and_keep_clear_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.log");
+        let mut store = ProfileStore::open(&path, "pw").unwrap();
+        for revision in 1..=200 {
+            store
+                .record("alice", revision, Some(vec![42; 1024]))
+                .unwrap();
+        }
+        store.record("bob", 1, Some(b"keep".to_vec())).unwrap();
+        store.record("alice", 201, None).unwrap();
+        drop(store);
+        let (_, records) = EncryptedRecordLog::<ProfileEntry>::open(&path, "pw", MAGIC).unwrap();
+        assert!(records.len() < 100, "obsolete avatars must be reclaimed");
+        let mut reopened = ProfileStore::open(&path, "pw").unwrap();
+        assert_eq!(reopened.avatar("bob"), Some(b"keep".to_vec()));
+        assert_eq!(reopened.updated_at("alice"), Some(201));
+        assert!(
+            !reopened
+                .record("alice", 200, Some(b"stale".to_vec()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn opening_legacy_avatar_journal_reclaims_obsolete_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.log");
+        let (mut file, _) = EncryptedRecordLog::<ProfileEntry>::open(&path, "pw", MAGIC).unwrap();
+        for revision in 1..=100 {
+            file.append(&ProfileEntry {
+                account_id: "alice".into(),
+                updated_at: revision,
+                avatar: None,
+            })
+            .unwrap();
+        }
+        drop(file);
+        let store = ProfileStore::open(&path, "pw").unwrap();
+        assert_eq!(store.updated_at("alice"), Some(100));
+        drop(store);
+        let (_, records) = EncryptedRecordLog::<ProfileEntry>::open(&path, "pw", MAGIC).unwrap();
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn failed_avatar_compaction_does_not_publish_the_next_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.log");
+        let mut store = ProfileStore::open(&path, "pw").unwrap();
+        for revision in 1..=66 {
+            store.record("alice", revision, None).unwrap();
+        }
+        std::fs::create_dir(path.with_extension("compact-tmp")).unwrap();
+        assert!(store.record("alice", 67, Some(b"new".to_vec())).is_err());
+        assert_eq!(store.updated_at("alice"), Some(66));
+        std::fs::remove_dir(path.with_extension("compact-tmp")).unwrap();
+        assert!(store.record("alice", 67, Some(b"new".to_vec())).unwrap());
+    }
 
     #[test]
     fn newest_wins_and_survives_reopen() {

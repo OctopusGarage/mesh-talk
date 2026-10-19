@@ -17,6 +17,9 @@ pub(super) struct LanguageState {
     file: EncryptedRecordLog<Record>,
     profiles: HashMap<String, ProfilePayload>,
     decisions: HashMap<EventId, bool>,
+    // Count profile records separately: immutable decisions must not grant an
+    // arbitrarily large budget for obsolete avatar-bearing profile versions.
+    profile_records: usize,
 }
 impl LanguageState {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -25,9 +28,16 @@ impl LanguageState {
             file,
             profiles: HashMap::new(),
             decisions: HashMap::new(),
+            profile_records: records
+                .iter()
+                .filter(|record| matches!(record, Record::Profile(_)))
+                .count(),
         };
         for record in records {
             state.install(record);
+        }
+        if state.profile_records > state.profiles.len() {
+            state.compact_profiles()?;
         }
         Ok(state)
     }
@@ -63,11 +73,31 @@ impl LanguageState {
         {
             return Ok(false);
         }
+        if self.profile_records >= self.profiles.len().saturating_mul(2).saturating_add(64) {
+            self.compact_profiles()?;
+        }
         let record = Record::Profile(profile.clone());
         self.file.append_durable(&record)?;
+        self.profile_records += 1;
         self.install(record);
         Ok(true)
     }
+    fn compact_profiles(&mut self) -> Result<(), LogError> {
+        let mut records: Vec<_> = self
+            .snapshot_profiles()
+            .into_iter()
+            .map(Record::Profile)
+            .collect();
+        records.extend(
+            self.snapshot_decisions()
+                .into_iter()
+                .map(|(id, hidden)| Record::Decision { id, hidden }),
+        );
+        self.file.rewrite(&records)?;
+        self.profile_records = self.profiles.len();
+        Ok(())
+    }
+
     pub fn profile(&self, account: &str) -> Option<ProfilePayload> {
         self.profiles.get(account).cloned()
     }
@@ -102,6 +132,101 @@ impl LanguageState {
 mod tests {
     use super::*;
     use crate::identity::account::Account;
+    #[test]
+    fn profile_compaction_preserves_immutable_receive_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("language.log");
+        let account = Account::generate();
+        let mut state = LanguageState::open(&path, "pw").unwrap();
+        for index in 0u32..200 {
+            let mut bytes = [0; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            state.decide(EventId::new(bytes), index % 2 == 0).unwrap();
+        }
+        for revision in 1..=200 {
+            state
+                .record_profile(&ProfilePayload::new_with_language(
+                    &account,
+                    None,
+                    revision,
+                    Some("en".into()),
+                ))
+                .unwrap();
+        }
+        drop(state);
+        let (_, records) = EncryptedRecordLog::<Record>::open(&path, "pw", b"MTLANG").unwrap();
+        let profile_count = records
+            .iter()
+            .filter(|record| matches!(record, Record::Profile(_)))
+            .count();
+        assert!(
+            profile_count < 100,
+            "receive decisions must not inflate the obsolete-profile budget"
+        );
+        let reopened = LanguageState::open(&path, "pw").unwrap();
+        assert_eq!(reopened.snapshot_decisions().len(), 200);
+        for index in 0u32..200 {
+            let mut bytes = [0; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            assert_eq!(reopened.hidden(EventId::new(bytes)), index % 2 == 0);
+        }
+        assert_eq!(
+            reopened.profile(&account.account_id()).unwrap().updated_at,
+            200
+        );
+        drop(reopened);
+        let (_, records) = EncryptedRecordLog::<Record>::open(&path, "pw", b"MTLANG").unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| matches!(r, Record::Profile(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_language_compaction_preserves_profile_and_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("language.log");
+        let account = Account::generate();
+        let mut state = LanguageState::open(&path, "pw").unwrap();
+        let id = EventId::new([7; 32]);
+        state.decide(id, true).unwrap();
+        for revision in 1..=66 {
+            state
+                .record_profile(&ProfilePayload::new_with_language(
+                    &account,
+                    None,
+                    revision,
+                    Some("en".into()),
+                ))
+                .unwrap();
+        }
+        std::fs::create_dir(path.with_extension("compact-tmp")).unwrap();
+        assert!(
+            state
+                .record_profile(&ProfilePayload::new_with_language(
+                    &account,
+                    None,
+                    67,
+                    Some("zh".into())
+                ))
+                .is_err()
+        );
+        assert_eq!(state.profile(&account.account_id()).unwrap().updated_at, 66);
+        assert!(state.hidden(id));
+        std::fs::remove_dir(path.with_extension("compact-tmp")).unwrap();
+        state
+            .record_profile(&ProfilePayload::new_with_language(
+                &account,
+                None,
+                67,
+                Some("zh".into()),
+            ))
+            .unwrap();
+    }
+
     #[test]
     fn preference_is_durable_and_rejects_stale_updates() {
         let dir = tempfile::tempdir().unwrap();

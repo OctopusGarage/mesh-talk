@@ -876,15 +876,16 @@ impl GuardedSyncStore<'_> {
             .state
             .read()
             .expect("privacy lock not poisoned");
-        let mut events: Vec<_> = self
-            .node
-            .log
-            .lock()
-            .expect("log lock not poisoned")
-            .events(conversation)
-            .into_iter()
-            .cloned()
-            .collect();
+        let mut events = crate::eventlog::sync::causal_events(
+            self.node
+                .log
+                .lock()
+                .expect("log lock not poisoned")
+                .events(conversation),
+        )
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
         if guard
             .as_ref()
             .is_none_or(|state| !state.policy.snapshot().invisible)
@@ -1264,6 +1265,155 @@ impl SyncStore for GuardedSyncStore<'_> {
             log.append_durable(event)
         } else {
             log.append(event)
+        }
+    }
+}
+
+#[cfg(test)]
+mod causal_export_tests {
+    use super::*;
+    use crate::eventlog::sync::{build_request, handle_request_bounded, handle_response};
+
+    #[tokio::test]
+    async fn loopback_guarded_sync_crosses_frame_cap_with_inverted_clocks() {
+        use crate::transport::SecureChannel;
+        use tokio::net::{TcpListener, TcpStream};
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            crate::identity::device::DeviceIdentity::generate(),
+            std::sync::Arc::new(std::sync::Mutex::new(crate::discovery::Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let conversation = ConversationId::new([52; 32]);
+        // Each event fits, but their combined payload exceeds one Noise frame.
+        let parent = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            100,
+            0,
+            EventKind::Message,
+            vec![1; 40 * 1024],
+        );
+        let child = Event::new(
+            &node.identity,
+            conversation,
+            2,
+            vec![parent.id],
+            1,
+            0,
+            EventKind::Message,
+            vec![2; 40 * 1024],
+        );
+        {
+            let mut log = node.log.lock().unwrap();
+            log.append_durable(parent.clone()).unwrap();
+            log.append_durable(child.clone()).unwrap();
+        }
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(stream, &node.identity).await.unwrap();
+            let store = node.sync_store(channel.peer_identity());
+            while !matches!(
+                super::super::session::serve_one(&mut channel, &store)
+                    .await
+                    .unwrap(),
+                super::super::session::Served::Closed
+            ) {}
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let identity = crate::identity::device::DeviceIdentity::generate();
+            let stream = TcpStream::connect(address).await.unwrap();
+            let mut channel = SecureChannel::connect(stream, &identity, None)
+                .await
+                .unwrap();
+            let target = std::sync::Mutex::new(EventLog::default());
+            let report = super::super::session::request_round(&mut channel, &target, conversation)
+                .await
+                .unwrap();
+            assert_eq!(report.applied, 2);
+            assert!(report.rejected.is_empty());
+            assert!(target.lock().unwrap().has(&parent.id));
+            assert!(target.lock().unwrap().has(&child.id));
+            drop(channel);
+            server.await.unwrap();
+        })
+        .await
+        .expect("bounded sync must converge across inverted-clock response frames");
+    }
+
+    #[tokio::test]
+    async fn guarded_bounded_sync_preserves_inverted_clock_ancestry() {
+        let dir = tempfile::tempdir().unwrap();
+        let author = crate::identity::device::DeviceIdentity::generate();
+        let peer = crate::identity::device::DeviceIdentity::generate();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            author,
+            std::sync::Arc::new(std::sync::Mutex::new(crate::discovery::Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let conversation = ConversationId::new([51; 32]);
+        let parent = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            100,
+            0,
+            EventKind::Message,
+            b"parent".to_vec(),
+        );
+        let child = Event::new(
+            &node.identity,
+            conversation,
+            2,
+            vec![parent.id],
+            1,
+            0,
+            EventKind::Message,
+            b"child".to_vec(),
+        );
+        {
+            let mut log = node.log.lock().unwrap();
+            log.append_durable(parent.clone()).unwrap();
+            log.append_durable(child.clone()).unwrap();
+        }
+        let guarded = node.sync_store(&peer.public());
+        let mut target = EventLog::default();
+        for expected in [parent.id, child.id] {
+            let response = handle_request_bounded(
+                &*guarded.lock().unwrap(),
+                &build_request(&target, conversation),
+                1,
+            );
+            assert_eq!(response.events.len(), 1);
+            assert_eq!(response.events[0].id, expected);
+            let (report, _) = handle_response(&mut target, &response);
+            assert_eq!(report.applied, 1);
+            assert!(report.rejected.is_empty());
         }
     }
 }

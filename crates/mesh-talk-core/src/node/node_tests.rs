@@ -9209,3 +9209,125 @@ async fn own_dm_reactions_survive_restart_and_removal() {
         "own DM remove survives restart"
     );
 }
+
+// Archived recovery histories must use the same signed metadata projection as live channels.
+#[test]
+fn archived_metadata_honors_leave_epoch_rename_and_dissolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = PersistentEventLog::open(&dir.path().join("archive.log"), "pw").unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let channel = crate::channel::new_channel_id();
+    let append = |log: &mut PersistentEventLog, author: &DeviceIdentity, kind, payload| {
+        let (parents, clock) = log.prepare(&channel).unwrap();
+        let seq = log
+            .next_sequence(&channel, &Author::from_ed25519(author.public().ed25519_pub))
+            .unwrap();
+        log.append(Event::new(
+            author, channel, seq, parents, clock, 1, kind, payload,
+        ))
+        .unwrap();
+    };
+    let meta = ChannelMeta {
+        name: "Original".into(),
+        members: vec![alice.public(), bob.public()],
+        epoch: 0,
+        owner: alice.public().user_id(),
+    };
+    append(&mut log, &alice, EventKind::MembershipChange, meta.encode());
+    append(&mut log, &bob, EventKind::ChannelLeave, vec![]);
+    // An old epoch snapshot cannot restore Bob or rename the channel.
+    append(&mut log, &alice, EventKind::MembershipChange, meta.encode());
+    append(
+        &mut log,
+        &alice,
+        EventKind::ChannelRename,
+        b"Renamed".to_vec(),
+    );
+    append(&mut log, &alice, EventKind::ChannelDissolve, vec![]);
+    append(
+        &mut log,
+        &alice,
+        EventKind::ChannelRename,
+        b"Too late".to_vec(),
+    );
+    let mut book = ChannelBook::new();
+    book.process(&alice, channel, &log.events(&channel));
+    let live = book.state(&channel).unwrap();
+    let archived = archived_channel_summaries(&log, &ChannelBook::new());
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].member_count, live.members().len());
+    assert_eq!(archived[0].member_count, 1);
+    assert_eq!(archived[0].owner, live.owner());
+    assert_eq!(archived[0].name, live.name());
+    assert!(archived[0].dissolved);
+}
+
+#[test]
+fn archived_metadata_rejects_transfer_to_unaccepted_invitee() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = PersistentEventLog::open(&dir.path().join("archive.log"), "pw").unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let channel = crate::channel::new_channel_id();
+    let meta = ChannelMeta {
+        name: "Invited".into(),
+        members: vec![alice.public(), bob.public()],
+        epoch: 0,
+        owner: alice.public().user_id(),
+    };
+    let (parents, clock) = log.prepare(&channel).unwrap();
+    log.append(Event::new(
+        &alice,
+        channel,
+        0,
+        parents,
+        clock,
+        1,
+        EventKind::MembershipChange,
+        meta.encode_invitation(),
+    ))
+    .unwrap();
+    let (parents, clock) = log.prepare(&channel).unwrap();
+    log.append(Event::new(
+        &alice,
+        channel,
+        1,
+        parents,
+        clock,
+        1,
+        EventKind::ChannelOwnerTransfer,
+        bob.public().user_id().into_bytes(),
+    ))
+    .unwrap();
+    let archived = archived_channel_summaries(&log, &ChannelBook::new());
+    assert_eq!(archived[0].owner, alice.public().user_id());
+    let (parents, clock) = log.prepare(&channel).unwrap();
+    log.append(Event::new(
+        &bob,
+        channel,
+        0,
+        parents,
+        clock,
+        1,
+        EventKind::ChannelAccept,
+        vec![],
+    ))
+    .unwrap();
+    let (parents, clock) = log.prepare(&channel).unwrap();
+    log.append(Event::new(
+        &alice,
+        channel,
+        2,
+        parents,
+        clock,
+        1,
+        EventKind::ChannelOwnerTransfer,
+        bob.public().user_id().into_bytes(),
+    ))
+    .unwrap();
+    assert_eq!(
+        archived_channel_summaries(&log, &ChannelBook::new())[0].owner,
+        bob.public().user_id()
+    );
+}

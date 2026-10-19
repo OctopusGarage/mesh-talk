@@ -520,14 +520,15 @@ pub async fn read_file<R: tauri::Runtime>(
     state: tauri::State<'_, NodeState>,
     file_conv: String,
 ) -> Result<tauri::ipc::Response, CommandError> {
+    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
     let id = parse_channel_id(&file_conv)?;
-    let node = state.node_handle().await?;
-    let bytes = tokio::task::spawn_blocking(move || node.read_file(id))
+    let bytes = admission
+        .clone()
+        .blocking(move |runtime, _| runtime.handle().read_file(id).map_err(CommandError::from))
+        .await?;
+    admission
+        .with_runtime(move |_| Ok(tauri::ipc::Response::new(bytes)))
         .await
-        .map_err(|e| format!("join error: {e}"))?
-        .map_err(CommandError::from)?;
-    crate::app_lock::reject_if_locked(&app)?;
-    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Return DURABLE chat-media bytes (image/screenshot/video) from the media store for inline
@@ -541,14 +542,20 @@ pub async fn read_media<R: tauri::Runtime>(
     state: tauri::State<'_, NodeState>,
     file_conv: String,
 ) -> Result<tauri::ipc::Response, CommandError> {
+    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
     let id = parse_channel_id(&file_conv)?;
-    let node = state.node_handle().await?;
-    let bytes = tokio::task::spawn_blocking(move || node.read_media(id))
+    let bytes = admission
+        .clone()
+        .blocking(move |runtime, _| {
+            runtime
+                .handle()
+                .read_media(id)
+                .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))
+        })
+        .await?;
+    admission
+        .with_runtime(move |_| Ok(tauri::ipc::Response::new(bytes)))
         .await
-        .map_err(|e| format!("join error: {e}"))?
-        .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))?;
-    crate::app_lock::reject_if_locked(&app)?;
-    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[cfg(test)]

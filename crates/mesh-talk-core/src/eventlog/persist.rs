@@ -471,7 +471,7 @@ impl SyncStore for PersistentEventLog {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
-        self.events(conversation)
+        super::sync::causal_events(self.events(conversation))
             .into_iter()
             .filter(|e| !have.contains(&e.id))
             .cloned()
@@ -500,6 +500,41 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn bounded_durable_sync_preserves_ancestry_after_reopen() {
+        use crate::eventlog::sync::{build_request, handle_request_bounded, handle_response};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.log");
+        let author = DeviceIdentity::generate();
+        let parent = mk(&author, 1, 100, b"parent");
+        let child = Event::new(
+            &author,
+            parent.conversation_id,
+            2,
+            vec![parent.id],
+            1,
+            0,
+            EventKind::Message,
+            b"child".to_vec(),
+        );
+        {
+            let mut source = PersistentEventLog::open(&path, "pw").unwrap();
+            source.append_durable(parent.clone()).unwrap();
+            source.append_durable(child.clone()).unwrap();
+        }
+        let source = PersistentEventLog::open(&path, "pw").unwrap();
+        let mut target = EventLog::default();
+        for expected in [parent.id, child.id] {
+            let response =
+                handle_request_bounded(&source, &build_request(&target, parent.conversation_id), 1);
+            assert_eq!(response.events.len(), 1);
+            assert_eq!(response.events[0].id, expected);
+            let (report, _) = handle_response(&mut target, &response);
+            assert_eq!(report.applied, 1);
+            assert!(report.rejected.is_empty());
+        }
     }
 
     #[test]

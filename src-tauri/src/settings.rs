@@ -508,22 +508,62 @@ fn preserve_login_bookkeeping(
     (settings, clear_user)
 }
 
-/// Apply the persisted relay preferences in the same order at startup and after a save.
-pub(crate) async fn apply_relay_settings(
-    node: &mesh_talk_core::node::Node,
+/// Apply relay policy only while its originating session and persisted revision
+/// still authorize each commit, including after the asynchronous privacy gate.
+async fn apply_relay_settings(
+    runtime: &mesh_talk_core::node::NodeRuntime,
+    admission: &RuntimeAdmission,
+    state: &SettingsState,
+    owner: &str,
+    revision: u64,
     settings: &AppSettings,
-) -> Result<(), &'static str> {
-    node.set_post_office_permissions(
-        settings.post_office_send_enabled,
-        settings.post_office_receive_enabled,
-    );
-    node.set_post_office_enabled(settings.post_office_enabled);
-    node.set_physical_lan_only(settings.physical_lan_only).await;
-    let hub_result = node.set_bridge_hub_id(
-        (!settings.bridge_hub_id.is_empty()).then_some(settings.bridge_hub_id.as_str()),
-    );
-    node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
-    hub_result
+) -> Result<(), CommandError> {
+    let node = runtime.handle();
+    node.set_physical_lan_only_if(settings.physical_lan_only, |commit| {
+        admission.authorize_io(runtime, &mut || {
+            state
+                .commit_current(owner, revision, || Ok(commit()))
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+                })?
+        })
+    })
+    .await
+    .map_err(|error| CommandError::Authorization(error.to_string()))?;
+    admission.checked(runtime, || {
+        state.commit_current(owner, revision, || {
+            node.set_post_office_permissions(
+                settings.post_office_send_enabled,
+                settings.post_office_receive_enabled,
+            );
+            node.set_post_office_enabled(settings.post_office_enabled);
+            node.set_bridge_hub_id(
+                (!settings.bridge_hub_id.is_empty()).then_some(settings.bridge_hub_id.as_str()),
+            )
+            .map_err(|error| CommandError::InvalidInput(error.into()))?;
+            node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
+            Ok(())
+        })
+    })?;
+    Ok(())
+}
+
+/// Startup shares the same application serialization and commit authority as saves.
+pub(crate) async fn apply_startup_settings(
+    admission: RuntimeAdmission,
+    state: SettingsState,
+) -> Result<(), CommandError> {
+    let owner = admission.lease().owner().to_owned();
+    let (revision, settings) = state.snapshot(&owner)?;
+    let serialization = state.1.clone().lock_owned().await;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let _serialization = serialization;
+                apply_relay_settings(runtime, admission, &state, &owner, revision, &settings).await
+            })
+        })
+        .await
 }
 
 /// Applications are serialized; each commit checks the latest persisted revision
@@ -544,37 +584,8 @@ async fn apply_running_settings(
     let serialization = admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
-                let node = runtime.handle();
-                node.set_physical_lan_only_if(settings.physical_lan_only, |commit| {
-                    admission.authorize_io(runtime, &mut || {
-                        state
-                            .commit_current(&owner, revision, || Ok(commit()))
-                            .map_err(|error| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::PermissionDenied,
-                                    error.to_string(),
-                                )
-                            })?
-                    })
-                })
-                .await
-                .map_err(|error| CommandError::Authorization(error.to_string()))?;
-                admission.checked(runtime, || {
-                    state.commit_current(&owner, revision, || {
-                        node.set_post_office_permissions(
-                            settings.post_office_send_enabled,
-                            settings.post_office_receive_enabled,
-                        );
-                        node.set_post_office_enabled(settings.post_office_enabled);
-                        node.set_bridge_hub_id(
-                            (!settings.bridge_hub_id.is_empty())
-                                .then_some(settings.bridge_hub_id.as_str()),
-                        )
-                        .map_err(|error| CommandError::InvalidInput(error.into()))?;
-                        node.set_bridge_discovery_enabled(settings.bridge_discovery_enabled);
-                        Ok(())
-                    })
-                })?;
+                apply_relay_settings(runtime, admission, &state, &owner, revision, &settings)
+                    .await?;
                 Ok(serialization)
             })
         })
@@ -774,6 +785,126 @@ mod tests {
             assert!(
                 !handle.physical_lan_only(),
                 "obsolete settings cannot commit runtime policy or reach retention pruning"
+            );
+            node.0.lock().await.take().unwrap().stop().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_relay_policy_rejects_authority_or_revision_change_during_policy_wait() {
+        for change in ["settings", "relogin", "logout", "lock", "current"] {
+            let root = tempfile::tempdir().unwrap();
+            let app = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+                Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                    mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+                )),
+            ));
+            let user = crate::services::user::User {
+                user_id: "settings-owner".into(),
+                name: "settings".into(),
+                display_name: "Settings".into(),
+                address: "local".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            };
+            app.session()
+                .publish("original".into(), user.clone(), "pw".into());
+            let node = crate::chat_commands::NodeState::empty();
+            let runtime = mesh_talk_core::node::NodeRuntime::start(
+                root.path(),
+                "settings-owner",
+                "Settings",
+                "pw",
+                0,
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            )
+            .await
+            .unwrap();
+            let handle = runtime.handle();
+            *node.0.lock().await = Some(runtime);
+            let state = SettingsState::default();
+            state.0.lock().unwrap().owner = Some("settings-owner".into());
+            state
+                .update_for_owner(
+                    "settings-owner",
+                    AppSettings {
+                        physical_lan_only: true,
+                        ..AppSettings::default()
+                    },
+                )
+                .unwrap();
+            let (revision, settings) = state.snapshot("settings-owner").unwrap();
+            let admission = RuntimeAdmission::capture_current(&app, &node).unwrap();
+            let (entered, held) = std::sync::mpsc::channel();
+            let (release, resumed) = std::sync::mpsc::channel();
+            let holder_node = handle.clone();
+            let holder = std::thread::spawn(move || {
+                tauri::async_runtime::block_on(holder_node.set_invisible_if(false, move || {
+                    entered.send(()).unwrap();
+                    resumed.recv().unwrap();
+                    Err(std::io::Error::other("test holder makes no mutation"))
+                }))
+            });
+            held.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let runtime_guard = node.0.lock().await;
+            let runtime = runtime_guard.as_ref().unwrap();
+            let result = {
+                let pending = apply_relay_settings(
+                    runtime,
+                    &admission,
+                    &state,
+                    "settings-owner",
+                    revision,
+                    &settings,
+                );
+                tokio::pin!(pending);
+                tokio::select! {
+                    biased;
+                    result = &mut pending => panic!("policy gate was not held: {result:?}"),
+                    _ = tokio::task::yield_now() => {}
+                }
+                match change {
+                    "settings" => {
+                        state
+                            .update_for_owner("settings-owner", AppSettings::default())
+                            .unwrap();
+                    }
+                    "relogin" => {
+                        app.session()
+                            .publish("replacement".into(), user, "pw".into());
+                    }
+                    "logout" => app.session().clear(),
+                    "lock" => {
+                        use tauri::Manager;
+                        let host = tauri::test::mock_builder()
+                            .manage(app.clone())
+                            .manage(app.app_lock().clone())
+                            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                            .unwrap();
+                        crate::app_lock::lock_app(host.state(), host.state()).unwrap();
+                    }
+                    _ => {}
+                }
+                release.send(()).unwrap();
+                pending.await
+            };
+            drop(runtime_guard);
+            assert!(holder.join().unwrap().is_err());
+            assert_eq!(
+                result.is_ok(),
+                change == "current",
+                "startup result for {change}"
+            );
+            assert_eq!(
+                handle.physical_lan_only(),
+                change == "current",
+                "startup policy for {change}"
             );
             node.0.lock().await.take().unwrap().stop().await;
         }
