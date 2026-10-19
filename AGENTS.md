@@ -51,6 +51,17 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 - Write documentation and reusable prompts in English unless a specific exception is needed.
 - Reference `specifications/development_conventions.md` for naming nuances.
 
+## Domain Language
+
+- `CONTEXT.md` is the canonical domain glossary. `docs/domain-design.md` indexes
+  the modeling references and defines DDD vocabulary and naming translations.
+- Distinguish local users, accounts and devices; desktop, transport and ratchet
+  sessions; discovery, presence, custody, recipient delivery and read state.
+- Use explicit identity/lifetime names in new code. Preserve public, wire and
+  stored identifiers unless a separately validated compatibility change is intended.
+- Update the glossary and affected owning guides when a domain meaning changes;
+  link to definitions instead of maintaining duplicate glossaries.
+
 ## Architecture & Components
 
 - Before adding business logic, consult [module ownership and reuse](docs/module-boundaries.md),

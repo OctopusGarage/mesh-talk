@@ -2,6 +2,15 @@
 
 This document outlines the development conventions, coding standards, and best practices for the Mesh-Talk project.
 
+## Domain language and modeling
+
+Use [CONTEXT.md](../CONTEXT.md) for canonical domain definitions and the
+[DDD guide](../docs/domain-design.md) for modeling terms, identifier meanings and
+translation conventions. Do not equate a local user UUID with an account or device
+ID, or a UI projection with authorization. New names should make identity kind
+and lifecycle explicit; existing public/wire/storage names require compatibility
+review before renaming.
+
 ## Code Organization
 
 1. **Module Structure**: Follow the module structure described in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)
@@ -13,9 +22,9 @@ This document outlines the development conventions, coding standards, and best p
 
 ## Naming Conventions
 
-1. **Files and Directories**: Use lowercase with underscores for files and directories
-2. **Functions and Variables**: Use snake_case for function and variable names
-3. **Structs and Enums**: Use PascalCase for struct and enum names
+1. **Rust**: Use snake_case for modules, functions and variables; PascalCase for structs and enums
+2. **TypeScript**: Use camelCase for functions and variables; PascalCase for components and types, matching existing feature conventions
+3. **Domain concepts**: Keep the same canonical meaning across languages; syntax may differ
 4. **Constants**: Use UPPER_SNAKE_CASE for constants
 5. **Descriptive Names**: Use descriptive names that convey purpose
 
@@ -60,7 +69,7 @@ This document outlines the development conventions, coding standards, and best p
    - Use features to enable optional functionality
    - Consider workspace organization for multi-crate projects
 2. **Git Hooks**:
-   - The pre-commit hook checks staged whitespace and source formatting
+   - The pre-commit hook checks repository hygiene, staged whitespace and source formatting
    - Run affected tests during development; run the full suite before PR submission
 
 ## Git Workflow

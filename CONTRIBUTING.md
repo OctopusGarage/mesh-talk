@@ -84,8 +84,10 @@ Quick local equivalents are wrapped in the **`/audit`** Claude command.
 
 ## Architecture
 
-See [`CONTEXT.md`](CONTEXT.md) for the domain model and layering, and
-[`AGENTS.md`](AGENTS.md) for repository conventions. In short: the frontend talks
+Use the [canonical glossary](CONTEXT.md) and [DDD conventions](docs/domain-design.md)
+for domain terms, identity kinds and identifier translations. See
+[module ownership](docs/module-boundaries.md) for layering and
+[`AGENTS.md`](AGENTS.md) for repository conventions. The frontend talks
 to the backend only through Tauri `commands`; networking changes (`udp`, `tcp`,
 discovery, reconnection) should mirror the docs under `specifications/`.
 

@@ -6,6 +6,11 @@ implementation. Network semantics and configuration belong to the
 [communication architecture](network-design-reference.md); this document defines
 where those decisions live in code and how to change them safely.
 
+The [canonical glossary](../CONTEXT.md) defines domain concepts;
+[DDD conventions](domain-design.md) define modeling terms and identifier mappings.
+The layers and owners below are implementation responsibilities, not declarations
+that every module or crate is a separate DDD bounded context.
+
 ## 1. Dependency direction
 
 | Layer                                       | Owns                                                                                          | Depends on                                              | Must delegate                                                        |

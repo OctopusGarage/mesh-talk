@@ -20,6 +20,15 @@ The site and README may summarize a capability, but link to its owning guide
 for setup, flags, support matrices, and changing limits. Do not copy a CLI option
 table, release procedure, or full feature inventory into either overview.
 
+## Shared domain language
+
+[CONTEXT.md](../CONTEXT.md) owns domain definitions; [DDD conventions](domain-design.md)
+own modeling vocabulary, identifier mappings and the reference index. Use those
+terms in guides, code comments and reviews. Keep technical invariants in the
+architecture/network references and implementation ownership in the module map.
+Do not create feature-local glossaries that redefine account/device identity,
+conversation membership, lifecycle or delivery outcomes.
+
 ## Shared project narrative
 
 1. **Local first:** a local identity, automatic signed LAN discovery, direct

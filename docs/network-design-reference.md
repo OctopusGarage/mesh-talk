@@ -65,29 +65,16 @@ The drawing shows ownership and dependencies, not a requirement that every messa
 
 ### Glossary
 
-| Term                         | Definition and boundary                                                                                                                                                                                |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Host / machine**           | A physical or virtual computer. It can run several processes, such as a desktop app and a post office with different device identities.                                                                |
-| **Client / app node**        | A Mesh Talk device participating in conversations. It does not automatically advertise or route traffic for its LAN neighbors.                                                                         |
-| **Account**                  | A cryptographic identity that may own multiple certified devices. It is not an IP address or a desktop login UUID.                                                                                     |
-| **Device identity**          | A device's signing and key-agreement identity, bound to its account by a certificate. Full identity checks must survive route changes.                                                                 |
-| **Peer / roster**            | A known device and its observed routes. Raw routing/diagnostic rosters include infrastructure; person and group pickers exclude post offices.                                                          |
-| **Physical LAN**             | An interface/subnet discovery scope. VLAN boundaries, Wi-Fi client isolation and firewalls can prevent communication even on apparently shared Wi-Fi.                                                  |
-| **Direct application route** | A candidate path to the named device without an intermediate Mesh Talk post office. It may use LAN, routed IP or Tailscale. Actual transport must still authenticate and connect.                      |
-| **Tailscale edge**           | Existing routed connectivity between particular machines. It does not merge their LAN discovery domains. “Direct” in Mesh Talk does not assert whether Tailscale itself uses a network relay.          |
-| **Presence / discovery**     | Signed, short-lived availability information. It provides identity and route candidates, not conversation permission or a delivery receipt.                                                            |
-| **Route provenance**         | How an endpoint was learned: LAN, routed query, authenticated connection, legacy gateway or post-office introduction. It is not inferred from a display name or IP prefix.                             |
-| **Directory introduction**   | Eligible signed presence learned through a bridge. It identifies a participant and potential mailbox path; the relay address is not that participant's own TCP listener.                               |
-| **Post office / relay**      | An application service that holds opaque encrypted events temporarily and can reconcile them with explicitly trusted equal relays. It is not a group member, generic IP router or WebRTC TURN service. |
-| **Bridge mode**              | A post office's opt-in directory capability, required with explicit trust for federation. Client bridge discovery is a separate device preference.                                                     |
-| **Federation**               | Authenticated exchange of eligible presence and relay-independent opaque mailbox data among mutually enrolled relays. Equal role does not mean automatic trust.                                        |
-| **Event / logical message**  | Signed, content-addressed protocol event versus user-visible message identity. Retries preserve immutable event identity; account/device views may merge logical copies.                               |
-| **Custody**                  | A retained encrypted copy. It is evidence of storage, not recipient delivery, reading or permanent durability.                                                                                         |
-| **Recipient confirmation**   | Validated destination-bound control evidence. A transport acknowledgment or relay's claim cannot substitute for it.                                                                                    |
-| **Channel / group**          | An authorized conversation with membership controls and encryption keys. It is unrelated to the UDP multicast group or an open TCP socket.                                                             |
-| **Share a copy / replica**   | An accepted member's permission to serve retained authorized group history. The sharing member can decrypt the group; an opaque post office cannot.                                                    |
-| **Anti-entropy**             | Bounded reconciliation of missing signed events between authorized holders, supporting eventual recovery while a valid path and retained copy exist.                                                   |
-| **Privacy generation**       | A local policy epoch used to prevent old sessions or in-flight work from surviving a revoked permission or account transition.                                                                         |
+The [canonical domain glossary](../CONTEXT.md) defines identity, conversations,
+network availability, acceptance and delivery. Use its terms here rather than
+maintaining a second set of definitions. [DDD conventions](domain-design.md)
+explain overloaded code identifiers and translation rules.
+
+The sections below own network-specific mechanisms and invariants: route
+provenance, source lifetimes, bridge/federation configuration, recipient
+confirmation, custody budgets and recovery limits. A protocol-specific use of
+“channel,” “group” or “session” must be qualified when it differs from the
+conversation or desktop-session meaning.
 
 ### Three operations often called “broadcast”
 

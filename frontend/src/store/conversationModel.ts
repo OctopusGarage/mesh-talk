@@ -4,7 +4,7 @@ export type ConvKind = "account" | "channel";
 
 export interface Conversation {
   kind: ConvKind;
-  id: string; // account_id (hex) | channel_id (hex)
+  id: string; // Kind-dependent account/channel ID; not a raw protocol ConversationId.
   name: string;
 }
 

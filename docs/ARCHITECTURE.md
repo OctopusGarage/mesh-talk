@@ -20,6 +20,10 @@ for cross-module design contracts, illustrated scenarios and development guardra
 
 ---
 
+Use the [canonical domain glossary](../CONTEXT.md) and
+[DDD conventions](domain-design.md) for terminology and identifier translations.
+This reference owns technical mechanisms and invariants.
+
 ## 1. Process & layers
 
 See the [module ownership and reuse guide](module-boundaries.md) before assigning
