@@ -63,11 +63,17 @@ pub async fn delete_contact(
     policy: tauri::State<'_, HiddenContactsState>,
 ) -> Result<HiddenContactsSnapshot, String> {
     let node = node.0.clone();
+    #[cfg(test)]
+    let captured = app.owner_command_captured.clone();
     let session = app.session().clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(entered) = captured.lock().unwrap().as_ref() {
+            let _ = entered.send("contact-runtime-wait");
+        }
+        let guard = node.blocking_lock();
         policy.transaction(&session, &owner, || {
-            let guard = node.blocking_lock();
             let runtime = guard
                 .as_ref()
                 .ok_or("Deleting a contact requires a running node")?;

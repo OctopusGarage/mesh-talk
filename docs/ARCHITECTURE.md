@@ -358,6 +358,11 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   `owner_*` delivery IPC and legacy account text/sticker/file sends capture the
   lease before waiting for the runtime lock. `RuntimeAdmission` owns capture,
   checked reads, guarded local acceptance and detached producer lifetime.
+  When contact presentation needs both runtime and policy state, acquire the
+  runtime lock, then the contact-policy lock, then session authority. Never wait
+  for a runtime while holding the session lock: startup installation and admitted
+  producers also need that session. Presence and self-contact identity are still
+  read inside the authorized policy transaction, with the runtime retained.
   Local text/sticker/file
   enqueue keeps that lifecycle admission through privacy updates and staging.
   Waiting for the privacy gate holds no session guard;
