@@ -1,5 +1,4 @@
 import { HighlightedText } from "./HighlightedText";
-import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useEffect, useMemo, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -353,10 +352,7 @@ export function ConversationHistoryDialog({
                             />
                           </span>
                         ) : (
-                          <HighlightedText
-                            text={messageDisplayText(m.text, t)}
-                            term={query}
-                          />
+                          <HighlightedText text={m.text} term={query} />
                         )}
                       </div>
                     </div>
@@ -470,7 +466,7 @@ export function ConversationHistoryDialog({
                     >
                       <RowMeta m={m} />
                       <p className="break-words text-sm text-foreground/90">
-                        {renderWithMentions(messageDisplayText(m.text, t))}
+                        {renderWithMentions(m.text)}
                       </p>
                     </div>
                   ))

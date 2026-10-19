@@ -123,11 +123,11 @@ preference. Unknown preferences disable animation; mounted consumers react to
 operating-system preference changes. None of these modules owns global chat state.
 
 `core/node/account_profile.rs` owns signed Account profile state: startup
-reconstruction, local revision allocation, legacy/modern incoming merge and
-coordinated avatar/language persistence. Its internal state owns the journals and
-current publication together. Node profile/language paths retain authenticated
-Event processing, authorization and delivery. Immutable receive decisions retain
-their first-wins semantics; recovery uses explicit snapshot/import operations.
+reconstruction, local revision allocation, authenticated incoming updates and
+coordinated avatar persistence. Its internal state owns the journal and current
+publication together. Node profile paths retain authenticated Event processing,
+authorization and delivery. Recovery uses explicit snapshot/import operations;
+retired language metadata is never republished or restored as filtering state.
 The existing signed payload and encrypted record formats remain the same.
 
 `src-tauri/src/desktop_session.rs` owns the active desktop user, token, password
@@ -308,12 +308,10 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   and its signed control reducer. Key distribution/decryption remains separate;
   archives share membership epochs, leaves, acceptance, ownership, rename and
   terminal dissolution rules with the metadata projection.
-- Peer-avatar and language-profile journals reclaim obsolete versions using
-  encrypted record-log rewrites. They compact on opening older redundant logs
-  and amortize subsequent rewrites by profile-version count, independently of
-  immutable receive-decision count. Latest clear tombstones and every retained
-  language decision survive compaction; the budget is relative to live profiles,
-  rather than a cap on the number of distinct accounts.
+- Peer-avatar journals reclaim obsolete versions using encrypted record-log
+  rewrites. They compact on opening older redundant logs and amortize subsequent
+  rewrites by profile-version count. Latest clear tombstones survive compaction;
+  the budget is relative to live profiles, rather than a cap on distinct accounts.
 - Auth registration builds the complete encrypted user aggregate in an unpublished
   same-volume staging directory, then publishes it by directory rename. Existing
   partial directories are preserved for recovery. Subsequent encrypted metadata

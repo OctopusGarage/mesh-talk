@@ -105,7 +105,8 @@ pub enum SnapshotRecordV1 {
     AccountContact {
         account_id: String,
     },
-    /// V2 additions; older readers reject the header before interpreting records.
+    /// Retired V2 records: keep positional tags so existing backups remain readable.
+    /// New exports omit these records and imports ignore their filtering metadata.
     DmLanguageProfile {
         payload: Vec<u8>,
     },

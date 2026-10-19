@@ -53,10 +53,6 @@ clap = { workspace = true }
 log = { workspace = true }
 tempfile = { workspace = true }
 tar = "0.4.46"
-# Explicit local model subset: no downloads or translation service at runtime.
-lingua = { version = "1.8", default-features = false, features = ["english", "chinese", "japanese", "spanish", "french", "german", "korean", "portuguese", "russian", "arabic"] }
-unicode-segmentation = "1.12"
-unicode-script = "0.5"
 
 # Unix-only: a `kill(pid, 0)` liveness probe so the CLI's data-dir lockfile can detect a
 # lock left by a crashed/killed node and reclaim it. Already in the build graph transitively

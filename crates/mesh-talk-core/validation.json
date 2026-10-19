@@ -163,10 +163,7 @@
         "crates/mesh-talk-core/src/node/account_profile.rs",
         "crates/mesh-talk-core/src/node/profile.rs",
         "crates/mesh-talk-core/src/node/profile_store.rs",
-        "crates/mesh-talk-core/src/node/profile_io.rs",
-        "crates/mesh-talk-core/src/node/language_state.rs",
-        "crates/mesh-talk-core/src/node/language_io.rs",
-        "crates/mesh-talk-core/src/node/language_tests.rs"
+        "crates/mesh-talk-core/src/node/profile_io.rs"
       ],
       "rust": [
         {
@@ -175,8 +172,6 @@
             "node::account_profile::tests::",
             "node::profile::tests::",
             "node::profile_store::tests::",
-            "node::language_state::tests::",
-            "node::language_tests::",
             "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers"
           ]

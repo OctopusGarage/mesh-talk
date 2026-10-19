@@ -377,12 +377,7 @@
         "语言",
         "中文",
         "开机启动",
-        "关闭到托盘",
-        "incoming message language",
-        "DM language",
-        "language restriction",
-        "接收消息语言",
-        "消息语言限制"
+        "关闭到托盘"
       ],
       "platforms": ["macos", "windows", "linux"],
       "document": "topics/language.md",

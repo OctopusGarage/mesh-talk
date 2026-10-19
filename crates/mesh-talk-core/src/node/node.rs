@@ -423,7 +423,6 @@ impl Node {
             custody_res,
             recv_files_res,
             profiles_res,
-            language_res,
             recalls_res,
             consent_res,
             consent_controls_res,
@@ -445,9 +444,6 @@ impl Node {
             let h_files =
                 s.spawn(|| ReceivedLog::open_file_cards(&dir.join("received_files.log"), password));
             // Durable store of avatars peers propagated to us (one per account, newest-wins).
-            let h_language = s.spawn(|| {
-                super::language_state::LanguageState::open(&dir.join("language.log"), password)
-            });
             let h_profiles = s.spawn(|| {
                 crate::node::profile_store::ProfileStore::open(&dir.join("profiles.log"), password)
             });
@@ -494,7 +490,6 @@ impl Node {
                 h_custody.join(),
                 h_files.join(),
                 h_profiles.join(),
-                h_language.join(),
                 h_recalls.join(),
                 h_consent.join(),
                 h_consent_controls.join(),
@@ -513,10 +508,7 @@ impl Node {
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let language_state =
-            language_res.unwrap_or_else(|error| std::panic::resume_unwind(error))?;
-        let account_profiles =
-            super::account_profile::AccountProfiles::new(&account, profiles, language_state);
+        let account_profiles = super::account_profile::AccountProfiles::new(&account, profiles);
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;

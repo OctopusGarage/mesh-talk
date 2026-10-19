@@ -27,7 +27,7 @@ not depend on a desktop login, IP address or display name.
 _Avoid_: local user, machine, device.
 
 **Account profile**:
-Signed account-level avatar and incoming-message language preferences, with
+Signed account-level avatar state, with
 revisions that order updates across devices.
 _Avoid_: local login profile, device identity, unverified display label.
 

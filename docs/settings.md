@@ -11,7 +11,7 @@ settings to confirm the value before editing it again.
 
 | Category              | Controls                                                                                                   |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| General               | Display language, incoming DM language, launch at OS login, close to tray.                                 |
+| General               | Display language, launch at OS login, close to tray.                                 |
 | Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
 | Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
 | Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
@@ -51,16 +51,6 @@ must be upgraded rather than transferring history first.
 Synchronization resumes when a trusted source is reachable and still retains the
 selected data. Local retention and deletion can remove that source; this feature
 is not an unlimited cloud archive. A local save remains useful while offline.
-
-## Incoming message language
-
-Choose **Incoming message language** in General to require at least 80% of each
-incoming direct message to use your selected language, with a 20% tolerance for
-other languages. **Unrestricted** is the default. Detection runs locally; blocked
-sends preserve the draft. This is an account communication preference, separate
-from display language and ordinary device settings. See
-[language restrictions](dm-language-restrictions.md) for supported languages,
-neutral-content exceptions, processing limits, linked devices, and compatibility.
 
 ## Network preferences and effective behavior
 

@@ -55,16 +55,6 @@ impl Node {
         Ok(())
     }
 
-    /// Seal + append + deliver `payload` to every peer device we'd fan an account message
-    /// out to (every known device of every known account, plus our own other devices),
-    /// deduped by user-id. Best-effort per device.
-    pub(in crate::node) async fn publish_profile_to_peers(&self, payload: &ProfilePayload) {
-        let wire = payload.encode();
-        for peer in self.profile_fanout_targets() {
-            self.deliver_profile(&peer, &wire).await;
-        }
-    }
-
     /// Re-publish our current profile to a single freshly-discovered `peer`, so a new
     /// contact gets our avatar without waiting for the next time we change it. A no-op if
     /// we've never set an avatar this session (nothing to send).

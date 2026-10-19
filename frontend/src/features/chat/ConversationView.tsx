@@ -13,7 +13,6 @@ import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
 import { ConversationDrafts } from "./conversationDrafts";
-import { useDmLanguagePolicy } from "./useDmLanguagePolicy";
 import {
   EmptyState,
   StartupFailureState,
@@ -77,11 +76,6 @@ export function ConversationView() {
   const active = useChat((s) => s.active);
   const owner = useAuth((s) => s.user?.id ?? null);
   const authGeneration = useAuth((s) => s.generation);
-  const dmLanguagePolicy = useDmLanguagePolicy(
-    owner,
-    authGeneration,
-    active?.kind === "account" ? active.id : null,
-  );
   const receptionScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const myAccountId = useChat((s) => s.myAccountId);
   const isPersonal = active?.kind === "account" && active.id === myAccountId;
@@ -416,18 +410,6 @@ export function ConversationView() {
         }}
       />
 
-      {dmLanguagePolicy.language && (
-        <p
-          role="status"
-          data-testid="dm-language-notice"
-          className="border-b bg-card px-5 py-2 text-[12px] leading-5 text-muted-foreground"
-        >
-          {t("dmLanguage.notice", {
-            language: t(`dmLanguage.languages.${dmLanguagePolicy.language}`),
-            percent: 80,
-          })}
-        </p>
-      )}
       <div className="conversation-log-surface relative flex-1 overflow-hidden">
         {!loading && historyError && (
           <div
@@ -692,7 +674,6 @@ export function ConversationView() {
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
           key={`${owner}:${authGeneration}:${key}`}
-          validateText={dmLanguagePolicy.validateText}
           admissionPending={drafts.current.isPending(draftKey)}
           initialDraft={drafts.current.get(draftKey)}
           onDraftChange={(text) => {
