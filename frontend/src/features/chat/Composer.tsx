@@ -111,7 +111,7 @@ export function Composer({
   prefill,
   onSendSticker,
   onImage,
-  expiryDurationMs = 300_000,
+  expiryDurationMs = null,
   onExpiryDurationChange,
 }: {
   onSend: (text: string) => boolean | Promise<boolean>;
