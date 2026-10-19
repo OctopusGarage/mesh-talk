@@ -108,7 +108,7 @@ fn open_private(path: &Path, create: bool) -> Result<File, IntegrationError> {
         Storage::FileSystem::*,
     };
     let security = windows_security::Security::new()?;
-    let mut attributes = security.attributes();
+    let attributes = security.attributes();
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: arguments point to live, terminated path and security allocations.
     let handle = unsafe {
@@ -116,7 +116,7 @@ fn open_private(path: &Path, create: bool) -> Result<File, IntegrationError> {
             path.as_ptr(),
             if create { GENERIC_WRITE } else { GENERIC_READ } | READ_CONTROL,
             FILE_SHARE_READ | if create { 0 } else { FILE_SHARE_DELETE },
-            &mut attributes,
+            &attributes,
             if create { CREATE_NEW } else { OPEN_EXISTING },
             FILE_FLAG_OPEN_REPARSE_POINT,
             std::ptr::null_mut(),
