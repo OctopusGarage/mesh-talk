@@ -310,10 +310,17 @@ export async function executePlan(
       ["--test", "--test-reporter=tap", file],
       cwd,
     );
-    const declared = [...output.matchAll(/^\s*# Subtest: (.+)$/gmu)].some(
-      (match) => path.resolve(cwd, match[1]) !== path.resolve(cwd, file),
+    const declared = new Set(
+      [...output.matchAll(/^\s*# Subtest: (.+)$/gmu)]
+        .map(match => match[1])
+        .filter(name => path.resolve(cwd, name.replace(/\\([#\\])/gu, "$1")) !== path.resolve(cwd, file)),
     );
-    if (!declared || !/^# pass [1-9][0-9]*$/mu.test(output))
+    // Aggregate TAP passes include Node's synthetic file wrapper. Require an
+    // actual passing declared case; stdout can print a heading as a comment.
+    const passed = [...output.matchAll(/^\s*ok [0-9]+ - (.+)$/gmu)].some(
+      match => !/\s+#\s*(?:SKIP|TODO)\b/iu.test(match[1]) && declared.has(match[1]),
+    );
+    if (!passed || !/^# pass [1-9][0-9]*$/mu.test(output))
       throw Error(`Selected diagnostic ran zero passing Node tests: ${file}`);
   }
   for (const selection of prepared) {

@@ -352,6 +352,36 @@ test("a synthetic passing Node file wrapper cannot stand in for declared tests",
   );
 });
 
+for (const body of [
+  "console.log('Subtest: placeholder');",
+  "import test from 'node:test'; test('skipped', {skip:true}, () => {}); console.log('Subtest: placeholder');",
+  "import test from 'node:test'; test('todo', {todo:true}, () => {}); console.log('Subtest: placeholder');",
+]) test(`printed headings cannot supply passing diagnostic evidence: ${body}`, async t => {
+  const f = repository(t);
+  f.write("scripts/empty.test.mjs", body);
+  await assert.rejects(
+    executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/empty.test.mjs"] },
+      { cwd: f.root, run: async (program, args, options) => {
+        const result = spawnSync(program, args, { ...options, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+        return { code: result.status, output: result.stdout + result.stderr };
+      }, log: () => {} }),
+    /zero.*Node/i,
+  );
+});
+
+for (const name of ["ordinary test", "name # SKIP literal", "back\\slash", "nested"]) test(`a real passing diagnostic is accepted: ${name}`, async t => {
+  const f = repository(t);
+  const body = name === "nested"
+    ? "import test from 'node:test'; test('parent', async t => { await t.test('child', () => {}); });"
+    : `import test from 'node:test'; test(${JSON.stringify(name)}, () => {});`;
+  f.write("scripts/passing.test.mjs", body);
+  await executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/passing.test.mjs"] },
+    { cwd: f.root, run: async (program, args, options) => {
+        const result = spawnSync(program, args, { ...options, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+        return { code: result.status, output: result.stdout + result.stderr };
+      }, log: () => {} });
+});
+
 function configureCLI(f, body) {
   const manifests = [
     "scripts/validation/validation.json",
