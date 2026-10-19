@@ -1,28 +1,23 @@
 # Mesh-Talk
 
 [![CI](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml)
-[![UI E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml)
-[![Backend E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml)
-[![Sanitizers](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml)
-[![Fuzz](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml)
-[![Mutation sample](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml)
-[![Gitleaks](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml)
-[![Scorecard](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/OctopusGarage/mesh-talk/badge)](https://scorecard.dev/viewer/?uri=github.com/OctopusGarage/mesh-talk)
-[![codecov](https://codecov.io/gh/OctopusGarage/mesh-talk/branch/main/graph/badge.svg)](https://codecov.io/gh/OctopusGarage/mesh-talk)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
-[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![platform: macOS | Windows | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000?logo=linux&logoColor=white)](#build-from-source)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-docs-8A2BE2)](https://deepwiki.com/OctopusGarage/mesh-talk)
 [![Release](https://img.shields.io/github/v/release/OctopusGarage/mesh-talk?sort=semver)](https://github.com/OctopusGarage/mesh-talk/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-287260.svg)](LICENSE)
 
-**A private messenger built for the networks you already own.** Mesh-Talk is a desktop app
-for direct messages, group channels, and file sharing. Peers discover one another on a
-local network and communicate without a cloud account or vendor-operated server. When
-people are farther apart or offline, optional routed discovery and peer-operated post
-offices extend delivery without changing who can read the content.
+**Encrypted conversations across the networks you control.** Mesh-Talk is a
+local-first, decentralized desktop messenger for macOS, Windows and Linux. Discover peers on a LAN
+and exchange end-to-end-encrypted messages and files without a cloud account,
+internet connection or central messaging server. Connect other LANs and sites
+through existing routed networks or optional, trusted peer-operated post offices.
+
+Conversation events synchronize across reachable, authorized peers. When a device
+reconnects, another group member can help it recover retained messages and eligible
+file contents—even when the original sender is unavailable. Recovery depends on
+permissions, connectivity and retained data; it is not an unlimited distributed archive.
+
+[Download](https://github.com/OctopusGarage/mesh-talk/releases) ·
+[Project site](https://octopusgarage.github.io/mesh-talk/) ·
+[User guide](docs/help/README.md) · [Technical documentation](docs/README.md)
 
 <p align="center">
   <img src="docs/screenshots/hero-barcelona.webp" width="860"
@@ -34,19 +29,29 @@ Read the [user guide](docs/help/README.md) for task-based instructions, or open
 **Help** in the app for offline search. [AI documentation and MCP](tools/help/README.md)
 let your own assistant query the same public manual.
 
-## Conversations that stay with you
+## Communication without a central dependency
 
-- **Talk naturally.** Send one-to-one messages or create group channels. Replies, reactions,
-  mentions, search, presence, and local history keep conversations usable as they grow.
-- **Share more than text.** Transfer files in encrypted chunks; send images and stickers;
-  personalize the app with themes, avatars, and installable customization packs.
-- **Keep your account portable.** Link devices to the same account and make a manual,
-  encrypted backup with a separate recovery key. Conversation events can sync from other
-  online channel members as well as from a post office when that path is available.
-- **Choose your visibility.** Verify contacts by safety number, use privacy presets or
-  invisible mode, recall messages, and set a fixed expiry time for an outgoing message.
-  The expiry starts when you send it; the sender's copy stays in history. Updated recipient
-  devices remove their local copies at the deadline.
+- **Start on the LAN.** Signed discovery finds nearby devices. Authenticated,
+  encrypted peer connections work without a vendor-operated service.
+- **Connect LANs and sites.** Use reachable routed paths, or opt into trusted
+  post-office bridges and federation. Mesh-Talk does not create a VPN or merge subnets.
+- **Deliver while a recipient is offline.** An available post office can temporarily
+  hold recipient-encrypted events, subject to capacity and a maximum age of 30 days.
+- **Catch up through group members.** Authorized members with sharing enabled can
+  supply missing retained messages and eligible file chunks. The sender need not
+  remain online; the supplying member must be reachable and still hold the data.
+- **Continue after reconnection.** Peers reconcile missing events and approved file
+  transfers can resume from available content. A message or file card, complete file
+  contents and recipient confirmation remain distinct outcomes.
+- **Synchronize your own devices.** Link certified devices to one account and choose
+  which history, file cards and attachment contents synchronize. This needs a reachable
+  eligible device and retained source data; a relay does not replace direct account sync.
+
+The desktop app also offers replies, reactions, mentions, search, identity verification,
+privacy controls, local history, encrypted manual backups and optional visual packs.
+[Experimental calls](docs/help/topics/calls.md) require their own live signaling and
+media paths. [Bots and local agents](docs/bot-integrations.md) use explicitly scoped
+local permissions. These features share the same communication and trust boundaries.
 
 <table>
   <tr>
@@ -65,8 +70,10 @@ let your own assistant query the same public manual.
    manually supplied address or an existing routed network can introduce a distant peer.
 2. **Connect.** Peers authenticate an encrypted Noise connection. Direct messages use a
    Double Ratchet; group channels use per-sender key ratchets.
-3. **Sync.** Devices exchange bounded, content-addressed conversation events. A device can
-   catch up after reconnecting, including through other online members of a channel.
+3. **Sync and recover.** Devices reconcile bounded, signed, content-addressed conversation
+   events. A reconnecting group member can catch up through another authorized member
+   with retained history and sharing enabled. Eligible retained file contents have
+   separate receiving and availability conditions.
 4. **Deliver later.** If the recipient is offline, an available post office can hold
    recipient-encrypted events until they return. An opt-in bridge can introduce peers
    across sites, using existing network routes.

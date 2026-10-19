@@ -332,9 +332,20 @@ Mesh-Talk keeps protocol and account data as encrypted files under `~/.mesh-talk
 Optional installed packs are kept separately in the webview's IndexedDB, and some
 UI preferences use local storage. If an encrypted account store appears corrupt:
 
-1. Close the application
-2. Back up and remove the affected per-account directory under `~/.mesh-talk/accounts/`
-3. Restart the application to re-create the stores (history not held by a peer/post office is lost)
+1. Close the application and preserve a copy of the affected data directory before
+   attempting recovery. Keep the original encrypted stores and keys intact.
+2. Record the error and check available disk space, file permissions and whether
+   another process is using the profile. Do not remove an account directory as a
+   general repair step.
+3. If you have a verified `.mtbackup` archive and its matching recovery key, follow
+   [backup and recovery](../docs/backup-recovery.md) to restore under an unused local
+   username. Restore creates a new device; it does not repair or merge into the
+   damaged profile or revoke its identity.
+
+Peer synchronization can supply only retained, authorized content over an available
+path. It cannot replace missing local keys or guarantee complete history or file
+bytes. Keep the preserved profile for diagnosis if no verified recovery path is
+available.
 
 ### Platform-Specific Troubleshooting
 

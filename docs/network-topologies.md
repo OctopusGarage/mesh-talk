@@ -1,6 +1,6 @@
 # Network topology and data-flow baseline
 
-**Status:** review baseline for `perf/optimization-series-20261015` on 2026-10-16. This describes the current implementation and separates code behavior from physical-network evidence. It is not a claim that every combination below passed an end-to-end test.
+This guide maps the current network and data paths, configuration choices and feature boundaries. Named physical checks remain dated evidence; the scenarios do not claim that every topology and platform combination has passed an end-to-end test.
 
 For the architectural baseline, module contracts and full scenario catalog, start with [Network Topology and Communication Architecture](network-design-reference.md). This guide summarizes the implemented paths and labels environmental and acceptance boundaries separately.
 

@@ -3,51 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Mesh-Talk — private messaging across your local networks</title>
+    <title>Mesh-Talk — encrypted messaging across your networks</title>
     <meta
       name="description"
-      content="Mesh-Talk is a local-first desktop messenger for macOS, Windows, and Linux. Chat directly on a LAN, or opt into routed discovery and peer-operated bridges across networks."
+      content="Encrypted peer-to-peer messaging for LANs and connected sites. No central server required. Synchronize retained messages and files across authorized peers, with optional offline delivery."
     />
-    <meta name="theme-color" content="#08141a" />
+    <meta name="theme-color" content="#0b191d" />
     <meta property="og:title" content="Mesh-Talk" />
     <meta
       property="og:description"
-      content="End-to-end-encrypted desktop chat on a LAN, with optional routed discovery, peer-operated bridges, and offline delivery."
+      content="Private conversations across local networks and sites. Encrypted messaging, multi-node synchronization, member-assisted recovery and optional offline delivery."
     />
     <meta property="og:type" content="website" />
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308141a'/%3E%3Cg stroke='%232fe6ce' stroke-width='1.4' fill='%232fe6ce'%3E%3Cline x1='9' y1='10' x2='23' y2='9' stroke-opacity='.5'/%3E%3Cline x1='9' y1='10' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='24' y2='22' stroke-opacity='.5'/%3E%3Ccircle cx='9' cy='10' r='2.6'/%3E%3Ccircle cx='23' cy='9' r='2.6'/%3E%3Ccircle cx='15' cy='23' r='2.6'/%3E%3Ccircle cx='24' cy='22' r='2.2' fill='%23f4c77b'/%3E%3C/g%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b191d'/%3E%3Cg stroke='%2394dac8' stroke-width='1.4' fill='%2394dac8'%3E%3Cline x1='9' y1='10' x2='23' y2='9' stroke-opacity='.5'/%3E%3Cline x1='9' y1='10' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='24' y2='22' stroke-opacity='.5'/%3E%3Ccircle cx='9' cy='10' r='2.6'/%3E%3Ccircle cx='23' cy='9' r='2.6'/%3E%3Ccircle cx='15' cy='23' r='2.6'/%3E%3Ccircle cx='24' cy='22' r='2.2' fill='%2394dac8'/%3E%3C/g%3E%3C/svg%3E"
     />
+    <link rel="stylesheet" href="theme.css" />
     <style>
-      @font-face {
-        font-family: "Space Grotesk";
-        src: url("fonts/space-grotesk-latin.woff2") format("woff2");
-        font-style: normal;
-        font-weight: 300 700;
-        font-display: swap;
-      }
-      :root {
-        --ink: #08141a;
-        --ink-2: #0c1d24;
-        --ink-3: #102832;
-        --line: #173640;
-        --line-2: #21505b;
-        --signal: #2fe6ce;
-        --signal-2: #10b6a6;
-        --paper: #e9f2f0;
-        --muted: #84a39e;
-        --faint: #9bb3ad;
-        --presence: #f4c77b;
-        --display:
-          "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI",
-          sans-serif;
-        --body: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
-        --maxw: 1140px;
-        --pad: clamp(1.25rem, 5vw, 3rem);
-      }
-
       * {
         box-sizing: border-box;
       }
@@ -68,7 +41,6 @@
         line-height: 1.6;
         -webkit-font-smoothing: antialiased;
         text-rendering: optimizeLegibility;
-        overflow-x: hidden;
       }
       a {
         color: inherit;
@@ -169,7 +141,7 @@
         color: #042c28;
       }
       .btn--primary:hover {
-        background: #4ff0db;
+        background: var(--signal-2);
       }
       .btn--ghost {
         border-color: var(--line-2);
@@ -186,24 +158,73 @@
         padding-bottom: clamp(3.5rem, 8vw, 6.5rem);
         overflow: hidden;
       }
-      #mesh {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        z-index: 0;
-        opacity: 0.38;
-      }
       .hero__in {
-        position: relative;
-        z-index: 1;
-        max-width: 40rem;
+        display: grid;
+        grid-template-columns: 1.1fr 1fr;
+        align-items: center;
+        gap: clamp(2rem, 5vw, 5rem);
+      }
+      .hero__copy {
+        min-width: 0;
+      }
+      .network-proof {
+        margin: 0;
+        min-width: 0;
+      }
+      .network-proof svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        color: var(--paper);
+      }
+      .network-proof figcaption {
+        color: var(--muted);
+        font-size: 0.8rem;
+        line-height: 1.6;
+        margin: 0.5rem 0 0;
+      }
+      .network-proof .network-region {
+        fill: var(--ink-2);
+        stroke: var(--line);
+      }
+      .network-proof .network-edge {
+        fill: none;
+        stroke: var(--line-2);
+        stroke-width: 1.5;
+      }
+      .network-proof .network-relay {
+        fill: var(--ink);
+        stroke: var(--signal);
+        stroke-width: 1.5;
+      }
+      .network-proof .network-peer {
+        fill: var(--signal);
+      }
+      .network-proof text {
+        fill: var(--paper);
+        font-family: var(--body);
+        font-size: 15px;
+      }
+      .network-proof .network-label {
+        fill: var(--muted);
+        font-size: 13px;
+      }
+      @media (max-width: 900px) {
+        .hero__in {
+          grid-template-columns: 1fr;
+        }
+        .network-proof {
+          max-width: 32rem;
+        }
+        .hero__copy {
+          max-width: 42rem;
+        }
       }
       .hero h1 {
         font-family: var(--display);
         font-weight: 700;
-        font-size: clamp(2.6rem, 7vw, 4.6rem);
-        line-height: 0.98;
+        font-size: clamp(2.8rem, 5.2vw, 4.2rem);
+        line-height: 1.06;
         letter-spacing: -0.03em;
         margin: 0;
       }
@@ -225,19 +246,12 @@
       }
       .ticker {
         margin-top: 2.4rem;
-        font-family: var(--mono);
-        font-size: 0.8rem;
+        font-size: 0.84rem;
         color: var(--faint);
         display: flex;
         align-items: center;
         flex-wrap: wrap;
         gap: 0.4rem 0.6rem;
-      }
-      .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--presence);
       }
 
       /* ---------- shared section ---------- */
@@ -266,27 +280,18 @@
       /* ---------- communication paths ---------- */
       .steps {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1.4rem;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 2rem 4rem;
       }
       .step {
-        position: relative;
-        padding: 1.6rem 1.4rem;
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: var(--ink-2);
-      }
-      .step__no {
-        font-family: var(--mono);
-        font-size: 0.78rem;
-        color: var(--signal);
-        letter-spacing: 0.15em;
+        padding: 1.25rem 0;
+        border-top: 1px solid var(--line);
       }
       .step h3 {
         font-family: var(--display);
         font-weight: 600;
         font-size: 1.18rem;
-        margin: 0.9rem 0 0.5rem;
+        margin: 0 0 0.75rem;
         letter-spacing: -0.01em;
       }
       .step p {
@@ -415,12 +420,6 @@
       }
       .cap:hover {
         background: var(--ink-2);
-      }
-      .cap__k {
-        font-family: var(--mono);
-        font-size: 0.7rem;
-        letter-spacing: 0.02em;
-        color: var(--faint);
       }
       .cap b {
         font-family: var(--display);
@@ -569,17 +568,77 @@
       }
       .foot__links {
         display: flex;
+        flex-wrap: wrap;
         gap: 1.4rem;
+      }
+
+      .recovery-layout {
+        display: grid;
+        grid-template-columns: 1fr 1.1fr;
+        gap: 2rem 5rem;
+      }
+      .recovery-flow {
+        padding: 0;
+        margin: 0;
+        list-style-position: inside;
+      }
+      .recovery-flow li {
+        padding: 0 0 1.6rem;
+        border-bottom: 1px solid var(--line);
+        margin: 0 0 1.6rem;
+        color: var(--signal);
+      }
+      .recovery-flow h3 {
+        display: inline;
+        font-family: var(--display);
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--paper);
+      }
+      .recovery-flow p {
+        margin: 0.7rem 0 0;
+        color: var(--muted);
+        font-size: 0.96rem;
+      }
+      .recovery-note {
+        font-size: 0.88rem;
+        color: var(--muted);
+      }
+      .recovery-layout a {
+        color: var(--signal);
+        text-decoration: underline;
+      }
+      .cap {
+        padding-top: 1.4rem;
+      }
+      @media (max-width: 900px) {
+        .recovery-layout {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 1080px) {
+        .nav__links {
+          gap: 1rem;
+        }
+        .nav__in {
+          gap: 1rem;
+        }
+      }
+      @media (max-width: 1000px) {
+        .nav__links .hide-sm {
+          display: none;
+        }
       }
     </style>
   </head>
   <body>
+    <a class="skip" href="#top">Skip to content</a>
     <!-- ===== nav ===== -->
     <header class="nav">
       <div class="wrap nav__in">
         <a class="brand" href="#top" aria-label="Mesh-Talk home">
           <svg viewBox="0 0 32 32" aria-hidden="true">
-            <g stroke="#2fe6ce" stroke-width="1.4" fill="#2fe6ce">
+            <g stroke="currentColor" stroke-width="1.4" fill="currentColor">
               <line x1="9" y1="10" x2="23" y2="9" stroke-opacity=".5" />
               <line x1="9" y1="10" x2="15" y2="23" stroke-opacity=".5" />
               <line x1="23" y1="9" x2="15" y2="23" stroke-opacity=".5" />
@@ -587,14 +646,15 @@
               <circle cx="9" cy="10" r="2.6" />
               <circle cx="23" cy="9" r="2.6" />
               <circle cx="15" cy="23" r="2.6" />
-              <circle cx="24" cy="22" r="2.2" fill="#f4c77b" />
+              <circle cx="24" cy="22" r="2.2" fill="currentColor" />
             </g>
           </svg>
           Mesh-Talk
         </a>
         <nav class="nav__links">
           <a class="hide-sm" href="#how">How it works</a>
-          <a class="hide-sm" href="#networks">Across LANs</a>
+          <a class="hide-sm" href="#networks">Networks</a>
+          <a class="hide-sm" href="#recovery">Recovery</a>
           <a class="hide-sm" href="#security">Security</a>
           <a class="hide-sm" href="#features">Features</a>
           <a class="hide-sm" href="help/index.html">Help</a>
@@ -614,47 +674,128 @@
     </header>
 
     <!-- ===== hero ===== -->
-    <main id="top">
+    <main id="top" tabindex="-1">
       <section class="hero">
-        <canvas id="mesh" aria-hidden="true"></canvas>
-        <div class="wrap hero__in reveal in">
-          <h1>Private conversations start on your local network.</h1>
-          <p class="hero__sub">
-            Create a local account and talk directly with nearby peers. Keep
-            messages end-to-end encrypted, reach other LANs through a network
-            you manage, and use a peer-operated post office for offline
-            delivery.
-          </p>
-          <div class="hero__cta">
-            <a
-              class="btn btn--primary"
-              href="https://github.com/OctopusGarage/mesh-talk/releases"
-              >Download for desktop</a
-            >
-            <a class="btn btn--ghost" href="help/index.html"
-              >Read the user guide</a
-            >
+        <div class="wrap hero__in">
+          <div class="hero__copy">
+            <h1>Encrypted conversations.<br />Across your networks.</h1>
+            <p class="hero__sub">
+              Talk directly on a LAN, without a central server. Connect sites
+              through routes you manage. When devices reconnect, authorized
+              peers help recover retained messages and files.
+            </p>
+            <div class="hero__cta">
+              <a
+                class="btn btn--primary"
+                href="https://github.com/OctopusGarage/mesh-talk/releases"
+                >Download for desktop</a
+              >
+              <a class="btn btn--ghost" href="help/index.html"
+                >Read the user guide</a
+              >
+            </div>
+            <p class="ticker">
+              macOS · Windows · Linux<span aria-hidden="true"> / </span>No cloud
+              account required
+            </p>
           </div>
-          <p class="ticker">
-            <span class="dot" aria-hidden="true"></span>
-            Signed LAN discovery · no cloud account required
-          </p>
+          <figure class="network-proof">
+            <svg
+              viewBox="0 0 480 340"
+              role="img"
+              aria-labelledby="network-title network-description"
+            >
+              <title id="network-title">
+                Independent local networks, connected by choice
+              </title>
+              <desc id="network-description">
+                Peers connect directly within each LAN. Optional trusted post
+                offices exchange encrypted events across an existing routed link
+                between sites.
+              </desc>
+              <rect
+                class="network-region"
+                x="6"
+                y="25"
+                width="204"
+                height="215"
+                rx="14"
+              />
+              <rect
+                class="network-region"
+                x="270"
+                y="25"
+                width="204"
+                height="215"
+                rx="14"
+              />
+              <text x="25" y="57">Local network</text>
+              <text x="290" y="57">Another site</text>
+              <path
+                class="network-edge"
+                d="M60 112H155 M60 112L108 194L155 112 M320 112H415 M320 112L368 194L415 112"
+              />
+              <path
+                d="M108 194H368"
+                fill="none"
+                stroke="var(--signal)"
+                stroke-width="1.5"
+                stroke-dasharray="4 6"
+              />
+              <circle class="network-peer" cx="60" cy="112" r="7" />
+              <circle class="network-peer" cx="155" cy="112" r="7" />
+              <circle class="network-peer" cx="320" cy="112" r="7" />
+              <circle class="network-peer" cx="415" cy="112" r="7" />
+              <text class="network-label" x="40" y="96">Peer A</text>
+              <text class="network-label" x="135" y="96">Peer B</text>
+              <text class="network-label" x="300" y="96">Peer C</text>
+              <text class="network-label" x="395" y="96">Peer D</text>
+              <rect
+                class="network-relay"
+                x="93"
+                y="179"
+                width="30"
+                height="30"
+                rx="6"
+              />
+              <rect
+                class="network-relay"
+                x="353"
+                y="179"
+                width="30"
+                height="30"
+                rx="6"
+              />
+              <text class="network-label" x="63" y="226">Post office</text>
+              <text class="network-label" x="323" y="226">Post office</text>
+              <text x="240" y="275" text-anchor="middle">
+                Existing routed connection
+              </text>
+              <text class="network-label" x="240" y="299" text-anchor="middle">
+                Direct locally. Encrypted between sites.
+              </text>
+            </svg>
+            <figcaption>
+              Illustrative topology. Post offices are optional; cross-site
+              communication requires reachable routes and explicit trust.
+            </figcaption>
+          </figure>
         </div>
       </section>
 
       <!-- ===== communication paths ===== -->
       <section class="section" id="how">
         <div class="wrap">
-          <div class="section__head reveal">
-            <h2>One identity. Three ways to reach a peer.</h2>
+          <div class="section__head">
+            <h2>Local first. Connected by choice.</h2>
             <p>
-              Mesh-Talk starts with direct LAN connections. Other paths are
-              explicit choices built on networks and devices you control.
+              Decentralized synchronization combines direct links, optional
+              relays, and shared recovery. Your peers hold the conversation; no
+              vendor-operated messaging service is required.
             </p>
           </div>
-          <div class="steps reveal">
+          <div class="steps">
             <div class="step">
-              <div class="step__no">01 / LOCAL</div>
               <h3>Meet nearby peers</h3>
               <p>
                 Signed discovery finds devices on the same LAN, even without
@@ -662,7 +803,6 @@
               </p>
             </div>
             <div class="step">
-              <div class="step__no">02 / ROUTED</div>
               <h3>Reach another LAN</h3>
               <p>
                 Use an existing route, such as your Tailscale network, to find
@@ -670,11 +810,18 @@
               </p>
             </div>
             <div class="step">
-              <div class="step__no">03 / OFFLINE</div>
               <h3>Deliver while away</h3>
               <p>
                 A peer-operated post office holds recipient-encrypted events
                 temporarily, subject to capacity and a 30-day maximum age.
+              </p>
+            </div>
+            <div class="step">
+              <h3>Recover together</h3>
+              <p>
+                Reconnect and request missing retained events from authorized
+                peers. Group members can share a copy even when the original
+                sender is unavailable.
               </p>
             </div>
           </div>
@@ -684,7 +831,7 @@
       <!-- ===== optional cross-network introductions ===== -->
       <section class="section" id="networks">
         <div class="wrap">
-          <div class="section__head reveal">
+          <div class="section__head">
             <h2>Across LANs, when you choose.</h2>
             <p>
               For a group spread across sites, equal post offices exchange
@@ -693,7 +840,7 @@
             </p>
           </div>
           <div
-            class="bridge reveal"
+            class="bridge"
             aria-label="Example of two LANs connected through existing routing"
           >
             <div class="bridge__site">
@@ -726,17 +873,66 @@
             >
             and
             <a
-              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/routed-network-discovery.md"
-              >setup details</a
+              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/post-office-federation.md"
+              >federation setup</a
             >.
           </p>
+        </div>
+      </section>
+
+      <section class="section" id="recovery">
+        <div class="wrap recovery-layout">
+          <div class="section__head">
+            <h2>A conversation can outlast a connection.</h2>
+            <p>
+              Devices go offline. Routes return. Missing history can come from
+              another authorized group member, not only from the original
+              sender.
+            </p>
+            <p><a href="help/channels.html">Understand group recovery</a></p>
+          </div>
+          <div>
+            <ol class="recovery-flow">
+              <li>
+                <h3>A member keeps a copy</h3>
+                <p>
+                  Participating members retain signed messages. With sharing
+                  enabled, a member can serve the retained history to other
+                  authorized members.
+                </p>
+              </li>
+              <li>
+                <h3>A peer comes back online</h3>
+                <p>
+                  Reachable peers reconcile missing events. The conversation
+                  catches up incrementally while preserving message identity and
+                  order.
+                </p>
+              </li>
+              <li>
+                <h3>Files follow their availability</h3>
+                <p>
+                  Approved transfers can resume from available retained chunks.
+                  A file card can arrive before its contents; another eligible
+                  member may supply retained file data.
+                </p>
+              </li>
+            </ol>
+            <p class="recovery-note">
+              Recovery depends on permission, connectivity and retained data.
+              Copies are bounded; a completed peer check does not prove every
+              offline member has nothing more to share. Post-office custody is
+              separate from recipient confirmation.
+            </p>
+            <a href="help/send-files.html">Read about file availability</a>
+          </div>
         </div>
       </section>
 
       <!-- ===== security: verification in the app ===== -->
       <section class="section" id="security">
         <div class="wrap secure">
-          <div class="section__head reveal" style="margin-bottom: 0">
+          <div class="section__head" style="margin-bottom: 0">
             <h2>You can check it's the right person.</h2>
             <p>
               Compare a contact's safety number over a trusted channel, then
@@ -751,7 +947,7 @@
               >
             </p>
           </div>
-          <figure class="security-shot reveal">
+          <figure class="security-shot">
             <a
               href="screenshots/verify.webp"
               aria-label="View the contact verification screen at full size"
@@ -774,12 +970,11 @@
       <!-- ===== capabilities ===== -->
       <section class="section" id="features">
         <div class="wrap">
-          <div class="section__head reveal">
-            <h2>Everyday chat, with control over your local data.</h2>
+          <div class="section__head">
+            <h2>Everyday messaging, with local control.</h2>
           </div>
-          <div class="caps reveal">
+          <div class="caps">
             <div class="cap">
-              <div class="cap__k">CONVERSE</div>
               <b>DMs and channels</b>
               <p>
                 One-to-one and group conversations with replies, reactions,
@@ -787,23 +982,22 @@
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">SHARE</div>
               <b>Encrypted files</b>
               <p>
-                Send media and large files in encrypted chunks with progress and
-                resume.
+                Send media and files in encrypted chunks. Interrupted transfers
+                can resume when an authorized source retains the content and
+                receiving is approved.
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">CONTINUE</div>
               <b>Linked devices</b>
               <p>
-                Use one account on your devices and keep a local conversation
-                history.
+                Link certified devices to one account. Choose which history,
+                file cards and attachment contents synchronize over reachable
+                device-to-device paths.
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">RECOVER</div>
               <b>Manual backup</b>
               <p>
                 Export an encrypted backup with a separate recovery key for
@@ -811,7 +1005,6 @@
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">CONTROL</div>
               <b>Privacy choices</b>
               <p>
                 Choose notification, app lock, visibility, and local retention
@@ -819,7 +1012,6 @@
               </p>
             </div>
             <div class="cap">
-              <div class="cap__k">PERSONALIZE</div>
               <b>Themes and packs</b>
               <p>
                 Choose an interface theme and add optional avatar, theme, or
@@ -833,10 +1025,10 @@
       <!-- ===== showcase ===== -->
       <section class="section" aria-label="Screenshots">
         <div class="wrap">
-          <div class="section__head reveal">
+          <div class="section__head">
             <h2>See the desktop app.</h2>
           </div>
-          <div class="shots reveal">
+          <div class="shots">
             <figure class="shot shot--wide">
               <img
                 src="screenshots/hero-barcelona.webp"
@@ -898,10 +1090,10 @@
       <!-- ===== download ===== -->
       <section class="section download" id="download">
         <div class="wrap">
-          <div class="section__head reveal" style="margin: 0 auto 0">
+          <div class="section__head" style="margin: 0 auto 0">
             <h2>Get Mesh-Talk.</h2>
           </div>
-          <div class="platforms reveal">
+          <div class="platforms">
             <a
               class="platform"
               href="https://github.com/OctopusGarage/mesh-talk/releases"
@@ -973,81 +1165,5 @@
         </nav>
       </div>
     </footer>
-
-    <script>
-      // A static peer-mesh drawing explains the product's local network model.
-      (function () {
-        var canvas = document.getElementById("mesh");
-        if (!canvas) return;
-        var ctx = canvas.getContext("2d");
-        var SIGNAL = "47,230,206";
-        var PRESENCE = "244,199,123";
-        var nodes = [];
-        var dpr = Math.min(window.devicePixelRatio || 1, 2);
-        var w = 0,
-          h = 0;
-
-        function resize() {
-          var r = canvas.getBoundingClientRect();
-          w = r.width;
-          h = r.height;
-          canvas.width = w * dpr;
-          canvas.height = h * dpr;
-          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-          var count = Math.max(10, Math.min(26, Math.round((w * h) / 32000)));
-          nodes = [];
-          for (var i = 0; i < count; i++) {
-            nodes.push({
-              x: Math.random() * w,
-              y: Math.random() * h,
-              r: 1.6 + Math.random() * 1.8,
-              warm: i % 9 === 0,
-            });
-          }
-        }
-
-        function draw() {
-          ctx.clearRect(0, 0, w, h);
-          // edges
-          for (var i = 0; i < nodes.length; i++) {
-            for (var j = i + 1; j < nodes.length; j++) {
-              var a = nodes[i],
-                b = nodes[j];
-              var dx = a.x - b.x,
-                dy = a.y - b.y;
-              var d = Math.hypot(dx, dy);
-              if (d < 150) {
-                ctx.strokeStyle =
-                  "rgba(" +
-                  SIGNAL +
-                  "," +
-                  (0.16 * (1 - d / 150)).toFixed(3) +
-                  ")";
-                ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.moveTo(a.x, a.y);
-                ctx.lineTo(b.x, b.y);
-                ctx.stroke();
-              }
-            }
-          }
-          // nodes
-          for (var k = 0; k < nodes.length; k++) {
-            var n = nodes[k];
-            ctx.fillStyle = "rgba(" + (n.warm ? PRESENCE : SIGNAL) + ",0.9)";
-            ctx.beginPath();
-            ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-
-        resize();
-        draw();
-        window.addEventListener("resize", function () {
-          resize();
-          draw();
-        });
-      })();
-    </script>
   </body>
 </html>

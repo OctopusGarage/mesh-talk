@@ -16,10 +16,12 @@ Mesh-Talk does not install a VPN, join IP subnets, or make an unreachable addres
 
 A configured, trusted post-office bridge can introduce opted-in participants across sites. **Use post offices**, relay send/receive permissions, and **Discover peers through a post office** are separate choices. Invisible mode suppresses public disclosure.
 
-A bridge introduction does not guarantee a direct path for calls or device synchronization. See [Use post offices](post-offices.md).
+Trusted relays need an existing reachable path between sites; enabling discovery does not create one. Encrypted messages and eligible file transfers can use configured relay paths, while calls and full linked-device synchronization need their own live paths. See [Use post offices](post-offices.md) for participation and delivery limits.
 
 ## Further reference
 
 [Routed discovery guide](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/routed-network-discovery.md)
+
+[Relay operator federation setup](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/post-office-federation.md)
 
 [Network topology and communication boundaries](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/network-design-reference.md)

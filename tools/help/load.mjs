@@ -3,13 +3,14 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 export const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const platforms = ["macos", "windows", "linux"];
-const categories = [
-  "getting-started",
-  "messaging",
-  "connection",
-  "privacy",
-  "personalization",
-];
+export const helpCategories = {
+  "getting-started": "Getting started",
+  connection: "Connection",
+  messaging: "Conversations & files",
+  privacy: "Privacy & identity",
+  personalization: "Personalization",
+};
+const categories = Object.keys(helpCategories);
 const settings = [
   "general",
   "appearance",

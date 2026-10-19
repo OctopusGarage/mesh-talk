@@ -1,21 +1,22 @@
 # Documentation
 
-For delayed group messages, unread behavior and recovery status, see
-[group conversation reception](group-conversation-reception.md).
-
 This is the navigation hub for Mesh-Talk's current guides, technical references, and
 validation guidance. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information
 belongs and how to keep the site, README, and guides aligned.
 
-| I want to…                         | Start here                                                   | Continue with                                                                                                                                    |
-| ---------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Install or try the desktop app     | [Project overview](../README.md)                             | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                                                 |
-| Connect peers across networks      | [Network architecture baseline](network-design-reference.md) | [Current topologies](network-topologies.md) · [Routed discovery](routed-network-discovery.md) · [Relay privacy](post-office-metadata-privacy.md) |
-| Run a headless node or relay       | [Deployment](../specifications/deployment_guide.md)          | [Relay releases](post-office-release.md)                                                                                                         |
-| Understand or change the protocol  | [Architecture](ARCHITECTURE.md)                              | [Domain glossary](../CONTEXT.md) · [DDD conventions](domain-design.md) · [Testing feedback loop](testing-feedback-loop.md)                       |
-| Contribute to the desktop app      | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                           |
-| Review security or past validation | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Validation and evaluation](#validation-and-evaluation)            |
+| I want to…                                    | Start here                                                   | Continue with                                                                                                                                    |
+| --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Install or try the desktop app                | [Project overview](../README.md)                             | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                                                 |
+| Read conversations or resolve missing history | [User guide](help/README.md)                                 | [Group reception](group-conversation-reception.md) · [Message delivery](help/topics/delivery.md) · [Files](help/topics/send-files.md)            |
+| Link devices or recover an account            | [Linked devices](help/topics/link-devices.md)                | [Backup and recovery](backup-recovery.md) · [Settings](settings.md)                                                                              |
+| Choose privacy and receiving preferences      | [Privacy controls](privacy-controls.md)                      | [Settings](settings.md) · [Incoming DM language](dm-language-restrictions.md)                                                                    |
+| Connect a bot or local assistant              | [Bot integrations](bot-integrations.md)                      | [Public documentation MCP](../tools/help/README.md)                                                                                              |
+| Connect peers across networks                 | [Network architecture baseline](network-design-reference.md) | [Current topologies](network-topologies.md) · [Routed discovery](routed-network-discovery.md) · [Relay privacy](post-office-metadata-privacy.md) |
+| Run a headless node or relay                  | [Deployment](../specifications/deployment_guide.md)          | [Relay releases](post-office-release.md)                                                                                                         |
+| Understand or change the protocol             | [Architecture](ARCHITECTURE.md)                              | [Domain glossary](../CONTEXT.md) · [DDD conventions](domain-design.md) · [Testing feedback loop](testing-feedback-loop.md)                       |
+| Contribute to the desktop app                 | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                           |
+| Review security or past validation            | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Validation and evaluation](#validation-and-evaluation)            |
 
 For menu locations and everyday tasks, start with the [user guide](help/README.md).
 The [help system guide](help-system.md) explains offline reading, publication and
@@ -33,7 +34,7 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/routed-network-discovery.md`](routed-network-discovery.md)         | Optional routed discovery over existing Tailscale, EasyTier or manually supplied addresses, identity boundary, route selection, and release checks.         |
 | [Incoming DM language](dm-language-restrictions.md)                       | Configure incoming message languages, 80/20 mixed-language tolerance, local detection, and device compatibility.                                            |
 | [`docs/network-design-reference.md`](network-design-reference.md)         | Network Topology and Communication Architecture: principles, module contracts, settings, 34 illustrated scenarios, resource limits and acceptance evidence. |
-| [`docs/network-topologies.md`](network-topologies.md)                     | Review baseline: network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.                         |
+| [`docs/network-topologies.md`](network-topologies.md)                     | Network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.                                          |
 | [`docs/post-office-federation.md`](post-office-federation.md)             | Equal-relay trust manifest, enrollment/revocation, boot-service deployment, compatibility, and bounded discovery.                                           |
 | [`docs/post-office-metadata-privacy.md`](post-office-metadata-privacy.md) | Opaque relay mailboxes, visible routing metadata, security limits, and compatibility.                                                                       |
 | [`docs/post-office-release.md`](post-office-release.md)                   | Signed headless relay release archives and Linux GHCR container deployment.                                                                                 |
@@ -45,6 +46,10 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/settings.md`](settings.md)                                         | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
 | [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
 | [`specifications/TODO.md`](../specifications/TODO.md)                     | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
+
+The [group reception guide](group-conversation-reception.md) owns ordering, unread
+tracking, catch-up notifications and local recovery observations. For embedding
+the UI-free protocol core, see the [core crate guide](../crates/mesh-talk-core/README.md).
 
 ## Bots and local agents
 

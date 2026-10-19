@@ -38,7 +38,7 @@ test("canonical static corpus produces readable root and versioned routes with n
       ...data.topics.map((t) => t.id + ".html"),
     ]) {
       const html = await readFile(join(out, prefix, file), "utf8");
-      assert.ok(html.includes('<html lang="en">'));
+      assert.match(html, /<html\b[^>]*\blang="en"/);
       for (const [, href] of html.matchAll(/(?:href|src)="([^"#]+)"/g)) {
         if (href.startsWith("https://") || href.startsWith("../")) continue;
         await readFile(join(out, prefix, href.split("#")[0]));

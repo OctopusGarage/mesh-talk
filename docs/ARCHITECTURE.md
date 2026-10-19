@@ -14,7 +14,7 @@ for cross-module design contracts, illustrated scenarios and development guardra
 [network topologies](network-topologies.md) provides the compact overview.
 
 > The earlier RSA-contact / plaintext-UDP / TCP-relay _legacy_ stack has been retired;
-> this serverless stack is the entire product and lives at `/`. The only retained
+> this local-first stack is the entire product and lives at `/`. The only retained
 > piece outside the node is the auth/session layer (`services/auth_service.rs` + `state.rs`),
 > which `login` uses before starting the node.
 

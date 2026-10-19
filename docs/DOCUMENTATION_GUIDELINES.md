@@ -31,20 +31,57 @@ conversation membership, lifecycle or delivery outcomes.
 
 ## Shared project narrative
 
-1. **Local first:** a local identity, automatic signed LAN discovery, direct
-   authenticated connections, and no vendor-operated account service.
-2. **Optional reach beyond a LAN:** an existing routed path or a configured
-   post-office bridge introduces participating peers. Mesh-Talk does not provide
-   a VPN or merge IP subnets.
-3. **Encrypted content with visible metadata:** messages are end-to-end encrypted;
-   peers and relays can observe some network or routing metadata.
-4. **Offline delivery is bounded:** a peer-operated post office stores encrypted
-   events temporarily, subject to capacity and a 30-day maximum age.
+Explain the whole communication model in this order, regardless of which feature
+changed most recently:
 
-Use this order when explaining the product to newcomers. Describe a capability
-and its relevant boundary together. For example, bridge discovery is opt-in;
-federated relays can replicate opaque mailboxes, while calls and direct device
-synchronization still require their own reachable paths.
+1. **Encrypted communication on a LAN:** local identities, signed discovery and
+   authenticated direct connections; no internet or central messaging service is
+   required for reachable LAN peers.
+2. **Decentralized synchronization:** authorized peers exchange signed,
+   content-addressed events. Multi-node synchronization is bounded by retained data
+   and available paths, rather than dependent on one permanent sender.
+3. **Other LANs and sites:** existing routed paths or opted-in, trusted post-office
+   bridges/federation connect participants. Mesh-Talk does not provide a VPN, forward
+   all LAN multicast or merge subnets.
+4. **Offline delivery:** optional peer-operated post offices temporarily hold
+   recipient-encrypted events, subject to capacity and a 30-day maximum age.
+5. **Reconnection and group recovery:** authorized members with sharing enabled can
+   supply retained messages and eligible file chunks, even without the original
+   sender. A reachable source, receiving approval and retained content are required.
+6. **Linked devices:** certified devices can synchronize selected account history,
+   file cards and attachment contents over eligible direct device paths.
+
+Use “no central server required” when describing serverless operation. Optional
+post offices are services run by peers; serverless does not mean the project can
+never use a server. Decentralized does not mean unrestricted routing, automatic
+trust, infinite storage or guaranteed delivery. Encryption protects content; peers
+and relays still observe some connection and routing metadata.
+
+Keep outcomes precise: local acceptance, relay custody, recipient confirmation,
+reading, file-card visibility and file-byte availability are distinct. A completed
+peer recovery check is a local observation, not proof that every offline device
+has no additional history. Calls and linked-device synchronization have their own
+reachability requirements. Link to [the glossary](../CONTEXT.md),
+[network contracts](network-design-reference.md) and
+[group reception](group-conversation-reception.md) for the authoritative definitions.
+
+## Public documentation styling
+
+The [shared public theme](../site/theme.css) owns the landing page and generated
+help reader's colors, self-hosted Space Grotesk headings, system body font, focus
+states and reduced-motion behavior. The [reader stylesheet](../tools/help/style.css)
+owns reading measure, topic navigation and article layout. The help build copies
+the same theme and licensed font into both current and versioned readers, keeping
+them self-contained under GitHub Pages project paths. Edit these sources rather
+than generated CSS or HTML. Application surfaces remain governed by
+[the desktop visual system](../frontend/DESIGN.md).
+
+Use a restrained hierarchy, short paragraphs, meaningful diagrams, consistent
+navigation and descriptive links. Keep screenshots labeled as demo data. Group
+manual topics by task; use the catalog as the source for search and navigation.
+Technical references keep their detailed contracts and scoped evidence rather
+than repeating the landing page's product copy. Prefer consistent terminology
+over making every document use identical prose.
 
 ## Writing and maintenance rules
 
